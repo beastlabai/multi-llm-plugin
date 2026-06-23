@@ -93,30 +93,34 @@ Check for existing output to avoid expensive duplicate runs. Follow the detectio
 
 **Note**: The orchestrator guards against re-runs (exits with code 2 if phase is already marked complete in state.json). Use `--force` to override. This instruction-level resume detection is the FIRST line of defense; the orchestrator guard is backup protection.
 
-### 3. Run the Orchestrator
+### 3. Run the Orchestrator (DETACHED)
+
+A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --models <selected>
+PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py \
+  --plan-file "$(realpath "$PLAN_PATH")" --models <selected> \
+  > "{plan}/review-tasks/orchestrator-run.log" 2>&1
 ```
 
-**IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
+**IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path, and `--project` (not `--directory`).
 
-**IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 1200000` (20 minutes) to allow enough time for all models to complete. The orchestrator manages parallelism internally.
+Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-tasks/orchestrator-run.log`**, not from terminal stdout.
 
-**TIMEOUT RECOVERY**: If this command times out or returns "(No output)", do NOT re-run. Go to step 4 (Timeout Recovery).
+**Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
 
-### 4. Timeout Recovery (conditional -- only if Bash returns "(No output)" or timeout)
+### 4. Interrupted-run Recovery (conditional -- only if the background run was interrupted or the log shows no completion markers)
 
-If the orchestrator times out or returns "(No output)":
+If the detached orchestrator was interrupted or `{plan}/review-tasks/orchestrator-run.log` shows neither a validation marker nor a clean completion:
 
 1. Read `{plan}/review-tasks/.status.json`
 2. Based on `state` field: `models_running` -> check which `{model}.json` files exist; `models_complete`/`grouping_complete` -> check for `grouped.json`, `validation_tasks.json`; `validation_pending` -> proceed to validation; `complete` -> report results
 3. If no `.status.json` -> fall back to file-based resume detection (step 2)
-4. **Use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Re-run missing models, (c) Re-run everything with longer timeout
+4. **Use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
 
 ### 5. Salvage Handling (Post-Orchestrator)
 
-After the orchestrator completes, check for `[SALVAGE_NEEDED]` markers in the output. Follow the salvage process in `references/salvage-handling.md`.
+After the background task completes, check the log file `{plan}/review-tasks/orchestrator-run.log` for `[SALVAGE_NEEDED]` markers. Follow the salvage process in `references/salvage-handling.md`.
 
 The reaggregation command for this mode is:
 ```bash
@@ -126,7 +130,7 @@ uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_
 
 ### 6. Validation Handling (Post-Orchestrator)
 
-After the orchestrator completes, check for validation markers in the output.
+After the background task completes, check the log file `{plan}/review-tasks/orchestrator-run.log` for validation markers.
 
 #### Reference-Based Validation
 

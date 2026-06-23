@@ -164,7 +164,17 @@ Examples:
     parser.add_argument(
         '--force',
         action='store_true',
-        help='Force re-run even if phase was previously completed'
+        help='Bypass the completed-phase and partial-completion guards and resume '
+             'the phase (already-completed per-model results are kept; only missing '
+             'models re-run). For a full re-run that discards existing results, also '
+             'pass --rerun-all.'
+    )
+
+    parser.add_argument(
+        '--rerun-all',
+        action='store_true',
+        help='Re-run every model from scratch, discarding any existing per-model '
+             'result files (default: resume — skip models that already have results).'
     )
 
     parser.add_argument(
@@ -179,6 +189,15 @@ Examples:
 
 async def main():
     """Main entry point."""
+    # Force line buffering so backgrounded runs (stdout redirected to a file,
+    # i.e. non-TTY) stream progress/validation/salvage markers instead of
+    # block-buffering for minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
     args = parse_args()
 
     # Load the prompt template

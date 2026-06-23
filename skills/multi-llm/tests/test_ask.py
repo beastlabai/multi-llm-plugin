@@ -456,7 +456,26 @@ class TestAggregation:
         status = read_status(d)
         assert set(status["models_completed"]) == {"claude-code:sonnet", "cursor-agent:auto"}
 
-    def test_force_reasks_all_models(self, plan):
+    def test_rerun_all_reasks_all_models(self, plan):
+        inv = FakeInvoker()
+        inv.configure("claude-code:sonnet", write_file=True, content="round-1")
+        run_ask(["--plan-file", str(plan), "--question", "Q",
+                 "--models", "claude-code:sonnet"], inv)
+        d = qdir(plan, "Q")
+        assert "round-1" in read_answers(d)
+
+        inv2 = FakeInvoker()
+        inv2.configure("claude-code:sonnet", write_file=True, content="round-2")
+        run_ask(["--plan-file", str(plan), "--question", "Q",
+                 "--models", "claude-code:sonnet", "--rerun-all"], inv2)
+        # Re-asked despite existing answer file (--rerun-all discards results).
+        assert inv2.calls == ["claude-code:sonnet"]
+        assert "round-2" in read_answers(d)
+        assert "round-1" not in read_answers(d)
+
+    def test_force_resumes_keeps_existing_answers(self, plan):
+        # --force now resumes (bypasses guards) rather than re-asking every
+        # model: a model that already has a non-empty answer is skipped.
         inv = FakeInvoker()
         inv.configure("claude-code:sonnet", write_file=True, content="round-1")
         run_ask(["--plan-file", str(plan), "--question", "Q",
@@ -468,10 +487,10 @@ class TestAggregation:
         inv2.configure("claude-code:sonnet", write_file=True, content="round-2")
         run_ask(["--plan-file", str(plan), "--question", "Q",
                  "--models", "claude-code:sonnet", "--force"], inv2)
-        # Re-asked despite existing answer file.
-        assert inv2.calls == ["claude-code:sonnet"]
-        assert "round-2" in read_answers(d)
-        assert "round-1" not in read_answers(d)
+        # Skipped on resume: not re-invoked, original answer preserved.
+        assert inv2.calls == []
+        assert "round-1" in read_answers(d)
+        assert "round-2" not in read_answers(d)
 
 
 # ---------------------------------------------------------------------------
@@ -860,55 +879,52 @@ class TestRoutingAndDocs:
             assert "unquoted" in doc.lower()
             assert "usage hint" in doc.lower()
 
-    def test_documented_bash_timeout_covers_max_provider_timeout(self):
-        """The Bash timeout documented for ask mode (in SKILL.md Critical Rule 1
-        and instructions/ask.md) must be >= the max provider default_timeout, so
-        a 20-min Bash cap can never silently sit over a 30-min provider budget
-        and kill a slow model before its own timeout fires."""
-        import yaml
+    def test_documented_bash_timeouts_within_cap_and_fanout_runs_detached(self):
+        """The Claude Code Bash tool hard-caps `timeout` at 600000 ms (10 min);
+        any larger value is silently clamped. So no instruction may document a
+        Bash timeout above the cap, and the long fan-out review/ask modes (whose
+        runtime routinely exceeds 10 min) MUST run detached with stdout
+        redirected to a log file rather than relying on an oversized foreground
+        timeout.
 
-        providers = yaml.safe_load((SKILL_DIR / "providers.yaml").read_text())
-        max_provider_timeout_s = max(
-            cfg.get("default_timeout", 1200)
-            for cfg in providers.get("providers", {}).values()
-        )
-
-        skill = (SKILL_DIR / "SKILL.md").read_text()
-        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
-        max_provider_timeout_ms = max_provider_timeout_s * 1000
+        This replaces the old contract, which required the ask-mode Bash timeout
+        to exceed the slowest provider budget (>=1.2M ms). That was the bug: the
+        cap made it unachievable, so a foreground run was SIGTERM'd mid-run and
+        lost the answers.md path printed on stdout. The fix is to run the fan-out
+        modes detached (not subject to the cap) with output captured to a log."""
+        BASH_TIMEOUT_CAP_MS = 600_000
 
         def documented_timeouts_ms(text):
-            # Match both `timeout: 2000000` (Bash-tool form) and prose like
-            # "a Bash `timeout` of ~2000000 ms" — i.e. any 6+ digit count
-            # presented as a Bash timeout value or explicitly in milliseconds.
+            # Match both `timeout: 600000` (Bash-tool form) and prose like
+            # "600000 ms" — i.e. any 6+ digit count presented as a Bash timeout
+            # value or explicitly in milliseconds.
             matches = re.findall(r"timeout`?\s*[:=]\s*[`~]?\s*([\d,_]{6,})", text)
             matches += re.findall(r"[`~]?([\d,_]{6,})\s*ms\b", text)
             return [int(m.replace(",", "").replace("_", "")) for m in matches]
 
-        # SKILL.md Critical Rule 1 must explicitly carve out ask mode, and the
-        # timeout it documents for that carve-out (the text after "Exception")
-        # must exceed the slowest provider budget. The 20-min global default
-        # that precedes the exception is intentionally NOT the ask budget.
-        assert "ask mode" in skill and "`--ask`" in skill
-        exception_clause = skill.split("**Exception", 1)
-        assert len(exception_clause) == 2, "SKILL.md ask-mode timeout exception missing"
-        skill_ask_clause = exception_clause[1].split("\n", 1)[0]
-        skill_ask_timeouts = [
-            v for v in documented_timeouts_ms(skill_ask_clause) if v >= 1_200_000
-        ]
-        assert skill_ask_timeouts, "no ask-mode Bash timeout found in SKILL.md exception"
-        assert min(skill_ask_timeouts) >= max_provider_timeout_ms, (
-            f"SKILL.md ask-mode Bash timeout ({min(skill_ask_timeouts)} ms) is below "
-            f"the max provider default_timeout ({max_provider_timeout_ms} ms)"
-        )
+        # No instruction (SKILL.md or any mode file) may document a Bash timeout
+        # above the hard cap — the regression guard for the original bug.
+        docs = [SKILL_DIR / "SKILL.md"]
+        docs += sorted((SKILL_DIR / "instructions").glob("*.md"))
+        for doc in docs:
+            over_cap = [
+                t for t in documented_timeouts_ms(doc.read_text())
+                if t > BASH_TIMEOUT_CAP_MS
+            ]
+            assert not over_cap, (
+                f"{doc.name} documents Bash timeout(s) above the "
+                f"{BASH_TIMEOUT_CAP_MS} ms cap: {over_cap}"
+            )
 
-        # instructions/ask.md is entirely about ask mode: its documented Bash
-        # timeout(s) must likewise cover the slowest provider budget.
-        ask_md_timeouts = [
-            v for v in documented_timeouts_ms(ask_md) if v >= 1_200_000
-        ]
-        assert ask_md_timeouts, "no documented Bash timeout found in ask.md"
-        assert min(ask_md_timeouts) >= max_provider_timeout_ms, (
-            f"ask.md documents a Bash timeout ({min(ask_md_timeouts)} ms) below "
-            f"the max provider default_timeout ({max_provider_timeout_ms} ms)"
-        )
+        # The fan-out review/ask modes must run detached with stdout captured to
+        # a log file, so markers and the final answers.md path survive past the
+        # cap (backgrounding without redirection would lose them).
+        skill = (SKILL_DIR / "SKILL.md").read_text()
+        assert "run_in_background" in skill
+        assert "PYTHONUNBUFFERED" in skill
+        assert "orchestrator-run.log" in skill
+
+        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
+        assert "run_in_background" in ask_md
+        assert "PYTHONUNBUFFERED" in ask_md
+        assert ".log" in ask_md

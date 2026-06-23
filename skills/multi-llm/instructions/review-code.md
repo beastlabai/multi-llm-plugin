@@ -146,23 +146,29 @@ Items with `needs-human-decision` status are included in the report for the user
 
    This instruction-level resume detection is the FIRST line of defense. The orchestrator guards are backup protection.
 
-5. **Run the code review orchestrator:**
+5. **Run the code review orchestrator (DETACHED):**
+
+   A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --models <selected> [--base-ref REF] [--apply-fixes]
+   PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py \
+     --plan-file "$(realpath "$PLAN_PATH")" --models <selected> [--base-ref REF] [--apply-fixes] \
+     > "{plan}/code-review/orchestrator-run.log" 2>&1
    ```
 
-   **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
+   **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path, and `--project` (not `--directory`).
 
-   **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 1200000` (20 minutes) to allow enough time for all models to complete. The orchestrator manages parallelism internally.
+   Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
 
-   The orchestrator will output:
+   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
+
+   The orchestrator will output (to the log):
    - `Git base reference: {commit}` - showing which base ref is being used
    - `Tracked files: N files` - files that were modified during implementation
    - If no state file exists, it will show: "No tracked files in state, falling back to git diff from {base_ref}"
 
 6. **Salvage Handling (Post-Orchestrator):**
 
-   After the orchestrator completes, check for `[SALVAGE_NEEDED]` markers in the output. Follow the salvage process in `references/salvage-handling.md`.
+   After the background task completes, check the log file `{plan}/code-review/orchestrator-run.log` for `[SALVAGE_NEEDED]` markers. Follow the salvage process in `references/salvage-handling.md`.
 
    The reaggregation command for this mode is:
    ```bash
@@ -173,7 +179,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
 7. **Validation Handling (Post-Orchestrator):**
 
-   After the orchestrator completes, check for validation markers in the output.
+   After the background task completes, check the log file `{plan}/code-review/orchestrator-run.log` for validation markers.
 
    #### Reference-Based Validation
 

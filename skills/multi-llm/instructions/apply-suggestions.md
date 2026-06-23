@@ -164,7 +164,7 @@ uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggest
 
 **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
 
-**IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 1200000` (20 minutes). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes.
+**IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
 
 The orchestrator will:
 1. Load validation results and grouped suggestions

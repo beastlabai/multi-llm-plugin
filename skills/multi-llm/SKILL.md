@@ -227,7 +227,13 @@ When running a mode, model selection follows this priority:
 
 These rules exist for specific technical reasons. Violating them causes failures that are hard to debug.
 
-1. **Foreground execution** — Run all orchestrator Bash commands in the foreground with `timeout: 1200000` (20 min). **Exception — ask mode** (`--ask`): use `timeout: 2000000` (≈33 min), because providers in `providers.yaml` use `default_timeout` up to **1800s** (`claude-code`, `codex`) and a 20-min Bash cap would kill the orchestrator before a slow model's own timeout fires — losing the final `answers.md` path printed on stdout. The Bash `timeout` must always be **≥ the max provider `default_timeout` over the asked models** (plus stagger + startup margin); keep it in sync with `providers.yaml` and `instructions/ask.md` (see the timeout reconciliation there). The orchestrators manage their own internal parallelism. When run in the background, the Bash tool returns immediately with empty output, and stdout (containing validation markers, salvage requests, and completion data) is lost — breaking every downstream step.
+1. **Orchestrator execution mode** — The Claude Code Bash tool hard-caps `timeout` at **600000 ms (10 min)**; any larger value is silently clamped to 600000. Choose the execution mode by orchestrator category:
+
+   - **Fast JSON-only orchestrators** (`--implement`, `--apply-suggestions`, `--apply-task-suggestions`, `--apply-code-fixes`) — run in the **FOREGROUND** with `timeout: 600000` (10 min). They only generate batch/task JSON and finish well under the cap, so foreground output (markers, paths) is returned directly.
+
+   - **Fan-out review/ask modes** (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`) — runtime scales with the number of models and ROUTINELY exceeds 10 min, so they MUST run **DETACHED** (`run_in_background: true`). Redirect both stdout and stderr to a log file inside the phase output dir (`> "<phase-dir>/orchestrator-run.log" 2>&1`) and set `PYTHONUNBUFFERED=1` so Python streams output to the log instead of block-buffering it (Python block-buffers when stdout is a non-TTY pipe). Detached runs are NOT subject to the 10-min Bash cap, so a slow model's own timeout governs. When the background task completes, read all markers (`[VALIDATION_PENDING]`, `[VALIDATION_BATCHES_PENDING]`, `[SALVAGE_NEEDED]`) and final output paths (e.g. `answers.md`) **from the log file**, not from terminal stdout.
+
+   The orchestrators manage their own internal parallelism. Backgrounding WITHOUT redirection loses stdout (markers/paths) — which is exactly why redirection to a log file is mandatory for the detached modes. Resume semantics: re-invoking a review/ask orchestrator with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models, and bypasses the completed-phase/partial-completion guards); `--rerun-all` forces a full re-run that discards existing per-model results. A fresh re-run of an already-completed phase is `--force --rerun-all`.
 
 2. **Subagent delegation** — When implementing tasks or applying fixes, use the Task tool with `subagent_type: "general-purpose"`. The orchestrators produce JSON instructions; Claude Code subagents execute them. Implementing manually bypasses the batching, routing, and tracking the orchestrators provide.
 
@@ -308,7 +314,8 @@ line — pass it to the orchestrator via `--question-file` (temp file, preferred
 
 ### Common Mistakes
 
-- Running orchestrator commands with `run_in_background: true` — causes empty output (see rule 1 above)
+- Backgrounding an orchestrator WITHOUT redirecting stdout/stderr to a log file — markers/paths are lost (see Rule 1 above); detached review/ask runs MUST redirect to `<phase-dir>/orchestrator-run.log`
+- Setting a Bash `timeout` above 600000 ms — silently clamped to 600000 (10 min); long fan-out runs must be detached, not given a bigger timeout
 - Writing implementation code directly instead of spawning Task subagents — bypasses routing, batching, and tracking
 - Using model names not listed in `providers.yaml` — the orchestrator rejects unknown models
 - Forgetting to report output file paths after execution — the user needs them to review results

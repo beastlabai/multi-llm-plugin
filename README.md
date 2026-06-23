@@ -115,7 +115,8 @@ These flags combine with any mode and are **position-independent** - they may ap
 | `--no-confirm` | Skip confirmation prompts - for unattended/silent runs. |
 | `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes. |
 | `--claude-decide` / `--let-claude-decide` | In the apply modes, let a Claude subagent judge every `needs-human-decision` finding instead of prompting you (see [below](#letting-claude-decide-ambiguous-findings)). |
-| `--force` | **Meaning depends on mode.** In `--ask`, re-query all models even when cached answers exist. In the apply modes, it's an alias for `--yes` (confirm bulk approval). |
+| `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). |
+| `--rerun-all` | In the fan-out review/ask modes, re-run every model from scratch, discarding any existing per-model results. Combine with `--force` (`--force --rerun-all`) for a fresh full re-run of an already-completed phase. |
 
 The apply and implement modes accept additional approval flags (`--yes`, `--approve-all`, `--resume`, `--task`, and more); see [`SKILL.md`](skills/multi-llm/SKILL.md) and the per-mode files in `skills/multi-llm/instructions/`.
 

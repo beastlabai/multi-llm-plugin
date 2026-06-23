@@ -34,6 +34,7 @@ def _make_args(plan_path: Path, **overrides) -> argparse.Namespace:
         validation_model=None,
         apply_fixes=False,
         force=False,
+        rerun_all=False,
         reaggregate=False,
         report_style="pr",
     )

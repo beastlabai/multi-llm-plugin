@@ -129,22 +129,26 @@ class TestForceFlag:
     """Tests for --force CLI flag in both orchestrators."""
 
     def test_review_plan_help_shows_force(self):
-        """--force flag appears in review_plan_orchestrator help."""
+        """--force and --rerun-all flags appear in review_plan_orchestrator help."""
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "review_plan_orchestrator.py"), "--help"],
             capture_output=True, text=True, cwd=str(SKILL_DIR)
         )
         assert "--force" in result.stdout
-        assert "Force re-run" in result.stdout
+        # --force now resumes/bypasses guards rather than re-running everything.
+        assert "Bypass" in result.stdout and "resume" in result.stdout
+        assert "--rerun-all" in result.stdout
 
     def test_code_review_help_shows_force(self):
-        """--force flag appears in code_review_orchestrator help."""
+        """--force and --rerun-all flags appear in code_review_orchestrator help."""
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "code_review_orchestrator.py"), "--help"],
             capture_output=True, text=True, cwd=str(SKILL_DIR)
         )
         assert "--force" in result.stdout
-        assert "Force re-run" in result.stdout
+        # --force now resumes/bypasses guards rather than re-running everything.
+        assert "Bypass" in result.stdout and "resume" in result.stdout
+        assert "--rerun-all" in result.stdout
 
     def test_review_plan_parse_args_force_default_false(self):
         """--force defaults to False in review_plan_orchestrator."""

@@ -619,7 +619,15 @@ Examples:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-ask all models regardless of existing answer files (refresh all opinions)",
+        help="Bypass resume guards (e.g. act on a stale-plan warning); already-answered "
+             "models are kept and only missing answers re-run. For a full re-ask of every "
+             "model, also pass --rerun-all.",
+    )
+    parser.add_argument(
+        "--rerun-all",
+        action="store_true",
+        help="Re-run every model from scratch, discarding any existing per-model result files "
+             "(default: resume — skip models that already have results).",
     )
 
     return parser.parse_args(argv)
@@ -630,6 +638,15 @@ Examples:
 # ---------------------------------------------------------------------------
 
 async def main(argv: Optional[List[str]] = None) -> int:
+    # Force line buffering so backgrounded runs (stdout redirected to a file,
+    # i.e. non-TTY) stream progress markers instead of block-buffering for
+    # minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
     args = parse_args(argv)
 
     # Resolve the verbatim question and require non-empty content.
@@ -697,7 +714,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 if prior.get("plan_hash") and prior.get("plan_hash") != plan_hash:
                     print("WARNING: plan file has changed since these answers were "
                           "generated; existing answers may be stale — re-run with "
-                          "--force to refresh.")
+                          "--rerun-all to refresh every model's answer.")
             except (json.JSONDecodeError, OSError, IOError):
                 pass
 
@@ -708,14 +725,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
               f"truncated (a marker points models at the full plan path).")
 
     project_root = get_project_root(plan_path) or os.path.dirname(plan_path) or "."
-    skip_existing = not args.force
+    skip_existing = not args.rerun_all
 
     print(f"Question slug: {slug}")
     print(f"Output directory: {question_dir}")
     print(f"Models: {', '.join(model_specs)}")
     print(f"Plan: {plan_path} ({len(plan_content)} bytes)")
-    if args.force:
-        print("Force: re-asking all models (ignoring existing answer files)")
+    if args.rerun_all:
+        print("Rerun-all: re-asking all models (ignoring existing answer files)")
     print("")
 
     write_status(question_dir, {
@@ -757,7 +774,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             if os.path.exists(answer_path):
                 print(f"WARNING: answer_{sanitized}.md is empty/unreadable; re-running model")
         else:
-            # --force: drop any stale answer so only content written during THIS
+            # --rerun-all: drop any stale answer so only content written during THIS
             # run can satisfy the hard-failure-with-file policy below.
             try:
                 os.remove(answer_path)

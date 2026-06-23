@@ -1655,7 +1655,7 @@ async def run_review_orchestration(
         args.max_parallel,
         out_dir=out_dir,
         prefix=prefix,
-        skip_existing=not args.force,
+        skip_existing=not getattr(args, "rerun_all", False),
     )
 
     # Save per-model results

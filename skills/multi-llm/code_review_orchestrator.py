@@ -71,7 +71,7 @@ from utils.provider_registry import (
 )
 from utils.json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
 from utils.llm_client import invoke_with_provider, invoke_with_file_output
-from utils.git_utils import get_project_root, validate_git_ref
+from utils.git_utils import get_project_root, validate_git_ref, _run_git
 from utils.html_report_generator import generate_html_report, write_html_report, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
 
@@ -213,7 +213,17 @@ Examples:
     parser.add_argument(
         '--force',
         action='store_true',
-        help='Force re-run even if phase was previously completed'
+        help='Bypass the completed-phase and partial-completion guards and resume '
+             'the phase (already-completed per-model results are kept; only missing '
+             'models re-run). For a full re-run that discards existing results, also '
+             'pass --rerun-all.'
+    )
+
+    parser.add_argument(
+        '--rerun-all',
+        action='store_true',
+        help='Re-run every model from scratch, discarding any existing per-model '
+             'result files (default: resume — skip models that already have results).'
     )
 
     parser.add_argument(
@@ -1226,6 +1236,15 @@ async def reaggregate_from_existing_files(
 
 async def main():
     """Main entry point."""
+    # Force line buffering so backgrounded runs (stdout redirected to a file,
+    # i.e. non-TTY) stream progress/validation/salvage markers instead of
+    # block-buffering for minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
     args = parse_args()
 
     # Validate plan file (resolve to absolute path first to handle
@@ -1391,6 +1410,35 @@ async def main():
     base_ref = validate_git_ref(base_ref)
     print(f"Git base reference: {base_ref or '(empty - validation will lack diff context)'}")
 
+    # Best-effort base-ref staleness visibility. Wrapped so it can NEVER fail the
+    # run: surface the resolved commit, and warn if the base ref lags behind HEAD
+    # (a common foot-gun when only the latest uncommitted work was meant to be
+    # reviewed).
+    if base_ref:
+        try:
+            log_out, _, log_rc = _run_git(
+                "log", "-1", "--format=%h %s", base_ref, check=False
+            )
+            if log_rc == 0 and log_out.strip():
+                print(f"Base ref commit: {log_out.strip()}")
+
+            _, _, anc_rc = _run_git(
+                "merge-base", "--is-ancestor", base_ref, "HEAD", check=False
+            )
+            if anc_rc == 0:
+                count_out, _, count_rc = _run_git(
+                    "rev-list", "--count", f"{base_ref}..HEAD", check=False
+                )
+                ahead = int(count_out.strip()) if count_rc == 0 and count_out.strip() else 0
+                if ahead > 0:
+                    print(
+                        f"NOTE: base ref is {ahead} commit(s) behind HEAD. If you "
+                        f"intend to review only the latest (uncommitted) work, pass "
+                        f"--base-ref HEAD."
+                    )
+        except Exception:
+            pass
+
     if tracked_files:
         print(f"Using {len(tracked_files)} tracked files from implementation phase")
         changed_files = list(set(entry["path"] for entry in tracked_files))
@@ -1434,7 +1482,7 @@ async def main():
             args.max_parallel,
             tracked_files,
             base_ref,
-            skip_existing=not args.force
+            skip_existing=not args.rerun_all
         )
 
         # Get the phase directory for code review outputs

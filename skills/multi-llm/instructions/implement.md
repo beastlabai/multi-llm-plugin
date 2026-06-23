@@ -180,7 +180,7 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
    **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
 
-   **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 1200000` (20 minutes). The orchestrator runs quickly — it only generates task JSON, it does not execute tasks.
+   **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates task JSON, it does not execute tasks — so 10 minutes is far more than enough.
 
 3. **Check for prerequisite markers in orchestrator output** (see Step 0 above)
 

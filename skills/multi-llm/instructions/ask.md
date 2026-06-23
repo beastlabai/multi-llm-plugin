@@ -74,10 +74,15 @@ two layers cannot diverge.
    ```bash
    QUESTION_TMPFILE="$(mktemp)"
    printf '%s' "$RAW_QUESTION" > "$QUESTION_TMPFILE"
-   uv run --project ${CLAUDE_SKILL_DIR} -- \
+   PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- \
      python ${CLAUDE_SKILL_DIR}/ask_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" --question-file "$QUESTION_TMPFILE" [--models ...]
+     --plan-file "$(realpath "$PLAN_PATH")" --question-file "$QUESTION_TMPFILE" [--models ...] \
+     > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
    ```
+
+   (Launch DETACHED — see step 3. The `<question-slug>-<hash8>` log dir matches the
+   orchestrator's output dir; if you don't know it yet, redirect to a temp log such
+   as `$(mktemp)` and read markers/paths from there.)
 
    **Alternatively — pass the question via a strictly-quoted environment
    variable** the orchestrator reads:
@@ -99,28 +104,37 @@ two layers cannot diverge.
    `--question` / `--question-file` / `--question-env` is required (they are
    mutually exclusive).
 
-3. **Run the orchestrator in the FOREGROUND** (Critical Rule 1 — do NOT use
-   `run_in_background`; background runs lose stdout, including the final
-   `answers.md` path).
+3. **Run the orchestrator DETACHED** (Critical Rule 1). Ask mode fans out across
+   many models and routinely runs well past **10 minutes** — and the Claude Code
+   Bash tool hard-caps `timeout` at **600000 ms (10 min)**; any larger value is
+   silently clamped to 600000. A foreground run would therefore be SIGTERM'd
+   mid-flight and lose the in-flight answers. So launch with
+   `run_in_background: true`, redirecting stdout+stderr to a log file and setting
+   `PYTHONUNBUFFERED=1` (see the command block in step 2):
 
-   **Bash-tool timeout:** set the Bash `timeout` high enough that it never
-   undercuts the per-model provider timeouts. Providers in `providers.yaml`
-   currently use `default_timeout` up to **1800s (30 min)** for `claude-code`
-   and `codex`. The Bash `timeout` must be **≥ the max provider
-   `default_timeout` over the asked models, plus stagger and startup overhead**:
-   roughly `max(provider default_timeout) + len(models) * PROVIDER_STAGGER_DELAY`
-   plus a safety margin (`PROVIDER_STAGGER_DELAY = 2.0s`). With the current
-   1800s ceiling, use a Bash `timeout` of **~2000000 ms (≈33 min)** so a single
-   slow model never gets killed before its own per-model timeout fires (which
-   would lose the `answers.md` path printed on stdout). Keep this in sync with
-   `providers.yaml` — if provider timeouts are raised, raise the Bash timeout
-   too. (Alternatively, always pass an explicit `--timeout` to the orchestrator
-   that is small enough to guarantee the whole run finishes inside the Bash
-   limit.)
+   ```bash
+   ... ask_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" \
+     --question-file "$QUESTION_TMPFILE" [--models ...] \
+     > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
+   ```
 
-4. **No validation/grouping/subagent steps.** On completion, read `answers.md`
-   (its path is the final line of stdout) and present a brief summary per model
-   plus the output file path, following the skill's standard Summary Format.
+   Detached runs are NOT subject to the 10-min Bash cap, so each model's own
+   per-provider `default_timeout` (in `providers.yaml`) governs — no Bash-vs-provider
+   timeout reconciliation is needed. `PYTHONUNBUFFERED=1` is required so Python
+   streams output to the log instead of block-buffering it (block-buffering leaves
+   the log empty for minutes when stdout is a non-TTY pipe). Backgrounding WITHOUT
+   redirection would lose stdout (including the `answers.md` path) — which is why
+   the redirect to a log file is mandatory.
+
+   **Resume**: re-invoking the identical question with `--force` RESUMES (keeps
+   already-completed `answer_<model>.md` files, runs only the missing models);
+   `--rerun-all` forces a full re-run discarding existing per-model answers.
+
+4. **No validation/grouping/subagent steps.** When the background task completes,
+   read the `answers.md` path **from the log file**
+   (`{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log`, final line),
+   then read `answers.md` and present a brief summary per model plus the output
+   file path, following the skill's standard Summary Format.
 
 ## Output Files
 
