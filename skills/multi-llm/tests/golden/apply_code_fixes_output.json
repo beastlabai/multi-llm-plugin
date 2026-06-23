@@ -1,0 +1,242 @@
+{
+  "format_version": 2,
+  "plan_file": "/tmp/tmpxxqf0spp/golden-plan.md",
+  "prefix": "golden-plan",
+  "output_dir": "/tmp/tmpxxqf0spp/golden-plan",
+  "state_file": "/tmp/tmpxxqf0spp/golden-plan/state.json",
+  "base_ref": "b50260c71d204c9f67a948168f78cb8591f18879",
+  "timestamp": "2026-03-14T16:52:38.990325",
+  "batches": [
+    {
+      "fixes": [
+        {
+          "index": 0,
+          "title": "Missing null check",
+          "description": "Add null check before accessing user.name",
+          "desc": "Add null check before accessing user.name",
+          "type": "bug",
+          "file": "src/auth.py",
+          "line_range": [
+            42,
+            50
+          ],
+          "anchor_text": "user.name",
+          "importance": "HIGH",
+          "theme": "Missing null check",
+          "category": "bug",
+          "validation_status": "valid",
+          "validation_reason": "Real issue confirmed",
+          "validation_confidence": 0.95,
+          "models": [
+            "gpt-4",
+            "claude-3"
+          ],
+          "suggestion_count": 1,
+          "subagent_type": "general-purpose"
+        }
+      ],
+      "file_key": "src/auth.py",
+      "batch_type": "bug",
+      "subagent_type": "general-purpose",
+      "fix_count": 1,
+      "total_chars": 41,
+      "priority_score": 3.0,
+      "prompt": "Fix the following code issue:\n\n**Plan file**: /tmp/tmpxxqf0spp/golden-plan.md\n**File**: src/auth.py\n**Lines**: 42-50\n**Issue**: Missing null check\n**Type**: bug\n**Importance**: HIGH\n\n**Description**:\nAdd null check before accessing user.name\n\n**Anchor text** (to help locate): `user.name`\n\n## Instructions\n1. Use `git diff b50260c71d204c9f67a948168f78cb8591f18879 -- src/auth.py` to see recent changes\n2. Read the file and locate the issue using line numbers or anchor text\n3. Make the necessary fix\n4. Verify your fix doesn't break anything (run typecheck if applicable)\n5. Do NOT make any other changes beyond this specific fix\n\nReturn: Brief summary of what you changed."
+    },
+    {
+      "fixes": [
+        {
+          "index": 1,
+          "title": "Security fix",
+          "description": "Sanitize user input to prevent SQL injection",
+          "desc": "Sanitize user input to prevent SQL injection",
+          "type": "security",
+          "file": "src/api.py",
+          "line_range": [
+            200,
+            210
+          ],
+          "anchor_text": "request.params",
+          "importance": "HIGH",
+          "theme": "Security fix",
+          "category": "security",
+          "validation_status": "valid",
+          "validation_reason": "Security issue confirmed",
+          "validation_confidence": 0.99,
+          "models": [
+            "gpt-4"
+          ],
+          "suggestion_count": 1,
+          "subagent_type": "general-purpose"
+        }
+      ],
+      "file_key": "src/api.py",
+      "batch_type": "security",
+      "subagent_type": "general-purpose",
+      "fix_count": 1,
+      "total_chars": 44,
+      "priority_score": 3.0,
+      "prompt": "Fix the following code issue:\n\n**Plan file**: /tmp/tmpxxqf0spp/golden-plan.md\n**File**: src/api.py\n**Lines**: 200-210\n**Issue**: Security fix\n**Type**: security\n**Importance**: HIGH\n\n**Description**:\nSanitize user input to prevent SQL injection\n\n**Anchor text** (to help locate): `request.params`\n\n## Instructions\n1. Use `git diff b50260c71d204c9f67a948168f78cb8591f18879 -- src/api.py` to see recent changes\n2. Read the file and locate the issue using line numbers or anchor text\n3. Make the necessary fix\n4. Verify your fix doesn't break anything (run typecheck if applicable)\n5. Do NOT make any other changes beyond this specific fix\n\nReturn: Brief summary of what you changed."
+    }
+  ],
+  "to_apply": [
+    {
+      "index": 0,
+      "title": "Missing null check",
+      "description": "Add null check before accessing user.name",
+      "desc": "Add null check before accessing user.name",
+      "type": "bug",
+      "file": "src/auth.py",
+      "line_range": [
+        42,
+        50
+      ],
+      "anchor_text": "user.name",
+      "importance": "HIGH",
+      "theme": "Missing null check",
+      "category": "bug",
+      "validation_status": "valid",
+      "validation_reason": "Real issue confirmed",
+      "validation_confidence": 0.95,
+      "models": [
+        "gpt-4",
+        "claude-3"
+      ],
+      "suggestion_count": 1,
+      "subagent_type": "general-purpose"
+    },
+    {
+      "index": 1,
+      "title": "Security fix",
+      "description": "Sanitize user input to prevent SQL injection",
+      "desc": "Sanitize user input to prevent SQL injection",
+      "type": "security",
+      "file": "src/api.py",
+      "line_range": [
+        200,
+        210
+      ],
+      "anchor_text": "request.params",
+      "importance": "HIGH",
+      "theme": "Security fix",
+      "category": "security",
+      "validation_status": "valid",
+      "validation_reason": "Security issue confirmed",
+      "validation_confidence": 0.99,
+      "models": [
+        "gpt-4"
+      ],
+      "suggestion_count": 1,
+      "subagent_type": "general-purpose"
+    }
+  ],
+  "needs_human_review": [
+    {
+      "index": 0,
+      "title": "Improve error handling",
+      "description": "Wrap database call in try-catch",
+      "desc": "Wrap database call in try-catch",
+      "type": "improvement",
+      "file": "src/db.py",
+      "line_range": [
+        100,
+        120
+      ],
+      "anchor_text": "db.query()",
+      "importance": "MEDIUM",
+      "theme": "Improve error handling",
+      "category": "improvement",
+      "validation_status": "needs-human-decision",
+      "validation_reason": "Ambiguous whether this is needed",
+      "validation_confidence": 0.5,
+      "models": [
+        "claude-3"
+      ],
+      "suggestion_count": 1,
+      "subagent_type": "general-purpose"
+    }
+  ],
+  "skipped_items": [
+    {
+      "title": "Remove unused import",
+      "theme": "Code cleanup",
+      "importance": "LOW",
+      "status": "invalid",
+      "reason": "Import is actually used"
+    }
+  ],
+  "user_skipped_items": [],
+  "skipped_count": 1,
+  "batching_stats": {
+    "total_fixes": 2,
+    "total_batches": 2,
+    "subagent_calls_saved": 0,
+    "efficiency_gain_percent": 0.0,
+    "average_batch_size": 1.0,
+    "max_batch_size": 1,
+    "single_fix_batches": 2,
+    "multi_fix_batches": 0,
+    "batch_type_distribution": {
+      "bug": 1,
+      "security": 1
+    },
+    "subagent_distribution": {
+      "general-purpose": 2
+    },
+    "batching_enabled": true
+  },
+  "human_review_config": {
+    "mode": "by-importance",
+    "batch_enabled": true,
+    "prompt_strategy": "single_batch",
+    "by_importance": {
+      "HIGH": [],
+      "MEDIUM": [
+        {
+          "index": 0,
+          "title": "Improve error handling",
+          "description": "Wrap database call in try-catch",
+          "desc": "Wrap database call in try-catch",
+          "type": "improvement",
+          "file": "src/db.py",
+          "line_range": [
+            100,
+            120
+          ],
+          "anchor_text": "db.query()",
+          "importance": "MEDIUM",
+          "theme": "Improve error handling",
+          "category": "improvement",
+          "validation_status": "needs-human-decision",
+          "validation_reason": "Ambiguous whether this is needed",
+          "validation_confidence": 0.5,
+          "models": [
+            "claude-3"
+          ],
+          "suggestion_count": 1,
+          "subagent_type": "general-purpose"
+        }
+      ],
+      "LOW": []
+    },
+    "total_count": 1,
+    "batch_prompt_template": "batch_approval_v1"
+  },
+  "resume_info": {
+    "previously_processed": [],
+    "previous_decisions": {},
+    "can_resume": false
+  },
+  "edited_descriptions": [],
+  "summary": {
+    "total_issues": 4,
+    "valid_count": 2,
+    "needs_human_count": 1,
+    "skipped_count": 1,
+    "user_skipped_count": 0,
+    "batch_count": 2,
+    "validation_failed_count": 0,
+    "auto_approved_count": 0,
+    "edited_description_count": 0
+  }
+}

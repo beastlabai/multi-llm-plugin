@@ -1,0 +1,130 @@
+# Malformed Response Scenario
+# Tests handling of invalid JSON responses from LLM providers
+#
+# This scenario simulates various types of malformed responses:
+# - Truncated JSON (incomplete object/array)
+# - Invalid JSON syntax
+# - Valid JSON but wrong schema
+# - Mixed content (markdown with embedded JSON)
+#
+# Used to test:
+# - JSON parsing error handling
+# - Salvage file creation (salvage_{model}.json)
+# - Error recovery and continuation
+
+name: "Malformed Response"
+description: "Simulates malformed JSON responses from LLM providers"
+
+default_delay_ms: 50
+
+# Malformed response configurations
+malformed_responses:
+  # Truncated JSON - object cut off mid-way
+  truncated_object:
+    content: '{"theme": "Add validation", "category": "security", "suggestions": [{"title": "Test"'
+    description: "JSON truncated in middle of object"
+
+  # Truncated JSON - array not closed
+  truncated_array:
+    content: '[{"title": "Test", "desc": "Description", "importance": "HIGH"}, {"title": "Another"'
+    description: "JSON truncated in middle of array"
+
+  # Invalid JSON syntax
+  invalid_syntax:
+    content: '{"title": "Test", desc: "Missing quotes on key", "importance": "HIGH"}'
+    description: "Invalid JSON - unquoted key"
+
+  # Valid JSON but wrong type (object instead of array)
+  wrong_type:
+    content: '{"error": "unexpected format", "details": "This should be an array"}'
+    description: "Valid JSON but wrong schema (expected array)"
+
+  # Markdown wrapper around JSON (common LLM behavior)
+  markdown_wrapped:
+    content: |
+      Here are the suggestions I found:
+
+      ```json
+      [{"title": "Test", "desc": "Description", "importance": "HIGH"}]
+      ```
+
+      I hope these suggestions are helpful!
+    description: "JSON wrapped in markdown code block"
+
+  # Empty response
+  empty:
+    content: ""
+    description: "Empty response body"
+
+  # Whitespace only
+  whitespace:
+    content: "   \n\t  \n  "
+    description: "Whitespace-only response"
+
+prompts:
+  # First provider returns truncated JSON
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    malformed: "truncated_object"
+    description: "Return truncated JSON on review"
+    # This should trigger salvage file creation
+    expect_salvage: true
+    provider_filter: "cursor-agent"
+
+  # Second provider returns markdown-wrapped JSON (may be recoverable)
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    malformed: "markdown_wrapped"
+    description: "Return markdown-wrapped JSON"
+    provider_filter: "gemini"
+
+  # Validation returns valid response (to test partial failure handling)
+  - pattern: "validate.*suggestion|verify.*suggestion"
+    fixture: "e2e/responses/validation/all_valid.json"
+    description: "Validation succeeds normally"
+
+  # Task generation returns wrong type
+  - pattern: "decompose.*task|generate.*task"
+    malformed: "wrong_type"
+    description: "Return wrong JSON type for tasks"
+    expect_salvage: true
+
+  # Code review returns empty response
+  - pattern: "review.*code|code.*review"
+    malformed: "empty"
+    description: "Return empty response for code review"
+    expect_salvage: true
+
+# Salvage file configuration
+# When a response cannot be parsed, the orchestrator creates a salvage file
+salvage:
+  # Expected salvage file pattern: salvage_{sanitized_model}.json
+  filename_pattern: "salvage_{model}.json"
+
+  # Required fields in salvage file
+  required_fields:
+    - model
+    - raw_response
+    - error_message
+    - timestamp
+
+  # Expected orchestrator output pattern
+  output_pattern: "[SALVAGE_NEEDED]"
+
+provider_overrides:
+  cursor-agent:
+    wire_format: "cursor-agent"
+  gemini:
+    wire_format: "gemini"
+  opencode:
+    wire_format: "opencode"
+  codex:
+    wire_format: "codex"
+  kilocode:
+    wire_format: "kilocode"
+
+logging:
+  enabled: true
+  include_prompt: true
+  include_response: true
+  include_timing: true
+  # Log parse errors for debugging
+  log_parse_errors: true

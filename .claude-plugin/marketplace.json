@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "beastlabai",
+  "owner": {
+    "name": "beastlabai",
+    "email": "257139646+beastlabai@users.noreply.github.com"
+  },
+  "description": "Beastlab AI plugins for Claude Code.",
+  "plugins": [
+    {
+      "name": "multi-llm",
+      "source": "./",
+      "description": "Multi-LLM orchestration: plan review, task generation, implementation, and code review across multiple LLM providers in parallel.",
+      "category": "workflow",
+      "keywords": [
+        "multi-llm",
+        "code-review",
+        "plan-review",
+        "orchestration"
+      ]
+    }
+  ]
+}

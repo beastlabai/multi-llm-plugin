@@ -1,0 +1,30 @@
+[
+  {
+    "title": "Add email format validation",
+    "desc": "The plan mentions validating email format using regex but doesn't specify the pattern. Add a specific regex pattern like ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$ to ensure consistent validation.",
+    "type": "addition",
+    "reference": "### Step 2: User Model",
+    "importance": "MEDIUM"
+  },
+  {
+    "title": "Define minimum password requirements",
+    "desc": "Add explicit password complexity requirements: minimum 12 characters, at least one uppercase, one lowercase, one number, and one special character. Consider using a password strength library like zxcvbn.",
+    "type": "addition",
+    "reference": "### Step 6: Security Measures",
+    "importance": "HIGH"
+  },
+  {
+    "title": "Specify JWT and refresh token expiration times",
+    "desc": "The plan doesn't specify token lifetimes. Recommend: access tokens expire in 15 minutes, refresh tokens in 7 days. Store these as configuration values, not hardcoded.",
+    "type": "clarification",
+    "reference": "### Step 3: Authentication Service",
+    "importance": "MEDIUM"
+  },
+  {
+    "title": "Document zero-downtime migration approach",
+    "desc": "For production deployments, specify how migrations will be applied without downtime. Consider using expand-contract pattern or online schema changes.",
+    "type": "addition",
+    "reference": "### Step 1: Database Schema",
+    "importance": "HIGH"
+  }
+]

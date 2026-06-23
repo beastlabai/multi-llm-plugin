@@ -1,0 +1,45 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "status": "valid",
+      "reason": "Confidence exactly 0.0",
+      "confidence": 0.0
+    },
+    {
+      "group_index": 1,
+      "status": "valid",
+      "reason": "Confidence exactly 1.0",
+      "confidence": 1.0
+    },
+    {
+      "group_index": 2,
+      "status": "valid",
+      "reason": "Confidence negative (should be clamped to 0.0)",
+      "confidence": -0.5
+    },
+    {
+      "group_index": 3,
+      "status": "valid",
+      "reason": "Confidence above 1.0 (should be clamped to 1.0)",
+      "confidence": 1.5
+    },
+    {
+      "group_index": 4,
+      "status": "valid",
+      "reason": "Confidence very small positive",
+      "confidence": 0.001
+    },
+    {
+      "group_index": 5,
+      "status": "valid",
+      "reason": "Confidence very close to 1.0",
+      "confidence": 0.999
+    }
+  ],
+  "metadata": {
+    "model": "test-model",
+    "schema_version": "2.0",
+    "test_case": "edge_confidence_values"
+  }
+}

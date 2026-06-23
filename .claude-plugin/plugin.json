@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "multi-llm",
+  "version": "0.1.0",
+  "description": "Orchestrate plan reviews, task generation, implementation, and code reviews across multiple LLM providers (Cursor, Gemini, Codex, OpenCode, Kilocode, Claude Code) in parallel — or ask every model a free-text question about a plan.",
+  "author": {
+    "name": "beastlabai",
+    "email": "257139646+beastlabai@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/beastlabai/multi-llm-plugin",
+  "repository": "https://github.com/beastlabai/multi-llm-plugin",
+  "license": "MIT",
+  "keywords": [
+    "multi-llm",
+    "code-review",
+    "plan-review",
+    "orchestration",
+    "cursor-agent",
+    "gemini",
+    "codex",
+    "opencode",
+    "kilocode",
+    "claude-code"
+  ]
+}

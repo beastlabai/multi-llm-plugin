@@ -1,0 +1,93 @@
+[
+  {
+    "theme": "SQL injection vulnerability",
+    "category": "security",
+    "models": ["cursor-agent"],
+    "suggestions": [
+      {
+        "title": "SQL injection vulnerability in user lookup",
+        "desc": "The user lookup query uses string formatting instead of parameterized queries, which could allow SQL injection attacks.",
+        "importance": "HIGH",
+        "file": "src/services/auth_service.py",
+        "line_range": [45, 48],
+        "type": "bug",
+        "anchor_text": "cursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")",
+        "source_model": "cursor-agent"
+      }
+    ]
+  },
+  {
+    "theme": "Missing password hashing",
+    "category": "security",
+    "models": ["cursor-agent", "gemini"],
+    "suggestions": [
+      {
+        "title": "Missing password hashing",
+        "desc": "The password is stored directly without hashing in the register function.",
+        "importance": "HIGH",
+        "file": "src/services/auth_service.py",
+        "line_range": [62, 65],
+        "type": "bug",
+        "anchor_text": "password=password",
+        "source_model": "cursor-agent"
+      },
+      {
+        "title": "Passwords stored in plaintext",
+        "desc": "Passwords should be hashed with bcrypt before storage.",
+        "importance": "HIGH",
+        "file": "src/services/auth_service.py",
+        "line_range": [62, 65],
+        "type": "bug",
+        "source_model": "gemini"
+      }
+    ]
+  },
+  {
+    "theme": "Rate limiting missing",
+    "category": "security",
+    "models": ["cursor-agent"],
+    "suggestions": [
+      {
+        "title": "Rate limiter not applied to registration",
+        "desc": "The registration endpoint is missing rate limiting.",
+        "importance": "MEDIUM",
+        "file": "src/api/auth_routes.py",
+        "line_range": [22, 35],
+        "type": "missing",
+        "source_model": "cursor-agent"
+      }
+    ]
+  },
+  {
+    "theme": "Hardcoded secrets",
+    "category": "security",
+    "models": ["gemini"],
+    "suggestions": [
+      {
+        "title": "Hardcoded JWT secret",
+        "desc": "The JWT secret is hardcoded in the source code.",
+        "importance": "HIGH",
+        "file": "src/services/auth_service.py",
+        "line_range": [15, 15],
+        "type": "bug",
+        "source_model": "gemini"
+      }
+    ]
+  },
+  {
+    "theme": "Session cleanup",
+    "category": "performance",
+    "models": ["cursor-agent"],
+    "suggestions": [
+      {
+        "title": "Session cleanup not implemented",
+        "desc": "Expired sessions are never cleaned up from the database.",
+        "importance": "LOW",
+        "file": "src/services/session_service.py",
+        "line_range": [1, 100],
+        "type": "missing",
+        "source_model": "cursor-agent"
+      }
+    ]
+  }
+]

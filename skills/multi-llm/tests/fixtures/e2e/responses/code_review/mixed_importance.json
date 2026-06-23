@@ -1,0 +1,65 @@
+[
+  {
+    "title": "SQL injection vulnerability",
+    "desc": "User input is interpolated directly into SQL query without sanitization.",
+    "importance": "high",
+    "file": "src/services/data_service.py",
+    "line_range": [120, 125],
+    "type": "bug",
+    "anchor_text": "f\"SELECT * FROM table WHERE id = {user_id}\""
+  },
+  {
+    "title": "Hardcoded API key",
+    "desc": "API key is hardcoded in source code; should be loaded from environment.",
+    "importance": "high",
+    "file": "src/config/settings.py",
+    "line_range": [45, 45],
+    "type": "bug",
+    "anchor_text": "API_KEY = \"sk-1234567890\""
+  },
+  {
+    "title": "Missing error handling",
+    "desc": "Database operation lacks try-catch block for error handling.",
+    "importance": "medium",
+    "file": "src/services/data_service.py",
+    "line_range": [80, 95],
+    "type": "missing",
+    "anchor_text": "db.execute(query)"
+  },
+  {
+    "title": "Input validation missing",
+    "desc": "User input is not validated before processing.",
+    "importance": "medium",
+    "file": "src/api/routes.py",
+    "line_range": [55, 60],
+    "type": "missing",
+    "anchor_text": "def create_item(data):"
+  },
+  {
+    "title": "Deprecated function usage",
+    "desc": "Using deprecated datetime.utcnow(); should use datetime.now(timezone.utc).",
+    "importance": "low",
+    "file": "src/utils/time_utils.py",
+    "line_range": [12, 12],
+    "type": "style",
+    "anchor_text": "datetime.utcnow()"
+  },
+  {
+    "title": "Inconsistent naming convention",
+    "desc": "Variable name 'userData' uses camelCase; should be 'user_data' per PEP8.",
+    "importance": "low",
+    "file": "src/services/user_service.py",
+    "line_range": [30, 30],
+    "type": "style",
+    "anchor_text": "userData ="
+  },
+  {
+    "title": "Magic number in timeout",
+    "desc": "Hardcoded timeout value 30 should be a named constant.",
+    "importance": "low",
+    "file": "src/api/client.py",
+    "line_range": [67, 67],
+    "type": "improvement",
+    "anchor_text": "timeout=30"
+  }
+]

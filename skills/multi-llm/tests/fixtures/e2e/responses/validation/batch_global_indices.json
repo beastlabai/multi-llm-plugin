@@ -1,0 +1,27 @@
+{
+  "groups": [
+    {
+      "group_index": 5,
+      "status": "valid",
+      "reason": "Using original global index 5",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 6,
+      "status": "invalid",
+      "reason": "Using original global index 6",
+      "confidence": 0.8
+    },
+    {
+      "group_index": 7,
+      "status": "valid",
+      "reason": "Using original global index 7",
+      "confidence": 0.95
+    }
+  ],
+  "metadata": {
+    "model": "test-model",
+    "schema_version": "2.0",
+    "index_scheme": "global"
+  }
+}

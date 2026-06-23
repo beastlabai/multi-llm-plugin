@@ -1,0 +1,167 @@
+{
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Create database schema and migrations",
+      "description": "Create the initial database schema including users, sessions, and login_attempts tables. Write SQL migration files with proper indexes and constraints. Ensure UUID generation and timestamp defaults are configured correctly.",
+      "depends_on": [],
+      "context_files": [
+        "plans/auth-feature.md"
+      ],
+      "output_files": [
+        "migrations/001_create_users.sql",
+        "migrations/002_create_sessions.sql",
+        "migrations/003_create_login_attempts.sql"
+      ],
+      "acceptance_criteria": [
+        "Users table has proper constraints on email (unique, not null)",
+        "Sessions table references users with ON DELETE CASCADE",
+        "Indexes created on frequently queried columns (email, user_id)",
+        "Migration files are idempotent (can be run multiple times safely)"
+      ],
+      "estimated_complexity": "low"
+    },
+    {
+      "id": 2,
+      "title": "Implement User model with password hashing",
+      "description": "Create the User model class with bcrypt password hashing (cost factor 12). Include email validation using regex pattern. Add methods for password verification using constant-time comparison.",
+      "depends_on": [1],
+      "context_files": [
+        "migrations/001_create_users.sql"
+      ],
+      "output_files": [
+        "src/models/user.py"
+      ],
+      "acceptance_criteria": [
+        "Password hashing uses bcrypt with cost factor 12",
+        "Email validation rejects invalid formats",
+        "Password verification is constant-time to prevent timing attacks",
+        "Model methods handle edge cases (empty strings, None values)"
+      ],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": 3,
+      "title": "Implement AuthService with JWT generation",
+      "description": "Create AuthService class with register, login, refresh, and logout methods. Implement JWT token generation with configurable expiration. Use refresh tokens for session management.",
+      "depends_on": [2],
+      "context_files": [
+        "src/models/user.py"
+      ],
+      "output_files": [
+        "src/services/auth_service.py"
+      ],
+      "acceptance_criteria": [
+        "JWT tokens include user_id and expiration claims",
+        "Access tokens expire in 15 minutes (configurable)",
+        "Refresh tokens are cryptographically secure (32+ bytes)",
+        "Logout invalidates the refresh token"
+      ],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": 4,
+      "title": "Implement SessionService for session management",
+      "description": "Create SessionService to manage user sessions including creation, validation, and revocation. Store session metadata (device info, IP address, user agent). Implement sliding expiration.",
+      "depends_on": [1],
+      "context_files": [
+        "migrations/002_create_sessions.sql"
+      ],
+      "output_files": [
+        "src/services/session_service.py"
+      ],
+      "acceptance_criteria": [
+        "Sessions store device and IP metadata",
+        "Sliding expiration extends session on activity",
+        "Users can view and revoke their sessions",
+        "Expired sessions are properly handled"
+      ],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": 5,
+      "title": "Implement rate limiter middleware",
+      "description": "Create rate limiting middleware using sliding window algorithm. Implement per-IP and per-user rate limits. Add Retry-After header when rate limited. Support configurable limits.",
+      "depends_on": [],
+      "context_files": [],
+      "output_files": [
+        "src/middleware/rate_limiter.py"
+      ],
+      "acceptance_criteria": [
+        "Rate limiter uses sliding window algorithm",
+        "Returns 429 status with Retry-After header",
+        "Supports both IP-based and user-based limits",
+        "Limits are configurable via environment variables"
+      ],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": 6,
+      "title": "Create auth API endpoints",
+      "description": "Implement REST API endpoints for registration, login, token refresh, logout, and user info. Apply rate limiting to login and registration endpoints. Validate request inputs.",
+      "depends_on": [3, 4, 5],
+      "context_files": [
+        "src/services/auth_service.py",
+        "src/services/session_service.py",
+        "src/middleware/rate_limiter.py"
+      ],
+      "output_files": [
+        "src/api/auth_routes.py"
+      ],
+      "acceptance_criteria": [
+        "All endpoints validate input before processing",
+        "Login and registration have rate limiting applied",
+        "Error responses use consistent format",
+        "Endpoints return appropriate HTTP status codes"
+      ],
+      "estimated_complexity": "medium"
+    },
+    {
+      "id": 7,
+      "title": "Write unit tests for auth services",
+      "description": "Create comprehensive unit tests for User model, AuthService, and SessionService. Test edge cases, error handling, and security features. Mock database connections.",
+      "depends_on": [2, 3, 4],
+      "context_files": [
+        "src/models/user.py",
+        "src/services/auth_service.py",
+        "src/services/session_service.py"
+      ],
+      "output_files": [
+        "tests/test_auth.py",
+        "tests/test_session.py"
+      ],
+      "acceptance_criteria": [
+        "Tests cover all public methods",
+        "Edge cases (invalid inputs, expired tokens) are tested",
+        "Security features (hashing, timing) are verified",
+        "Test coverage is at least 80%"
+      ],
+      "estimated_complexity": "high"
+    },
+    {
+      "id": 8,
+      "title": "Write integration tests for API endpoints",
+      "description": "Create integration tests that exercise the full auth flow through the API. Test registration, login, refresh, and logout sequences. Verify rate limiting behavior.",
+      "depends_on": [6, 7],
+      "context_files": [
+        "src/api/auth_routes.py",
+        "tests/test_auth.py"
+      ],
+      "output_files": [
+        "tests/test_auth_integration.py"
+      ],
+      "acceptance_criteria": [
+        "Full auth flow is tested end-to-end",
+        "Rate limiting triggers after threshold",
+        "Concurrent requests are handled correctly",
+        "Error responses match expected format"
+      ],
+      "estimated_complexity": "high"
+    }
+  ],
+  "clarifications_needed": [
+    "Should email verification be blocking (user cannot login until verified) or non-blocking?",
+    "What is the maximum number of active sessions per user (or unlimited)?",
+    "Should rate limiting be stored in Redis or is in-memory acceptable for single-instance deployments?"
+  ]
+}

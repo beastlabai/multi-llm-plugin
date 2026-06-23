@@ -1,0 +1,40 @@
+{
+  "capture_date": "2026-03-14T16:52:38.759638",
+  "commit_hash": "b50260c71d204c9f67a948168f78cb8591f18879",
+  "python_version": "3.12.3 (main, Mar  3 2026, 12:15:18) [GCC 13.3.0]",
+  "orchestrators": [
+    "apply_suggestions_orchestrator.py",
+    "apply_code_fixes_orchestrator.py",
+    "apply_task_suggestions_orchestrator.py"
+  ],
+  "artifacts": {
+    "help_files": [
+      "apply_suggestions_help.txt",
+      "apply_code_fixes_help.txt",
+      "apply_task_suggestions_help.txt"
+    ],
+    "dry_run_files": [
+      "apply_suggestions_dry_run_stdout.txt",
+      "apply_suggestions_dry_run_stderr.txt",
+      "apply_code_fixes_dry_run_stdout.txt",
+      "apply_code_fixes_dry_run_stderr.txt",
+      "apply_task_suggestions_dry_run_stdout.txt",
+      "apply_task_suggestions_dry_run_stderr.txt"
+    ],
+    "json_output_files": [
+      "apply_suggestions_output.json",
+      "apply_code_fixes_output.json",
+      "apply_task_suggestions_orchestrator_output.json"
+    ],
+    "orchestrator_output_files": [
+      "apply_suggestions_orchestrator_output.json",
+      "apply_code_fixes_orchestrator_output.json",
+      "apply_task_suggestions_orchestrator_output.json"
+    ],
+    "report_parsing_files": [
+      "apply_suggestions_report_parsing.json",
+      "apply_code_fixes_report_parsing.json",
+      "apply_task_suggestions_report_parsing.json"
+    ]
+  }
+}

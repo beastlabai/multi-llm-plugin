@@ -1,0 +1,207 @@
+{
+  "format_version": 2,
+  "plan_file": "/tmp/tmpoitba3w8/golden-plan.md",
+  "tasks_file": "/tmp/tmpoitba3w8/golden-plan/tasks/tasks.md",
+  "tasks_file_backup": "/tmp/tmpoitba3w8/golden-plan/apply-task-suggestions/tasks-backup.md",
+  "prefix": "golden-plan",
+  "output_dir": "/tmp/tmpoitba3w8/golden-plan",
+  "apply_task_suggestions_dir": "/tmp/tmpoitba3w8/golden-plan/apply-task-suggestions",
+  "timestamp": "2026-03-14T16:52:39.093210",
+  "batches": [
+    {
+      "suggestions": [
+        {
+          "index": 0,
+          "title": "Add rate limiting task",
+          "description": "Plan requires rate limiting but no task covers it.",
+          "type": "addition",
+          "reference": "Plan Coverage",
+          "task_reference": "Plan Coverage",
+          "importance": "HIGH",
+          "theme": "Missing rate limiting task",
+          "category": "coverage",
+          "validation_status": "valid",
+          "validation_reason": "Clear addition needed.",
+          "validation_confidence": 0.95,
+          "models": [
+            "cursor-agent"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "section_key": "section:plan_coverage",
+      "batch_type": "addition",
+      "suggestion_count": 1,
+      "total_chars": 50,
+      "priority_score": 3.0,
+      "prompt": "Apply the following task suggestion to the tasks file.\n\n**Target file (to edit)**: /tmp/tmpoitba3w8/golden-plan/tasks/tasks.md\n**Plan file (context only)**: /tmp/tmpoitba3w8/golden-plan.md\n\n**Current tasks.md content** (for reference \u2014 read the actual file for the latest version):\n```\n# Implementation Tasks\n\n## T001: Create notification data model\nSet up the database schema for notifications.\n- Depends on: none\n- Complexity: low\n\n## T002: Implement notification service\nCore service layer for creating and querying notifications.\n- Depends on: T001\n- Complexity: medium\n\n## T003: Add email channel adapter\nIntegrate with email provider for transactional emails.\n- Depends on: T002\n- Complexity: medium\n\n## T004: Add WebSocket delivery\nReal-time in-app notification delivery via WebSocket.\n- Depends on: T002\n- Complexity: high\n\n## T005: Create API endpoints\nREST endpoints for sending and managing notifications.\n- Depends on: T002\n- Complexity: medium\n\n## T006: Write tests\nUnit, integration, and E2E tests for the notification system.\n- Depends on: T003, T004, T005\n- Complexity: medium\n\n```\n\n**Suggestion**: Add rate limiting task\n**Type**: addition\n**Task reference**: Plan Coverage\n**Importance**: HIGH\n\n**Details**:\nPlan requires rate limiting but no task covers it.\n\n## Task-Specific Edit Rules\n\nFor each suggestion type, follow these rules precisely:\n\n### Addition\n- Add new task(s) using `### Task T0XX:` format\n- Assign the next available ID (scan existing IDs to determine the highest, then increment)\n- New tasks MUST include ALL canonical fields:\n  - `files_to_modify` (list of files to change)\n  - `files_to_create` (list of new files, if any)\n  - `estimated_complexity` (low/medium/high)\n  - `subagent_type` (or manual type if applicable)\n  - `depends_on` (list of prerequisite task IDs, or empty)\n  - Acceptance criteria (bulleted list)\n- After adding, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Modification\n- Update the specified task fields (description, dependencies, acceptance criteria, etc.)\n- Modified tasks MUST preserve or explicitly update ALL canonical fields\n  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `subagent_type`,\n  acceptance criteria) \u2014 never silently drop fields\n- If changing `depends_on`, regenerate the dependency graph and update header metadata\n\n### Deletion\n- Remove the specified task entirely\n- Clean up `depends_on` references to the deleted task ID in ALL other tasks\n- Surviving tasks MUST NOT be renumbered \u2014 IDs are stable identifiers\n- After deletion, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Clarification\n- Rewrite the task description and/or acceptance criteria for clarity\n- ALL canonical fields must be preserved \u2014 do not remove or alter fields that are not being clarified\n\n## Instructions\n\n1. Read the current tasks.md file\n2. Locate the task mentioned in the reference (if applicable)\n3. Apply the suggested change following the type-specific rules above\n4. Ensure the change integrates smoothly with surrounding content\n5. Check if the tasks file already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating\n6. After any structural edit (addition, deletion, dependency change), regenerate the dependency graph and update header metadata\n7. Do NOT make any other changes beyond this specific suggestion\n\nReturn a brief summary of what was changed."
+    },
+    {
+      "suggestions": [
+        {
+          "index": 1,
+          "title": "Fix T003 dependency",
+          "description": "T003 uses the schema created by T001 but doesn't list T001 in depends_on.",
+          "type": "modification",
+          "reference": "T003",
+          "task_reference": "Task T003",
+          "importance": "HIGH",
+          "theme": "T003 missing dependency on T001",
+          "category": "dependency",
+          "validation_status": "valid",
+          "validation_reason": "Dependency fix is straightforward.",
+          "validation_confidence": 0.9,
+          "models": [
+            "cursor-agent"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "section_key": "section:t003",
+      "batch_type": "modification",
+      "suggestion_count": 1,
+      "total_chars": 73,
+      "priority_score": 3.0,
+      "prompt": "Apply the following task suggestion to the tasks file.\n\n**Target file (to edit)**: /tmp/tmpoitba3w8/golden-plan/tasks/tasks.md\n**Plan file (context only)**: /tmp/tmpoitba3w8/golden-plan.md\n\n**Current tasks.md content** (for reference \u2014 read the actual file for the latest version):\n```\n# Implementation Tasks\n\n## T001: Create notification data model\nSet up the database schema for notifications.\n- Depends on: none\n- Complexity: low\n\n## T002: Implement notification service\nCore service layer for creating and querying notifications.\n- Depends on: T001\n- Complexity: medium\n\n## T003: Add email channel adapter\nIntegrate with email provider for transactional emails.\n- Depends on: T002\n- Complexity: medium\n\n## T004: Add WebSocket delivery\nReal-time in-app notification delivery via WebSocket.\n- Depends on: T002\n- Complexity: high\n\n## T005: Create API endpoints\nREST endpoints for sending and managing notifications.\n- Depends on: T002\n- Complexity: medium\n\n## T006: Write tests\nUnit, integration, and E2E tests for the notification system.\n- Depends on: T003, T004, T005\n- Complexity: medium\n\n```\n\n**Suggestion**: Fix T003 dependency\n**Type**: modification\n**Task reference**: T003\n**Importance**: HIGH\n\n**Details**:\nT003 uses the schema created by T001 but doesn't list T001 in depends_on.\n\n## Task-Specific Edit Rules\n\nFor each suggestion type, follow these rules precisely:\n\n### Addition\n- Add new task(s) using `### Task T0XX:` format\n- Assign the next available ID (scan existing IDs to determine the highest, then increment)\n- New tasks MUST include ALL canonical fields:\n  - `files_to_modify` (list of files to change)\n  - `files_to_create` (list of new files, if any)\n  - `estimated_complexity` (low/medium/high)\n  - `subagent_type` (or manual type if applicable)\n  - `depends_on` (list of prerequisite task IDs, or empty)\n  - Acceptance criteria (bulleted list)\n- After adding, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Modification\n- Update the specified task fields (description, dependencies, acceptance criteria, etc.)\n- Modified tasks MUST preserve or explicitly update ALL canonical fields\n  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `subagent_type`,\n  acceptance criteria) \u2014 never silently drop fields\n- If changing `depends_on`, regenerate the dependency graph and update header metadata\n\n### Deletion\n- Remove the specified task entirely\n- Clean up `depends_on` references to the deleted task ID in ALL other tasks\n- Surviving tasks MUST NOT be renumbered \u2014 IDs are stable identifiers\n- After deletion, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Clarification\n- Rewrite the task description and/or acceptance criteria for clarity\n- ALL canonical fields must be preserved \u2014 do not remove or alter fields that are not being clarified\n\n## Instructions\n\n1. Read the current tasks.md file\n2. Locate the task mentioned in the reference (if applicable)\n3. Apply the suggested change following the type-specific rules above\n4. Ensure the change integrates smoothly with surrounding content\n5. Check if the tasks file already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating\n6. After any structural edit (addition, deletion, dependency change), regenerate the dependency graph and update header metadata\n7. Do NOT make any other changes beyond this specific suggestion\n\nReturn a brief summary of what was changed."
+    },
+    {
+      "suggestions": [
+        {
+          "index": 2,
+          "title": "Improve T002 acceptance criteria",
+          "description": "T002 acceptance criteria should list specific interfaces.",
+          "type": "clarification",
+          "reference": "T002",
+          "task_reference": "Task T002",
+          "importance": "LOW",
+          "theme": "T002 acceptance criteria vague",
+          "category": "clarity",
+          "validation_status": "valid",
+          "validation_reason": "Minor wording improvement.",
+          "validation_confidence": 0.8,
+          "models": [
+            "gpt-4"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "section_key": "section:t002",
+      "batch_type": "clarification",
+      "suggestion_count": 1,
+      "total_chars": 57,
+      "priority_score": 1.0,
+      "prompt": "Apply the following task suggestion to the tasks file.\n\n**Target file (to edit)**: /tmp/tmpoitba3w8/golden-plan/tasks/tasks.md\n**Plan file (context only)**: /tmp/tmpoitba3w8/golden-plan.md\n\n**Current tasks.md content** (for reference \u2014 read the actual file for the latest version):\n```\n# Implementation Tasks\n\n## T001: Create notification data model\nSet up the database schema for notifications.\n- Depends on: none\n- Complexity: low\n\n## T002: Implement notification service\nCore service layer for creating and querying notifications.\n- Depends on: T001\n- Complexity: medium\n\n## T003: Add email channel adapter\nIntegrate with email provider for transactional emails.\n- Depends on: T002\n- Complexity: medium\n\n## T004: Add WebSocket delivery\nReal-time in-app notification delivery via WebSocket.\n- Depends on: T002\n- Complexity: high\n\n## T005: Create API endpoints\nREST endpoints for sending and managing notifications.\n- Depends on: T002\n- Complexity: medium\n\n## T006: Write tests\nUnit, integration, and E2E tests for the notification system.\n- Depends on: T003, T004, T005\n- Complexity: medium\n\n```\n\n**Suggestion**: Improve T002 acceptance criteria\n**Type**: clarification\n**Task reference**: T002\n**Importance**: LOW\n\n**Details**:\nT002 acceptance criteria should list specific interfaces.\n\n## Task-Specific Edit Rules\n\nFor each suggestion type, follow these rules precisely:\n\n### Addition\n- Add new task(s) using `### Task T0XX:` format\n- Assign the next available ID (scan existing IDs to determine the highest, then increment)\n- New tasks MUST include ALL canonical fields:\n  - `files_to_modify` (list of files to change)\n  - `files_to_create` (list of new files, if any)\n  - `estimated_complexity` (low/medium/high)\n  - `subagent_type` (or manual type if applicable)\n  - `depends_on` (list of prerequisite task IDs, or empty)\n  - Acceptance criteria (bulleted list)\n- After adding, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Modification\n- Update the specified task fields (description, dependencies, acceptance criteria, etc.)\n- Modified tasks MUST preserve or explicitly update ALL canonical fields\n  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `subagent_type`,\n  acceptance criteria) \u2014 never silently drop fields\n- If changing `depends_on`, regenerate the dependency graph and update header metadata\n\n### Deletion\n- Remove the specified task entirely\n- Clean up `depends_on` references to the deleted task ID in ALL other tasks\n- Surviving tasks MUST NOT be renumbered \u2014 IDs are stable identifiers\n- After deletion, regenerate the dependency graph and update header metadata (task count, complexity summary)\n\n### Clarification\n- Rewrite the task description and/or acceptance criteria for clarity\n- ALL canonical fields must be preserved \u2014 do not remove or alter fields that are not being clarified\n\n## Instructions\n\n1. Read the current tasks.md file\n2. Locate the task mentioned in the reference (if applicable)\n3. Apply the suggested change following the type-specific rules above\n4. Ensure the change integrates smoothly with surrounding content\n5. Check if the tasks file already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating\n6. After any structural edit (addition, deletion, dependency change), regenerate the dependency graph and update header metadata\n7. Do NOT make any other changes beyond this specific suggestion\n\nReturn a brief summary of what was changed."
+    }
+  ],
+  "to_apply": [
+    {
+      "index": 0,
+      "title": "Add rate limiting task",
+      "description": "Plan requires rate limiting but no task covers it.",
+      "type": "addition",
+      "reference": "Plan Coverage",
+      "task_reference": "Plan Coverage",
+      "importance": "HIGH",
+      "theme": "Missing rate limiting task",
+      "category": "coverage",
+      "validation_status": "valid",
+      "validation_reason": "Clear addition needed.",
+      "validation_confidence": 0.95,
+      "models": [
+        "cursor-agent"
+      ],
+      "suggestion_count": 1
+    },
+    {
+      "index": 1,
+      "title": "Fix T003 dependency",
+      "description": "T003 uses the schema created by T001 but doesn't list T001 in depends_on.",
+      "type": "modification",
+      "reference": "T003",
+      "task_reference": "Task T003",
+      "importance": "HIGH",
+      "theme": "T003 missing dependency on T001",
+      "category": "dependency",
+      "validation_status": "valid",
+      "validation_reason": "Dependency fix is straightforward.",
+      "validation_confidence": 0.9,
+      "models": [
+        "cursor-agent"
+      ],
+      "suggestion_count": 1
+    },
+    {
+      "index": 2,
+      "title": "Improve T002 acceptance criteria",
+      "description": "T002 acceptance criteria should list specific interfaces.",
+      "type": "clarification",
+      "reference": "T002",
+      "task_reference": "Task T002",
+      "importance": "LOW",
+      "theme": "T002 acceptance criteria vague",
+      "category": "clarity",
+      "validation_status": "valid",
+      "validation_reason": "Minor wording improvement.",
+      "validation_confidence": 0.8,
+      "models": [
+        "gpt-4"
+      ],
+      "suggestion_count": 1
+    }
+  ],
+  "needs_human_review": [],
+  "skipped_items": [],
+  "user_skipped_items": [
+    {
+      "title": "Clarify T005 description",
+      "theme": "T005 description lacks detail",
+      "importance": "MEDIUM"
+    }
+  ],
+  "skipped_count": 0,
+  "batching_stats": {
+    "total_suggestions": 3,
+    "total_batches": 3,
+    "subagent_calls_saved": 0,
+    "efficiency_gain_percent": 0.0,
+    "average_batch_size": 1.0,
+    "max_batch_size": 1,
+    "single_suggestion_batches": 3,
+    "multi_suggestion_batches": 0,
+    "batch_type_distribution": {
+      "addition": 1,
+      "modification": 1,
+      "clarification": 1
+    },
+    "batching_enabled": true
+  },
+  "human_review_config": {
+    "mode": "by-importance",
+    "batch_enabled": true,
+    "prompt_strategy": "single_batch",
+    "by_importance": {
+      "HIGH": [],
+      "MEDIUM": [],
+      "LOW": []
+    },
+    "total_count": 0,
+    "batch_prompt_template": "batch_approval_v1"
+  },
+  "resume_info": {
+    "previously_processed": [],
+    "previous_decisions": {},
+    "can_resume": false
+  },
+  "edited_descriptions": [],
+  "summary": {
+    "total_groups": 4,
+    "valid_count": 3,
+    "needs_human_count": 0,
+    "skipped_count": 0,
+    "user_skipped_count": 1,
+    "batch_count": 3,
+    "validation_failed_count": 0,
+    "auto_approved_count": 0,
+    "edited_description_count": 0
+  }
+}

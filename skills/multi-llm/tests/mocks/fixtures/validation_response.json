@@ -1,0 +1,17 @@
+[
+  {
+    "group_id": "grp-001",
+    "status": "valid",
+    "reasoning": "This is a legitimate security concern that should be addressed before production deployment"
+  },
+  {
+    "group_id": "grp-002",
+    "status": "invalid",
+    "reasoning": "The suggested change is already implemented in the codebase as of the latest commit"
+  },
+  {
+    "group_id": "grp-003",
+    "status": "needs-human-decision",
+    "reasoning": "This is a tradeoff between performance and code readability that depends on business requirements"
+  }
+]

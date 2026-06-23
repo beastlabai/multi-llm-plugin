@@ -1,0 +1,114 @@
+usage: apply_code_fixes_orchestrator.py [-h] --plan-file PLAN_FILE
+                                        [--skip-human-review]
+                                        [--min-priority {low,medium,high}]
+                                        [--dry-run] [--no-batch]
+                                        [--max-batch-size MAX_BATCH_SIZE]
+                                        [--approve-all-low] [--approve-all]
+                                        [--skip-all-human]
+                                        [--approve-importance {LOW,MEDIUM,HIGH} [{LOW,MEDIUM,HIGH} ...]]
+                                        [--claude-decide] [--yes] [--force]
+                                        [--include-high] [--resume] [--fresh]
+                                        [--batch-review-mode {individual,by-importance,summary-only}]
+                                        [--accept-stale-consolidation]
+                                        [--no-confirm] [--include-low]
+                                        [--verbose] [--revalidate]
+                                        [--revalidate-model REVALIDATE_MODEL]
+                                        [--output-format {json,text}]
+                                        [--base-ref BASE_REF]
+                                        [--approve-validation-failed]
+                                        [--revalidate-all-human]
+                                        [--internal-revalidation]
+
+Prepare validated code review fixes for application
+
+options:
+  -h, --help            show this help message and exit
+  --plan-file PLAN_FILE
+                        Path to the implementation plan markdown file
+  --skip-human-review   [DEPRECATED] Skip needs-human-decision items (use
+                        --skip-all-human instead)
+  --min-priority {low,medium,high}
+                        Minimum importance level to include (default: low =
+                        all valid suggestions)
+  --dry-run             Show what would be applied without outputting for
+                        execution
+  --no-batch            Disable smart batching (process each suggestion
+                        separately)
+  --max-batch-size MAX_BATCH_SIZE
+                        Maximum suggestions per batch (default: 4)
+  --approve-all-low     Auto-approve all LOW importance items with needs-
+                        human-decision status
+  --approve-all         Auto-approve ALL needs-human-decision items (use with
+                        caution, requires --yes or --force)
+  --skip-all-human      Skip all needs-human-decision and validation_failed
+                        items
+  --approve-importance {LOW,MEDIUM,HIGH} [{LOW,MEDIUM,HIGH} ...]
+                        Auto-approve needs-human-decision items at these
+                        importance levels
+  --claude-decide, --let-claude-decide
+                        Let Claude evaluate each needs-human-decision item
+                        with its own judgment (no interactive prompt), instead
+                        of asking you. Equivalent to choosing 'Let Claude
+                        decide' in the interactive review. Unlike --approve-
+                        all / --skip-all-human, this is a per-item judgment,
+                        not a blanket rule: partially-valid items are salvaged
+                        (trimmed to their worthwhile core and applied) rather
+                        than skipped wholesale. Does not bypass the no-
+                        selection confirmation for valid items — combine with
+                        --no-confirm for fully unattended runs.
+  --yes, -y             Confirm bulk approval operations (required with
+                        --approve-all)
+  --force, -f           Force bulk approval operations (alias for --yes)
+  --include-high        Allow --approve-all to include HIGH importance items
+                        (otherwise blocked)
+  --resume              Resume from last checkpoint, skipping already-
+                        processed items
+  --fresh               Clear previous progress and start fresh
+  --batch-review-mode {individual,by-importance,summary-only}
+                        How to present items for human review (default: by-
+                        importance)
+  --accept-stale-consolidation
+                        Accept consolidated decisions even if grouped.json has
+                        changed since consolidation
+  --no-confirm          Skip confirmation prompt when no user selections are
+                        found (for unattended operation)
+  --include-low         [DEPRECATED] No longer needed, low is now default. Use
+                        --min-priority to filter.
+  --verbose             Enable verbose/debug output
+  --revalidate          Re-run validation only on items with validation_failed
+                        status
+  --revalidate-model REVALIDATE_MODEL
+                        Model to use for revalidation (e.g., cursor-
+                        agent:opus)
+  --output-format {json,text}
+                        Output format (default: text)
+  --base-ref BASE_REF   Git ref to use for diffs (default: from state file or
+                        HEAD~1)
+  --approve-validation-failed
+                        Auto-approve items that had recoverable validation
+                        failures (e.g., parsing/timeout)
+  --revalidate-all-human
+                        Re-run validation on ALL needs-human-decision items
+  --internal-revalidation
+                        Run revalidation inside orchestrator (legacy mode)
+                        instead of delegating to Claude Code subagent
+
+This orchestrator outputs a JSON list of fixes to apply.
+The actual application is handled by Claude Code using Task subagents.
+
+Example:
+  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file plans/my-plan.md
+
+Bulk Approval Examples:
+  # Auto-approve all LOW importance items
+  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file plans/my-plan.md --approve-all-low
+
+  # Auto-approve items with validation failures (parsing errors, timeouts)
+  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file plans/my-plan.md --approve-validation-failed
+
+  # Skip all items requiring human review
+  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file plans/my-plan.md --skip-all-human
+
+  # Re-run validation on failed items with a different model
+  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
+        

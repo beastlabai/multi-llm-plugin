@@ -1,0 +1,28 @@
+{
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Create base class",
+      "description": "Create the abstract base class for the feature",
+      "depends_on": [],
+      "context_files": [],
+      "output_files": [
+        "src/models/base.py"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Implement processor",
+      "description": "Implement the data processing logic",
+      "depends_on": [
+        1
+      ],
+      "context_files": [
+        "src/models/base.py"
+      ],
+      "output_files": [
+        "src/models/processor.py"
+      ]
+    }
+  ]
+}

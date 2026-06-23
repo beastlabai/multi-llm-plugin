@@ -1,0 +1,31 @@
+[
+  {
+    "id": "cr-001",
+    "type": "bug",
+    "file": "src/auth/login.py",
+    "line": 42,
+    "description": "Potential SQL injection vulnerability in user lookup query",
+    "importance": "HIGH",
+    "suggested_fix": "Use parameterized queries instead of string concatenation",
+    "code_before": "cursor.execute(f\"SELECT * FROM users WHERE username = '{username}'\")",
+    "code_after": "cursor.execute(\"SELECT * FROM users WHERE username = %s\", (username,))"
+  },
+  {
+    "id": "cr-002",
+    "type": "style",
+    "file": "src/utils/helpers.py",
+    "line": 15,
+    "description": "Function exceeds recommended length of 50 lines",
+    "importance": "LOW",
+    "suggested_fix": "Extract helper functions for better readability"
+  },
+  {
+    "id": "cr-003",
+    "type": "performance",
+    "file": "src/api/handlers.py",
+    "line": 128,
+    "description": "N+1 query pattern detected in user list endpoint",
+    "importance": "MEDIUM",
+    "suggested_fix": "Use eager loading or batch fetching for related objects"
+  }
+]

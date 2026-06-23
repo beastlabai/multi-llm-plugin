@@ -1,0 +1,92 @@
+[
+  {
+    "title": "SQL injection vulnerability in user lookup",
+    "desc": "The user lookup query uses string formatting instead of parameterized queries, which could allow SQL injection attacks.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [45, 48],
+    "type": "bug",
+    "anchor_text": "cursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")",
+    "suggested_fix": {
+      "format": "before_after",
+      "before": "cursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")",
+      "after": "cursor.execute(\"SELECT * FROM users WHERE email = %s\", (email,))"
+    }
+  },
+  {
+    "title": "Missing password hashing",
+    "desc": "The password is stored directly without hashing in the register function, violating security best practices.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [62, 65],
+    "type": "bug",
+    "anchor_text": "password=password",
+    "suggested_fix": {
+      "format": "before_after",
+      "before": "user = User(email=email, password=password)",
+      "after": "user = User(email=email, password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()))"
+    }
+  },
+  {
+    "title": "Rate limiter not applied to registration endpoint",
+    "desc": "The registration endpoint is missing rate limiting, which could allow attackers to create many accounts quickly.",
+    "importance": "medium",
+    "file": "src/api/auth_routes.py",
+    "line_range": [22, 35],
+    "type": "missing",
+    "anchor_text": "@router.post(\"/register\")"
+  },
+  {
+    "title": "Hardcoded JWT secret",
+    "desc": "The JWT secret is hardcoded in the source code instead of being loaded from environment variables.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [15, 15],
+    "type": "bug",
+    "anchor_text": "JWT_SECRET = \"super-secret-key-123\"",
+    "suggested_fix": {
+      "format": "before_after",
+      "before": "JWT_SECRET = \"super-secret-key-123\"",
+      "after": "JWT_SECRET = os.environ.get(\"JWT_SECRET\") or raise ValueError(\"JWT_SECRET not set\")"
+    }
+  },
+  {
+    "title": "Missing input validation in login endpoint",
+    "desc": "The login endpoint does not validate that email and password are provided before processing.",
+    "importance": "medium",
+    "file": "src/api/auth_routes.py",
+    "line_range": [40, 45],
+    "type": "missing"
+  },
+  {
+    "title": "Inconsistent error messages",
+    "desc": "Error messages reveal whether an email exists in the system, which could be used for user enumeration attacks.",
+    "importance": "medium",
+    "file": "src/services/auth_service.py",
+    "line_range": [78, 82],
+    "type": "bug",
+    "anchor_text": "raise AuthError(\"User not found\")",
+    "suggested_fix": {
+      "format": "before_after",
+      "before": "raise AuthError(\"User not found\")",
+      "after": "raise AuthError(\"Invalid credentials\")"
+    }
+  },
+  {
+    "title": "Session cleanup not implemented",
+    "desc": "Expired sessions are never cleaned up from the database, which could lead to table bloat over time.",
+    "importance": "low",
+    "file": "src/services/session_service.py",
+    "line_range": [1, 100],
+    "type": "missing"
+  },
+  {
+    "title": "Inefficient query in get_user_sessions",
+    "desc": "The get_user_sessions function performs N+1 queries when loading session details. Should use a JOIN or eager loading.",
+    "importance": "low",
+    "file": "src/services/session_service.py",
+    "line_range": [55, 68],
+    "type": "improvement",
+    "anchor_text": "for session in sessions:"
+  }
+]

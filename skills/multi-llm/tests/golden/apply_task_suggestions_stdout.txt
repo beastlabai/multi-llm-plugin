@@ -1,0 +1,59 @@
+
+============================================================
+TASK SUGGESTIONS TO APPLY (BATCHED)
+============================================================
+Plan: /tmp/tmpoitba3w8/golden-plan.md
+Tasks file: /tmp/tmpoitba3w8/golden-plan/tasks/tasks.md
+Valid suggestions: 3
+Batches: 3
+Needs human review: 0
+Skipped: 0
+
+Batching efficiency:
+  Subagent calls saved: 0
+  Efficiency gain: 0.0%
+
+============================================================
+BATCH 1 (1 suggestion(s))
+============================================================
+Section: section:plan_coverage
+Type: addition
+Priority score: 3.0
+
+  --- Suggestion 1 ---
+  Title: Add rate limiting task
+  Type: addition
+  Importance: HIGH
+  Task reference: Plan Coverage
+  Description:
+  Plan requires rate limiting but no task covers it....
+
+============================================================
+BATCH 2 (1 suggestion(s))
+============================================================
+Section: section:t003
+Type: modification
+Priority score: 3.0
+
+  --- Suggestion 1 ---
+  Title: Fix T003 dependency
+  Type: modification
+  Importance: HIGH
+  Task reference: Task T003
+  Description:
+  T003 uses the schema created by T001 but doesn't list T001 in depends_on....
+
+============================================================
+BATCH 3 (1 suggestion(s))
+============================================================
+Section: section:t002
+Type: clarification
+Priority score: 1.0
+
+  --- Suggestion 1 ---
+  Title: Improve T002 acceptance criteria
+  Type: clarification
+  Importance: LOW
+  Task reference: Task T002
+  Description:
+  T002 acceptance criteria should list specific interfaces....

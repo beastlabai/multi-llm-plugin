@@ -1,0 +1,85 @@
+You are reviewing code changes that implement a feature plan.
+
+## Plan File
+{plan_path}
+
+## Git Base Reference
+{base_ref}
+
+This is the git commit from when implementation started. Use this to see what changed.
+
+## Files Changed During Implementation
+{tracked_files_list}
+
+These are the files that were modified during the implementation phase.
+Focus your review on ONLY these files. Ignore any other uncommitted changes in the repo.
+
+## How to Examine Changes
+
+To see what changed in each file, use these git commands:
+
+1. **See all implementation changes at once:**
+   ```bash
+   git diff {base_ref} -- <file1> <file2> ...
+   ```
+
+2. **See changes for a specific file:**
+   ```bash
+   git diff {base_ref} -- path/to/file.ts
+   ```
+
+3. **See the current content of a file:**
+   ```bash
+   cat path/to/file.ts
+   # or use the Read tool
+   ```
+
+Read the plan file to understand:
+1. What features/changes were planned
+2. The implementation requirements and acceptance criteria
+
+## Your Task
+1. Read the plan file at the path above to understand requirements
+2. For EACH file in the "Files Changed" list, examine the actual diff using `git diff {base_ref} -- <file>`
+3. Compare the implementation against the plan requirements
+4. Identify any issues
+
+Look for:
+- **Bugs**: Logic errors, incorrect behavior, edge cases
+- **Missing functionality**: Plan requirements not implemented
+- **Security issues**: Vulnerabilities, unsafe patterns
+- **Scope creep**: Code that goes beyond what was planned
+- **Quality issues**: Performance problems, code smells
+
+## Output Format
+Return ONLY a valid JSON array with no additional text. Each issue must have this structure:
+{{
+  "title": "Short issue title (5-10 words)",
+  "desc": "Detailed description explaining the problem and recommended fix",
+  "importance": "high",
+  "file": "path/to/file.py",
+  "line_range": [10, 15],
+  "type": "bug",
+  "anchor_text": "exact code snippet identifying the location"
+}}
+
+Field requirements:
+- "title": string, concise summary (required)
+- "desc": string, 2-4 sentences explaining problem and fix (required)
+- "importance": exactly "high", "medium", or "low" (required)
+  - high = bugs, security issues, incorrect behavior
+  - medium = missing functionality, significant improvements
+  - low = style issues, minor improvements
+- "file": string, relative path to affected file (required)
+- "line_range": [start, end] line numbers, or null (required)
+- "type": exactly "bug", "missing", "improvement", "style", or "scope" (required)
+- "anchor_text": string, 10-50 char code snippet for locating issue (required)
+
+If no issues are found, return an empty array: []
+
+## Output Location
+CRITICAL: Write your JSON output to this file: {output_json_path}
+Do NOT print JSON to stdout. Write ONLY the JSON array to the specified file path.
+After writing, confirm by printing: "JSON written to {output_json_path}"
+
+The file must contain ONLY valid JSON - no markdown, no code blocks, no explanation. Just the raw JSON array.

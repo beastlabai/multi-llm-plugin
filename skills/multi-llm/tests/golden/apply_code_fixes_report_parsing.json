@@ -1,0 +1,12 @@
+{
+  "report_file": "report.md",
+  "orchestrator_type": "apply_code_fixes",
+  "skipped_suggestions_old_format": [],
+  "skipped_groups": [],
+  "skipped_group_suggestions": [
+    "ca590739b194e64d"
+  ],
+  "validation_overrides_groups": {},
+  "suggestion_validation_overrides": {},
+  "edited_descriptions": {}
+}

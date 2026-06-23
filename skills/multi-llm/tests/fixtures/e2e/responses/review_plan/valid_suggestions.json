@@ -1,0 +1,92 @@
+[
+  {
+    "theme": "Add input validation for email format",
+    "category": "security",
+    "models": ["cursor-agent", "gemini"],
+    "suggestions": [
+      {
+        "title": "Add email format validation",
+        "desc": "The plan mentions validating email format using regex but doesn't specify the pattern. Add a specific regex pattern like ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$ to ensure consistent validation.",
+        "type": "addition",
+        "reference": "### Step 2: User Model",
+        "importance": "MEDIUM",
+        "source_model": "cursor-agent"
+      }
+    ]
+  },
+  {
+    "theme": "Specify password complexity requirements",
+    "category": "security",
+    "models": ["cursor-agent"],
+    "suggestions": [
+      {
+        "title": "Define minimum password requirements",
+        "desc": "Add explicit password complexity requirements: minimum 12 characters, at least one uppercase, one lowercase, one number, and one special character. Consider using a password strength library like zxcvbn.",
+        "type": "addition",
+        "reference": "### Step 6: Security Measures",
+        "importance": "HIGH",
+        "source_model": "cursor-agent"
+      }
+    ]
+  },
+  {
+    "theme": "Add token expiration configuration",
+    "category": "architecture",
+    "models": ["gemini", "opencode"],
+    "suggestions": [
+      {
+        "title": "Specify JWT and refresh token expiration times",
+        "desc": "The plan doesn't specify token lifetimes. Recommend: access tokens expire in 15 minutes, refresh tokens in 7 days. Store these as configuration values, not hardcoded.",
+        "type": "clarification",
+        "reference": "### Step 3: Authentication Service",
+        "importance": "MEDIUM",
+        "source_model": "gemini"
+      }
+    ]
+  },
+  {
+    "theme": "Add database migration strategy",
+    "category": "architecture",
+    "models": ["opencode"],
+    "suggestions": [
+      {
+        "title": "Document zero-downtime migration approach",
+        "desc": "For production deployments, specify how migrations will be applied without downtime. Consider using expand-contract pattern or online schema changes.",
+        "type": "addition",
+        "reference": "### Step 1: Database Schema",
+        "importance": "HIGH",
+        "source_model": "opencode"
+      }
+    ]
+  },
+  {
+    "theme": "Improve rate limiting specification",
+    "category": "security",
+    "models": ["kilocode"],
+    "suggestions": [
+      {
+        "title": "Specify rate limiting implementation details",
+        "desc": "Add details about rate limiting: use sliding window algorithm, store counters in Redis, return Retry-After header when rate limited. Consider IP-based and user-based limits separately.",
+        "type": "modification",
+        "reference": "### Step 6: Security Measures",
+        "importance": "MEDIUM",
+        "source_model": "kilocode"
+      }
+    ]
+  },
+  {
+    "theme": "Add error response standardization",
+    "category": "api",
+    "models": ["codex"],
+    "suggestions": [
+      {
+        "title": "Define standard error response format",
+        "desc": "Add a standard error response format for all auth endpoints: {\"error\": {\"code\": \"AUTH_001\", \"message\": \"...\", \"details\": {}}}. Include error codes for common scenarios.",
+        "type": "addition",
+        "reference": "### Step 4: API Endpoints",
+        "importance": "LOW",
+        "source_model": "codex"
+      }
+    ]
+  }
+]

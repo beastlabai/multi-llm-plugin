@@ -1,0 +1,23 @@
+Plan: /tmp/tmpoitba3w8/golden-plan.md
+Output directory: /tmp/tmpoitba3w8/golden-plan
+Prefix: golden-plan
+Tasks file: /tmp/tmpoitba3w8/golden-plan/tasks/tasks.md
+Loaded 4 suggestion groups
+Loaded 4 validation results
+User skipped 1 individual suggestions: ['96ab0d661144ce7d']
+User preference summary: 1 items will be skipped
+  Skipping individual suggestions: 96ab0d661144ce7d
+Filtered 1 user-skipped items
+
+Filtered suggestions:
+  Valid (to apply): 3
+  Needs human review: 0
+  Skipped: 0
+
+Batching results:
+  Total suggestions: 3
+  Total batches: 3
+  Subagent calls saved: 0
+  Efficiency gain: 0.0%
+Tasks file backup: /tmp/tmpoitba3w8/golden-plan/apply-task-suggestions/tasks-backup.md
+[OUTPUT_FILE] /tmp/tmpoitba3w8/golden-plan/apply-task-suggestions/orchestrator_output.json

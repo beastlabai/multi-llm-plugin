@@ -1,0 +1,27 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "status": "valid",
+      "reason": "Index 0 - ambiguous, could be local or global for batch [0,1,2]",
+      "confidence": 0.88
+    },
+    {
+      "group_index": 1,
+      "status": "invalid",
+      "reason": "Index 1 - ambiguous, could be local or global for batch [0,1,2]",
+      "confidence": 0.72
+    },
+    {
+      "group_index": 2,
+      "status": "needs-human-decision",
+      "reason": "Index 2 - ambiguous, could be local or global for batch [0,1,2]",
+      "confidence": 0.55
+    }
+  ],
+  "metadata": {
+    "model": "test-model",
+    "schema_version": "2.0",
+    "index_scheme": "ambiguous"
+  }
+}

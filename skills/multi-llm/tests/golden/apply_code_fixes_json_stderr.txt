@@ -1,0 +1,20 @@
+Plan: /tmp/tmpxxqf0spp/golden-plan.md
+Output directory: /tmp/tmpxxqf0spp/golden-plan
+Prefix: golden-plan
+Loaded 4 issue groups
+Loaded 4 validation results
+No user preferences detected (checked user_selections.json, consolidated_user_selections.json, and report.md)
+
+Filtered fixes:
+  Valid (to apply): 2
+  Needs human review: 1
+  Skipped: 1
+Git base reference: b50260c71d204c9f67a948168f78cb8591f18879
+
+Batching results:
+  Total fixes: 2
+  Total batches: 2
+  Subagent calls saved: 0
+  Efficiency gain: 0.0%
+  Subagent distribution: {'general-purpose': 2}
+[OUTPUT_FILE] /tmp/tmpxxqf0spp/golden-plan/apply-fixes/orchestrator_output.json

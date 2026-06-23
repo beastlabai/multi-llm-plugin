@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Virtual environments / uv
+.venv/
+venv/
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Test scratch: integration tests generate fixtures under the skill's plans/ dir
+skills/multi-llm/plans/
+
+# Multi-LLM generated artifacts (plan-local state & outputs)
+# These are created next to plans at runtime and must not be committed.
+**/plans/**/state.json
+**/plans/**/review-plan/
+**/plans/**/review-tasks/
+**/plans/**/review-code/
+**/plans/**/code-review/
+**/plans/**/apply-suggestions/
+**/plans/**/apply-task-suggestions/
+**/plans/**/apply-code-fixes/
+**/plans/**/implement/
+**/plans/**/ask/
+plan_review_output.json
+
+# Editor / OS
+.idea/
+.vscode/
+.zed/
+.DS_Store
+*.bak
+*.swp

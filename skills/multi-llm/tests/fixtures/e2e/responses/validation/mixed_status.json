@@ -1,0 +1,32 @@
+[
+  {
+    "group_id": "grp-email-validation",
+    "status": "valid",
+    "reasoning": "This is a legitimate security improvement. Email validation is essential to prevent injection attacks and ensure data integrity."
+  },
+  {
+    "group_id": "grp-password-complexity",
+    "status": "valid",
+    "reasoning": "Password complexity requirements are critical for account security. The suggested requirements align with OWASP guidelines."
+  },
+  {
+    "group_id": "grp-token-expiration",
+    "status": "needs-human-decision",
+    "reasoning": "Token expiration times are context-dependent. A 15-minute access token may be too short for some use cases (e.g., long-running operations). Human input needed to balance security vs. usability."
+  },
+  {
+    "group_id": "grp-migration-strategy",
+    "status": "invalid",
+    "reasoning": "The plan explicitly states 'Week 1: Database schema' which implies migrations will be handled during initial development, not production deployments. This suggestion is a false positive."
+  },
+  {
+    "group_id": "grp-rate-limiting",
+    "status": "needs-human-decision",
+    "reasoning": "Redis dependency may not be appropriate for all deployment scenarios. Simpler in-memory rate limiting might suffice. Requires architectural decision."
+  },
+  {
+    "group_id": "grp-error-response",
+    "status": "invalid",
+    "reasoning": "The current REST API design already implies standard HTTP error responses. Adding custom error codes may be over-engineering for this use case."
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "status": "valid",
+      "reason": "First item in batch - using local index 0",
+      "confidence": 0.85
+    },
+    {
+      "group_index": 1,
+      "status": "invalid",
+      "reason": "Second item in batch - using local index 1",
+      "confidence": 0.75
+    },
+    {
+      "group_index": 2,
+      "status": "needs-human-decision",
+      "reason": "Third item in batch - using local index 2",
+      "confidence": 0.5
+    }
+  ],
+  "metadata": {
+    "model": "test-model",
+    "schema_version": "2.0",
+    "index_scheme": "local"
+  }
+}

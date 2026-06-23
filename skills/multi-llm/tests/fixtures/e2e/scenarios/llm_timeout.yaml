@@ -1,0 +1,93 @@
+# LLM Timeout Scenario
+# Tests graceful handling of LLM provider timeouts
+#
+# This scenario simulates timeout behavior for specific prompts while
+# allowing other prompts to succeed. Used to test:
+# - Timeout detection and error handling
+# - Graceful degradation when some providers fail
+# - Retry logic with exponential backoff
+
+name: "LLM Timeout"
+description: "Simulates provider timeout during review-plan phase"
+
+# Default response delay (non-timeout responses)
+default_delay_ms: 50
+
+# Timeout configuration
+# When MULTI_LLM_TEST_FAST_BACKOFF=1 is set, the orchestrator uses
+# minimal retry delays (10ms instead of 5/10/20s)
+timeout:
+  # How the mock simulates timeout:
+  # - "exit_quick": Exit immediately with timeout error (fast, recommended for tests)
+  # - "sleep_forever": Actually sleep (slow, only for manual testing)
+  # Default is "exit_quick" when MULTI_LLM_TEST_MODE=1
+  simulation_mode: "exit_quick"
+
+  # Exit code when simulating timeout
+  exit_code: 124  # Standard timeout exit code
+
+  # Error message pattern (orchestrators look for this)
+  error_message: "TIMEOUT: LLM provider did not respond within the configured timeout"
+
+prompts:
+  # First request times out
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    action: "timeout"
+    description: "Simulate timeout on initial review request"
+    # Only timeout on first matching call, then succeed
+    timeout_on_call: 1
+
+  # Second attempt succeeds (if retry is implemented)
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    fixture: "e2e/responses/review_plan/valid_suggestions.json"
+    description: "Successful response after retry"
+    # Skip first call (which timed out), respond on second
+    skip_calls: 1
+
+  # Validation phase succeeds
+  - pattern: "validate.*suggestion|verify.*suggestion"
+    fixture: "e2e/responses/validation/all_valid.json"
+    description: "Validation succeeds normally"
+
+  # Task generation succeeds
+  - pattern: "decompose.*task|generate.*task"
+    fixture: "e2e/responses/generate_tasks/tasks.json"
+    description: "Task generation succeeds normally"
+
+  # Code review succeeds
+  - pattern: "review.*code|code.*review"
+    fixture: "e2e/responses/code_review/issues.json"
+    description: "Code review succeeds normally"
+
+# Provider-specific timeout behavior
+provider_overrides:
+  cursor-agent:
+    wire_format: "cursor-agent"
+    # cursor-agent times out on first call
+    timeout_probability: 1.0
+    timeout_on_call: 1
+
+  gemini:
+    wire_format: "gemini"
+    # gemini always succeeds (tests partial provider failure)
+    timeout_probability: 0.0
+
+  opencode:
+    wire_format: "opencode"
+    timeout_probability: 0.0
+
+  codex:
+    wire_format: "codex"
+    timeout_probability: 0.0
+
+  kilocode:
+    wire_format: "kilocode"
+    timeout_probability: 0.0
+
+logging:
+  enabled: true
+  include_prompt: true
+  include_response: true
+  include_timing: true
+  # Log timeout events for debugging
+  log_timeouts: true

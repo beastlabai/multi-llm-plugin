@@ -1,0 +1,71 @@
+# Full Workflow Scenario
+# Tests the complete workflow chain: review-plan -> apply-suggestions -> generate-tasks -> implement -> code-review -> apply-fixes
+#
+# This scenario provides valid responses for all workflow phases with consistent data.
+
+name: "Full Workflow"
+description: "Complete workflow chain with all phases"
+
+# Default response delay in milliseconds
+default_delay_ms: 25
+
+# Response mappings based on prompt patterns
+prompts:
+  # Review Plan phase - raw suggestions from LLM (flat format)
+  - pattern: "review.*implementation plan|reviewing.*plan|plan review|analyze.*plan"
+    fixture: "../responses/review_plan/raw_suggestions.json"
+    description: "Review plan suggestions (raw format)"
+
+  # Validation phase for suggestions - all valid
+  - pattern: "validate.*suggestion|verify.*suggestion|check.*valid.*suggestion"
+    fixture: "../responses/validation/all_valid.json"
+    description: "Validation results for suggestions (all valid)"
+
+  # Generate Tasks phase - task decomposition
+  - pattern: "decompose.*task|generate.*task|break.*down.*task|task.*breakdown|create.*task"
+    fixture: "../responses/generate_tasks/tasks.json"
+    description: "Task decomposition output"
+
+  # Implement phase - task implementation responses (subagent outputs)
+  - pattern: "implement.*task|execute.*task|subagent|delegate.*task"
+    fixture: "../responses/generate_tasks/tasks.json"
+    description: "Implementation task responses"
+
+  # Code Review phase - issues found in implemented code
+  - pattern: "review.*code|code.*review|analyze.*implementation|check.*code|review.*implementation"
+    fixture: "../responses/code_review/issues.json"
+    description: "Code review issues"
+
+  # Validation phase for code fixes - all valid
+  - pattern: "validate.*fix|verify.*fix|check.*fix.*valid"
+    fixture: "../responses/validation/all_valid.json"
+    description: "Validation results for code fixes (all valid)"
+
+  # Apply fixes - fix application responses
+  - pattern: "apply.*fix|implement.*fix|make.*change"
+    fixture: "../responses/validation/all_valid.json"
+    description: "Fix application responses"
+
+# Provider-specific overrides
+provider_overrides:
+  cursor-agent:
+    wire_format: "cursor-agent"
+
+  gemini:
+    wire_format: "gemini"
+
+  opencode:
+    wire_format: "opencode"
+
+  codex:
+    wire_format: "codex"
+
+  kilocode:
+    wire_format: "kilocode"
+
+# Call logging configuration
+logging:
+  enabled: true
+  include_prompt: true
+  include_response: true
+  include_timing: true

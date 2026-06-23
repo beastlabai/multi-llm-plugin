@@ -1,0 +1,133 @@
+# Rate Limited Scenario
+# Tests handling of rate limit (429) errors from LLM providers
+#
+# This scenario simulates rate limiting behavior:
+# - First request returns 429 error
+# - Retry with exponential backoff (5s, 10s, 20s in real orchestrator)
+# - Subsequent requests succeed
+#
+# Used to test:
+# - 429 error detection
+# - Exponential backoff implementation
+# - Retry-After header handling
+# - Graceful recovery after rate limit
+
+name: "Rate Limited"
+description: "Simulates rate limiting (429) errors from LLM providers"
+
+default_delay_ms: 50
+
+# Rate limit configuration
+rate_limit:
+  # HTTP status code for rate limiting
+  status_code: 429
+
+  # Retry-After header value (seconds)
+  # When MULTI_LLM_TEST_FAST_BACKOFF=1, this is ignored and minimal delay is used
+  retry_after_seconds: 5
+
+  # Error response format
+  error_response:
+    error:
+      type: "rate_limit_exceeded"
+      message: "You have exceeded the rate limit. Please retry after the specified time."
+      retry_after: 5
+
+  # Number of requests that will be rate limited before succeeding
+  # This allows testing retry behavior
+  rate_limit_count: 2
+
+prompts:
+  # First two review requests get rate limited, third succeeds
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    action: "rate_limit"
+    rate_limit_until_call: 3
+    description: "Rate limit first two review requests"
+
+  # After rate limit clears, return valid response
+  - pattern: "review.*implementation plan|reviewing.*plan"
+    fixture: "e2e/responses/review_plan/valid_suggestions.json"
+    skip_calls: 2
+    description: "Successful response after rate limit clears"
+
+  # Validation is not rate limited
+  - pattern: "validate.*suggestion|verify.*suggestion"
+    fixture: "e2e/responses/validation/all_valid.json"
+    description: "Validation succeeds normally"
+
+  # Task generation gets rate limited once
+  - pattern: "decompose.*task|generate.*task"
+    action: "rate_limit"
+    rate_limit_until_call: 2
+    description: "Rate limit first task generation request"
+
+  - pattern: "decompose.*task|generate.*task"
+    fixture: "e2e/responses/generate_tasks/tasks.json"
+    skip_calls: 1
+    description: "Task generation succeeds after retry"
+
+  # Code review is not rate limited
+  - pattern: "review.*code|code.*review"
+    fixture: "e2e/responses/code_review/issues.json"
+    description: "Code review succeeds normally"
+
+# Backoff configuration for tests
+# When MULTI_LLM_TEST_FAST_BACKOFF=1 is set:
+# - Retry delays are reduced to 10ms
+# - Retry-After header is ignored
+# This allows fast test execution while still exercising retry logic
+backoff:
+  # Real orchestrator uses: 5s, 10s, 20s
+  real_delays_seconds: [5, 10, 20]
+
+  # Test mode uses: 10ms, 10ms, 10ms
+  test_delays_ms: [10, 10, 10]
+
+  # Maximum number of retries
+  max_retries: 3
+
+# Provider-specific rate limit behavior
+provider_overrides:
+  cursor-agent:
+    wire_format: "cursor-agent"
+    # cursor-agent is rate limited
+    rate_limit_probability: 1.0
+
+  gemini:
+    wire_format: "gemini"
+    # gemini is not rate limited (tests partial provider failure)
+    rate_limit_probability: 0.0
+
+  opencode:
+    wire_format: "opencode"
+    rate_limit_probability: 0.0
+
+  codex:
+    wire_format: "codex"
+    # codex is rate limited (tests multiple provider rate limiting)
+    rate_limit_probability: 1.0
+
+  kilocode:
+    wire_format: "kilocode"
+    rate_limit_probability: 0.0
+
+# Expected orchestrator behavior
+expected_behavior:
+  # Orchestrator should log rate limit detection
+  log_pattern: "Rate limit.*429|received rate limit|backing off"
+
+  # Orchestrator should respect Retry-After when not in fast backoff mode
+  respects_retry_after: true
+
+  # Orchestrator should eventually succeed after retries
+  eventual_success: true
+
+logging:
+  enabled: true
+  include_prompt: true
+  include_response: true
+  include_timing: true
+  # Log rate limit events for debugging
+  log_rate_limits: true
+  # Log retry attempts
+  log_retries: true

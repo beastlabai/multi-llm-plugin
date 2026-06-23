@@ -1,0 +1,225 @@
+{
+  "format_version": 2,
+  "plan_file": "/tmp/tmpehahkhnr/golden-plan.md",
+  "prefix": "golden-plan",
+  "output_dir": "/tmp/tmpehahkhnr/golden-plan",
+  "apply_suggestions_dir": "/tmp/tmpehahkhnr/golden-plan/apply-suggestions",
+  "timestamp": "2026-03-14T16:52:38.872960",
+  "batches": [
+    {
+      "suggestions": [
+        {
+          "index": 0,
+          "title": "Add email format validation",
+          "description": "Add regex validation to ensure email addresses are in valid format.",
+          "type": "addition",
+          "reference": "### Step 2: User Model",
+          "importance": "HIGH",
+          "theme": "Add input validation for email",
+          "category": "security",
+          "validation_status": "valid",
+          "validation_reason": "Email validation is clear.",
+          "validation_confidence": 0.95,
+          "models": [
+            "claude-sonnet",
+            "gpt-4"
+          ],
+          "suggestion_count": 1
+        },
+        {
+          "index": 1,
+          "title": "Enforce password complexity",
+          "description": "Require passwords to have at least 8 characters with mixed case and special chars.",
+          "type": "addition",
+          "reference": "### Step 2: User Model",
+          "importance": "MEDIUM",
+          "theme": "Add password complexity requirements",
+          "category": "security",
+          "validation_status": "valid",
+          "validation_reason": "Password complexity is well-defined.",
+          "validation_confidence": 0.9,
+          "models": [
+            "gpt-4"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "section_key": "step_2",
+      "batch_type": "addition",
+      "suggestion_count": 2,
+      "total_chars": 149,
+      "priority_score": 5.0,
+      "prompt": "Apply the following 2 related suggestions to the plan file (Section: step_2):\n\n**Plan file**: /tmp/tmpehahkhnr/golden-plan.md\n**Batch type**: addition\n**Suggestions in this batch**: 2\n\n---\n### Suggestion 1: Add email format validation\n- **Type**: addition\n- **Section**: ### Step 2: User Model\n- **Importance**: HIGH\n\n**Details**:\nAdd regex validation to ensure email addresses are in valid format.\n\n---\n### Suggestion 2: Enforce password complexity\n- **Type**: addition\n- **Section**: ### Step 2: User Model\n- **Importance**: MEDIUM\n\n**Details**:\nRequire passwords to have at least 8 characters with mixed case and special chars.\n\n---\n\n## Instructions\n\n1. Read the current plan file first\n2. Apply ALL suggestions in this batch, processing them in order\n3. For each suggestion:\n   - Locate the referenced section\n   - Apply the change according to its type (addition/modification/deletion/clarification)\n   - Ensure changes integrate smoothly with surrounding content\n4. Do NOT make any changes beyond these specific suggestions\n5. If suggestions affect the same area, apply them intelligently to avoid conflicts\n6. Before applying each suggestion, check if the plan already reflects a similar change (from a previously applied batch). If a suggestion is already addressed, note it as \"already applied\" in the summary and move on\n\n## Return Format\n\nReturn a brief summary for EACH suggestion applied:\n```\nSuggestion 1: [What was changed]\nSuggestion 2: [What was changed]\nSuggestion N: Already addressed by prior changes - skipped\n...\n```"
+    },
+    {
+      "suggestions": [
+        {
+          "index": 2,
+          "title": "Log session activities",
+          "description": "Add logging for login, logout, and token refresh events.",
+          "type": "addition",
+          "reference": "### Step 5: Session Management",
+          "importance": "LOW",
+          "theme": "Add session activity logging",
+          "category": "monitoring",
+          "validation_status": "valid",
+          "validation_reason": "Session logging is straightforward.",
+          "validation_confidence": 0.88,
+          "models": [
+            "claude-sonnet"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "section_key": "step_5",
+      "batch_type": "addition",
+      "suggestion_count": 1,
+      "total_chars": 56,
+      "priority_score": 1.0,
+      "prompt": "Apply the following suggestion to the plan file:\n\n**Plan file**: /tmp/tmpehahkhnr/golden-plan.md\n**Suggestion**: Log session activities\n**Type**: addition\n**Section**: ### Step 5: Session Management\n**Importance**: LOW\n\n**Details**:\nAdd logging for login, logout, and token refresh events.\n\nInstructions:\n1. Read the current plan file\n2. Locate the section mentioned in the reference\n3. Apply the suggested change appropriately:\n   - For \"addition\": Add new content in the appropriate location\n   - For \"modification\": Update existing content as described\n   - For \"deletion\": Remove the specified content\n   - For \"clarification\": Rewrite for clarity while preserving meaning\n4. Ensure the change integrates smoothly with surrounding content\n5. Check if the plan already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating\n6. Do NOT make any other changes beyond this specific suggestion\n\nReturn a brief summary of what was changed."
+    }
+  ],
+  "to_apply": [
+    {
+      "index": 0,
+      "title": "Add email format validation",
+      "description": "Add regex validation to ensure email addresses are in valid format.",
+      "type": "addition",
+      "reference": "### Step 2: User Model",
+      "importance": "HIGH",
+      "theme": "Add input validation for email",
+      "category": "security",
+      "validation_status": "valid",
+      "validation_reason": "Email validation is clear.",
+      "validation_confidence": 0.95,
+      "models": [
+        "claude-sonnet",
+        "gpt-4"
+      ],
+      "suggestion_count": 1
+    },
+    {
+      "index": 1,
+      "title": "Enforce password complexity",
+      "description": "Require passwords to have at least 8 characters with mixed case and special chars.",
+      "type": "addition",
+      "reference": "### Step 2: User Model",
+      "importance": "MEDIUM",
+      "theme": "Add password complexity requirements",
+      "category": "security",
+      "validation_status": "valid",
+      "validation_reason": "Password complexity is well-defined.",
+      "validation_confidence": 0.9,
+      "models": [
+        "gpt-4"
+      ],
+      "suggestion_count": 1
+    },
+    {
+      "index": 2,
+      "title": "Log session activities",
+      "description": "Add logging for login, logout, and token refresh events.",
+      "type": "addition",
+      "reference": "### Step 5: Session Management",
+      "importance": "LOW",
+      "theme": "Add session activity logging",
+      "category": "monitoring",
+      "validation_status": "valid",
+      "validation_reason": "Session logging is straightforward.",
+      "validation_confidence": 0.88,
+      "models": [
+        "claude-sonnet"
+      ],
+      "suggestion_count": 1
+    }
+  ],
+  "needs_human_review": [
+    {
+      "index": 0,
+      "title": "Specify token storage location",
+      "description": "The plan doesn't specify whether to use cookies or localStorage.",
+      "type": "clarification",
+      "reference": "### Step 4: API Endpoints",
+      "importance": "MEDIUM",
+      "theme": "Clarify token storage approach",
+      "category": "architecture",
+      "validation_status": "validation_failed",
+      "validation_reason": "Failed to parse LLM response.",
+      "validation_confidence": 0.0,
+      "models": [
+        "gpt-4"
+      ],
+      "suggestion_count": 1
+    }
+  ],
+  "skipped_items": [],
+  "user_skipped_items": [
+    {
+      "title": "Implement account lockout",
+      "theme": "Add account lockout after failed attempts",
+      "importance": "HIGH"
+    }
+  ],
+  "skipped_count": 0,
+  "batching_stats": {
+    "total_suggestions": 3,
+    "total_batches": 2,
+    "subagent_calls_saved": 1,
+    "efficiency_gain_percent": 33.3,
+    "average_batch_size": 1.5,
+    "max_batch_size": 2,
+    "single_suggestion_batches": 1,
+    "multi_suggestion_batches": 1,
+    "batch_type_distribution": {
+      "addition": 2
+    },
+    "batching_enabled": true
+  },
+  "human_review_config": {
+    "mode": "by-importance",
+    "batch_enabled": true,
+    "prompt_strategy": "single_batch",
+    "by_importance": {
+      "HIGH": [],
+      "MEDIUM": [
+        {
+          "index": 0,
+          "title": "Specify token storage location",
+          "description": "The plan doesn't specify whether to use cookies or localStorage.",
+          "type": "clarification",
+          "reference": "### Step 4: API Endpoints",
+          "importance": "MEDIUM",
+          "theme": "Clarify token storage approach",
+          "category": "architecture",
+          "validation_status": "validation_failed",
+          "validation_reason": "Failed to parse LLM response.",
+          "validation_confidence": 0.0,
+          "models": [
+            "gpt-4"
+          ],
+          "suggestion_count": 1
+        }
+      ],
+      "LOW": []
+    },
+    "total_count": 1,
+    "batch_prompt_template": "batch_approval_v1"
+  },
+  "resume_info": {
+    "previously_processed": [],
+    "previous_decisions": {},
+    "can_resume": false
+  },
+  "edited_descriptions": [],
+  "summary": {
+    "total_groups": 5,
+    "valid_count": 3,
+    "needs_human_count": 1,
+    "skipped_count": 0,
+    "user_skipped_count": 1,
+    "batch_count": 2,
+    "validation_failed_count": 1,
+    "auto_approved_count": 0,
+    "edited_description_count": 0
+  }
+}

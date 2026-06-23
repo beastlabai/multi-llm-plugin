@@ -1,0 +1,12 @@
+{
+  "report_file": "report.md",
+  "orchestrator_type": "apply_task_suggestions",
+  "skipped_suggestions_old_format": [],
+  "skipped_groups": [],
+  "skipped_group_suggestions": [
+    "96ab0d661144ce7d"
+  ],
+  "validation_overrides_groups": {},
+  "suggestion_validation_overrides": {},
+  "edited_descriptions": {}
+}

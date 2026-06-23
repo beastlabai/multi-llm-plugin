@@ -1,0 +1,33 @@
+[
+  {
+    "group_index": 0,
+    "status": "valid",
+    "reason": "SQL injection is a critical security vulnerability that must be fixed.",
+    "confidence": 0.95
+  },
+  {
+    "group_index": 1,
+    "status": "valid",
+    "reason": "Password hashing is essential for security.",
+    "confidence": 0.98
+  },
+  {
+    "group_index": 2,
+    "status": "needs-human-decision",
+    "reason": "Rate limiting implementation depends on infrastructure choices.",
+    "confidence": 0.6
+  },
+  {
+    "group_index": 3,
+    "status": "validation_failed",
+    "reason": "Could not parse validation response",
+    "error_type": "parsing_error",
+    "recoverable": true
+  },
+  {
+    "group_index": 4,
+    "status": "invalid",
+    "reason": "Session cleanup is a low priority optimization, not critical.",
+    "confidence": 0.7
+  }
+]

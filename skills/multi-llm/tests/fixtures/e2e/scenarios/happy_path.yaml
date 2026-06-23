@@ -1,0 +1,74 @@
+# Happy Path Scenario
+# Tests the complete workflow with all successful responses
+#
+# This scenario provides valid responses for all workflow phases:
+# - review-plan: Returns suggestions from multiple providers
+# - validation: All suggestions are validated as "valid"
+# - generate-tasks: Returns well-formed task decomposition
+# - code-review: Returns reviewable issues
+# - apply-fixes: Issues can be applied successfully
+
+name: "Happy Path"
+description: "Complete workflow with all successful responses"
+
+# Default response delay in milliseconds (simulates LLM thinking time)
+default_delay_ms: 50
+
+# Response mappings based on prompt patterns
+# Patterns are matched using Python regex (re.search)
+# First matching pattern wins
+prompts:
+  # Review Plan phase - raw suggestions from LLM (flat format, not grouped)
+  - pattern: "review.*implementation plan|reviewing.*plan|plan review"
+    fixture: "../responses/review_plan/raw_suggestions.json"
+    description: "Review plan suggestions (raw/flat format)"
+
+  # Validation phase - all suggestions are valid
+  - pattern: "validate.*suggestion|verify.*suggestion|check.*valid"
+    fixture: "../responses/validation/all_valid.json"
+    description: "Validation results for suggestions"
+
+  # Generate Tasks phase - task decomposition
+  - pattern: "decompose.*task|generate.*task|break.*down.*task|task.*breakdown"
+    fixture: "../responses/generate_tasks/tasks.json"
+    description: "Task decomposition output"
+
+  # Code Review phase - issues found in code
+  - pattern: "review.*code|code.*review|analyze.*implementation|check.*code"
+    fixture: "../responses/code_review/issues.json"
+    description: "Code review issues"
+
+  # Apply fixes validation - all fixes are valid
+  - pattern: "validate.*fix|verify.*fix|check.*fix.*valid"
+    fixture: "../responses/validation/all_valid.json"
+    description: "Validation results for code fixes"
+
+# Provider-specific overrides (optional)
+# Use when different providers should return different responses
+provider_overrides:
+  cursor-agent:
+    # cursor-agent returns its response in {"type": "result", "result": "..."} format
+    wire_format: "cursor-agent"
+
+  gemini:
+    # gemini returns its response in {"response": "..."} format
+    wire_format: "gemini"
+
+  opencode:
+    # opencode returns NDJSON event stream
+    wire_format: "opencode"
+
+  codex:
+    # codex returns NDJSON event stream (same as opencode)
+    wire_format: "codex"
+
+  kilocode:
+    # kilocode returns its response in {"output": "..."} format
+    wire_format: "kilocode"
+
+# Call logging configuration
+logging:
+  enabled: true
+  include_prompt: true
+  include_response: true
+  include_timing: true

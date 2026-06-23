@@ -1,0 +1,6 @@
+{
+  "error": true,
+  "message": "Simulated validation failure - LLM returned malformed response",
+  "raw_output": "This is not valid JSON: {\"truncated",
+  "groups": []
+}

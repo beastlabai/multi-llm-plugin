@@ -1,0 +1,62 @@
+[
+  {
+    "title": "SQL injection vulnerability in user lookup",
+    "desc": "The user lookup query uses string formatting instead of parameterized queries, which could allow SQL injection attacks.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [45, 48],
+    "type": "bug",
+    "anchor_text": "cursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")",
+    "source_model": "cursor-agent:auto"
+  },
+  {
+    "title": "Potential SQL injection in user query",
+    "desc": "User query string interpolation should use parameterized queries to prevent injection.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [44, 50],
+    "type": "bug",
+    "anchor_text": "f\"SELECT * FROM users",
+    "source_model": "gemini:gemini-2.5-flash"
+  },
+  {
+    "title": "Missing password hashing",
+    "desc": "The password is stored directly without hashing in the register function.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [62, 65],
+    "type": "bug",
+    "anchor_text": "password=password",
+    "source_model": "cursor-agent:auto"
+  },
+  {
+    "title": "Rate limiter missing on registration",
+    "desc": "The registration endpoint should have rate limiting to prevent abuse.",
+    "importance": "medium",
+    "file": "src/api/auth_routes.py",
+    "line_range": [22, 35],
+    "type": "missing",
+    "anchor_text": "@router.post(\"/register\")",
+    "source_model": "gemini:gemini-2.5-flash"
+  },
+  {
+    "title": "Hardcoded JWT secret key",
+    "desc": "JWT secret is hardcoded; should use environment variables.",
+    "importance": "high",
+    "file": "src/services/auth_service.py",
+    "line_range": [15, 15],
+    "type": "bug",
+    "anchor_text": "JWT_SECRET = \"super-secret-key-123\"",
+    "source_model": "cursor-agent:auto"
+  },
+  {
+    "title": "Inefficient N+1 query pattern",
+    "desc": "The session loading performs N+1 queries; should use JOIN or batch loading.",
+    "importance": "low",
+    "file": "src/services/session_service.py",
+    "line_range": [55, 68],
+    "type": "improvement",
+    "anchor_text": "for session in sessions:",
+    "source_model": "gemini:gemini-2.5-flash"
+  }
+]

@@ -1,0 +1,136 @@
+# providers.yaml - Multi-LLM provider configuration
+#
+# Note: Command construction (flags, arguments, subcommands) is handled by
+# provider classes in utils/providers/. This config only contains:
+# - command: CLI binary name (used for availability check via `which`)
+# - default_timeout: Provider-specific timeout in seconds
+# - supports_json_output: Whether provider supports JSON output natively
+# - models: List of supported model names for this provider
+
+providers:
+  claude-code:
+    command: claude
+    default_timeout: 1800
+    supports_json_output: true
+    max_concurrent: 2
+    models:
+      - sonnet
+      - opus
+      - fable
+      - haiku
+
+  cursor-agent:
+    command: cursor-agent
+    default_timeout: 1200
+    max_concurrent: 2
+    supports_json_output: true
+    models:
+      - auto
+      - gpt-5.2-high
+      - gpt-5.3-codex
+      - gpt-5.3-codex-high
+      - gpt-5.4-high
+      - gpt-5.5-extra-high
+      - gemini-3-pro
+      - gemini-3.1-pro
+      - grok
+      - gemini-3-flash
+      - gpt-5.2
+      - kimi-k2.5
+      - grok-4-20-thinking
+      - grok-4.3
+      - composer-2
+      - composer-2.5
+
+  gemini:
+    command: gemini
+    default_timeout: 1200  # Gemini can be slower
+    supports_json_output: true
+    models:
+      - gemini-3-flash
+      - gemini-3-pro
+      - gemini-3.1-pro
+      - gemini-2.5-flash
+      - gemini-2.5-pro
+
+  opencode:
+    command: opencode
+    default_timeout: 1200
+    supports_json_output: true  # Uses --format json (NDJSON event stream)
+    # Run "opencode models" to see the full list of available models
+    models:
+      - opencode/big-pickle
+      - opencode/sonnet
+
+  codex:
+    command: codex
+    default_timeout: 1800
+    supports_json_output: true  # Uses --json (NDJSON event stream)
+    models:
+      - gpt-5.2-codex
+      - gpt-5.5
+
+  kilocode:
+    command: kilocode
+    default_timeout: 1200
+    supports_json_output: false  # Plain text output; --json streams too much data
+    # Run "kilocode models" to see the full list of available models
+    # Model names use 3-part format: backend/provider/model
+    max_concurrent: 2
+    models:
+      - openrouter/moonshotai/kimi-k2.5
+      - openrouter/moonshotai/kimi-k2.6
+      - openrouter/moonshotai/kimi-k2.7-code
+      - openrouter/nvidia/nemotron-3-ultra-550b-a55b
+      - openrouter/z-ai/glm-5.2
+      - openrouter/minimax/minimax-m2.7
+      - openrouter/minimax/minimax-m3
+      - openrouter/x-ai/grok-4.20-multi-agent
+      - openrouter/arcee-ai/trinity-large-thinking
+      - openrouter/xiaomi/mimo-v2.5-pro
+      - openrouter/qwen/qwen3.7-max
+
+# Default provider when model name doesn't include provider prefix
+default_provider: cursor-agent
+
+# Default models to use when no models are specified on CLI
+# If set, skips interactive selection and uses these models automatically
+# Use --interactive flag to override and force interactive selection
+defaults:
+  models:
+    - cursor-agent:composer-2.5
+    #- cursor-agent:gpt-5.5-extra-high
+    - cursor-agent:gemini-3.1-pro
+    - cursor-agent:grok-4.3
+    #- cursor-agent:kimi-k2.6
+    #- opencode:opencode/big-pickle
+    - kilocode:openrouter/moonshotai/kimi-k2.7-code
+    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b
+    - kilocode:openrouter/z-ai/glm-5.2
+    - kilocode:openrouter/minimax/minimax-m3
+    - kilocode:openrouter/xiaomi/mimo-v2.5-pro
+    - kilocode:openrouter/qwen/qwen3.7-max
+    - claude-code:opus
+    #- claude-code:fable
+    - codex:gpt-5.5
+
+  # Lightweight model subset for the --quick / -q flag
+  # Used instead of defaults.models for faster reviews with fewer models
+  # Omit --quick to use the full defaults.models list, or pass --interactive to pick manually
+  quick_models:
+    - cursor-agent:composer-2.5
+    - cursor-agent:gpt-5.5-extra-high
+    - claude-code:opus
+    #- claude-code:fable
+
+  # Optional: only use defaults for specific modes
+  # modes:
+  #   review-plan:
+  #     models:
+  #       - cursor-agent:auto
+  #       - gemini:gemini-2.5-flash
+  #     quick:
+  #       - cursor-agent:auto
+  #   code-review:
+  #     models:
+  #       - cursor-agent:gpt-5.2-high

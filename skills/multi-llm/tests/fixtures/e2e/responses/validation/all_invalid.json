@@ -1,0 +1,32 @@
+[
+  {
+    "group_id": "grp-email-validation",
+    "status": "invalid",
+    "reasoning": "The plan already mentions 'Validate email format using regex' in Step 2. This suggestion is redundant."
+  },
+  {
+    "group_id": "grp-password-complexity",
+    "status": "invalid",
+    "reasoning": "The plan already includes 'Validate password complexity' in Step 6: Security Measures. This is a duplicate suggestion."
+  },
+  {
+    "group_id": "grp-token-expiration",
+    "status": "invalid",
+    "reasoning": "Token expiration is typically a configuration concern, not a plan concern. This should be handled during implementation, not documented in the plan."
+  },
+  {
+    "group_id": "grp-migration-strategy",
+    "status": "invalid",
+    "reasoning": "This is an initial implementation plan, not a production deployment plan. Migration strategy concerns are out of scope."
+  },
+  {
+    "group_id": "grp-rate-limiting",
+    "status": "invalid",
+    "reasoning": "The plan already specifies 'Rate limit login attempts (5 attempts per 15 minutes)'. Implementation details like Redis are not appropriate for a high-level plan."
+  },
+  {
+    "group_id": "grp-error-response",
+    "status": "invalid",
+    "reasoning": "Standard REST API conventions already define error response formats. This level of detail is unnecessary for the planning phase."
+  }
+]

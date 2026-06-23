@@ -1,0 +1,21 @@
+Plan: /tmp/tmpehahkhnr/golden-plan.md
+Output directory: /tmp/tmpehahkhnr/golden-plan
+Prefix: golden-plan
+Loaded 5 suggestion groups
+Loaded 5 validation results
+User skipped 1 individual suggestions: ['0f2ba04e987bcea4']
+User preference summary: 1 items will be skipped
+  Skipping individual suggestions: 0f2ba04e987bcea4
+Filtered 1 user-skipped items
+
+Filtered suggestions:
+  Valid (to apply): 3
+  Needs human review: 1
+  Skipped: 0
+
+Batching results:
+  Total suggestions: 3
+  Total batches: 2
+  Subagent calls saved: 1
+  Efficiency gain: 33.3%
+[OUTPUT_FILE] /tmp/tmpehahkhnr/golden-plan/apply-suggestions/orchestrator_output.json
