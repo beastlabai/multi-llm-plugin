@@ -5,7 +5,7 @@ Runs all modes in sequence for complete automation.
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --full <plan_path> [model1 model2 ...] [--quick]
+/multi-llm:multi-llm --full <plan_path> [model1 model2 ...] [--quick] [--yes]
 ```
 
 ## Process
@@ -17,10 +17,25 @@ Runs all modes in sequence for complete automation.
 3c. **Phase 3c: Apply Task Suggestions** (auto-apply validated task review findings to tasks)
 4. **Phase 4: Implement** (automatic execution)
 5. **Phase 5: Review Code** (automatic review)
+6. **Phase 6: Apply Code Fixes** (auto-apply validated code-review findings to the code)
 
 ## How Full Mode Works
 
 Full mode orchestrates the entire workflow by loading and executing each phase's instructions in sequence. This provides end-to-end automation from plan review through implementation and code review.
+
+## Non-Interactive Mode (`--yes` / `--non-interactive`)
+
+By default, full mode still stops to ask you a few questions (model selection, `needs-human-decision` items, whether to review tasks). Passing **`--yes`** (alias **`--non-interactive`**) makes the entire workflow run **fully unattended — zero AskUserQuestion prompts** — by applying these effects to every phase:
+
+| Phase | Default (interactive) | With `--yes` |
+|-------|----------------------|--------------|
+| Model selection (Phase 1 & 5) | Prompts if no models given | Never prompts — uses `--models` if given, else `--quick` if given, else `providers.yaml` defaults |
+| Phase 2 Apply Suggestions | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` (Claude decides every item; no confirmation) |
+| Phase 3b Review Tasks | Prompts "review the tasks?" | Runs review-tasks **automatically** (no prompt) |
+| Phase 3c Apply Task Suggestions | `--no-confirm` already | Adds `--claude-decide` (Claude decides every item) |
+| Phase 6 Apply Code Fixes | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` |
+
+`--yes` is the umbrella switch; the narrower flags (`--quick`, `--claude-decide`, `--no-confirm`) keep their individual meanings and can still be passed on their own. Throughout the steps below, **"if `--yes` was specified"** means apply the row above for that phase. If `--yes` is NOT set, follow the interactive behavior as written.
 
 ---
 
@@ -29,7 +44,8 @@ Full mode orchestrates the entire workflow by loading and executing each phase's
 ### 1. Handle Model Selection (same as review-plan mode)
 
 - If models provided in args: use those directly
-- If NO models provided: Claude MUST use AskUserQuestion to prompt user for model selection
+- If `--yes` (or `--non-interactive`) was specified: **never prompt.** Resolve models without asking — use `--models` if given, else pass `--quick` if given, else pass no model flag at all (the orchestrator falls back to `providers.yaml` defaults). Skip the AskUserQuestion below entirely.
+- If NO models provided (and NOT `--yes`): Claude MUST use AskUserQuestion to prompt user for model selection
   - Present available models from `providers.yaml` (multi-select)
 
 ### 2. Execute Phase 1: Review Plan
@@ -85,11 +101,16 @@ Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-suggestions.md` a
 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")"
 ```
 
+If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended (Claude judges every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
+```bash
+uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --claude-decide --no-confirm
+```
+
 This phase applies validated suggestions sequentially:
 - Load validation results from Phase 1
 - Filter to valid suggestions (HIGH/MEDIUM importance)
 - Apply each suggestion one at a time using Task subagents
-- Handle needs-human-decision items via AskUserQuestion
+- Handle needs-human-decision items via AskUserQuestion (or, under `--yes`, via Claude's autonomous "Let Claude Decide" judgment — no prompts)
 - Generate applied suggestions report
 
 Wait for completion, then proceed to Phase 3.
@@ -173,7 +194,9 @@ Wait for completion, then proceed to Phase 3b.
 
 After task generation completes successfully, determine whether to run the review-tasks phase.
 
-**Non-interactive / automation mode**: When running in a non-interactive context (no TTY or when a future `--non-interactive` flag is set), skip `review-tasks` by default without prompting. To opt in during automated runs, the user must pass `--review-tasks` explicitly on the CLI. If skipping without prompt, run:
+**`--yes` / `--non-interactive` mode**: Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
+
+**No-TTY automation without `--yes`**: When running in a non-interactive context (no TTY) and `--yes` was NOT passed, skip `review-tasks` by default without prompting. To opt in during such runs, the user must pass `--review-tasks` (or `--yes`) explicitly on the CLI. If skipping without prompt, run:
 
 ```bash
 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode review-tasks --skip --reason "Non-interactive mode: skipped by default"
@@ -181,7 +204,7 @@ uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflo
 
 Then proceed directly to Phase 3c.
 
-**Interactive mode**: Use AskUserQuestion to prompt:
+**Interactive mode (no `--yes`)**: Use AskUserQuestion to prompt:
 
 > "Would you like to review the generated tasks with multiple LLMs before implementation?"
 
@@ -225,6 +248,11 @@ Then proceed directly to Phase 4.
 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-confirm
 ```
 
+If `--yes` (or `--non-interactive`) was specified, also append `--claude-decide` so any `needs-human-decision` task suggestions are judged by Claude rather than prompted:
+```bash
+uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-confirm --claude-decide
+```
+
 This phase:
 - Loads validated task suggestions from the review-tasks phase
 - Filters to valid suggestions (HIGH/MEDIUM importance)
@@ -256,6 +284,42 @@ If `--quick` was specified, pass `--quick` to the code review orchestrator:
 ```bash
 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --quick
 ```
+
+Use the **same models resolved in Phase 1** (Critical Rule 4). Under `--yes`, resolve models the same non-interactive way as Phase 1 (never prompt). This phase only *reviews* the code and produces `{plan}/code-review/` outputs — the fixes are applied in Phase 6.
+
+Wait for completion, then proceed to Phase 6.
+
+### 6b. Execute Phase 6: Apply Code Fixes
+
+Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-code-fixes.md` and execute. This phase mirrors Phase 2 (Apply Suggestions), but applies the validated findings from the code review (Phase 5) to the **code** rather than the plan.
+
+**Conditional — skip if there is nothing to apply.** Check `{plan}/code-review/grouped.json`. If it does not exist, or contains zero groups / zero valid (HIGH/MEDIUM) findings, skip this phase:
+
+```bash
+uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode apply-code-fixes --skip --reason "Skipped: code review produced zero actionable findings"
+```
+
+Then proceed to the report.
+
+**Otherwise, run the apply-code-fixes orchestrator:**
+
+```bash
+uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")"
+```
+
+If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended:
+```bash
+uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --claude-decide --no-confirm
+```
+
+This phase:
+- Loads validated code-review findings from Phase 5
+- Filters to valid findings (HIGH/MEDIUM importance)
+- Applies each fix to the code one at a time using Task subagents
+- Handles `needs-human-decision` items via AskUserQuestion (or, under `--yes`, via Claude's autonomous "Let Claude Decide" judgment — no prompts)
+- Generates an applied code fixes report and overlays decisions onto `{plan}/code-review/report.html`
+
+Follow the full apply-code-fixes instruction file to process batches, generate the summary report, and mark the phase completed. Wait for completion, then proceed to the report.
 
 ### 7. Report Combined Results
 
@@ -300,8 +364,14 @@ After all phases complete, provide a comprehensive summary:
 
 ### Phase 5: Review Code
 - Issues found: N
-- Issues fixed: N (if --apply-fixes)
-- Review report: {plan}_code_review.md
+- Importance breakdown: HIGH: N, MEDIUM: N, LOW: N
+- Review report: {plan}/code-review/report.html
+
+### Phase 6: Apply Code Fixes *(only if executed, omit if skipped)*
+- Fixes applied: N
+- Decided by Claude: N (A approved, V salvaged, S skipped) *(under `--yes`)*
+- Fixes skipped: N
+- Applied code fixes report: {prefix}_applied_code_fixes.md
 
 ### All Output Files
 - [List all generated files with full paths]
@@ -323,10 +393,11 @@ After all phases complete, provide a comprehensive summary:
 ## Critical Rules for Full Mode
 
 1. **Sequential Execution**: Each phase MUST complete before the next begins
-2. **Error Handling**: If a phase fails, report the error and ask user whether to continue
+2. **Error Handling**: If a phase fails, report the error and ask user whether to continue. Under `--yes`, "ask whether to continue" still applies for hard failures — `--yes` suppresses *workflow decision* prompts (model choice, human-decision items, review-tasks opt-in), not crash recovery.
 3. **State Preservation**: Each phase's state is preserved for the next phase
 4. **Same Models**: Use the same model selection for both review-plan and review-code phases
-5. **Apply Suggestions Sequential**: In Phase 2, process suggestions ONE AT A TIME to avoid conflicts
+5. **Apply Sequential**: In Phases 2, 3c, and 6, process items ONE AT A TIME to avoid conflicts
+6. **`--yes` is all-or-nothing for prompts**: When `--yes` / `--non-interactive` is set, NO AskUserQuestion may be issued for normal workflow decisions in any phase — resolve models non-interactively, pass `--claude-decide --no-confirm` to every apply phase, and run review-tasks automatically. See the Non-Interactive Mode table above.
 
 ## Planned Features (Not Yet Implemented)
 

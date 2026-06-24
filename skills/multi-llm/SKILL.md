@@ -11,7 +11,7 @@ allowed-tools:
   - AskUserQuestion
   - Glob
   - Grep
-argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--force]
+argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force]
 ---
 
 # Multi-LLM Skill
@@ -100,6 +100,12 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 # Run full workflow
 /multi-llm:multi-llm --full plans/my-feature.md
 
+# Run full workflow fully unattended (zero prompts): non-interactive model
+# selection, Claude decides all human-decision items, auto-runs review-tasks,
+# and auto-applies code-review fixes
+/multi-llm:multi-llm --full plans/my-feature.md --yes
+/multi-llm:multi-llm --full plans/my-feature.md --yes --quick   # also pin to the 2 quick models
+
 # Check workflow status
 /multi-llm:multi-llm --status plans/my-feature.md
 
@@ -126,8 +132,8 @@ Example in this skill: [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md).
 ## Pre-execution Validation
 
 Flags are **position-independent**: `--models` (variadic), `--quick`,
-`--interactive`, `--force`, and the mode flags (`--ask`, `--review-plan`, …) may
-appear anywhere. These blocks scan argv for `--ask` to detect ask mode, then
+`--interactive`, `--yes` / `--non-interactive`, `--force`, and the mode flags
+(`--ask`, `--review-plan`, …) may appear anywhere. These blocks scan argv for `--ask` to detect ask mode, then
 collect the positional tokens (skipping every `--flag` and the values consumed
 by variadic `--models`): the first positional is the **plan path** and, for
 `--ask`, the second is the **question**.
