@@ -13,6 +13,7 @@ markers = [
     "robustness: marks tests for LLM error handling robustness scenarios",
     "live: marks tests that require Claude Code CLI and API (skipped in CI)",
     "timeout: marks tests with a timeout limit (requires pytest-timeout)",
+    "config_override: opts out of the autouse per-project config isolation fixture (tests that exercise override discovery/env themselves)",
 ]
 # Filter out warnings about dataclass fixtures being collected by pytest
 filterwarnings = [

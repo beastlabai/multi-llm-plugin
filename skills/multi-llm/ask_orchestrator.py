@@ -680,6 +680,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             interactive=args.interactive,
             quick=args.quick,
             mode="ask",
+            anchor=plan_path,  # per-project config discovery follows the plan-derived root
         )
     except RuntimeError as e:
         print(f"ERROR: {e}")
@@ -692,7 +693,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     # Model validation = warn-and-proceed (match existing orchestrators).
-    invalid_models = [m for m in model_specs if not is_model_valid(m)]
+    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
         available = get_all_model_specs()

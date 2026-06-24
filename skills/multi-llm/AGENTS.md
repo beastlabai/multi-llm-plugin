@@ -3,7 +3,8 @@
 ## Architecture
 
 - Orchestrators produce JSON instructions for Claude Code to execute — they never modify code directly
-- `generate-tasks` and `--status` have no Python orchestrator — handled via instruction files in `instructions/`
+- `generate-tasks`, `--status`, and `--init` have no Python orchestrator — handled via instruction files in `instructions/`
+- **Config layering** (`provider_registry.load_config`): base `providers.yaml` → auto-discovered `<git-root>/.multi-llm/providers.yaml` (selection keys only; a `providers:` block is dropped+warned) → `MULTI_LLM_PROVIDERS_CONFIG` env override. Deep-merge, lists replace, `None` skipped. Discovery anchors on the optional `anchor` (plan path threaded from `resolve_models`) then CWD; cache keyed on the resolved anchor. Present-but-invalid explicit overrides fail fast (`ConfigError`); `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` restores warn-and-skip. Config `command` is metadata-only and NEVER executed (binaries are hardcoded in `utils/providers/`). Scaffold via `init_config.py` (`--init`).
 - `ask` mode (`ask_orchestrator.py`) is a read-only free-text Q&A side-channel: markdown output, no JSON schema / grouping / validation, output under `{plan}/ask/<question-slug>-<hash8>/`. It shares concurrency mechanics with the review modes via `run_models_concurrent` in `review_orchestrator_base.py`.
 
 ## Developer Notes

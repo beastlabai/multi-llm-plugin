@@ -5,10 +5,16 @@ import os
 import pytest
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional, Set
 from unittest.mock import MagicMock, patch
+
+# Make the skill's own packages (utils.*) importable from conftest regardless of
+# where pytest is launched, so the config-isolation fixture below can reach
+# utils.provider_registry.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from .harness import (
     SkillRunner,
@@ -16,6 +22,49 @@ from .harness import (
     MockProvider,
     AssertionHelpers,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_config(request, monkeypatch):
+    """Neutralize per-project config discovery for the default test suite.
+
+    Now that ``load_config()`` reads from CWD (project-local discovery) and from
+    ``MULTI_LLM_PROVIDERS_CONFIG``, the suite's many base-value assertions would
+    otherwise become environment-dependent (breaking if a dev/CI env exports the
+    var, or if pytest runs inside a dir that has a ``.multi-llm/providers.yaml``).
+
+    Applied to every test that does NOT opt into override behavior via
+    ``@pytest.mark.config_override``, this fixture:
+      * unsets ``MULTI_LLM_PROVIDERS_CONFIG`` / ``MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE``,
+      * forces project-local discovery to return ``None`` (deterministic;
+        independent of where pytest is launched),
+      * resets ``registry._config`` / ``registry._config_key`` before and after so
+        cache state never leaks between tests.
+
+    Tests that exercise override behavior add ``@pytest.mark.config_override`` and
+    set up their own discovery/env within the test body.
+    """
+    try:
+        import utils.provider_registry as registry
+    except Exception:
+        yield
+        return
+
+    def _reset_cache():
+        registry._config = None
+        if hasattr(registry, "_config_key"):
+            registry._config_key = None
+
+    _reset_cache()
+    monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
+    monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", raising=False)
+    if "config_override" not in request.keywords:
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+    _reset_cache()
+    try:
+        yield
+    finally:
+        _reset_cache()
 
 
 @pytest.fixture

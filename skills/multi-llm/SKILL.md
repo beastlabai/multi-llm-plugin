@@ -11,7 +11,7 @@ allowed-tools:
   - AskUserQuestion
   - Glob
   - Grep
-argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force]
+argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status|--init] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force]
 ---
 
 # Multi-LLM Skill
@@ -51,6 +51,7 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 9. **Full Workflow** (`--full`): Run all modes in sequence
 10. **Status** (`--status`): Show current workflow state and suggested next action
 11. **Ask** (`--ask`): Ask each model a free-text question about a plan; aggregate answers into one markdown file
+12. **Init Config** (`--init`): Scaffold a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`)
 
 ## Quick Start
 
@@ -152,7 +153,26 @@ by variadic `--models`): the first positional is the **plan path** and, for
 
 ## Provider Configuration
 
-Providers and models are configured in `${CLAUDE_SKILL_DIR}/providers.yaml`.
+Providers and models are configured in `${CLAUDE_SKILL_DIR}/providers.yaml` (the
+**base** layer).
+
+### Per-project override (optional)
+
+A repository can override the *selection* defaults (`default_provider`,
+`defaults.models`, `defaults.quick_models`, `defaults.modes`) without editing the
+installed plugin by adding `<git-root>/.multi-llm/providers.yaml`. It is optional
+and auto-discovered; absent → base behavior, unchanged. Config is layered
+base → project-local → `MULTI_LLM_PROVIDERS_CONFIG` env override, deep-merged with
+**lists replacing wholesale**. Scaffold a commented stub with the **`--init`**
+flag (routed via `instructions/init-config.md`):
+
+```bash
+/multi-llm:multi-llm --init                 # writes <git-root>/.multi-llm/providers.yaml
+/multi-llm:multi-llm --init --gitignore     # keep it developer-local (untracked)
+```
+
+The auto-discovered file may only change selection (a `providers:` block there is
+ignored). See the README "Per-project configuration" section for full semantics.
 
 ### providers.yaml Format
 
@@ -262,6 +282,7 @@ These rules exist for specific technical reasons. Violating them causes failures
    - `--review-code`: review-code mode
    - `--ask`: ask mode
    - `--full`: full workflow mode
+   - `--init`: init-config mode (no plan path)
 
 2. **Load the mode-specific instructions** using the Read tool:
    ```
@@ -279,6 +300,7 @@ These rules exist for specific technical reasons. Violating them causes failures
    - `apply-code-fixes`
    - `ask`
    - `full-workflow`
+   - `init-config`
 
 3. **Execute the loaded instructions** step-by-step
 
@@ -298,6 +320,7 @@ If first arg starts with "--":
   - "--apply-code-fixes" -> mode = apply-code-fixes
   - "--ask" -> mode = ask
   - "--full" -> mode = full-workflow
+  - "--init" -> mode = init-config (no plan path; see instructions/init-config.md)
   - Plan path is second arg
 Else:
   - mode = review-plan (default)

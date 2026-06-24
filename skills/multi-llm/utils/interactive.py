@@ -176,19 +176,24 @@ def select_multi(
     return _numbered_prompt(options, prompt)
 
 
-def select_models_two_step() -> List[str]:
+def select_models_two_step(anchor: Optional[str] = None) -> List[str]:
     """
     Two-step interactive model selection: providers first, then models.
 
     Step 1: User selects which providers to use (only shows available providers)
     Step 2: For each selected provider, user selects which models to use
 
+    Args:
+        anchor: Optional discovery anchor (the plan-file path or target-repo
+            directory). Threaded into config discovery so per-project overrides
+            resolve from the plan-derived git root rather than CWD.
+
     Returns:
         List of model specs in provider:model format (e.g., ["gemini:gemini-2.5-flash"])
     """
     from .provider_registry import get_provider
 
-    config = load_config()
+    config = load_config(anchor=anchor)
     providers = config.get("providers", {})
 
     if not providers:
@@ -247,7 +252,8 @@ def resolve_models(
     cli_models: Optional[List[str]] = None,
     interactive: bool = False,
     quick: bool = False,
-    mode: Optional[str] = None
+    mode: Optional[str] = None,
+    anchor: Optional[str] = None
 ) -> List[str]:
     """
     Resolve which models to use based on priority order.
@@ -264,6 +270,10 @@ def resolve_models(
         interactive: Whether --interactive flag was passed
         quick: Whether --quick flag was passed
         mode: Optional mode name for mode-specific defaults
+        anchor: Optional discovery anchor (the plan-file path or target-repo
+            directory). When supplied, per-project config discovery resolves the
+            git root from it so the override file used matches the orchestrator's
+            plan-derived root; when omitted, discovery falls back to CWD.
 
     Returns:
         List of model specs in provider:model format
@@ -284,21 +294,21 @@ def resolve_models(
 
     # 2. --interactive flag forces interactive selection
     if interactive:
-        return select_models_two_step()
+        return select_models_two_step(anchor=anchor)
 
     # 3. --quick flag uses quick_models from YAML
     if quick:
-        if not has_quick_models(mode):
+        if not has_quick_models(mode, anchor=anchor):
             raise RuntimeError(
                 "No quick_models configured in providers.yaml. "
                 "Add a 'quick_models' list under 'defaults' in providers.yaml."
             )
-        quick_models = get_quick_models(mode)
+        quick_models = get_quick_models(mode, anchor=anchor)
         available_models = []
         unavailable_providers = set()
 
         for model_spec in quick_models:
-            provider_name, _ = parse_model_spec(model_spec)
+            provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
             provider = get_provider(provider_name)
 
             if provider is not None and provider.is_available():
@@ -322,13 +332,13 @@ def resolve_models(
             )
 
     # 4. Check for YAML defaults (with availability filtering)
-    if has_default_models(mode):
-        default_models = get_default_models(mode)
+    if has_default_models(mode, anchor=anchor):
+        default_models = get_default_models(mode, anchor=anchor)
         available_models = []
         unavailable_providers = set()
 
         for model_spec in default_models:
-            provider_name, _ = parse_model_spec(model_spec)
+            provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
             provider = get_provider(provider_name)
 
             if provider is not None and provider.is_available():
@@ -355,4 +365,4 @@ def resolve_models(
             )
 
     # 5. Fall back to interactive selection
-    return select_models_two_step()
+    return select_models_two_step(anchor=anchor)

@@ -1359,7 +1359,8 @@ async def main():
             cli_models=args.models,
             interactive=args.interactive,
             quick=args.quick,
-            mode='code-review'  # Mode-specific defaults from providers.yaml
+            mode='code-review',  # Mode-specific defaults from providers.yaml
+            anchor=str(plan_path),  # per-project config discovery follows the plan-derived root
         )
     except RuntimeError as e:
         # TTY error from interactive selection
@@ -1383,7 +1384,7 @@ async def main():
         print(f"Using default models from providers.yaml: {', '.join(model_specs)}")
 
     # Validate model specs against the registry
-    invalid_models = [m for m in model_specs if not is_model_valid(m)]
+    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=str(plan_path))]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
         available = get_all_model_specs()

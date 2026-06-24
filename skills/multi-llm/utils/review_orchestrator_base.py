@@ -1579,6 +1579,7 @@ async def run_review_orchestration(
             interactive=args.interactive,
             quick=args.quick,
             mode=phase_name,
+            anchor=plan_path,  # per-project config discovery follows the plan-derived root
         )
     except RuntimeError as e:
         print(f"ERROR: {e}")
@@ -1601,7 +1602,7 @@ async def run_review_orchestration(
         print(f"Using default models from providers.yaml: {', '.join(model_specs)}")
 
     # Validate model specs
-    invalid_models = [m for m in model_specs if not is_model_valid(m)]
+    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
         available = get_all_model_specs()

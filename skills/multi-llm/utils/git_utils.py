@@ -43,6 +43,32 @@ def get_project_root(from_path: str) -> Optional[str]:
     return None
 
 
+def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
+    """Detect the git project root by running git from a *directory* directly.
+
+    Unlike :func:`get_project_root`, which takes a *file* path and uses its
+    ``dirname`` to choose where to run git, this takes a directory and runs
+    ``git rev-parse --show-toplevel`` there with no path manipulation. Pass a
+    directory (e.g. CWD or a target-repo dir) directly without the brittle
+    synthetic-path trick (``get_project_root(os.path.join(cwd, "_"))``) that
+    relies on ``dirname`` stripping a fake segment.
+
+    Args:
+        directory: Directory to run git discovery from. Defaults to CWD.
+
+    Returns:
+        Absolute path to the project root, or None if not in a git repo.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+        cwd=directory or "."
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
 def get_modified_files() -> List[str]:
     """Get list of modified and untracked files."""
     stdout, _, _ = _run_git("status", "--porcelain")

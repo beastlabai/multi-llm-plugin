@@ -1,0 +1,111 @@
+# .multi-llm/providers.yaml — per-project provider/model selection override
+# =============================================================================
+# This file is OPTIONAL. When absent, multi-llm uses its built-in defaults and
+# behaves exactly as it would without it. It lets THIS repository pick which
+# providers/models the multi-llm skill selects, without editing the installed
+# plugin (which is global and gets clobbered on update).
+#
+# It lives at:   <git-root>/.multi-llm/providers.yaml
+# Scaffold it:   use the `--init` flag (see README "Per-project configuration"),
+#                or run init_config.py directly.
+#
+# ----------------------------------------------------------------------------
+# HOW MERGING WORKS (read this before editing)
+# ----------------------------------------------------------------------------
+# Your file is deep-merged ON TOP OF the built-in base config:
+#   base providers.yaml  →  THIS file  →  MULTI_LLM_PROVIDERS_CONFIG (if set)
+#
+#  * Only set what you want to change. Everything you omit is INHERITED.
+#  * LISTS REPLACE, THEY DO NOT APPEND. If you set `defaults.models`, you get
+#    EXACTLY that list — the base list is discarded, not extended.
+#  * Nested dicts (maps) deep-merge; only list/scalar VALUES replace wholesale.
+#
+# ----------------------------------------------------------------------------
+# BLANK vs. CLEAR vs. OMIT (the three states of a key)
+# ----------------------------------------------------------------------------
+#  * OMIT a key entirely        → inherit the base value.
+#  * Leave a key BLANK / null   → ALSO inherit the base value (a blank value is
+#       e.g.  `models:`            skipped, NOT treated as "clear"). Uncommenting
+#                                  a key but leaving it empty is therefore inert.
+#  * Set an EXPLICIT EMPTY LIST  → deliberately WIPE OUT the inherited list.
+#       e.g.  `quick_models: []`   `quick_models: []` means "use NO quick models
+#                                  here" — under --quick that ERRORS; an empty
+#                                  `defaults.models` falls back to interactive
+#                                  selection (and fails in unattended runs).
+#                                  `[]` is a FOOTGUN, not a no-op — use only when
+#                                  you truly mean "none".
+#
+# You CANNOT unset an inherited SCALAR back to "absent": you can overwrite it
+# with a new value, but `key:` (blank) just keeps the base. There is no deletion
+# sentinel. Likewise you cannot PRUNE an inherited `defaults.modes.<mode>` entry
+# (only overwrite its list, e.g. `<mode>: []`) — see the modes note below.
+#
+# ----------------------------------------------------------------------------
+# TRUST MODEL — provider DEFINITIONS are intentionally NOT overridable here
+# ----------------------------------------------------------------------------
+# This auto-discovered file is restricted to SELECTION keys (which models/
+# providers a run picks). A `providers:` block here is IGNORED (dropped with a
+# warning) so a cloned repo cannot silently redefine provider capabilities.
+# Provider binaries are hardcoded in the plugin; the config `command` field is
+# documentation-only and is NEVER executed from config, in any layer.
+# (Use the MULTI_LLM_PROVIDERS_CONFIG env override for out-of-tree experiments
+# that need to deep-merge an existing `providers.<name>`.)
+#
+# ----------------------------------------------------------------------------
+# ONE OVERRIDE PER REPO
+# ----------------------------------------------------------------------------
+# Discovery anchors at the git ROOT, so a repository has exactly ONE
+# .multi-llm/providers.yaml shared repo-wide. A monorepo CANNOT set per-package
+# or per-subdirectory defaults via auto-discovery — use MULTI_LLM_PROVIDERS_CONFIG
+# per-invocation for that. There are no per-plan or per-subdirectory overrides.
+# =============================================================================
+
+
+# --- default_provider --------------------------------------------------------
+# Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
+# Uncomment to change it:
+#
+# default_provider: claude-code
+
+
+# --- defaults ----------------------------------------------------------------
+defaults:
+
+  # --- defaults.models -------------------------------------------------------
+  # The model set used for normal (non-quick) runs. REPLACES the base list.
+  # NOTE (mode shadowing): setting ONLY `defaults.models` does NOT change modes
+  # that have a base `defaults.modes.<mode>` entry (e.g. review-plan /
+  # code-review) — those mode-specific lists keep winning. To change a specific
+  # mode's models, override `defaults.modes.<mode>` below (not just this list).
+  #
+  # models:
+  #   - claude-code:opus
+  #   - cursor-agent:composer-2.5
+  #   - gemini:gemini-3-pro
+
+  # --- defaults.quick_models -------------------------------------------------
+  # Lightweight subset used with the --quick / -q flag. REPLACES the base list.
+  # `quick_models: []` disables quick mode (it will ERROR under --quick); a blank
+  # `quick_models:` instead inherits the base.
+  #
+  # quick_models:
+  #   - claude-code:opus
+  #   - cursor-agent:composer-2.5
+
+  # --- defaults.modes --------------------------------------------------------
+  # Per-mode overrides. A mode's `models` (and optional `quick`) win over the
+  # global `defaults.models` / `defaults.quick_models` ABOVE for that mode.
+  # Override the specific mode here to change ONLY that mode's selection.
+  # You cannot delete an inherited mode entry — only overwrite its list
+  # (e.g. `code-review: { models: [] }` clears it).
+  #
+  # modes:
+  #   review-plan:
+  #     models:
+  #       - claude-code:opus
+  #       - cursor-agent:gemini-3.1-pro
+  #     quick:
+  #       - claude-code:opus
+  #   code-review:
+  #     models:
+  #       - cursor-agent:gpt-5.4-high

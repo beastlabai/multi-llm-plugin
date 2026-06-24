@@ -1,4 +1,14 @@
-# providers.yaml - Multi-LLM provider configuration
+# providers.yaml - Multi-LLM provider configuration (BASE layer)
+#
+# This is the built-in BASE layer. Config is assembled lowest -> highest:
+#   1. this file (base; always present)
+#   2. <git-root>/.multi-llm/providers.yaml   (optional per-project override,
+#      auto-discovered; restricted to SELECTION keys — default_provider,
+#      defaults.models, defaults.quick_models, defaults.modes)
+#   3. MULTI_LLM_PROVIDERS_CONFIG=/path.yaml   (optional env escape hatch)
+# Each layer is deep-merged over the one below; LIST values replace wholesale.
+# Scaffold a per-project override with `--init`. See the README
+# "Per-project configuration" section for the full semantics.
 #
 # Note: Command construction (flags, arguments, subcommands) is handled by
 # provider classes in utils/providers/. This config only contains:
