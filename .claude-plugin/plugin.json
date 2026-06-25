@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "multi-llm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Orchestrate plan reviews, task generation, implementation, and code reviews across multiple LLM providers (Cursor, Gemini, Codex, OpenCode, Kilocode, Claude Code) in parallel — or ask every model a free-text question about a plan.",
   "author": {
     "name": "beastlabai",
