@@ -62,7 +62,7 @@ With batching, 10 suggestions might become 3-4 batches:
    - Only process suggestions with `status: "valid"`
    - Exclude suggestions marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related suggestions into batches by task reference
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one suggestion's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every suggestion up front. See step 6.
+4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one suggestion's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every suggestion up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those suggestions to the judge without prompting. See step 6.
 5. **Batch Application**: Process each batch with a single subagent:
    - Spawn a Task subagent with the batch prompt
    - Wait for completion before moving to the next batch
@@ -285,6 +285,8 @@ uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics
 ### 6. Handle Human Decision Items
 
 Follow the human decision batch mode process in `references/human-decision-batch.md`.
+
+**Auto-route report-pre-marked suggestions first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked Claude set** — every suggestion whose `group_id` is in `human_review_config.claude_decide_item_ids` or that carries `decision_mode == "claude_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let Claude Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked Claude set **without any prompt**, then handle only the interactive set with the flow below. These suggestions were chosen in the report's "Let Claude decide" dropdown/checkbox; they are the per-item equivalent of `--claude-decide` scoped to just those suggestions.
 
 **Check `human_review_config.decision_mode` first**: if it is `"claude_auto_decide"` (the user passed `--claude-decide`), do NOT prompt the user — go straight to "Let Claude Decide" Mode and evaluate every `needs-human-decision` suggestion autonomously per the criteria in that reference. By default, **partially-valid suggestions are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only suggestions with nothing worthwhile are skipped entirely.
 

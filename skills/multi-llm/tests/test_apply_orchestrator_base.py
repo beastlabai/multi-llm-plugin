@@ -1365,6 +1365,22 @@ class TestHtmlValidationOverrideKeyNormalization:
 
         assert orch.validation_overrides == {"aaaa1111bbbb2222": "invalid"}
 
+    def test_claude_decide_round_trips_from_user_selections(self, tmp_path):
+        """A 'claude_decide' override survives ingest verbatim (group + suggestion)."""
+        orch = self._orch_with_groups(
+            [{"group_hash": "aaaa1111bbbb2222", "theme": "First",
+              "suggestions": [{"suggestion_hash": "s1"}]}]
+        )
+        review_dir = self._write_selections(
+            tmp_path,
+            {"aaaa1111bbbb2222": "claude_decide", "G1S1": "claude_decide"},
+        )
+
+        orch.load_html_selections(review_dir, {})
+
+        assert orch.validation_overrides == {"aaaa1111bbbb2222": "claude_decide"}
+        assert orch.suggestion_validation_overrides == {"G1S1": "claude_decide"}
+
     def test_all_digit_hash_not_treated_as_index(self, tmp_path):
         """A known group_hash that happens to be all digits stays a hash key."""
         all_digit_hash = "1234567890123456"
@@ -4792,3 +4808,207 @@ class TestExitCodeAndPromptParity:
             f"[{fixture_id}] Exit codes should be identical across orchestrators: "
             f"{actual_codes} ({desc})"
         )
+
+
+# ======================================================================
+# Test: "Let Claude decide" routing marker (Section 3)
+# ======================================================================
+
+
+class TestClaudeDecideGroupOverride:
+    """Group-level claude_decide override is a routing marker, not a status."""
+
+    def _orch(self, **arg_overrides):
+        return MockApplyOrchestrator(_make_args(**arg_overrides))
+
+    def test_group_claude_decide_keeps_needs_human_and_tags(self):
+        """claude_decide override keeps needs-human-decision and tags the group."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "abc123",
+                "validation_status": "needs-human-decision",
+                "validation_reason": "Ambiguous",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {"abc123": "claude_decide"}
+        orch.apply_group_validation_overrides()
+
+        g = orch.merged[0]
+        # Status is NOT changed to "claude_decide" (it is not a real status).
+        assert g["validation_status"] == "needs-human-decision"
+        assert g["claude_decide"] is True
+        assert "abc123" in orch.claude_decide_overrides
+        assert g["validation_reason"] == "Routed to Claude by reviewer"
+        # claude_decide is a marker, not a user-approved override.
+        assert g.get("user_override") is not True
+
+    def test_group_claude_decide_never_becomes_status(self):
+        """No code path may set validation_status == 'claude_decide'."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "h1",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {"h1": "claude_decide"}
+        orch.apply_group_validation_overrides()
+        assert orch.merged[0]["validation_status"] != "claude_decide"
+
+    def test_unknown_override_value_warned_and_ignored(self, capsys):
+        """A typo/stale override value is warned-and-ignored, not applied."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "h1",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {"h1": "bogus_value"}
+        orch.apply_group_validation_overrides()
+
+        g = orch.merged[0]
+        # Underlying status is retained; the value did not become a status.
+        assert g["validation_status"] == "needs-human-decision"
+        assert g.get("user_override") is not True
+        assert "h1" not in orch.claude_decide_overrides
+        captured = capsys.readouterr()
+        assert "bogus_value" in captured.err
+
+    def test_valid_override_still_works(self):
+        """The valid/invalid path is unaffected by the marker special-casing."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "h1",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {"h1": "valid"}
+        orch.apply_group_validation_overrides()
+        assert orch.merged[0]["validation_status"] == "valid"
+        assert orch.merged[0]["user_override"] is True
+
+
+class TestClaudeDecideSuggestionOverride:
+    """Per-suggestion claude_decide override propagates to the group."""
+
+    def _orch(self, **arg_overrides):
+        return MockApplyOrchestrator(_make_args(**arg_overrides))
+
+    def test_suggestion_claude_decide_keeps_group_needs_human(self):
+        """A claude_decide suggestion keeps its group needs-human (not promoted/dropped)."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "g1hash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [
+                    {"title": "A", "desc": "a"},
+                ],
+            }
+        ]
+        orch.suggestion_validation_overrides = {"G1S1": "claude_decide"}
+        orch.apply_suggestion_validation_overrides()
+
+        g = orch.merged[0]
+        assert g["validation_status"] == "needs-human-decision"
+        assert g["claude_decide"] is True
+        assert "g1hash" in orch.claude_decide_overrides
+        # The suggestion is not dropped.
+        assert len(g["suggestions"]) == 1
+        assert g["suggestions"][0].get("claude_decide") is True
+
+    def test_mixed_group_one_claude_decide_propagates(self):
+        """One claude_decide suggestion alongside untouched ones still routes the group."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "mixhash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [
+                    {"title": "A", "desc": "a"},
+                    {"title": "B", "desc": "b"},
+                    {"title": "C", "desc": "c"},
+                ],
+            }
+        ]
+        # Only the middle suggestion is marked.
+        orch.suggestion_validation_overrides = {"G1S2": "claude_decide"}
+        orch.apply_suggestion_validation_overrides()
+
+        g = orch.merged[0]
+        assert g["claude_decide"] is True
+        assert "mixhash" in orch.claude_decide_overrides
+        # No suggestion dropped; group still needs-human.
+        assert len(g["suggestions"]) == 3
+        assert g["validation_status"] == "needs-human-decision"
+
+    def test_claude_decide_suggestion_not_dropped_as_invalid(self):
+        """claude_decide must not land in the invalid-drop set."""
+        orch = self._orch()
+        orch.merged = [
+            {
+                "group_hash": "g1",
+                "validation_status": "needs-human-decision",
+                "suggestions": [
+                    {"title": "A", "desc": "a"},
+                    {"title": "B", "desc": "b"},
+                ],
+            }
+        ]
+        orch.suggestion_validation_overrides = {
+            "G1S1": "claude_decide",
+            "G1S2": "invalid",
+        }
+        orch.apply_suggestion_validation_overrides()
+        g = orch.merged[0]
+        # S2 (invalid) dropped, S1 (claude_decide) kept.
+        assert len(g["suggestions"]) == 1
+        assert g["suggestions"][0]["title"] == "A"
+        assert g["claude_decide"] is True
+
+
+class TestBuildHumanReviewConfigClaudeDecide:
+    """build_human_review_config exposes claude_decide_item_ids."""
+
+    def _config(self, formatted_human, **arg_overrides):
+        orch = MockApplyOrchestrator(_make_args(**arg_overrides))
+        orch.formatted_human = formatted_human
+        return orch.build_human_review_config()
+
+    def test_claude_decide_item_ids_lists_marked_items(self):
+        """Only items with decision_mode == claude_auto_decide are listed."""
+        formatted = [
+            {"group_id": "h1", "importance": "HIGH",
+             "decision_mode": "claude_auto_decide"},
+            {"group_id": "h2", "importance": "MEDIUM"},
+            {"group_id": "h3", "importance": "LOW",
+             "decision_mode": "claude_auto_decide"},
+        ]
+        config = self._config(formatted)
+        assert config["claude_decide_item_ids"] == ["h1", "h3"]
+        # Per-item routing does not flip the global decision_mode.
+        assert config["decision_mode"] == "interactive"
+
+    def test_no_marked_items_empty_list(self):
+        """No pre-marked items -> empty claude_decide_item_ids."""
+        formatted = [{"group_id": "h1", "importance": "HIGH"}]
+        config = self._config(formatted)
+        assert config["claude_decide_item_ids"] == []
+        assert config["decision_mode"] == "interactive"
+
+    def test_global_flag_does_not_change_per_item_index(self):
+        """--claude-decide flips the global mode; the per-item index is unchanged."""
+        formatted = [
+            {"group_id": "h1", "importance": "HIGH",
+             "decision_mode": "claude_auto_decide"},
+        ]
+        config = self._config(formatted, claude_decide=True)
+        assert config["decision_mode"] == "claude_auto_decide"
+        assert config["claude_decide_item_ids"] == ["h1"]

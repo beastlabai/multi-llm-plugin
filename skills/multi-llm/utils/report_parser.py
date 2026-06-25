@@ -700,9 +700,12 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
         v1: ## G1: Theme              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
+    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    claude_decide).
 
     Returns:
-        Dict mapping group hash to override value ("valid" or "invalid")
+        Dict mapping group hash to override value ("valid", "invalid", or
+        "claude_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -737,12 +740,21 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
+        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        claude_decide_checked = bool(re.search(
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            block, re.IGNORECASE
+        ))
 
+        # Precedence: invalid > valid > claude_decide (an explicit valid/invalid
+        # is a firmer signal than "you decide").
         override_val = None
         if invalid_checked:
             override_val = "invalid"  # invalid wins if both checked
         elif valid_checked:
             override_val = "valid"
+        elif claude_decide_checked:
+            override_val = "claude_decide"
 
         if override_val:
             if hash_val:
@@ -789,9 +801,12 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
         v1: ### G1S2: Title              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
+    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    claude_decide).
 
     Returns:
-        Dict mapping suggestion hash to override value ("valid" or "invalid")
+        Dict mapping suggestion hash to override value ("valid", "invalid", or
+        "claude_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -825,12 +840,20 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
+        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        claude_decide_checked = bool(re.search(
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            block, re.IGNORECASE
+        ))
 
+        # Precedence: invalid > valid > claude_decide.
         override_val = None
         if invalid_checked:
             override_val = "invalid"  # invalid wins if both checked
         elif valid_checked:
             override_val = "valid"
+        elif claude_decide_checked:
+            override_val = "claude_decide"
 
         if override_val:
             if hash_val:
@@ -878,9 +901,12 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
         - [ ] Mark invalid
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
+    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    claude_decide).
 
     Returns:
-        Dict mapping issue index (1-based) to override value ("valid" or "invalid")
+        Dict mapping issue index (1-based) to override value ("valid",
+        "invalid", or "claude_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -912,11 +938,19 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
+        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        claude_decide_checked = bool(re.search(
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            block, re.IGNORECASE
+        ))
 
+        # Precedence: invalid > valid > claude_decide.
         if invalid_checked:
             overrides[issue_idx] = "invalid"  # invalid wins if both checked
         elif valid_checked:
             overrides[issue_idx] = "valid"
+        elif claude_decide_checked:
+            overrides[issue_idx] = "claude_decide"
 
     return overrides
 
@@ -963,11 +997,11 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
         - [ ] Mark invalid
         - [ ] Needs human attention
 
-    3-state priority: invalid > needs-human-decision > valid.
+    4-state priority: invalid > needs-human-decision > valid > claude_decide.
 
     Returns:
         Dict mapping consolidated_id (12-char hex) to override value
-        ("valid", "invalid", or "needs-human-decision")
+        ("valid", "invalid", "needs-human-decision", or "claude_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -1004,14 +1038,23 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*needs\s+human\s+attention',
             block, re.IGNORECASE
         ))
+        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        claude_decide_checked = bool(re.search(
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            block, re.IGNORECASE
+        ))
 
-        # 3-state priority: invalid > needs-human-decision > valid
+        # 4-state priority: invalid > needs-human-decision > valid >
+        # claude_decide (an explicit invalid/needs-human/valid is a firmer
+        # signal than "you decide").
         if invalid_checked:
             overrides[consolidated_id] = "invalid"
         elif needs_human_checked:
             overrides[consolidated_id] = "needs-human-decision"
         elif valid_checked:
             overrides[consolidated_id] = "valid"
+        elif claude_decide_checked:
+            overrides[consolidated_id] = "claude_decide"
 
     return overrides
 

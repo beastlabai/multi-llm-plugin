@@ -13,7 +13,28 @@ Before prompting for ANY needs-human-decision item, check:
    - Go directly to the **"Let Claude Decide" Mode** section below and
      evaluate every item autonomously.
    - This takes precedence over `batch_enabled` and `mode`.
-1. Otherwise, read `human_review_config.batch_enabled` from orchestrator output
+0a. **Partition `needs_human_review` before doing anything else.** Split the items
+    into two sets:
+    - **Pre-marked Claude set** — every item whose `group_id` appears in
+      `human_review_config.claude_decide_item_ids`, **OR** that carries a per-item
+      `decision_mode == "claude_auto_decide"` field. (The id list is a convenience
+      index; the authoritative per-item signal is the `decision_mode` field — fall
+      back to scanning that flag if an item has no stable id.)
+    - **Interactive set** — all remaining items.
+    Then:
+    1. **Process the pre-marked Claude set first, without prompting.** Run the
+       **"Let Claude Decide" Mode** section below scoped to exactly those items
+       (per-item trigger — one judging subagent, or the haiku coordinator fan-out
+       if >4). Do NOT emit any `AskUserQuestion` for these items, and do NOT
+       include them in any batch summary.
+    2. **Then continue the steps below for the interactive set only** — the normal
+       batch summary / individual prompts. (If the global
+       `decision_mode == "claude_auto_decide"` from step 0, every item is already
+       in the pre-marked set by construction, so the interactive set is empty.)
+    3. This per-item path is independent of `batch_enabled` / `mode`; it is the
+       per-item analogue of the global `claude_auto_decide` mode.
+1. Otherwise, for the **interactive set** read `human_review_config.batch_enabled`
+   from orchestrator output
 2. If `batch_enabled == true`:
    - Do NOT use individual AskUserQuestion for each item
    - Present the batch summary prompt ONCE
@@ -41,7 +62,16 @@ Trigger this mode when **any** of the following hold:
 - the user selects "Let Claude decide" in the batch-approval prompt — scope: **all** `needs-human-decision` items, **or**
 - the user selects "Let Claude decide" for a single item in an individual / legacy per-item prompt — scope: **just that one item**, **or**
 - `human_review_config.decision_mode == "claude_auto_decide"` (the user passed
-  `--claude-decide` on the command line, so no prompt is shown) — scope: **all** `needs-human-decision` items.
+  `--claude-decide` on the command line, so no prompt is shown) — scope: **all** `needs-human-decision` items, **or**
+- **reviewer pre-marked items via report override** — every item whose `group_id`
+  is in `human_review_config.claude_decide_item_ids`, **or** that carries a per-item
+  `decision_mode == "claude_auto_decide"` field (set via the report's "Let Claude
+  decide" dropdown/checkbox) — scope: **exactly those items**. This is **distinct
+  from** the global `--claude-decide` trigger above: that flag targets **all**
+  needs-human items, whereas this per-item trigger targets only the items the
+  reviewer pre-marked in the report. See **Batch Mode Guard** step 0a for how this
+  pre-marked set is gathered and processed (partition-then-process) before the
+  interactive set.
 
 The evaluation is identical in every case; only the *set of items* it runs on differs. The per-item trigger exists so a user who is unsure about one specific item can offload just that decision to Claude — exactly as `--claude-decide` would have handled it — without touching the other items. For each item in scope, evaluate it autonomously and choose one of **three** outcomes per item:
 

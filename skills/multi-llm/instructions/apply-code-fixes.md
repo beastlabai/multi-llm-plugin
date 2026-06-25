@@ -64,7 +64,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
    - Only process fixes with `status: "valid"`
    - Exclude issues marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related fixes by file location
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front. See step 6.
+4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6.
 5. **Batch Application**: Process each batch with a specialist subagent:
    - Spawn a Task subagent with the appropriate `subagent_type`
    - Wait for completion before moving to the next batch
@@ -288,6 +288,8 @@ uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics
 ### 6. Handle Human Decision Items
 
 Follow the human decision batch mode process in `references/human-decision-batch.md`.
+
+**Auto-route report-pre-marked fixes first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked Claude set** — every fix whose `group_id` is in `human_review_config.claude_decide_item_ids` or that carries `decision_mode == "claude_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let Claude Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked Claude set **without any prompt**, then handle only the interactive set with the flow below. These fixes were chosen in the report's "Let Claude decide" dropdown/checkbox; they are the per-item equivalent of `--claude-decide` scoped to just those fixes.
 
 **Check `human_review_config.decision_mode` first**: if it is `"claude_auto_decide"` (the user passed `--claude-decide`), do NOT prompt the user — go straight to "Let Claude Decide" Mode and evaluate every `needs-human-decision` fix autonomously per the criteria in that reference. By default, **partially-valid fixes are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only fixes with nothing worthwhile are skipped entirely.
 

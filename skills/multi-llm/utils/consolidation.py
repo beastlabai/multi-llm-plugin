@@ -1412,6 +1412,22 @@ def generate_consolidated_report(
     )
     lines.append("")
 
+    # --- Build validation lookups for per-group aggregate status ---
+    # Mirrors the HTML consolidated path so the "Let Claude decide" checkbox can
+    # be gated on a needs-human-decision aggregate status.
+    from .html_report_generator import derive_aggregate_validation_status
+
+    validation_by_hash: Dict[str, str] = {}
+    validation_by_index: Dict[int, str] = {}
+    if validation:
+        for entry in validation:
+            g_hash = entry.get("group_id") or entry.get("group_hash")
+            if g_hash:
+                validation_by_hash[g_hash] = entry.get("status", "")
+            g_idx = entry.get("group_index")
+            if g_idx is not None:
+                validation_by_index[g_idx] = entry.get("status", "")
+
     # --- Per-group sections ---
     for cg in consolidated_groups:
         display_index = cg.get("display_index", 0)
@@ -1436,11 +1452,29 @@ def generate_consolidated_report(
             f"## CG{display_index} [{consolidated_id}]: {title}"
         )
 
+        # Aggregate validation status across the underlying groups (used to
+        # gate the needs-human-decision-only "Let Claude decide" checkbox).
+        underlying_statuses: List[str] = []
+        for u_idx in underlying_indices:
+            if u_idx < 0 or u_idx >= len(groups):
+                continue
+            g_hash = groups[u_idx].get("group_hash")
+            status = (
+                validation_by_hash.get(g_hash, "") if g_hash else ""
+            ) or validation_by_index.get(u_idx, "")
+            if status:
+                underlying_statuses.append(status)
+        agg_status = derive_aggregate_validation_status(underlying_statuses)
+
         # Checkboxes
         lines.append("- [ ] Skip this group")
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
         lines.append("- [ ] Needs human attention")
+        # "Let Claude decide" routes the consolidated group to the per-item
+        # judge at apply time. Scoped to needs-human-decision only.
+        if agg_status == "needs-human-decision":
+            lines.append("- [ ] Let Claude decide")
 
         # Metadata line
         lines.append(

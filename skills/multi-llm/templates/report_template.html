@@ -1596,6 +1596,8 @@
                   '<option value=""' + (!suggOverride ? ' selected' : '') + '>-- No override --</option>' +
                   '<option value="valid"' + (suggOverride === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
                   '<option value="invalid"' + (suggOverride === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
+                  (validationStatus === 'needs-human-decision' ?
+                    '<option value="claude_decide"' + (suggOverride === 'claude_decide' ? ' selected' : '') + '>Let Claude decide</option>' : '') +
                   '</select>';
               }
             }
@@ -1691,6 +1693,8 @@
               '<option value=""' + (!selections.validation_overrides[groupHashKey] ? ' selected' : '') + '>-- No override --</option>' +
               '<option value="valid"' + (selections.validation_overrides[groupHashKey] === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
               '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
+              (validationStatus === 'needs-human-decision' ?
+                '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let Claude decide</option>' : '') +
               '</select>' : '')) +
           '</div>' +
           '<div class="group-badges">';

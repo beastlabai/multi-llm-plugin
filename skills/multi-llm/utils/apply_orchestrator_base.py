@@ -49,6 +49,7 @@ from .filtering import (
     filter_user_skipped_groups,
     resolve_bulk_option_conflicts,
     should_bypass_no_selection_confirmation,
+    validate_claude_decide_items_honored,
 )
 from .importance import get_highest_importance
 from .output_handler import derive_prefix, find_output_dir, get_phase_dir
@@ -97,6 +98,37 @@ class OrchestratorError(Exception):
         super().__init__(message)
         self.message = message
         self.exit_code = exit_code
+
+
+# ---------------------------------------------------------------------------
+# Validation-override allowlist
+# ---------------------------------------------------------------------------
+
+# The only override values accepted when ingested report selections are turned
+# into status/marker decisions. Anything else (a typo or a stale value left in
+# user_selections.json / consolidated_user_selections.json / a hand-edited
+# Markdown checkbox label) is warned-and-ignored at the apply boundary rather
+# than written verbatim into ``validation_status`` (which would produce a bogus
+# status that silently falls through ``filter_items``). ``claude_decide`` is a
+# *routing marker*, not a status: an allowlisted ``claude_decide`` is handed to
+# ``_route_claude_decide_marker`` and never assigned to ``validation_status``.
+# ``needs-human-decision`` is accepted because the consolidated surface can emit
+# it as an override value.
+VALID_OVERRIDE_VALUES: frozenset = frozenset(
+    {"valid", "invalid", "claude_decide", "needs-human-decision"}
+)
+
+
+def _format_override_target(value: str) -> str:
+    """Render an override value for the dry-run/no-selection override print.
+
+    ``claude_decide`` is a routing marker, not a validation status, so label it
+    as such instead of printing a bare ``-> claude_decide`` (which misreads as a
+    status change).
+    """
+    if value == "claude_decide":
+        return "Let Claude decide (routing marker)"
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +505,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.old_skipped_ids: Set[str] = set()
         self.validation_overrides: Dict[str, str] = {}
         self.suggestion_validation_overrides: Dict[str, str] = {}
+        # Group hashes / suggestion ids the reviewer pre-marked "Let Claude
+        # decide" in the report. A routing marker, not a validation status —
+        # marked items keep validation_status == "needs-human-decision" and
+        # carry group["claude_decide"] = True so they reach the per-item judge.
+        #
+        # NOTE: write-only diagnostic mirror. Nothing in the production code
+        # paths READS this set — all routing/filtering/formatting is driven by
+        # group["claude_decide"] and the per-item decision_mode flag. It exists
+        # purely as an observable record for tests/diagnostics and does NOT gate
+        # any runtime behavior. (The _write_outputs() claude_decide audit keys
+        # off build_human_review_config()["claude_decide_item_ids"], not this
+        # set.) Do not assume populating it changes how items are routed.
+        self.claude_decide_overrides: Set[str] = set()
 
         # Filtering results
         self.valid: List[Dict[str, Any]] = []
@@ -902,7 +947,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                             group.get("theme", "Unknown"),
                         )
                 for ghash in sorted(self.validation_overrides):
-                    new_status = self.validation_overrides[ghash]
+                    new_status = _format_override_target(
+                        self.validation_overrides[ghash]
+                    )
                     if ghash in _hash_to_info_ovr:
                         label, theme = _hash_to_info_ovr[ghash]
                         print(
@@ -916,7 +963,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         )
             if self.suggestion_validation_overrides:
                 for sid in sorted(self.suggestion_validation_overrides):
-                    new_status = self.suggestion_validation_overrides[sid]
+                    new_status = _format_override_target(
+                        self.suggestion_validation_overrides[sid]
+                    )
                     print(
                         f"  Override {sid}: -> {new_status}",
                         file=sys.stderr,
@@ -998,57 +1047,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.apply_group_validation_overrides()
 
         # Apply per-suggestion validation overrides
-        if self.suggestion_validation_overrides:
-            sugg_override_count = 0
-            for idx, group in enumerate(self.merged, 1):
-                suggestions = group.get("suggestions", [])
-                modified = False
-                for sugg_idx, sugg in enumerate(suggestions, 1):
-                    shash = sugg.get("suggestion_hash", "")
-                    positional_id = f"G{idx}S{sugg_idx}"
-                    matched_key = None
-                    if shash and shash in self.suggestion_validation_overrides:
-                        matched_key = shash
-                    elif positional_id in self.suggestion_validation_overrides:
-                        matched_key = positional_id
-
-                    if matched_key is not None:
-                        override_status = self.suggestion_validation_overrides[
-                            matched_key
-                        ]
-                        if override_status == "invalid":
-                            sugg["_user_override_invalid"] = True
-                        elif override_status == "valid":
-                            sugg["_user_override_valid"] = True
-                        sugg_override_count += 1
-                        modified = True
-
-                if modified:
-                    remaining = [
-                        s
-                        for s in suggestions
-                        if not s.get("_user_override_invalid")
-                    ]
-                    group["suggestions"] = remaining
-                    if (
-                        remaining
-                        and all(s.get("_user_override_valid") for s in remaining)
-                        and group.get("validation_status")
-                        in ("needs-human-decision", "validation_failed")
-                    ):
-                        old_status = group.get("validation_status", "unknown")
-                        group["validation_status"] = "valid"
-                        group["validation_reason"] = (
-                            f"All suggestions individually marked valid by user "
-                            f"(was {old_status})"
-                        )
-                        group["user_override"] = True
-
-            if sugg_override_count:
-                print(
-                    f"Applied {sugg_override_count} per-suggestion validation overrides",
-                    file=sys.stderr,
-                )
+        self.apply_suggestion_validation_overrides()
 
         # Step 25: Filter user-skipped + by status/importance
         self.user_skipped_items = []
@@ -1301,6 +1300,26 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     or len(self.state.get_all_human_decisions(self.phase_name)) > 0
                 ),
             }
+
+        # Post-hoc audit: verify every report-pre-marked "Let Claude decide"
+        # item actually reached the judge (decision_source == claude_*), rather
+        # than being prompted interactively or dropped. This is the runtime
+        # backstop for the per-item routing the apply instructions perform; it
+        # surfaces warnings but never fails the run (a sibling of the
+        # batch-mode-compliance audit). Recorded decisions only exist once at
+        # least one batch has been processed (e.g. on --resume), so this is a
+        # no-op on the initial pass when nothing has been recorded yet.
+        if self.state is not None:
+            recorded_decisions = self.state.get_all_human_decisions(
+                self.phase_name
+            )
+            cd_ok, cd_warnings = validate_claude_decide_items_honored(
+                self.build_human_review_config(),
+                recorded_decisions,
+            )
+            if not cd_ok:
+                for warning in cd_warnings:
+                    self.logger.warning(warning)
 
         # Step 32: Build output JSON
         try:
@@ -1584,6 +1603,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "by_importance": by_importance,
             "total_count": len(self.formatted_human),
             "batch_prompt_template": "batch_approval_v1",
+            # Convenience index of items the reviewer pre-marked "Let Claude
+            # decide" in the report. The authoritative per-item signal is the
+            # per-item ``decision_mode == "claude_auto_decide"`` flag the
+            # formatters emit; this list lets the instructions find them without
+            # scanning every item. The global ``decision_mode`` above stays
+            # "interactive" unless --claude-decide was passed; per-item routing
+            # is purely additive.
+            "claude_decide_item_ids": [
+                it.get("group_id", "")
+                for it in self.formatted_human
+                if it.get("decision_mode") == "claude_auto_decide"
+            ],
         }
 
     # ==================================================================
@@ -1625,6 +1656,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return ""
 
+    def _route_claude_decide_marker(
+        self, group: Dict[str, Any], key: Any, value: str
+    ) -> bool:
+        """Handle a ``claude_decide`` override as a routing marker, not a status.
+
+        Returns ``True`` if *value* was a ``claude_decide`` marker (the caller
+        should skip the ``validation_status`` assignment), ``False`` otherwise.
+
+        A ``claude_decide`` marker keeps the item in ``needs_human`` and tags it
+        so the per-item "Let Claude Decide" judge picks it up at apply time; it
+        must NEVER be written into ``validation_status`` (which is not a real
+        status and would silently fall through ``filter_items``).
+        """
+        if value == "claude_decide":
+            group["claude_decide"] = True
+            # Diagnostics-only mirror; routing is driven by group["claude_decide"]
+            # above, not by this set (see declaration note in __init__).
+            self.claude_decide_overrides.add(key)
+            # A surfaced reason so the routing is visible in logs/reports. Not a
+            # setdefault no-op — the item already carries a needs-human reason.
+            group["validation_reason"] = "Routed to Claude by reviewer"
+            return True
+        return False
+
     def apply_group_validation_overrides(self) -> None:
         """Apply group-level validation overrides to merged groups.
 
@@ -1642,14 +1697,136 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         for group in self.merged:
             ghash = group.get("group_hash", "")
             if ghash and ghash in self.validation_overrides:
+                value = self.validation_overrides[ghash]
+                if value not in VALID_OVERRIDE_VALUES:
+                    print(
+                        f"WARNING: ignoring unknown validation override "
+                        f"{value!r} for group [{str(ghash)[:8]}]; leaving its "
+                        f"underlying status unchanged.",
+                        file=sys.stderr,
+                    )
+                    continue
+                # Route "claude_decide" as a marker, never as a status.
+                if self._route_claude_decide_marker(group, ghash, value):
+                    override_count += 1
+                    continue
                 old_status = group.get("validation_status", "unknown")
-                group["validation_status"] = self.validation_overrides[ghash]
+                group["validation_status"] = value
                 group["validation_reason"] = f"User override (was {old_status})"
                 group["user_override"] = True
                 override_count += 1
         if override_count:
             print(
                 f"Applied {override_count} user validation overrides",
+                file=sys.stderr,
+            )
+
+    def apply_suggestion_validation_overrides(self) -> None:
+        """Apply per-suggestion validation overrides to ``self.merged``.
+
+        ``invalid`` drops the suggestion; ``valid`` flags it (and promotes the
+        group if *all* survivors are valid); ``claude_decide`` is a routing
+        marker that keeps the suggestion and, after the loop, routes the whole
+        containing group to the per-item judge (the apply-time review unit is a
+        group, so the marker is propagated up — including the mixed-group case
+        where only one suggestion is marked). Unknown values are warned and
+        ignored.
+        """
+        if not self.suggestion_validation_overrides:
+            return
+
+        sugg_override_count = 0
+        for idx, group in enumerate(self.merged, 1):
+            suggestions = group.get("suggestions", [])
+            modified = False
+            for sugg_idx, sugg in enumerate(suggestions, 1):
+                shash = sugg.get("suggestion_hash", "")
+                positional_id = f"G{idx}S{sugg_idx}"
+                matched_key = None
+                if shash and shash in self.suggestion_validation_overrides:
+                    matched_key = shash
+                elif positional_id in self.suggestion_validation_overrides:
+                    matched_key = positional_id
+
+                if matched_key is not None:
+                    override_status = self.suggestion_validation_overrides[
+                        matched_key
+                    ]
+                    if override_status not in VALID_OVERRIDE_VALUES:
+                        print(
+                            f"WARNING: ignoring unknown per-suggestion "
+                            f"validation override {override_status!r} for "
+                            f"{positional_id}; leaving it unchanged.",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if override_status == "invalid":
+                        sugg["_user_override_invalid"] = True
+                    elif override_status == "valid":
+                        sugg["_user_override_valid"] = True
+                    elif override_status == "claude_decide":
+                        # Routing marker: keep the suggestion (do NOT drop or
+                        # promote) and tag it. Propagated to the group below so
+                        # the whole group routes to the per-item judge.
+                        sugg["claude_decide"] = True
+                    sugg_override_count += 1
+                    modified = True
+
+            if modified:
+                remaining = [
+                    s
+                    for s in suggestions
+                    if not s.get("_user_override_invalid")
+                ]
+                group["suggestions"] = remaining
+                # A "Let Claude decide" marker (set group-level by
+                # apply_group_validation_overrides, or per-suggestion in the
+                # loop above) is an affirmative "route to the judge" request and
+                # must win over a "valid" promotion. Without this guard, a group
+                # marked claude_decide whose surviving suggestions are all
+                # individually "valid" would be promoted to "valid" while still
+                # carrying claude_decide=True; filter_items only honours
+                # claude_decide in the needs-human-decision branch, so the group
+                # would auto-apply and bypass the judge.
+                marked_claude_decide = group.get("claude_decide") or any(
+                    s.get("claude_decide") for s in remaining
+                )
+                if (
+                    not marked_claude_decide
+                    and remaining
+                    and all(s.get("_user_override_valid") for s in remaining)
+                    and group.get("validation_status")
+                    in ("needs-human-decision", "validation_failed")
+                ):
+                    old_status = group.get("validation_status", "unknown")
+                    group["validation_status"] = "valid"
+                    group["validation_reason"] = (
+                        f"All suggestions individually marked valid by user "
+                        f"(was {old_status})"
+                    )
+                    group["user_override"] = True
+
+                # Reconcile per-suggestion -> group granularity: if any
+                # surviving suggestion is "claude_decide", route the whole
+                # group to the judge (the apply-time review unit is a group,
+                # and the formatters only inspect the group). This also covers
+                # the mixed-group case (one claude_decide suggestion alongside
+                # other untouched needs-human suggestions).
+                if any(
+                    s.get("claude_decide")
+                    for s in group.get("suggestions", [])
+                ):
+                    group["claude_decide"] = True
+                    # Diagnostics-only mirror; the group["claude_decide"] flag
+                    # above is what actually routes the group to the judge (see
+                    # declaration note in __init__). This set is never read.
+                    self.claude_decide_overrides.add(
+                        group.get("group_hash", "")
+                    )
+
+        if sugg_override_count:
+            print(
+                f"Applied {sugg_override_count} per-suggestion validation overrides",
                 file=sys.stderr,
             )
 

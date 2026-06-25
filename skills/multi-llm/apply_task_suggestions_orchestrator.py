@@ -289,8 +289,11 @@ Bulk Approval Examples:
             all_descs = [s.get("desc", "") for s in suggestions if s.get("desc")]
             desc = "\n\n".join(all_descs)
 
-        return {
+        formatted = {
             "index": index,
+            # Stable group identifier so judging subagents / human-decision
+            # routing can reference pre-marked items.
+            "group_id": group.get("group_hash", ""),
             "title": title,
             "description": desc,
             "type": suggestion_type,
@@ -305,6 +308,11 @@ Bulk Approval Examples:
             "models": group.get("models", []),
             "suggestion_count": len(suggestions),
         }
+        # Per-item routing flag: reviewer pre-marked this group "Let Claude
+        # decide" in the report. Routed to the per-item judge without prompting.
+        if group.get("claude_decide"):
+            formatted["decision_mode"] = "claude_auto_decide"
+        return formatted
 
     def generate_batch_prompts(self, batches: List[SuggestionBatch]) -> List[Dict[str, Any]]:
         """Attach task-specific prompts to each batch.

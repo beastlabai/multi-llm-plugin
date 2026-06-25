@@ -2327,3 +2327,122 @@ class TestMergeConsolidatedSelections:
         assert isinstance(overrides, dict)
         assert all(isinstance(s, str) for s in skipped)
         assert all(isinstance(k, str) and isinstance(v, str) for k, v in overrides.items())
+
+class TestParseClaudeDecideOverrides:
+    """`Let Claude decide` checkbox -> "claude_decide" across all parsers."""
+
+    # --- Group parser ---
+    def test_group_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## G1 [aabb000000000001]: Theme
+- [ ] Skip this group
+- [ ] Mark valid
+- [ ] Mark invalid
+- [x] Let Claude decide
+**Validation:** ? Needs Review
+""")
+        result = parse_validation_overrides_groups(str(report))
+        assert result == {"aabb000000000001": "claude_decide"}
+
+    def test_group_precedence_invalid_over_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## G1 [aabb000000000001]: Theme
+- [ ] Mark valid
+- [x] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_validation_overrides_groups(str(report))
+        assert result == {"aabb000000000001": "invalid"}
+
+    def test_group_precedence_valid_over_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## G1 [aabb000000000001]: Theme
+- [x] Mark valid
+- [ ] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_validation_overrides_groups(str(report))
+        assert result == {"aabb000000000001": "valid"}
+
+    # --- Suggestion parser ---
+    def test_suggestion_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### G1S1 [ccdd000000000001]: Title
+- [ ] Skip
+- [ ] Mark valid
+- [ ] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_suggestion_validation_overrides(str(report))
+        assert result == {"ccdd000000000001": "claude_decide"}
+
+    def test_suggestion_precedence_valid_over_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### G1S1 [ccdd000000000001]: Title
+- [x] Mark valid
+- [x] Let Claude decide
+""")
+        result = parse_suggestion_validation_overrides(str(report))
+        assert result == {"ccdd000000000001": "valid"}
+
+    # --- Issues parser (code review) ---
+    def test_issue_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### 1. Title
+- [ ] Skip
+- [ ] Mark valid
+- [ ] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_validation_overrides_issues(str(report))
+        assert result == {1: "claude_decide"}
+
+    def test_issue_precedence_invalid_over_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### 1. Title
+- [x] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_validation_overrides_issues(str(report))
+        assert result == {1: "invalid"}
+
+    # --- Consolidated parser (4-state precedence) ---
+    def test_consolidated_claude_decide_alone(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## CG1 [abc123def456]: Section
+- [ ] Mark valid
+- [ ] Mark invalid
+- [ ] Needs human attention
+- [x] Let Claude decide
+""")
+        result = parse_consolidated_validation_overrides(str(report))
+        assert result == {"abc123def456": "claude_decide"}
+
+    def test_consolidated_invalid_beats_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## CG1 [abc123def456]: Section
+- [x] Mark invalid
+- [x] Let Claude decide
+""")
+        result = parse_consolidated_validation_overrides(str(report))
+        assert result == {"abc123def456": "invalid"}
+
+    def test_consolidated_valid_beats_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## CG1 [abc123def456]: Section
+- [x] Mark valid
+- [x] Let Claude decide
+""")
+        result = parse_consolidated_validation_overrides(str(report))
+        assert result == {"abc123def456": "valid"}
+
+    def test_consolidated_needs_human_beats_claude_decide(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## CG1 [abc123def456]: Section
+- [ ] Mark valid
+- [ ] Mark invalid
+- [x] Needs human attention
+- [x] Let Claude decide
+""")
+        result = parse_consolidated_validation_overrides(str(report))
+        assert result == {"abc123def456": "needs-human-decision"}

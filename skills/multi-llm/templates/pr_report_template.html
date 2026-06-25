@@ -4562,6 +4562,9 @@
         html += '<option value="valid"' + (selections.validation_overrides[groupHashKey] === 'valid' ? ' selected' : '') + '>Override: valid</option>';
         html += '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Override: invalid</option>';
         html += '<option value="needs-human-decision"' + (selections.validation_overrides[groupHashKey] === 'needs-human-decision' ? ' selected' : '') + '>Override: needs-human</option>';
+        if (vs === 'needs-human-decision') {
+          html += '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let Claude decide</option>';
+        }
         html += '</select>';
       }
 

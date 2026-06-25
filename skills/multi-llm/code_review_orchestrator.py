@@ -1003,6 +1003,10 @@ def _format_issue(
     if validation_status in ("needs-human-decision", "validation_failed"):
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
+    # "Let Claude decide" routes this issue to the per-item judge at apply time.
+    # Scoped to needs-human-decision only.
+    if validation_status == "needs-human-decision":
+        lines.append("- [ ] Let Claude decide")
 
     lines.extend([
         f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {issue.get('model', 'unknown')}",

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.apply_orchestrator_base import (
+    VALID_OVERRIDE_VALUES,
     ApplyOrchestratorBase,
     OrchestratorError,
     build_common_arg_parser,
@@ -314,6 +315,9 @@ def format_fix_for_output(group: Dict[str, Any], index: int) -> Dict[str, Any]:
 
     formatted = {
         "index": index,
+        # Stable group identifier so judging subagents / human-decision-batch.md
+        # can reference pre-marked items for routing/recording/resume/overlay.
+        "group_id": group.get("group_hash", ""),
         "title": title,
         "description": desc,
         "desc": desc,  # Keep both for compatibility
@@ -336,6 +340,11 @@ def format_fix_for_output(group: Dict[str, Any], index: int) -> Dict[str, Any]:
             "title": title,
         }),
     }
+
+    # Per-item routing flag: a reviewer pre-marked this group "Let Claude
+    # decide" in the report. Routed to the per-item judge without prompting.
+    if group.get("claude_decide"):
+        formatted["decision_mode"] = "claude_auto_decide"
 
     return formatted
 
@@ -619,22 +628,37 @@ Bulk Approval Examples:
 
         override_count = 0
         for idx, group in enumerate(self.merged, 1):  # 1-based group index
-            # Try integer key match first (code-fixes pattern)
+            # Try integer key match first (code-fixes pattern), then hash-based
+            # match (from HTML/consolidated decisions).
+            matched_key: Any = None
             if idx in self.validation_overrides:
-                old_status = group.get("validation_status", "unknown")
-                group["validation_status"] = self.validation_overrides[idx]
-                group["validation_reason"] = f"User override (was {old_status})"
-                group["user_override"] = True
-                override_count += 1
+                matched_key = idx
             else:
-                # Also try hash-based match (from HTML/consolidated decisions)
                 ghash = group.get("group_hash", "")
                 if ghash and ghash in self.validation_overrides:
-                    old_status = group.get("validation_status", "unknown")
-                    group["validation_status"] = self.validation_overrides[ghash]
-                    group["validation_reason"] = f"User override (was {old_status})"
-                    group["user_override"] = True
-                    override_count += 1
+                    matched_key = ghash
+
+            if matched_key is None:
+                continue
+
+            value = self.validation_overrides[matched_key]
+            if value not in VALID_OVERRIDE_VALUES:
+                print(
+                    f"WARNING: ignoring unknown validation override {value!r} "
+                    f"for issue {matched_key}; leaving its underlying status "
+                    f"unchanged.",
+                    file=sys.stderr,
+                )
+                continue
+            # Route "claude_decide" as a marker, never as a status.
+            if self._route_claude_decide_marker(group, matched_key, value):
+                override_count += 1
+                continue
+            old_status = group.get("validation_status", "unknown")
+            group["validation_status"] = value
+            group["validation_reason"] = f"User override (was {old_status})"
+            group["user_override"] = True
+            override_count += 1
         if override_count:
             print(
                 f"Applied {override_count} user validation overrides",

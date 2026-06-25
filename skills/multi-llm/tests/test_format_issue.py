@@ -347,3 +347,27 @@ class TestFormatIssueEdgeCases:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestLetClaudeDecideIssueCheckbox:
+    """Markdown emit guard for the code-review 'Let Claude decide' checkbox."""
+
+    def _issue(self):
+        return {"title": "T", "description": "D", "file": "a.py", "type": "bug",
+                "model": "m"}
+
+    def test_emits_for_needs_human(self):
+        lines = _format_issue(1, self._issue(),
+                              validation_status="needs-human-decision")
+        assert "- [ ] Let Claude decide" in "\n".join(lines)
+
+    def test_omits_for_validation_failed(self):
+        lines = _format_issue(1, self._issue(),
+                              validation_status="validation_failed")
+        result = "\n".join(lines)
+        assert "- [ ] Let Claude decide" not in result
+        assert "- [ ] Mark valid" in result
+
+    def test_omits_for_valid(self):
+        lines = _format_issue(1, self._issue(), validation_status="valid")
+        assert "- [ ] Let Claude decide" not in "\n".join(lines)

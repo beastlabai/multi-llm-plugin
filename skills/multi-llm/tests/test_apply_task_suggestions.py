@@ -835,7 +835,7 @@ class TestFormatSuggestionForOutput:
         result = orch.format_item_for_output(group, 0)
 
         expected_keys = {
-            "index", "title", "description", "type", "reference",
+            "index", "group_id", "title", "description", "type", "reference",
             "task_reference", "importance", "theme", "category",
             "validation_status", "validation_reason",
             "validation_confidence", "models", "suggestion_count",
@@ -1263,3 +1263,104 @@ class TestHelperFunctions:
         f.write_text("not json{")
         result = load_json_file(str(f))
         assert result is None
+
+
+class TestFormatItemClaudeDecide:
+    """format_item_for_output emits group_id and per-item decision_mode."""
+
+    def _make_orchestrator(self):
+        orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
+        orch.args = argparse.Namespace(plan_file="p.md")
+        return orch
+
+    def _group(self, **extra):
+        g = {
+            "group_hash": "task_g_hash",
+            "theme": "Theme",
+            "validation_status": "needs-human-decision",
+            "suggestions": [{"title": "T", "desc": "d", "reference": "T001"}],
+        }
+        g.update(extra)
+        return g
+
+    def test_group_id_emitted_for_every_item(self):
+        """group_id == group_hash on every human-review item (not just marked)."""
+        orch = self._make_orchestrator()
+        result = orch.format_item_for_output(self._group(), 0)
+        assert result["group_id"] == "task_g_hash"
+        # Unmarked group carries no decision_mode.
+        assert "decision_mode" not in result
+
+    def test_decision_mode_for_claude_decide_group(self):
+        """A claude_decide-marked group emits decision_mode == claude_auto_decide."""
+        orch = self._make_orchestrator()
+        result = orch.format_item_for_output(self._group(claude_decide=True), 0)
+        assert result["group_id"] == "task_g_hash"
+        assert result["decision_mode"] == "claude_auto_decide"
+
+
+class TestOrchestratorOutputClaudeDecideShape:
+    """The serialized orchestrator_output.json carries the new routing fields."""
+
+    def _orch(self, tmp_path):
+        orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
+        orch.args = argparse.Namespace(
+            plan_file="p.md", batch_review_mode="by-importance", claude_decide=False
+        )
+        orch.out_dir = str(tmp_path)
+        orch.plan_path = "p.md"
+        orch.prefix = "feat"
+        # build_output_json backs up the tasks file, so it must exist on disk.
+        tasks_file = tmp_path / "tasks.md"
+        tasks_file.write_text("# Tasks\n\n## T001: First task\nDo something.\n")
+        orch.tasks_file = str(tasks_file)
+        orch.formatted_valid = []
+        orch.formatted_human = []
+        orch.formatted_skipped = []
+        orch.user_skipped_items = []
+        orch.skipped = []
+        orch.valid = []
+        orch.needs_human = []
+        orch.merged = []
+        orch.groups = []
+        orch.batching_stats = {}
+        orch.edit_log = []
+        return orch
+
+    def test_written_output_has_group_id_and_decision_mode(self, tmp_path):
+        orch = self._orch(tmp_path)
+        marked = orch.format_item_for_output(
+            {"group_hash": "h_marked", "theme": "M",
+             "validation_status": "needs-human-decision",
+             "claude_decide": True,
+             "suggestions": [{"title": "A", "desc": "a", "reference": "T001",
+                              "importance": "HIGH"}]},
+            0,
+        )
+        plain = orch.format_item_for_output(
+            {"group_hash": "h_plain", "theme": "P",
+             "validation_status": "needs-human-decision",
+             "suggestions": [{"title": "B", "desc": "b", "reference": "T002",
+                              "importance": "MEDIUM"}]},
+            1,
+        )
+        orch.formatted_human = [marked, plain]
+
+        output = orch.build_output_json([])
+        # Serialize to disk and read back to assert the on-disk shape.
+        out_path = tmp_path / "orchestrator_output.json"
+        out_path.write_text(json.dumps(output), encoding="utf-8")
+        on_disk = json.loads(out_path.read_text())
+
+        nhr = on_disk["needs_human_review"]
+        # Every human-review item carries group_id == source group_hash.
+        assert {it["group_id"] for it in nhr} == {"h_marked", "h_plain"}
+        # Only the marked item carries the per-item routing flag.
+        marked_items = [it for it in nhr if it.get("decision_mode") == "claude_auto_decide"]
+        assert len(marked_items) == 1
+        assert marked_items[0]["group_id"] == "h_marked"
+
+        cfg = on_disk["human_review_config"]
+        assert cfg["claude_decide_item_ids"] == ["h_marked"]
+        # Per-item routing does not flip the global mode.
+        assert cfg["decision_mode"] == "interactive"

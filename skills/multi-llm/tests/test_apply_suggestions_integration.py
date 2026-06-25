@@ -12,6 +12,7 @@ To regenerate the test fixtures:
     uv run -- python tests/test_apply_suggestions_integration.py --setup-fixtures
 """
 
+import copy
 import json
 import os
 import shutil
@@ -1000,48 +1001,30 @@ class TestReportFormat:
                     assert has_validation_line, "New format should have **Validation:** line"
 
 
-def apply_suggestion_overrides(groups, suggestion_overrides):
-    """Replicate per-suggestion override application logic from the orchestrator.
-
-    This mirrors the logic in apply_suggestions_orchestrator.py (lines ~806-838)
-    for testing without running the full orchestrator.
-    """
-    import copy
-    merged = copy.deepcopy(groups)
-
-    for idx, group in enumerate(merged, 1):
-        suggestions = group.get("suggestions", [])
-        modified = False
-        for sugg_idx, sugg in enumerate(suggestions, 1):
-            sid = f"G{idx}S{sugg_idx}"
-            if sid in suggestion_overrides:
-                override_status = suggestion_overrides[sid]
-                if override_status == "invalid":
-                    sugg["_user_override_invalid"] = True
-                elif override_status == "valid":
-                    sugg["_user_override_valid"] = True
-                modified = True
-
-        if modified:
-            # Remove invalid-overridden suggestions
-            remaining = [s for s in suggestions if not s.get("_user_override_invalid")]
-            group["suggestions"] = remaining
-
-            # If all remaining are explicitly marked valid and group was
-            # needs-human-decision/validation_failed, promote to valid
-            if (remaining
-                and all(s.get("_user_override_valid") for s in remaining)
-                and group.get("validation_status") in ("needs-human-decision", "validation_failed")):
-                old_status = group.get("validation_status", "unknown")
-                group["validation_status"] = "valid"
-                group["validation_reason"] = f"All suggestions individually marked valid by user (was {old_status})"
-                group["user_override"] = True
-
-    return merged
-
-
 class TestPerSuggestionOverrides:
-    """Test per-suggestion validation override application logic."""
+    """Test the REAL per-suggestion validation override code path.
+
+    These tests instantiate ``ApplySuggestionsOrchestrator`` and call the
+    production ``apply_suggestion_validation_overrides()`` directly (rather than
+    a stale, duplicated helper). This ensures they exercise the actual logic,
+    including ``claude_decide`` marker handling and group-level propagation.
+    """
+
+    @staticmethod
+    def _run_overrides(groups, suggestion_overrides):
+        """Apply per-suggestion overrides via the real orchestrator method.
+
+        Returns the mutated ``self.merged`` and the orchestrator instance so
+        callers can also assert on ``claude_decide_overrides`` etc.
+        """
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+
+        orch = ApplySuggestionsOrchestrator.__new__(ApplySuggestionsOrchestrator)
+        orch.merged = copy.deepcopy(groups)
+        orch.suggestion_validation_overrides = dict(suggestion_overrides)
+        orch.claude_decide_overrides = set()
+        orch.apply_suggestion_validation_overrides()
+        return orch.merged, orch
 
     def test_suggestion_override_invalid_removes_suggestion(self):
         """Override G1S2 as invalid removes it from the group, keeps others."""
@@ -1057,7 +1040,7 @@ class TestPerSuggestionOverrides:
             }
         ]
         overrides = {"G1S2": "invalid"}
-        result = apply_suggestion_overrides(groups, overrides)
+        result, _ = self._run_overrides(groups, overrides)
 
         # G1S2 (Add logging) should be removed
         assert len(result[0]["suggestions"]) == 2
@@ -1080,7 +1063,7 @@ class TestPerSuggestionOverrides:
             }
         ]
         overrides = {"G1S1": "valid", "G1S2": "valid"}
-        result = apply_suggestion_overrides(groups, overrides)
+        result, _ = self._run_overrides(groups, overrides)
 
         # Group should be promoted to valid
         assert result[0]["validation_status"] == "valid"
@@ -1105,7 +1088,7 @@ class TestPerSuggestionOverrides:
         ]
         # Only mark first suggestion valid, leave others untouched
         overrides = {"G1S1": "valid"}
-        result = apply_suggestion_overrides(groups, overrides)
+        result, _ = self._run_overrides(groups, overrides)
 
         # Group should NOT be promoted (not all suggestions marked valid)
         assert result[0]["validation_status"] == "needs-human-decision"
@@ -1113,6 +1096,60 @@ class TestPerSuggestionOverrides:
         assert "user_override" not in result[0]
         # All 3 suggestions should still be present
         assert len(result[0]["suggestions"]) == 3
+
+    def test_suggestion_override_claude_decide_propagates_to_group(self):
+        """A claude_decide marker on one suggestion routes the whole group to the judge."""
+        groups = [
+            {
+                "group_hash": "g_claude_decide",
+                "theme": "Refactor",
+                "validation_status": "needs-human-decision",
+                "validation_reason": "Unclear blast radius",
+                "suggestions": [
+                    {"title": "Extract helper", "desc": "Pull out shared logic"},
+                    {"title": "Rename module", "desc": "Clarify naming"},
+                ],
+            }
+        ]
+        # Mark only the first suggestion claude_decide.
+        overrides = {"G1S1": "claude_decide"}
+        result, orch = self._run_overrides(groups, overrides)
+
+        group = result[0]
+        # The marked suggestion is kept (not dropped) and tagged.
+        assert len(group["suggestions"]) == 2
+        assert group["suggestions"][0]["claude_decide"] is True
+        # The group is routed to the judge: marker propagated up and registered.
+        assert group["claude_decide"] is True
+        assert "g_claude_decide" in orch.claude_decide_overrides
+        # Status is NOT promoted to valid (claude_decide must win).
+        assert group["validation_status"] == "needs-human-decision"
+        assert "user_override" not in group
+
+    def test_suggestion_override_claude_decide_wins_over_valid(self):
+        """claude_decide must block group promotion even if survivors are all 'valid'."""
+        groups = [
+            {
+                "group_hash": "g_mixed",
+                "theme": "Mixed",
+                "validation_status": "needs-human-decision",
+                "validation_reason": "Needs review",
+                "suggestions": [
+                    {"title": "Tighten validation", "desc": "Stricter checks"},
+                    {"title": "Add audit log", "desc": "Record changes"},
+                ],
+            }
+        ]
+        # One marked valid, the other claude_decide. claude_decide must win:
+        # the group should route to the judge, NOT be promoted to valid.
+        overrides = {"G1S1": "valid", "G1S2": "claude_decide"}
+        result, orch = self._run_overrides(groups, overrides)
+
+        group = result[0]
+        assert group["validation_status"] == "needs-human-decision"
+        assert "user_override" not in group
+        assert group["claude_decide"] is True
+        assert "g_mixed" in orch.claude_decide_overrides
 
 
 if __name__ == "__main__":
@@ -1130,3 +1167,102 @@ if __name__ == "__main__":
     else:
         # Run with pytest
         pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# format_item_for_output — group_id + claude_decide routing flag
+# ---------------------------------------------------------------------------
+
+from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator  # noqa: E402
+import argparse as _argparse  # noqa: E402
+
+
+class TestFormatItemClaudeDecide:
+    """ApplySuggestionsOrchestrator.format_item_for_output routing fields."""
+
+    def _make_orchestrator(self):
+        orch = ApplySuggestionsOrchestrator.__new__(ApplySuggestionsOrchestrator)
+        orch.args = _argparse.Namespace(plan_file="p.md")
+        return orch
+
+    def _group(self, **extra):
+        g = {
+            "group_hash": "sugg_g_hash",
+            "theme": "Theme",
+            "validation_status": "needs-human-decision",
+            "suggestions": [{"title": "T", "desc": "d"}],
+        }
+        g.update(extra)
+        return g
+
+    def test_group_id_on_every_item(self):
+        orch = self._make_orchestrator()
+        result = orch.format_item_for_output(self._group(), 0)
+        assert result["group_id"] == "sugg_g_hash"
+        assert "decision_mode" not in result
+
+    def test_decision_mode_for_marked_group(self):
+        orch = self._make_orchestrator()
+        result = orch.format_item_for_output(self._group(claude_decide=True), 0)
+        assert result["group_id"] == "sugg_g_hash"
+        assert result["decision_mode"] == "claude_auto_decide"
+
+
+class TestOrchestratorOutputClaudeDecideShape:
+    """The serialized orchestrator_output.json carries the new routing fields."""
+
+    def _orch(self, tmp_path):
+        orch = ApplySuggestionsOrchestrator.__new__(ApplySuggestionsOrchestrator)
+        orch.args = _argparse.Namespace(
+            plan_file="p.md", batch_review_mode="by-importance", claude_decide=False
+        )
+        orch.out_dir = str(tmp_path)
+        orch.plan_path = "p.md"
+        orch.prefix = "feat"
+        orch.formatted_valid = []
+        orch.formatted_skipped = []
+        orch.user_skipped_items = []
+        orch.skipped = []
+        orch.valid = []
+        orch.needs_human = []
+        orch.merged = []
+        orch.groups = []
+        orch.batching_stats = {}
+        orch.edit_log = []
+        return orch
+
+    def test_written_output_has_group_id_and_decision_mode(self, tmp_path):
+        orch = self._orch(tmp_path)
+        marked = orch.format_item_for_output(
+            {"group_hash": "h_marked", "theme": "M",
+             "validation_status": "needs-human-decision",
+             "claude_decide": True,
+             "suggestions": [{"title": "A", "desc": "a", "importance": "HIGH"}]},
+            0,
+        )
+        plain = orch.format_item_for_output(
+            {"group_hash": "h_plain", "theme": "P",
+             "validation_status": "needs-human-decision",
+             "suggestions": [{"title": "B", "desc": "b", "importance": "MEDIUM"}]},
+            1,
+        )
+        orch.formatted_human = [marked, plain]
+
+        output = orch.build_output_json([])
+        # Serialize to disk and read back to assert the on-disk shape.
+        out_path = tmp_path / "orchestrator_output.json"
+        out_path.write_text(json.dumps(output), encoding="utf-8")
+        on_disk = json.loads(out_path.read_text())
+
+        nhr = on_disk["needs_human_review"]
+        # Every human-review item carries group_id == source group_hash.
+        assert {it["group_id"] for it in nhr} == {"h_marked", "h_plain"}
+        # Only the marked item carries the per-item routing flag.
+        marked_items = [it for it in nhr if it.get("decision_mode") == "claude_auto_decide"]
+        assert len(marked_items) == 1
+        assert marked_items[0]["group_id"] == "h_marked"
+
+        cfg = on_disk["human_review_config"]
+        assert cfg["claude_decide_item_ids"] == ["h_marked"]
+        # Per-item routing does not flip the global mode.
+        assert cfg["decision_mode"] == "interactive"

@@ -2691,5 +2691,175 @@ class TestValidationOverridesConversion:
         assert group_validation_overrides == {1: "valid", 5: "invalid"}
 
 
+class TestCodeFixesClaudeDecideOverride:
+    """The code-fixes override of apply_group_validation_overrides routes the marker."""
+
+    def _make_orchestrator(self):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        orch.validation_overrides = {}
+        orch.claude_decide_overrides = set()
+        orch.merged = []
+        return orch
+
+    def test_claude_decide_by_integer_issue_key(self):
+        """An integer-keyed claude_decide override is routed as a marker."""
+        orch = self._make_orchestrator()
+        orch.merged = [
+            {
+                "group_hash": "cf_hash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {1: "claude_decide"}  # 1-based issue index
+        orch.apply_group_validation_overrides()
+
+        g = orch.merged[0]
+        assert g["validation_status"] == "needs-human-decision"
+        assert g["validation_status"] != "claude_decide"
+        assert g["claude_decide"] is True
+        assert 1 in orch.claude_decide_overrides
+
+    def test_claude_decide_by_group_hash_key(self):
+        """A hash-keyed claude_decide override (HTML/consolidated) is routed too."""
+        orch = self._make_orchestrator()
+        orch.merged = [
+            {
+                "group_hash": "cf_hash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {"cf_hash": "claude_decide"}
+        orch.apply_group_validation_overrides()
+
+        g = orch.merged[0]
+        assert g["validation_status"] == "needs-human-decision"
+        assert g["claude_decide"] is True
+        assert "cf_hash" in orch.claude_decide_overrides
+
+    def test_unknown_value_warned_and_ignored(self, capsys):
+        """A typo/stale override on a code-fix is warned-and-ignored."""
+        orch = self._make_orchestrator()
+        orch.merged = [
+            {
+                "group_hash": "cf_hash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {1: "garbage"}
+        orch.apply_group_validation_overrides()
+
+        g = orch.merged[0]
+        assert g["validation_status"] == "needs-human-decision"
+        assert g.get("user_override") is not True
+        assert 1 not in orch.claude_decide_overrides
+        assert "garbage" in capsys.readouterr().err
+
+    def test_valid_override_unaffected(self):
+        """The valid/invalid integer-key path still works."""
+        orch = self._make_orchestrator()
+        orch.merged = [
+            {
+                "group_hash": "cf_hash",
+                "validation_status": "needs-human-decision",
+                "suggestions": [],
+            }
+        ]
+        orch.validation_overrides = {1: "valid"}
+        orch.apply_group_validation_overrides()
+        assert orch.merged[0]["validation_status"] == "valid"
+        assert orch.merged[0]["user_override"] is True
+
+
+class TestFormatFixForOutputClaudeDecide:
+    """format_fix_for_output emits group_id and per-item decision_mode."""
+
+    def _group(self, **extra):
+        g = {
+            "group_hash": "fix_g_hash",
+            "theme": "Theme",
+            "validation_status": "needs-human-decision",
+            "suggestions": [{"title": "Fix", "desc": "d", "file": "a.py",
+                             "type": "bug", "importance": "HIGH"}],
+        }
+        g.update(extra)
+        return g
+
+    def test_group_id_on_every_fix(self):
+        result = format_fix_for_output(self._group(), 0)
+        assert result["group_id"] == "fix_g_hash"
+        assert "decision_mode" not in result
+
+    def test_decision_mode_for_marked_fix(self):
+        result = format_fix_for_output(self._group(claude_decide=True), 0)
+        assert result["group_id"] == "fix_g_hash"
+        assert result["decision_mode"] == "claude_auto_decide"
+
+
+class TestOrchestratorOutputClaudeDecideShape:
+    """The serialized orchestrator_output.json carries the new routing fields."""
+
+    def _orch(self, tmp_path):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        orch.args = argparse.Namespace(
+            plan_file="p.md", batch_review_mode="by-importance", claude_decide=False
+        )
+        orch.out_dir = str(tmp_path)
+        orch.plan_path = "p.md"
+        orch.prefix = "feat"
+        orch.formatted_valid = []
+        orch.formatted_human = []
+        orch.formatted_skipped = []
+        orch.user_skipped_items = []
+        orch.skipped = []
+        orch.valid = []
+        orch.needs_human = []
+        orch.merged = []
+        orch.groups = []
+        orch.batching_stats = {}
+        orch.edit_log = []
+        return orch
+
+    def test_written_output_has_group_id_and_decision_mode(self, temp_dir):
+        orch = self._orch(temp_dir)
+        marked = orch.format_item_for_output(
+            {"group_hash": "h_marked", "theme": "M",
+             "validation_status": "needs-human-decision",
+             "claude_decide": True,
+             "suggestions": [{"title": "A", "desc": "a", "file": "a.py",
+                              "type": "bug", "importance": "HIGH"}]},
+            0,
+        )
+        plain = orch.format_item_for_output(
+            {"group_hash": "h_plain", "theme": "P",
+             "validation_status": "needs-human-decision",
+             "suggestions": [{"title": "B", "desc": "b", "file": "b.py",
+                              "type": "bug", "importance": "MEDIUM"}]},
+            1,
+        )
+        orch.formatted_human = [marked, plain]
+
+        output = orch.build_output_json([])
+        # Serialize to disk and read back to assert the on-disk shape.
+        out_path = temp_dir / "orchestrator_output.json"
+        out_path.write_text(json.dumps(output), encoding="utf-8")
+        on_disk = json.loads(out_path.read_text())
+
+        nhr = on_disk["needs_human_review"]
+        # Every human-review item carries group_id == source group_hash.
+        assert {it["group_id"] for it in nhr} == {"h_marked", "h_plain"}
+        # Only the marked item carries the per-item routing flag.
+        marked_items = [it for it in nhr if it.get("decision_mode") == "claude_auto_decide"]
+        assert len(marked_items) == 1
+        assert marked_items[0]["group_id"] == "h_marked"
+
+        cfg = on_disk["human_review_config"]
+        assert cfg["claude_decide_item_ids"] == ["h_marked"]
+        # Per-item routing does not flip the global mode.
+        assert cfg["decision_mode"] == "interactive"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

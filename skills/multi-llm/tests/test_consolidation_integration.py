@@ -924,3 +924,98 @@ class TestStableIdPersistence:
             ids_per_run.append(run_ids)
 
         assert ids_per_run[0] == ids_per_run[1]
+
+
+# ===========================================================================
+# "Let Claude decide" on the consolidated surface (Section 5)
+# ===========================================================================
+
+
+class TestConsolidatedClaudeDecide:
+    """Emit + parse + round-trip of the consolidated 'Let Claude decide' option."""
+
+    def _cg(self, cid, indices, ids):
+        return {
+            "consolidated_id": cid,
+            "display_index": 1,
+            "title": "Combined",
+            "description": "Merged",
+            "importance": "MEDIUM",
+            "reference": "Task 1",
+            "type": "modification",
+            "underlying_group_indices": indices,
+            "underlying_group_ids": ids,
+            "model_count": 1,
+            "original_suggestion_count": len(indices),
+            "is_singleton": len(indices) == 1,
+            "reasoning": "Test",
+        }
+
+    def test_emit_checkbox_for_needs_human(self, tmp_path):
+        """generate_consolidated_report emits the checkbox for a needs-human group."""
+        groups = [_make_group("Theme G1", "Task 1")]
+        cg = self._cg("abc123def456", [0], [generate_group_id(groups[0])])
+        validation = [{"group_index": 0, "status": "needs-human-decision"}]
+        path = generate_consolidated_report(
+            [cg], groups, str(tmp_path), "feat", validation=validation
+        )
+        content = Path(path).read_text()
+        assert "- [ ] Let Claude decide" in content
+
+    def test_omit_checkbox_for_valid(self, tmp_path):
+        """No checkbox when the aggregate status is not needs-human-decision."""
+        groups = [_make_group("Theme G1", "Task 1")]
+        cg = self._cg("abc123def456", [0], [generate_group_id(groups[0])])
+        validation = [{"group_index": 0, "status": "valid"}]
+        path = generate_consolidated_report(
+            [cg], groups, str(tmp_path), "feat", validation=validation
+        )
+        content = Path(path).read_text()
+        assert "- [ ] Let Claude decide" not in content
+        # The existing checkboxes are still present.
+        assert "- [ ] Mark valid" in content
+
+    def test_round_trip_claude_decide_preserved_as_marker(self, tmp_path):
+        """A consolidated claude_decide resolves to group indices, kept verbatim."""
+        phase_dir = str(tmp_path)
+        groups = [
+            _make_group("Theme G1", "Task 1"),
+            _make_group("Theme G2", "Task 1"),
+        ]
+        g_ids = [generate_group_id(g) for g in groups]
+        cg1_id = generate_consolidated_id([g_ids[0], g_ids[1]])
+        consolidated_groups = [self._cg(cg1_id, [0, 1], [g_ids[0], g_ids[1]])]
+
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# Test Plan", encoding="utf-8")
+        metadata = _build_metadata(
+            phase_dir, str(plan_file), groups, consolidated_groups, merged_count=1
+        )
+        _write_json(
+            tmp_path / "consolidated.json",
+            {"consolidated_groups": consolidated_groups, "metadata": metadata},
+        )
+
+        report_lines = [
+            "# Report",
+            "",
+            f"## CG1 [{cg1_id}]: Combined",
+            "- [ ] Skip this group",
+            "- [ ] Mark valid",
+            "- [ ] Mark invalid",
+            "- [ ] Needs human attention",
+            "- [x] Let Claude decide",
+            "",
+        ]
+        (tmp_path / "consolidated-report.md").write_text(
+            "\n".join(report_lines), encoding="utf-8"
+        )
+
+        skipped, overrides = load_merged_suggestions(
+            phase_dir, groups, str(plan_file)
+        )
+
+        # Resolves to BOTH underlying group indices, preserved as the marker
+        # string (NOT flattened into a status).
+        assert overrides.get(0) == "claude_decide"
+        assert overrides.get(1) == "claude_decide"

@@ -1051,6 +1051,11 @@ def format_group(group: Dict[str, Any], group_idx: int) -> List[str]:
     if validation_status in ("needs-human-decision", "validation_failed"):
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
+    # "Let Claude decide" routes this item to the per-item judge at apply time.
+    # Scoped to needs-human-decision only (validation_failed stays valid/invalid
+    # or --revalidate).
+    if validation_status == "needs-human-decision":
+        lines.append("- [ ] Let Claude decide")
 
     lines.extend([
         f"**Validation:** {validation_str} | "
@@ -1121,6 +1126,10 @@ def format_suggestion_in_group(
     if group_validation_status in ("needs-human-decision", "validation_failed") and group_suggestion_count > 1:
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
+        # "Let Claude decide" — needs-human-decision only. Single-suggestion
+        # groups use the group-level checkbox (no per-suggestion select here).
+        if group_validation_status == "needs-human-decision":
+            lines.append("- [ ] Let Claude decide")
     lines.extend([
         f"**Importance:** {importance} | "
         f"**Type:** {stype} | "
