@@ -157,18 +157,14 @@ Model selection priority (highest first): `--models`, then `--interactive`, then
 
 ## Per-project configuration
 
-`providers.yaml` (above) is the **base** layer, shared by every repo. To give a
-single repository its own **selection** defaults without editing the installed
-plugin, add an override file:
+`providers.yaml` (above) is the **base** layer shared by every repo. To give one
+repository its own model/provider **selection** defaults — without editing the
+installed plugin — add an optional, auto-discovered override file at
+`<git-root>/.multi-llm/providers.yaml`. When it's absent, behavior is unchanged.
 
-```
-<git-root>/.multi-llm/providers.yaml
-```
-
-It is **optional and auto-discovered**. When absent, behavior is identical to
-today (base defaults). It overrides only the *selection* keys — `default_provider`,
-`defaults.models`, `defaults.quick_models`, `defaults.modes` — and inherits
-everything else from the base, so it can be tiny:
+It overrides only the *selection* keys (`default_provider`, `defaults.models`,
+`defaults.quick_models`, `defaults.modes`) and inherits everything else from the
+base, so it stays tiny:
 
 ```yaml
 # .multi-llm/providers.yaml — only what this repo changes
@@ -181,131 +177,35 @@ defaults:
     - claude-code:opus
 ```
 
-### Layering and precedence
+Create one with `/multi-llm:multi-llm --init` (add `--gitignore` to keep it
+developer-local, `--force` to overwrite an existing file).
 
-Config is assembled lowest → highest, each layer **deep-merged** over the one below:
+### Good to know
 
-1. **Base** — the plugin's `providers.yaml` (always present).
-2. **Project-local** — `<git-root>/.multi-llm/providers.yaml` (the feature).
-3. **Env override** — `MULTI_LLM_PROVIDERS_CONFIG=/path.yaml` (escape hatch; see below).
+- **Precedence (low → high):** base `providers.yaml` → project-local
+  `.multi-llm/providers.yaml` → `MULTI_LLM_PROVIDERS_CONFIG=/path.yaml` env override.
+  Each layer is deep-merged over the one below.
+- **Lists replace, they don't append.** Set `defaults.models` and you get exactly
+  that list. Omitting or blanking a key inherits the base; an explicit empty list
+  `[]` is the only way to clear one — and an empty `defaults.models`/`quick_models`
+  falls back to interactive selection (or fails in unattended runs like `--full`).
+- **Per-mode lists win.** Modes with a base `defaults.modes.<mode>` entry (e.g.
+  `--review-plan`, `--review-code`) ignore a project-wide `defaults.models` —
+  override `defaults.modes.<mode>` to change those.
+- **Requires a git repo.** Discovery resolves the git root, so there's one override
+  per repo, shared repo-wide (no per-subdirectory configs). Non-git projects must
+  use `MULTI_LLM_PROVIDERS_CONFIG` instead.
+- **Commit or ignore?** Commit it for a team-wide standard; ignore it (`--gitignore`)
+  or use the env override for personal preferences.
 
-**Lists replace, they do not append.** If you set `defaults.models`, you get
-*exactly* that list — the base list is discarded, not extended. Only nested maps
-deep-merge; any list or scalar value replaces wholesale.
+### Safety
 
-### Blank vs. clear vs. omit
-
-| You write | Result |
-| --- | --- |
-| Omit the key | Inherit the base value |
-| `models:` (blank / null) | **Also inherit the base** — a blank value is *not* "clear" |
-| `models: []` (empty list) | **Wipe out** the inherited list (use no models here) |
-
-A blank/omitted key inherits the base; an **explicit empty list `[]` is the only
-way to deliberately empty a list**. `[]` is a footgun, not a no-op: an empty
-`defaults.models` falls back to interactive selection (and fails in unattended
-runs like `--full`); an empty `quick_models` errors under `--quick`. You **cannot
-unset a scalar back to "absent"** — you can only overwrite it. Likewise inherited
-`providers.<name>` definitions and `defaults.modes.<mode>` entries can be changed
-but **not removed** (only overwritten, e.g. `defaults.modes.code-review: []`).
-
-### Two caveats worth knowing
-
-- **A mode-specific base list still wins over a project-wide `defaults.models`.**
-  `defaults.modes[<mode>]` is consulted *before* `defaults.models`. Because the
-  project file deep-merges over the base, setting **only** `defaults.models` does
-  **not** change modes that have a base `defaults.modes` entry (e.g. `--review-plan`
-  / `--review-code`) — those keep their mode-specific list. To change a specific
-  mode's models, override `defaults.modes.<mode>` (not just `defaults.models`).
-- **Auto-discovery requires a git repo.** Discovery resolves the git root via
-  `git rev-parse --show-toplevel`. A directory that is not a git repository has no
-  auto-discovered layer at all — `.multi-llm/providers.yaml` is ignored even if it
-  sits in the current directory. Non-git projects must use
-  `MULTI_LLM_PROVIDERS_CONFIG` instead.
-
-### Where discovery is anchored: plan path → CWD
-
-The git root that discovery resolves is **anchored at the plan file's directory
-when a plan path is supplied**, and falls back to the **current working directory**
-otherwise. In a real run the orchestrator threads the plan-file path through, so
-config discovery resolves from the *same* git root the orchestrator derives from
-the plan (`get_project_root(plan_path)`) — not from CWD. CWD is only a fallback,
-used when no plan path is available.
-
-This matters when CWD is not the plan's git root — centrally-stored plans, an
-absolute plan path from another repo, multi-repo workflows, or a CI job invoked
-from a subdirectory. In those cases discovery follows the **plan's** repo, so the
-loaded `.multi-llm/providers.yaml` matches the repo the orchestrator actually
-operates on rather than whatever happens to be in CWD. (The env override
-`MULTI_LLM_PROVIDERS_CONFIG`, by contrast, is always CWD-anchored for relative
-paths — see below.)
-
-### One override per repository
-
-Although discovery is *anchored* at the plan path (above), it still resolves up to
-the git **root**, so a repository has exactly **one** `.multi-llm/providers.yaml`,
-shared repo-wide. The anchor selects *which repo's* config is loaded, not a finer
-scope within it: two plans in the same repo always resolve to the same file. A
-monorepo with multiple apps/packages **cannot** set per-package or per-subdirectory
-defaults via auto-discovery — every subdirectory resolves to the same git root. For
-genuinely per-plan or per-subdirectory overrides, use `MULTI_LLM_PROVIDERS_CONFIG`
-per invocation.
-
-### Scaffold it with `--init`
-
-```text
-/multi-llm:multi-llm --init                 # writes a commented stub at the git root
-/multi-llm:multi-llm --init --gitignore     # also ignore it (developer-local)
-/multi-llm:multi-llm --init --force         # overwrite an existing file
-```
-
-Under the hood this runs the standalone scaffolder (no orchestrator):
-
-```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/init_config.py [--dir PATH] [--force] [--gitignore]
-```
-
-It refuses to clobber an existing file without `--force` and prints the path it wrote.
-
-### Commit it or ignore it?
-
-The override is **trackable by default** — that's the common case:
-
-- **Commit** it for a **team-wide, repo-standard** model/provider selection that
-  everyone shares.
-- **Ignore** it for **personal, per-developer** preferences: run
-  `--init --gitignore` (which appends `.multi-llm/` to `.gitignore`), or point
-  `MULTI_LLM_PROVIDERS_CONFIG` at a fully out-of-tree path. This keeps individual
-  model choices out of the shared repo.
-
-Decide deliberately so teams neither accidentally commit individual model choices
-nor accidentally ignore a config they meant to share.
-
-### Env override: `MULTI_LLM_PROVIDERS_CONFIG`
-
-Set `MULTI_LLM_PROVIDERS_CONFIG=/path/to.yaml` to layer a config on top of the
-project-local file (highest precedence) — useful for CI or one-offs, and the only
-override mechanism for non-git directories. **Relative paths are resolved against
-the current working directory** (which is the repo root in real runs), not the git
-root. A value that is set but points at a missing file warns and is skipped.
-
-### Trust model & safety
-
-Running multi-llm inside a repo **auto-loads that repo's
-`.multi-llm/providers.yaml`** — so a freshly cloned, untrusted repo can ship one
-that changes which providers/models a run selects. The blast radius is limited to
-**selection**, not code execution: provider binaries are hardcoded in the plugin,
-and the config `command` field is documentation-only and is **never executed from
-config**, in any layer. For that reason the auto-discovered layer is restricted to
-selection keys — a `providers:` block there is **ignored** (dropped with a warning)
-so cloned content cannot redefine provider capabilities.
-
-A **present-but-malformed** explicit override (bad YAML, a non-mapping root, an
-unreadable file) **fails fast** with a clear error naming the file, rather than
-silently degrading to the base (which could run the wrong, more expensive models).
-An **absent** override falls through silently to the base. Set
-`MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to opt back into best-effort
-warn-and-skip loading.
+A repo's override is auto-loaded, so a cloned repo can change which models a run
+selects — but never *what executes*: provider binaries are hardcoded and the config
+`command` field is never run. The override is limited to selection keys (a
+`providers:` block is ignored, with a warning). A present-but-malformed explicit
+override fails fast with a clear error naming the file; set
+`MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to warn-and-skip instead.
 
 ---
 
