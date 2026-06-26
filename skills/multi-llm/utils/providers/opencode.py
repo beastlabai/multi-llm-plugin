@@ -4,7 +4,7 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, ModelListing, build_models_listing, parse_line_ids
 
 
 class OpenCodeProvider(LLMProvider):
@@ -23,12 +23,24 @@ class OpenCodeProvider(LLMProvider):
     def default_timeout(self) -> int:
         return 600
 
+    can_list_models = True
+
     def is_available(self) -> bool:
         return shutil.which("opencode") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
         # opencode run --format json --model <model> "<prompt>"
         return ["opencode", "run", "--format", "json", "--model", model, prompt]
+
+    def list_models(self, curated: List[str], *, timeout: int = 10) -> ModelListing:
+        """List opencode models via `opencode models` (curated fallback).
+
+        Output is one ``provider/model`` id per line (e.g. ``opencode/sonnet``);
+        the ``/`` namespace is kept verbatim as the bare id. See ``parse_line_ids``.
+        """
+        return build_models_listing(
+            ["opencode", "models"], parse_line_ids, curated, timeout=timeout
+        )
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse NDJSON event stream output from OpenCode.

@@ -58,8 +58,26 @@
 # .multi-llm/providers.yaml shared repo-wide. A monorepo CANNOT set per-package
 # or per-subdirectory defaults via auto-discovery — use MULTI_LLM_PROVIDERS_CONFIG
 # per-invocation for that. There are no per-plan or per-subdirectory overrides.
+#
+# ----------------------------------------------------------------------------
+# MODE SHADOWING — these globals do NOT cover modes that set their own list
+# ----------------------------------------------------------------------------
+# The `default_provider` / `defaults.models` / `defaults.quick_models` in the
+# managed block below are GLOBAL defaults. They apply to a mode (review-plan,
+# code-review, review-tasks, ask) ONLY when that mode has no
+# `defaults.modes.<mode>` entry here or in an inherited layer — a mode-specific
+# list still WINS for that mode. `--init`'s interactive writer sets only these
+# globals; to change a specific mode, add a `defaults.modes.<mode>` block here
+# yourself (see the modes example below).
 # =============================================================================
 
+
+# <<< multi-llm:init-managed >>>
+# Everything BETWEEN these two markers is the SELECTION block. `--init`'s
+# interactive writer REPLACES this whole region on each run; everything OUTSIDE
+# it (all comments above and below, including the MODE SHADOWING note) is
+# preserved verbatim across a re-init. Hand-edits inside the markers are
+# overwritten by the next `--init --force`.
 
 # --- default_provider --------------------------------------------------------
 # Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
@@ -109,3 +127,4 @@ defaults:
   #   code-review:
   #     models:
   #       - cursor-agent:gpt-5.4-high
+# <<< /multi-llm:init-managed >>>

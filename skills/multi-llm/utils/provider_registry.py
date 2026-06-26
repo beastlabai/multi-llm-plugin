@@ -291,6 +291,17 @@ def _load_override_layer(layer_name: str, path: Path, permissive: bool) -> Optio
     return data
 
 
+def load_base_config() -> dict:
+    """Public accessor for the built-in base ``providers.yaml`` (no overrides).
+
+    Used by ``--init`` so the interactive flow reflects the plugin's canonical
+    catalog (curated models, provider metadata, declaration order) independent of
+    any project-local override or ``MULTI_LLM_PROVIDERS_CONFIG`` that may have
+    altered the merged runtime view from :func:`load_config`.
+    """
+    return _load_base_config()
+
+
 def load_config(anchor: Optional[Union[str, Path]] = None,
                 permissive: Optional[bool] = None) -> dict:
     """Load layered providers configuration (base → project-local → env).
@@ -384,8 +395,44 @@ def get_provider_timeout(provider_name: str) -> int:
     return provider.default_timeout if provider else 1200
 
 
-def is_model_valid(spec: str, anchor: Optional[Union[str, Path]] = None) -> bool:
+def _collect_configured_specs(anchor: Optional[Union[str, Path]] = None) -> set:
+    """Canonical set of provider:model specs the user explicitly configured.
+
+    Walks the merged defaults.models + defaults.quick_models + every
+    defaults.modes.<mode> entry (both the bare-list shape and the
+    {"models": [...], "quick": [...]} dict shape), then canonicalizes each raw
+    entry through parse_model_spec so a bare (prefix-less) id resolves against the
+    same anchor-aware default_provider and compares equal to a resolved warned spec.
+    """
+    config = load_config(anchor=anchor)
+    defaults = config.get("defaults", {}) or {}
+    raw: List[str] = []
+    raw += defaults.get("models", []) or []
+    raw += defaults.get("quick_models", []) or []
+    for mode_val in (defaults.get("modes", {}) or {}).values():
+        if isinstance(mode_val, dict):            # {models, quick} shape
+            raw += mode_val.get("models", []) or []
+            raw += mode_val.get("quick", []) or []
+        elif isinstance(mode_val, list):          # bare-list shape
+            raw += mode_val
+        # any other shape (str/None/etc.) is ignored, not exploded
+    canon = set()
+    for spec in raw:
+        if not isinstance(spec, str) or not spec.strip():
+            continue
+        provider, model = parse_model_spec(spec, anchor=anchor)
+        canon.add(f"{provider}:{model}")
+    return canon
+
+
+def is_model_valid(spec: str, anchor: Optional[Union[str, Path]] = None, *,
+                   configured: Optional[set] = None) -> bool:
     """Check if a model spec is valid (exists in config).
+
+    A spec is valid if either (a) the user explicitly configured it in
+    ``defaults.*`` — so a model deliberately placed in the config is honoured even
+    when it is absent from the provider catalog (suppressing the spurious "unknown
+    model" warning) — or (b) it exists in the provider catalog.
 
     Args:
         spec: Model spec ('provider:model' or a bare, prefix-less model name).
@@ -393,8 +440,22 @@ def is_model_valid(spec: str, anchor: Optional[Union[str, Path]] = None) -> bool
                 parse_model_spec/get_available_models so a bare spec resolves its
                 default_provider against the plan-derived project-local config
                 rather than the CWD-anchored one.
+        configured: Optional override of the canonical configured set (used by
+                tests / explicit injection). When ``None``, the set is built
+                internally from the merged ``defaults.*`` via
+                ``_collect_configured_specs``.
+
+    The spec is canonicalized through ``parse_model_spec`` *before* the membership
+    test so a bare spec compares canonically against the canonical configured set.
+    Provider-existence is NOT short-circuited: a spec naming a non-existent
+    provider only matches ``configured`` if that exact typo was written into
+    ``defaults.*``; otherwise the catalog-membership path still returns False.
     """
+    if configured is None:
+        configured = _collect_configured_specs(anchor=anchor)
     provider_name, model = parse_model_spec(spec, anchor=anchor)
+    if f"{provider_name}:{model}" in configured:   # canonical provider:model
+        return True
     models_by_provider = get_available_models(anchor=anchor)
     if provider_name not in models_by_provider:
         return False

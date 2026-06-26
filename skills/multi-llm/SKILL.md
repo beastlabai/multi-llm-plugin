@@ -11,7 +11,7 @@ allowed-tools:
   - AskUserQuestion
   - Glob
   - Grep
-argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status|--init] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force]
+argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status|--init] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force] [--gitignore|--template-only|--non-interactive|--timeout SECONDS (--init only)]
 ---
 
 # Multi-LLM Skill
@@ -51,7 +51,7 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 9. **Full Workflow** (`--full`): Run all modes in sequence
 10. **Status** (`--status`): Show current workflow state and suggested next action
 11. **Ask** (`--ask`): Ask each model a free-text question about a plan; aggregate answers into one markdown file
-12. **Init Config** (`--init`): Scaffold a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`)
+12. **Init Config** (`--init`): Set up a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`). On a TTY it's interactive (detect installed CLIs, pick default + `--quick` model panels, "Show all…" reveals each CLI's full catalog); off a TTY or with `--template-only` / `--non-interactive` it writes the commented stub. Flags: `--gitignore`, `--force`, `--template-only`, `--non-interactive`, `--timeout SECONDS`.
 
 ## Quick Start
 
@@ -163,11 +163,13 @@ A repository can override the *selection* defaults (`default_provider`,
 installed plugin by adding `<git-root>/.multi-llm/providers.yaml`. It is optional
 and auto-discovered; absent → base behavior, unchanged. Config is layered
 base → project-local → `MULTI_LLM_PROVIDERS_CONFIG` env override, deep-merged with
-**lists replacing wholesale**. Scaffold a commented stub with the **`--init`**
-flag (routed via `instructions/init-config.md`):
+**lists replacing wholesale**. Set one up with the **`--init`**
+flag (routed via `instructions/init-config.md`) — interactive on a TTY, commented
+stub otherwise:
 
 ```bash
-/multi-llm:multi-llm --init                 # writes <git-root>/.multi-llm/providers.yaml
+/multi-llm:multi-llm --init                 # interactive picker (TTY); writes <git-root>/.multi-llm/providers.yaml
+/multi-llm:multi-llm --init --template-only # write the commented stub to hand-edit
 /multi-llm:multi-llm --init --gitignore     # keep it developer-local (untracked)
 ```
 

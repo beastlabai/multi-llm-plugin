@@ -15,6 +15,8 @@ from utils.interactive import (
     _try_gum_choose,
     _try_fzf_multi,
     select_models_interactive,
+    select_multi,
+    UNAVAILABLE,
 )
 
 
@@ -90,12 +92,12 @@ class TestNumberedPrompt:
 class TestTryGumChoose:
     """Tests for _try_gum_choose function."""
 
-    def test_returns_none_when_gum_not_installed(self, monkeypatch):
-        """Test returns None when gum is not installed."""
+    def test_returns_unavailable_when_gum_not_installed(self, monkeypatch):
+        """Test returns UNAVAILABLE when gum is not installed (cascade falls through)."""
         monkeypatch.setattr('shutil.which', lambda x: None)
 
         result = _try_gum_choose(["a", "b"], "prompt")
-        assert result is None
+        assert result is UNAVAILABLE
 
     @patch('subprocess.run')
     @patch('shutil.which')
@@ -112,8 +114,12 @@ class TestTryGumChoose:
 
     @patch('subprocess.run')
     @patch('shutil.which')
-    def test_returns_none_on_empty_selection(self, mock_which, mock_run):
-        """Test returns None when no items selected."""
+    def test_returns_empty_list_on_empty_selection(self, mock_which, mock_run):
+        """Test returns [] (NOT UNAVAILABLE) when gum ran but nothing was selected.
+
+        An empty selection is a deliberate cancel/Esc, not an unavailable backend,
+        so it must be a concrete empty list that stops the cascade.
+        """
         mock_which.return_value = "/usr/bin/gum"
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -121,18 +127,43 @@ class TestTryGumChoose:
         )
 
         result = _try_gum_choose(["model-a", "model-b"], "prompt")
-        assert result is None
+        assert result == []
+        assert result is not UNAVAILABLE
+
+    @patch('subprocess.run')
+    @patch('shutil.which')
+    def test_returns_empty_list_on_nonzero_exit(self, mock_which, mock_run):
+        """Test returns [] when gum exits non-zero (Esc cancel), not UNAVAILABLE."""
+        mock_which.return_value = "/usr/bin/gum"
+        mock_run.return_value = MagicMock(
+            returncode=130,
+            stdout=""
+        )
+
+        result = _try_gum_choose(["model-a", "model-b"], "prompt")
+        assert result == []
+        assert result is not UNAVAILABLE
+
+    @patch('subprocess.run')
+    @patch('shutil.which')
+    def test_returns_unavailable_on_subprocess_failure(self, mock_which, mock_run):
+        """Test returns UNAVAILABLE when the gum subprocess fails to launch."""
+        mock_which.return_value = "/usr/bin/gum"
+        mock_run.side_effect = OSError("boom")
+
+        result = _try_gum_choose(["model-a", "model-b"], "prompt")
+        assert result is UNAVAILABLE
 
 
 class TestTryFzfMulti:
     """Tests for _try_fzf_multi function."""
 
-    def test_returns_none_when_fzf_not_installed(self, monkeypatch):
-        """Test returns None when fzf is not installed."""
+    def test_returns_unavailable_when_fzf_not_installed(self, monkeypatch):
+        """Test returns UNAVAILABLE when fzf is not installed (cascade falls through)."""
         monkeypatch.setattr('shutil.which', lambda x: None)
 
         result = _try_fzf_multi(["a", "b"], "prompt")
-        assert result is None
+        assert result is UNAVAILABLE
 
     @patch('subprocess.run')
     @patch('shutil.which')
@@ -146,6 +177,20 @@ class TestTryFzfMulti:
 
         result = _try_fzf_multi(["model-a", "model-b", "model-c"], "prompt")
         assert result == ["model-b"]
+
+    @patch('subprocess.run')
+    @patch('shutil.which')
+    def test_returns_empty_list_on_cancel(self, mock_which, mock_run):
+        """Test returns [] (NOT UNAVAILABLE) when fzf ran but the user cancelled."""
+        mock_which.return_value = "/usr/bin/fzf"
+        mock_run.return_value = MagicMock(
+            returncode=130,
+            stdout=""
+        )
+
+        result = _try_fzf_multi(["model-a", "model-b"], "prompt")
+        assert result == []
+        assert result is not UNAVAILABLE
 
 
 class TestSelectModelsInteractive:
@@ -169,4 +214,98 @@ class TestSelectModelsInteractive:
         monkeypatch.setattr('builtins.input', lambda _: "1")
 
         result = select_models_interactive(["model-a", "model-b"])
+        assert result == ["model-a"]
+
+
+class TestSelectMultiCascade:
+    """select_multi cascade: UNAVAILABLE falls through; a cancel does NOT."""
+
+    def test_unavailable_backend_falls_through_to_next(self, monkeypatch):
+        """gum UNAVAILABLE → cascade tries fzf, whose selection is returned."""
+        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
+        monkeypatch.setattr(
+            'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
+        )
+        monkeypatch.setattr(
+            'utils.interactive._try_fzf_multi', lambda opts, prompt: ["model-b"]
+        )
+
+        called = {"numbered": False}
+
+        def _numbered(opts, prompt):
+            called["numbered"] = True
+            return ["should-not-happen"]
+
+        monkeypatch.setattr('utils.interactive._numbered_prompt', _numbered)
+
+        result = select_multi(["model-a", "model-b"], "prompt")
+        assert result == ["model-b"]
+        assert called["numbered"] is False
+
+    def test_gum_cancel_does_not_cascade_to_fzf_or_numbered(self, monkeypatch):
+        """A cancelled gum (ran → []) stops the cascade and returns [].
+
+        This is the regression guard for the reported bug: an Esc / empty gum
+        selection must NOT fall through and re-prompt the user via fzf or the
+        numbered fallback.
+        """
+        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
+        monkeypatch.setattr(
+            'utils.interactive._try_gum_choose', lambda opts, prompt: []
+        )
+
+        calls = {"fzf": False, "numbered": False}
+
+        def _fzf(opts, prompt):
+            calls["fzf"] = True
+            return ["leaked-from-fzf"]
+
+        def _numbered(opts, prompt):
+            calls["numbered"] = True
+            return ["leaked-from-numbered"]
+
+        monkeypatch.setattr('utils.interactive._try_fzf_multi', _fzf)
+        monkeypatch.setattr('utils.interactive._numbered_prompt', _numbered)
+
+        result = select_multi(["model-a", "model-b"], "prompt")
+        assert result == []
+        assert calls["fzf"] is False
+        assert calls["numbered"] is False
+
+    def test_fzf_cancel_does_not_cascade_to_numbered(self, monkeypatch):
+        """gum UNAVAILABLE, fzf ran-but-cancelled → return []; numbered not used."""
+        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
+        monkeypatch.setattr(
+            'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
+        )
+        monkeypatch.setattr(
+            'utils.interactive._try_fzf_multi', lambda opts, prompt: []
+        )
+
+        called = {"numbered": False}
+
+        def _numbered(opts, prompt):
+            called["numbered"] = True
+            return ["leaked"]
+
+        monkeypatch.setattr('utils.interactive._numbered_prompt', _numbered)
+
+        result = select_multi(["model-a", "model-b"], "prompt")
+        assert result == []
+        assert called["numbered"] is False
+
+    def test_both_unavailable_falls_back_to_numbered(self, monkeypatch):
+        """gum and fzf both UNAVAILABLE → numbered fallback is used."""
+        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
+        monkeypatch.setattr(
+            'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
+        )
+        monkeypatch.setattr(
+            'utils.interactive._try_fzf_multi', lambda opts, prompt: UNAVAILABLE
+        )
+        monkeypatch.setattr(
+            'utils.interactive._numbered_prompt', lambda opts, prompt: ["model-a"]
+        )
+
+        result = select_multi(["model-a", "model-b"], "prompt")
         assert result == ["model-a"]

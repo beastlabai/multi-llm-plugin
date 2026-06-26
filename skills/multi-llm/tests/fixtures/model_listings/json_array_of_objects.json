@@ -1,0 +1,5 @@
+[
+  {"id": "gpt-5.2-high", "name": "GPT-5.2 High"},
+  {"id": "composer-2.5", "name": "Composer 2.5"},
+  {"id": "claude-opus-4-8-thinking-high", "name": "Opus 4.8 Thinking"}
+]

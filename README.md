@@ -177,8 +177,17 @@ defaults:
     - claude-code:opus
 ```
 
-Create one with `/multi-llm:multi-llm --init` (add `--gitignore` to keep it
-developer-local, `--force` to overwrite an existing file).
+Create one with `/multi-llm:multi-llm --init`. On a terminal this is
+**interactive**: it detects which provider CLIs are installed, shows each one's
+curated models first (choose **"Show all…"** to browse that CLI's full catalog
+behind a fuzzy filter, or **"Enter a model id manually…"** for anything else),
+then has you pick the default and `--quick` panels and a `default_provider`, and
+writes only those selection keys after a confirm step. Off a terminal — or with
+`--template-only` / `--non-interactive` (e.g. CI) — it instead writes the
+commented stub for you to hand-edit. Add `--gitignore` to keep the file
+developer-local, `--force` to overwrite an existing one, and `--timeout SECONDS`
+to bound how long a `models` listing may take (default 10s; a listing that
+fails, times out, or needs auth silently falls back to the curated list).
 
 ### Good to know
 

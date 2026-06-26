@@ -1237,11 +1237,17 @@ class TestFailFastVsPermissive:
 
 @pytest.mark.config_override
 class TestInitConfigScaffolder:
-    """init_config.py scaffolding + packaging guard."""
+    """init_config.py scaffolding + packaging guard.
+
+    Interactive is now the TTY default, so these verbatim-copy assertions pass
+    ``--template-only`` explicitly to pin the template path regardless of whether
+    the test runner happens to expose a TTY. (See the interactive flow's own tests
+    in tests/test_init_interactive.py.)
+    """
 
     def _run_init(self, target_dir, *extra):
         import init_config
-        return init_config.main(["--dir", str(target_dir), *extra])
+        return init_config.main(["--dir", str(target_dir), "--template-only", *extra])
 
     def test_template_asset_exists_packaging_guard(self):
         import init_config
@@ -1354,3 +1360,109 @@ class TestOrchestratorIntegration:
         _reset_cache()
         cwd_based = resolve_models(mode=None)
         assert cwd_based == ["cursor-agent:auto"]
+
+
+@pytest.mark.config_override
+class TestIsModelValidOptionB:
+    """is_model_valid honours explicitly-configured defaults (step 5, Option B).
+
+    A model deliberately placed in ``defaults.*`` is treated as valid even when
+    it is absent from the provider catalog, which suppresses the spurious
+    "unknown model" warning. The configured set is built INTERNALLY from the
+    merged config (no threading from call sites); an optional ``configured``
+    override exists for tests / explicit injection.
+    """
+
+    def test_explicit_configured_override_param(self, reg):
+        # The override param short-circuits without consulting the catalog.
+        assert is_model_valid(
+            "cursor-agent:made-up", configured={"cursor-agent:made-up"}
+        ) is True
+
+    def test_configured_set_built_internally(self, monkeypatch, tmp_path):
+        # Real git repo: a project override puts a made-up model in defaults.models.
+        # No `configured` argument is passed → the set must be derived internally.
+        _patch_base_only(monkeypatch)  # FIXED_BASE base, real discovery
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  models:\n    - cursor-agent:made-up\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        _reset_cache()
+        # made-up is NOT in the FIXED_BASE catalog, yet it is configured → valid.
+        assert is_model_valid("cursor-agent:made-up", anchor=str(tmp_path)) is True
+
+    def test_unconfigured_and_uncatalogued_is_false(self, reg):
+        # Neither configured (in FIXED_BASE defaults) nor present in the catalog.
+        assert is_model_valid("cursor-agent:not-a-real-model") is False
+
+    def test_bare_spec_canonicalizes_against_default_provider(self, monkeypatch):
+        # A bare spec "opus" in defaults.models resolves against the configured
+        # default_provider. With claude-code as default it canonicalizes to
+        # claude-code:opus and validates / suppresses. Use a base whose defaults
+        # contain only the single bare spec so the configured set is exact.
+        base = copy.deepcopy(FIXED_BASE)
+        base["default_provider"] = "claude-code"
+        base["defaults"] = {"models": ["opus"]}
+        monkeypatch.setattr(
+            registry, "_load_base_config", lambda: copy.deepcopy(base)
+        )
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        _reset_cache()
+        assert registry._collect_configured_specs() == {"claude-code:opus"}
+        assert is_model_valid("opus") is True
+        assert is_model_valid("claude-code:opus") is True
+
+    def test_bare_spec_canonicalizes_under_different_default_provider(self, monkeypatch):
+        # The SAME bare spec under a DIFFERENT default_provider resolves to a
+        # different canonical spec — proving anchor-aware resolution.
+        base = copy.deepcopy(FIXED_BASE)
+        base["default_provider"] = "cursor-agent"
+        base["defaults"] = {"models": ["opus"]}
+        monkeypatch.setattr(
+            registry, "_load_base_config", lambda: copy.deepcopy(base)
+        )
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        _reset_cache()
+        assert registry._collect_configured_specs() == {"cursor-agent:opus"}
+
+    def test_mode_quick_entries_both_shapes_collected(self, monkeypatch, tmp_path):
+        # A bare-list mode and a {models, quick} dict mode both contribute their
+        # specs; the dict's `quick` sub-key is NOT dropped.
+        _patch_base_only(monkeypatch)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "default_provider: cursor-agent\n"
+            "defaults:\n"
+            "  models: []\n"
+            "  quick_models: []\n"
+            "  modes:\n"
+            "    review-plan:\n"
+            "      - cursor-agent:bare-list-model\n"
+            "    code-review:\n"
+            "      models:\n"
+            "        - cursor-agent:dict-model\n"
+            "      quick:\n"
+            "        - cursor-agent:dict-quick-model\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        _reset_cache()
+        specs = registry._collect_configured_specs(anchor=str(tmp_path))
+        assert "cursor-agent:bare-list-model" in specs
+        assert "cursor-agent:dict-model" in specs
+        assert "cursor-agent:dict-quick-model" in specs
+
+    def test_unknown_provider_spec_not_configured_is_false(self, monkeypatch, tmp_path):
+        # A typo'd provider that is NOT written into defaults.* must stay invalid:
+        # provider-existence is preserved (no short-circuit on the catalog path).
+        _patch_base_only(monkeypatch)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  models:\n    - cursor-agent:made-up\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        _reset_cache()
+        assert is_model_valid("cursr-agent:foo", anchor=str(tmp_path)) is False

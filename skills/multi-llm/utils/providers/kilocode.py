@@ -5,7 +5,7 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, ModelListing, build_models_listing, parse_line_ids
 
 
 class KiloCodeProvider(LLMProvider):
@@ -25,11 +25,25 @@ class KiloCodeProvider(LLMProvider):
     def default_timeout(self) -> int:
         return 600
 
+    can_list_models = True
+
     def is_available(self) -> bool:
         return shutil.which("kilocode") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
         return ["kilocode", "run", "--auto", "-m", model, prompt]
+
+    def list_models(self, curated: List[str], *, timeout: int = 10) -> ModelListing:
+        """List kilocode models via `kilocode models` (curated fallback).
+
+        Output is one id per line; ids are long namespaced paths
+        (``kilo/anthropic/claude-opus-4.8``, ``openrouter/moonshotai/kimi-k2``)
+        kept verbatim. Lines with a ``:`` suffix (``…:free`` / ``…:discounted``)
+        are dropped per the bare-id contract. See ``parse_line_ids``.
+        """
+        return build_models_listing(
+            ["kilocode", "models"], parse_line_ids, curated, timeout=timeout
+        )
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse output from Kilo Code CLI.

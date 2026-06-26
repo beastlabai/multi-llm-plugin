@@ -4,9 +4,41 @@
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .provider_registry import load_config
+
+# Sentinel action ids returned by select_with_actions (see ActionSelection).
+ACTION_SHOW_ALL = "show_all"
+ACTION_ENTER_MANUAL = "enter_manual"
+
+
+class _Unavailable:
+    """Sentinel: a picker backend (gum/fzf) could not be used at all.
+
+    This distinguishes "the backend tool is not installed / failed to launch"
+    (the cascade should fall through to the next backend) from "the backend ran
+    and the user made an empty selection / cancelled / hit Esc" (which is a real,
+    intentional result and must NOT fall through — it stops the cascade and yields
+    an empty selection). Backend helpers return ``UNAVAILABLE`` only in the former
+    case; otherwise they return a concrete (possibly empty) selection.
+
+    This mechanism is shared by the multi-select cascade and is reusable by the
+    single-select cascade (``select_one`` and its backends).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNAVAILABLE"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+# Singleton sentinel returned by picker backends that are unavailable.
+UNAVAILABLE = _Unavailable()
 
 
 def is_tty() -> bool:
@@ -14,10 +46,18 @@ def is_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _try_gum_choose(options: List[str], prompt: str) -> Optional[List[str]]:
-    """Try gum choose for multi-select. Returns None if gum not available."""
+def _try_gum_choose(options: List[str], prompt: str):
+    """Try gum choose for multi-select.
+
+    Returns:
+        - ``UNAVAILABLE`` if gum is not installed or the subprocess fails to run
+          (the caller should fall through to the next backend).
+        - A list of selected items otherwise — possibly **empty** when the user
+          made no selection / cancelled / hit Esc (a real result; the caller must
+          NOT fall through to another backend).
+    """
     if not shutil.which("gum"):
-        return None
+        return UNAVAILABLE
 
     try:
         # gum choose --no-limit allows multi-select
@@ -29,17 +69,28 @@ def _try_gum_choose(options: List[str], prompt: str) -> Optional[List[str]]:
             timeout=120,
             check=False  # We handle returncode manually
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().split("\n")
-        return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
+        return UNAVAILABLE
+
+    # gum ran: a non-zero exit / empty stdout is a deliberate cancel (Esc), which
+    # is an empty selection — NOT an "unavailable" fall-through.
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split("\n")
+    return []
 
 
-def _try_fzf_multi(options: List[str], prompt: str) -> Optional[List[str]]:
-    """Try fzf with multi-select. Returns None if fzf not available."""
+def _try_fzf_multi(options: List[str], prompt: str):
+    """Try fzf with multi-select.
+
+    Returns:
+        - ``UNAVAILABLE`` if fzf is not installed or the subprocess fails to run
+          (the caller should fall through to the next backend).
+        - A list of selected items otherwise — possibly **empty** when the user
+          made no selection / cancelled / hit Esc (a real result; the caller must
+          NOT fall through to another backend).
+    """
     if not shutil.which("fzf"):
-        return None
+        return UNAVAILABLE
 
     try:
         # fzf -m enables multi-select with TAB
@@ -54,11 +105,14 @@ def _try_fzf_multi(options: List[str], prompt: str) -> Optional[List[str]]:
             timeout=120,
             check=False  # We handle returncode manually
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().split("\n")
-        return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
+        return UNAVAILABLE
+
+    # fzf ran: a non-zero exit (Esc → 130) / empty stdout is a deliberate cancel,
+    # which is an empty selection — NOT an "unavailable" fall-through.
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split("\n")
+    return []
 
 
 def _numbered_prompt(options: List[str], prompt: str) -> List[str]:
@@ -118,14 +172,15 @@ def select_models_interactive(
             "Use --models flag to specify models explicitly."
         )
 
-    # Try gum first (best UX)
+    # Cascade gum → fzf → numbered, falling through ONLY when a backend is
+    # UNAVAILABLE. A backend that ran returns a (possibly empty) list; an empty
+    # list is a deliberate cancel and is returned as-is, not re-prompted.
     result = _try_gum_choose(available_models, prompt)
-    if result is not None:
+    if result is not UNAVAILABLE:
         return result
 
-    # Try fzf (widely available)
     result = _try_fzf_multi(available_models, prompt)
-    if result is not None:
+    if result is not UNAVAILABLE:
         return result
 
     # Fall back to numbered prompt
@@ -162,14 +217,16 @@ def select_multi(
             "Use --models flag to specify models explicitly."
         )
 
-    # Try gum first (best UX)
+    # Cascade gum → fzf → numbered, but ONLY fall through when a backend is
+    # UNAVAILABLE. A backend that actually ran returns a (possibly empty) list;
+    # an empty list means the user cancelled / hit Esc / selected nothing, which
+    # must be returned as-is — NOT re-prompted via the next backend.
     result = _try_gum_choose(options, prompt)
-    if result is not None:
+    if result is not UNAVAILABLE:
         return result
 
-    # Try fzf (widely available)
     result = _try_fzf_multi(options, prompt)
-    if result is not None:
+    if result is not UNAVAILABLE:
         return result
 
     # Fall back to numbered prompt
@@ -366,3 +423,219 @@ def resolve_models(
 
     # 5. Fall back to interactive selection
     return select_models_two_step(anchor=anchor)
+
+
+# ---------------------------------------------------------------------------
+# Init-flow picker primitives (sentinel-aware multi-select, free text, single
+# select). Composed on top of the gum → fzf → numbered cascade above.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ActionSelection:
+    """Outcome of a sentinel-aware multi-select pass (see select_with_actions).
+
+    Exactly one of the three states holds:
+      * ``cancelled`` — nothing was checked / Esc / empty (skip this provider).
+      * ``action`` set — the user triggered a mode-switch sentinel (ordinary picks
+        in the same pass are intentionally discarded; see the §4 exclusivity rule).
+      * neither — ``selected`` holds the ordinary rows the user picked.
+    """
+
+    action: Optional[str] = None          # None | ACTION_SHOW_ALL | ACTION_ENTER_MANUAL
+    selected: List[str] = field(default_factory=list)
+    cancelled: bool = False
+
+
+def select_with_actions(
+    rows: List[str],
+    prompt: str,
+    *,
+    show_all_label: Optional[str] = None,
+    manual_label: Optional[str] = None,
+) -> ActionSelection:
+    """Multi-select ``rows`` plus optional action *sentinels*, resolving exclusivity.
+
+    Appends the provided sentinel labels (``show_all_label`` /  ``manual_label``)
+    to the option list, runs the normal ``select_multi`` cascade, then classifies
+    the result per the §4 contract:
+
+    - **Sentinels are exclusive.** If any sentinel is checked, ordinary picks in the
+      same pass are ignored and the sentinel's action fires.
+    - **"Show all…" wins** over "Enter manually…" when both are checked (a fixed
+      precedence so all backends behave identically).
+    - **Only ordinary rows** → returned as ``selected``.
+    - **Nothing checked** (Esc / empty / non-zero) → ``cancelled=True``.
+    """
+    options = list(rows)
+    sentinel_map = {}
+    if show_all_label:
+        options.append(show_all_label)
+        sentinel_map[show_all_label] = ACTION_SHOW_ALL
+    if manual_label:
+        options.append(manual_label)
+        sentinel_map[manual_label] = ACTION_ENTER_MANUAL
+
+    picked = select_multi(options, prompt)
+    if not picked:
+        return ActionSelection(cancelled=True)
+
+    actions = [sentinel_map[p] for p in picked if p in sentinel_map]
+    if ACTION_SHOW_ALL in actions:                       # fixed precedence
+        return ActionSelection(action=ACTION_SHOW_ALL)
+    if ACTION_ENTER_MANUAL in actions:
+        return ActionSelection(action=ACTION_ENTER_MANUAL)
+
+    ordinary = [p for p in picked if p not in sentinel_map]
+    if not ordinary:
+        return ActionSelection(cancelled=True)
+    return ActionSelection(selected=ordinary)
+
+
+def prompt_text(prompt: str) -> Optional[str]:
+    """Prompt for a single free-text line; return it stripped, or None.
+
+    None is returned on EOF / interrupt / a blank (whitespace-only) entry, so the
+    caller can reject empties rather than accept a whitespace spec.
+    """
+    if not is_tty():
+        raise RuntimeError("No TTY available for free-text entry.")
+    try:
+        value = input(f"{prompt} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return value or None
+
+
+def prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    """Ask a yes/no question; return the boolean. Empty/EOF → ``default``."""
+    if not is_tty():
+        return default
+    suffix = " [y/N]" if not default else " [Y/n]"
+    try:
+        answer = input(f"{prompt}{suffix} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
+def _try_gum_choose_one(options: List[str], prompt: str, default: Optional[str]):
+    """Try gum choose in single-select mode (no --no-limit).
+
+    Mirrors the multi-select ``UNAVAILABLE`` convention so a deliberate cancel is
+    distinguished from a missing backend:
+
+    Returns:
+        - ``UNAVAILABLE`` if gum is not installed or the subprocess fails to run
+          (the caller should fall through to the next backend).
+        - ``None`` if gum ran but the user cancelled / hit Esc / made no choice
+          (a real "cancelled" result; the caller must NOT fall through — it stops
+          the cascade and falls back to the default).
+        - The selected row (a ``str``) otherwise.
+    """
+    if not shutil.which("gum"):
+        return UNAVAILABLE
+    cmd = ["gum", "choose", "--header", prompt]
+    if default in options:
+        cmd += ["--selected", default]
+    try:
+        result = subprocess.run(
+            cmd + options, capture_output=True, text=True, timeout=120, check=False
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return UNAVAILABLE
+    # gum ran: a non-zero exit / empty stdout is a deliberate cancel (Esc) → None,
+    # NOT an "unavailable" fall-through.
+    if result.returncode == 0 and result.stdout.strip():
+        # Single-select returns one line; guard against any stray extra.
+        return result.stdout.strip().split("\n")[0]
+    return None
+
+
+def _try_fzf_one(options: List[str], prompt: str):
+    """Try fzf in single-select mode (no -m).
+
+    Mirrors the multi-select ``UNAVAILABLE`` convention:
+
+    Returns:
+        - ``UNAVAILABLE`` if fzf is not installed or the subprocess fails to run
+          (the caller should fall through to the next backend).
+        - ``None`` if fzf ran but the user cancelled / hit Esc (a real "cancelled"
+          result; the caller must NOT fall through — it stops the cascade and
+          falls back to the default).
+        - The selected row (a ``str``) otherwise.
+    """
+    if not shutil.which("fzf"):
+        return UNAVAILABLE
+    try:
+        result = subprocess.run(
+            ["fzf", "--header", prompt, "--bind", "enter:accept"],
+            input="\n".join(options),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return UNAVAILABLE
+    # fzf ran: a non-zero exit (Esc → 130) / empty stdout is a deliberate cancel
+    # → None, NOT an "unavailable" fall-through.
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split("\n")[0]
+    return None
+
+
+def _numbered_prompt_one(options: List[str], prompt: str, default: Optional[str]) -> Optional[str]:
+    """Fallback single-choice numbered prompt; empty input → ``default``."""
+    print(f"\n{prompt}")
+    print("-" * 40)
+    for i, opt in enumerate(options, 1):
+        marker = "  (default)" if opt == default else ""
+        print(f"  {i}. {opt}{marker}")
+    print("-" * 40)
+    hint = f" [default: {default}]" if default in options else ""
+    try:
+        user_input = input(f"Enter a single number{hint}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    if not user_input:
+        return default
+    try:
+        idx = int(user_input)
+        if 1 <= idx <= len(options):
+            return options[idx - 1]
+    except ValueError:
+        pass
+    return default
+
+
+def select_one(
+    rows: List[str],
+    prompt: str = "Select one:",
+    default: Optional[str] = None,
+) -> Optional[str]:
+    """Single-select with the gum → fzf → numbered cascade (mirrors select_multi).
+
+    Used for ``default_provider``. Returns the chosen row; on cancel / empty falls
+    back to ``default`` (which the caller guarantees is one of ``rows``).
+
+    Cascade rule (mirrors select_multi): fall through to the next backend ONLY when
+    a backend is ``UNAVAILABLE`` (not installed / failed to launch). When a backend
+    actually ran and the user cancelled (helper returns ``None``), STOP cascading
+    and return ``default`` — re-prompting with a different backend would be
+    surprising for a deliberate cancel.
+    """
+    if not is_tty():
+        raise RuntimeError("No TTY available for interactive selection.")
+    if not rows:
+        return default
+
+    result = _try_gum_choose_one(rows, prompt, default)
+    if result is not UNAVAILABLE:
+        return result if result is not None else default
+    result = _try_fzf_one(rows, prompt)
+    if result is not UNAVAILABLE:
+        return result if result is not None else default
+    return _numbered_prompt_one(rows, prompt, default)

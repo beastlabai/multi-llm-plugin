@@ -1,0 +1,8 @@
+[1mAvailable models[0m
+
+[32mauto[0m - Auto
+[32mgpt-5.2-high[0m - GPT-5.2 High
+[32mcomposer-2.5[0m - Composer 2.5
+[32mclaude-opus-4-8-thinking-high[0m - Opus 4.8 1M Thinking
+
+[2mTip: use --model <id> (or /model <id> in interactive mode) to switch.[0m
