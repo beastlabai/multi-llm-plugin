@@ -231,17 +231,35 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
 
-3. **Read current plan state** — Always read the latest plan file version before each batch.
+3. **Read current plan state and snapshot it** — Always read the latest plan file version before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git:
+   ```bash
+   # Plan files are frequently untracked (freshly created). Every `git diff` variant
+   # silently ignores fully-untracked files, so it CANNOT detect whether a batch
+   # changed the plan. Snapshot the file and diff against the snapshot instead.
+   BATCH_SNAPSHOT="$(mktemp)"
+   cp "$PLAN_PATH" "$BATCH_SNAPSHOT"
+   ```
+   Keep `$BATCH_SNAPSHOT` for step 6.
 
 4. **Spawn a Task subagent** using the substituted prompt
    - Use `general-purpose` subagent type
    - The prompt already contains all suggestions and instructions
 5. **Wait for completion** - Do NOT parallelize batch processing
 
-6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
-   - **Success**: The expected changes are present in the target files (verified via diff or content check).
-   - **Failure (clean)**: The subagent failed and no file modifications were made (verified by checking that target files are unchanged from their pre-batch state).
-   - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.
+6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status.
+
+   **Do NOT use `git diff` / `git diff --stat` to detect whether the plan changed.** Plan files are frequently untracked (freshly created), and every `git diff` variant silently ignores fully-untracked files — it will report "no changes" even when the subagent edited the plan, producing a false clean-failure. Detect changes by diffing against the step-3 snapshot instead:
+   ```bash
+   diff -u "$BATCH_SNAPSHOT" "$PLAN_PATH"   # empty output = byte-identical (unchanged); non-empty = file changed
+   ```
+   Classify the result:
+   - **Success**: The snapshot diff is non-empty AND the expected changes are present (spot-check by `grep`-ing the plan for distinctive text from this batch's suggestions).
+   - **Failure (clean)**: The subagent reported failure AND the snapshot diff is empty (plan byte-identical to the pre-batch snapshot).
+   - **Partial application**: The snapshot diff shows some but not all expected changes, or the subagent failed but the snapshot diff is non-empty.
+
+   (If you specifically want a git-based view of the change, first run `git add -N -- "$PLAN_PATH"` so `git diff` can see the otherwise-untracked file — but the snapshot diff above is the authoritative, git-independent check.)
+
+   On **success** or **clean failure**, remove the snapshot: `rm -f "$BATCH_SNAPSHOT"`. On **partial application**, keep `$BATCH_SNAPSHOT` so the human reviewer can inspect what changed.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 

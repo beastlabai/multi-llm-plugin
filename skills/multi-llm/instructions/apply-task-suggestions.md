@@ -231,17 +231,32 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
 
-3. **Read current tasks.md state** — Always read the latest version of tasks.md before each batch.
+3. **Read current tasks.md state and snapshot it** — Always read the latest version of tasks.md before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git. Use the `tasks_file` path from `orchestrator_output.json` as `$TASKS_PATH`:
+   ```bash
+   # tasks.md is frequently untracked (freshly created). Every `git diff` variant
+   # silently ignores fully-untracked files, so it CANNOT detect whether a batch
+   # changed tasks.md. Snapshot the file and diff against the snapshot instead.
+   TASKS_PATH="<tasks_file from orchestrator_output.json>"
+   BATCH_SNAPSHOT="$(mktemp)"
+   cp "$TASKS_PATH" "$BATCH_SNAPSHOT"
+   ```
+   This batch only ever touches the single `tasks.md` file, so one snapshot covers it. Keep `$BATCH_SNAPSHOT` for step 6.
 
 4. **Spawn a Task subagent** using the substituted prompt
    - Use `general-purpose` subagent type
    - The prompt already contains all suggestions and instructions
 5. **Wait for completion** - Do NOT parallelize batch processing
 
-6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
-   - **Success**: The expected changes are present in the target files (verified via diff or content check).
-   - **Failure (clean)**: The subagent failed and no file modifications were made (verified by checking that target files are unchanged from their pre-batch state).
-   - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.
+6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status. **Do NOT use `git diff` / `git diff --stat` as the change detector**: every `git diff` variant silently ignores fully-untracked files, and tasks.md is frequently freshly-created and untracked — so git would report "no changes" even when the subagent successfully edited it, producing a false clean-failure. Instead, diff the file against the pre-batch snapshot captured in step 3:
+   ```bash
+   diff -u "$BATCH_SNAPSHOT" "$TASKS_PATH"
+   ```
+   An empty diff means the file is byte-for-byte unchanged; a non-empty diff means it was modified. (If you do want git's view, first run `git add -N -- "$TASKS_PATH"` so an untracked tasks.md shows up — but the snapshot diff above is the authoritative detector here.) Classify the result:
+   - **Success**: The snapshot diff is non-empty **and** the expected changes are present (grep spot-check the modified tasks.md for the intended task IDs / fields from the batch).
+   - **Failure (clean)**: The subagent failed **and** the snapshot diff is empty (tasks.md is byte-for-byte identical to its pre-batch snapshot).
+   - **Partial application**: The snapshot diff is non-empty but the expected changes are incomplete, **or** the subagent failed but the snapshot diff is non-empty.
+
+   On **success** or **clean failure**, remove the snapshot (`rm -f "$BATCH_SNAPSHOT"`). On **partial application**, keep `$BATCH_SNAPSHOT` so a human can inspect what changed.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 
