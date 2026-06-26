@@ -746,3 +746,356 @@ class TestConfiguredModelReachesInvocation:
         resolved = resolve_models(mode=None, anchor=str(repo / "plan.md"))
         # The non-catalog configured spec is dispatched (warn-and-proceed).
         assert "cursor-agent:made-up-not-in-catalog" in resolved
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive seam 1: --emit-catalog (a pure read; JSON to stdout, no write)
+# ---------------------------------------------------------------------------
+
+
+# Provider listing-capability split mirrors the base config (and the existing
+# TestAdapterListModels.test_capability_flags assertions).
+_CAN_LIST = {"cursor-agent", "opencode", "kilocode"}
+_CANNOT_LIST = {"claude-code", "gemini", "codex"}
+
+
+def _emit_payload(monkeypatch, repo, extra_args=None):
+    """Run `--emit-catalog ... --json`; caller parses the pure-JSON stdout."""
+    args = ["--dir", str(repo), "--emit-catalog", "--json"]
+    if extra_args:
+        args += extra_args
+    _reset_cache()
+    rc = init_config.main(args)
+    return rc
+
+
+@pytest.mark.config_override
+class TestEmitCatalog:
+    def test_emit_catalog_json_shape(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        assert _emit_payload(monkeypatch, repo) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        # Exact top-level keys with correct types.
+        assert isinstance(payload["target_dir"], str)
+        assert isinstance(payload["config_path"], str)
+        assert payload["config_path"] == str(repo / ".multi-llm" / "providers.yaml")
+        assert isinstance(payload["config_exists"], bool)
+        assert payload["config_exists"] is False                 # nothing written yet
+        assert payload["default_provider_base"] == "cursor-agent"
+        assert payload["git_tracked_default"] is True
+        assert isinstance(payload["providers"], list)
+        assert isinstance(payload["base_catalog"], list)
+        assert isinstance(payload["shadowed_modes"], list)
+
+        # Per-provider entry shape.
+        for entry in payload["providers"]:
+            assert isinstance(entry["name"], str)
+            assert isinstance(entry["available"], bool)
+            assert isinstance(entry["can_list_models"], bool)
+            assert isinstance(entry["curated"], list)
+            assert "full" not in entry                            # no --show-all
+        # Provider order follows base-config declaration order.
+        names = [e["name"] for e in payload["providers"]]
+        assert names == [
+            "claude-code", "cursor-agent", "gemini", "opencode", "codex", "kilocode",
+        ]
+        # can_list_models capability split matches the adapters.
+        for entry in payload["providers"]:
+            if entry["name"] in _CAN_LIST:
+                assert entry["can_list_models"] is True
+            elif entry["name"] in _CANNOT_LIST:
+                assert entry["can_list_models"] is False
+
+    def test_emit_catalog_config_exists_reflects_reality(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        out = repo / ".multi-llm" / "providers.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("default_provider: cursor-agent\n", encoding="utf-8")
+        before = out.read_text()
+
+        # Emitting over an EXISTING file does not error and reports the file (no
+        # exists/force refusal, no overwrite).
+        assert _emit_payload(monkeypatch, repo) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["config_exists"] is True
+        assert out.read_text() == before                          # untouched
+
+    def test_emit_catalog_only_installed_providers_available_no_write(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import json
+
+        # Only `claude` (claude-code) on PATH; everything else absent.
+        real = __import__("shutil").which
+
+        def which(name):
+            if name == "claude":
+                return "/usr/bin/claude"
+            if name in {"cursor-agent", "gemini", "opencode", "codex", "kilocode", "gum", "fzf"}:
+                return None
+            return real(name)
+
+        monkeypatch.setattr("shutil.which", which)
+        repo = _git_repo(tmp_path)
+        assert _emit_payload(monkeypatch, repo) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        by_name = {e["name"]: e for e in payload["providers"]}
+        assert by_name["claude-code"]["available"] is True
+        assert by_name["cursor-agent"]["available"] is False
+        assert by_name["gemini"]["available"] is False
+        # A pure read writes nothing.
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_emit_catalog_curated_and_base_catalog_match_base_config(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import json
+
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        assert _emit_payload(monkeypatch, repo) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        base = registry.load_base_config()
+        providers_cfg = base.get("providers", {}) or {}
+        by_name = {e["name"]: e for e in payload["providers"]}
+        for name, cfg in providers_cfg.items():
+            assert by_name[name]["curated"] == list(cfg.get("models", []) or [])
+
+        # base_catalog == sorted set of every provider:model spec in the base config.
+        expected = sorted(
+            f"{name}:{model}"
+            for name, cfg in providers_cfg.items()
+            for model in (cfg.get("models", []) or [])
+        )
+        assert payload["base_catalog"] == expected
+
+    def test_emit_catalog_show_all_attaches_full_and_note_only_to_target(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import json
+
+        _all_available(monkeypatch)
+        cur = registry.get_provider("cursor-agent")
+        curated = list(registry.load_base_config()["providers"]["cursor-agent"]["models"])
+        # A successful listing whose models include extras; the seam floats curated
+        # to the top via list_models (we emulate that ordering directly).
+        listed = curated + ["brand-new-model"]
+        monkeypatch.setattr(
+            cur, "list_models",
+            lambda c, *, timeout=10: ModelListing(
+                models=list(listed), source="cli", recommended=list(c)
+            ),
+        )
+        repo = _git_repo(tmp_path)
+        assert _emit_payload(monkeypatch, repo, ["--show-all", "cursor-agent"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        by_name = {e["name"]: e for e in payload["providers"]}
+        target = by_name["cursor-agent"]
+        assert target["full"] == listed
+        assert "note" in target                                   # key present (may be None)
+        assert target["note"] is None                             # success → no fallback note
+        # `full` floats curated to the top.
+        assert target["full"][: len(curated)] == curated
+        # Other providers have NO `full` key.
+        for name, entry in by_name.items():
+            if name != "cursor-agent":
+                assert "full" not in entry
+
+    def test_emit_catalog_show_all_listing_failure_is_tolerant(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import json
+
+        _all_available(monkeypatch)
+        # Force the underlying listing command to fail → list_models falls back to
+        # curated with a non-null note (never raises).
+        monkeypatch.setattr(
+            "utils.providers.base.run_models_command", lambda argv, *, timeout: None
+        )
+        repo = _git_repo(tmp_path)
+        curated = list(registry.load_base_config()["providers"]["cursor-agent"]["models"])
+        # Must return 0 and never raise.
+        assert _emit_payload(monkeypatch, repo, ["--show-all", "cursor-agent"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        target = {e["name"]: e for e in payload["providers"]}["cursor-agent"]
+        assert target["note"] is not None                         # explains the fallback
+        assert isinstance(target["note"], str)
+        assert target["full"] == curated                          # failure-tolerant fallback
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive seam 2: --from-selections FILE (explicit selection IN)
+# ---------------------------------------------------------------------------
+
+
+def _write_selections(tmp_path, data) -> Path:
+    """Serialize a selection dict to a JSON file under tmp_path."""
+    import json
+
+    path = tmp_path / "selections.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+@pytest.mark.config_override
+class TestFromSelections:
+    def test_from_selections_happy_path(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = _write_selections(tmp_path, {
+            "default_provider": "claude-code",
+            "models": ["claude-code:opus", "cursor-agent:composer-2.5"],
+            "quick_models": ["claude-code:opus"],
+        })
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 0
+
+        out = repo / ".multi-llm" / "providers.yaml"
+        assert out.exists()
+        text = out.read_text()
+        # Managed markers present (written via the same _write_interactive path).
+        assert init_config.MARKER_START in text and init_config.MARKER_END in text
+        cfg = yaml.safe_load(text)
+        assert cfg["default_provider"] == "claude-code"
+        assert cfg["defaults"]["models"] == [
+            "claude-code:opus", "cursor-agent:composer-2.5",
+        ]
+        assert cfg["defaults"]["quick_models"] == ["claude-code:opus"]
+
+    def test_from_selections_reinit_force_preserves_outside_marker(
+        self, tmp_path, monkeypatch
+    ):
+        # Re-init with --force over a seeded MARKED file preserves outside-marker
+        # hand edits while regenerating the managed block (parity with the TTY flow).
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        out = repo / ".multi-llm" / "providers.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        template = init_config.TEMPLATE_PATH.read_text()
+        seeded = template.replace(
+            init_config.MARKER_START,
+            "# HAND-MAINTAINED above the markers\n" + init_config.MARKER_START,
+            1,
+        )
+        seeded = seeded.rstrip("\n") + "\n# HAND-MAINTAINED below the markers\n"
+        out.write_text(seeded)
+
+        sel = _write_selections(tmp_path, {
+            "default_provider": "cursor-agent",
+            "models": ["cursor-agent:composer-2.5"],
+            "quick_models": [],
+        })
+        _reset_cache()
+        assert init_config.main(
+            ["--dir", str(repo), "--from-selections", str(sel), "--force"]
+        ) == 0
+
+        result = out.read_text()
+        assert "# HAND-MAINTAINED above the markers" in result
+        assert "# HAND-MAINTAINED below the markers" in result
+        cfg = yaml.safe_load(result)
+        assert cfg["defaults"]["models"] == ["cursor-agent:composer-2.5"]
+        assert cfg["defaults"]["quick_models"] == []
+
+    def test_from_selections_empty_models_exits_1_no_write(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = _write_selections(tmp_path, {
+            "default_provider": "cursor-agent",
+            "models": [],
+            "quick_models": [],
+        })
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 1
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_from_selections_malformed_json_exits_1(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = tmp_path / "selections.json"
+        sel.write_text("{not valid json", encoding="utf-8")
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 1
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_from_selections_missing_file_exits_1(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        missing = tmp_path / "does-not-exist.json"
+        _reset_cache()
+        assert init_config.main(
+            ["--dir", str(repo), "--from-selections", str(missing)]
+        ) == 1
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_from_selections_exists_without_force_refused(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        out = repo / ".multi-llm" / "providers.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("default_provider: cursor-agent\n", encoding="utf-8")
+        before = out.read_text()
+
+        sel = _write_selections(tmp_path, {
+            "default_provider": "cursor-agent",
+            "models": ["cursor-agent:composer-2.5"],
+            "quick_models": [],
+        })
+        _reset_cache()
+        # Shares the exists/force refusal with every write path → exit 1, no overwrite.
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 1
+        assert out.read_text() == before
+
+    def test_from_selections_malformed_spec_exits_1(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = _write_selections(tmp_path, {
+            "default_provider": "cursor-agent",
+            # 'composer-2.5' has no colon → not a well-formed provider:model spec.
+            "models": ["composer-2.5"],
+            "quick_models": [],
+        })
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 1
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_from_selections_unknown_default_provider_exits_1(self, tmp_path, monkeypatch):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = _write_selections(tmp_path, {
+            "default_provider": "not-a-real-provider",
+            "models": ["cursor-agent:composer-2.5"],
+            "quick_models": [],
+        })
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 1
+        assert not (repo / ".multi-llm" / "providers.yaml").exists()
+
+    def test_from_selections_quick_not_subset_warns_but_writes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _all_available(monkeypatch)
+        repo = _git_repo(tmp_path)
+        sel = _write_selections(tmp_path, {
+            "default_provider": "cursor-agent",
+            "models": ["cursor-agent:composer-2.5"],
+            # Quick spec not present in models → advisory warning, still writes.
+            "quick_models": ["cursor-agent:gpt-5.2-high"],
+        })
+        _reset_cache()
+        assert init_config.main(["--dir", str(repo), "--from-selections", str(sel)]) == 0
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "quick_models" in err
+        cfg = yaml.safe_load((repo / ".multi-llm" / "providers.yaml").read_text())
+        assert cfg["defaults"]["quick_models"] == ["cursor-agent:gpt-5.2-high"]

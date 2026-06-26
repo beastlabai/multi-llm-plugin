@@ -23,6 +23,7 @@ selection). Pass --gitignore to instead keep it as a developer-local, untracked
 override.
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -46,6 +47,7 @@ from utils.interactive import (  # noqa: E402
     select_with_actions,
 )
 from utils.provider_registry import get_provider, load_base_config  # noqa: E402
+from utils.providers.base import is_valid_bare_id  # noqa: E402
 
 # Template is resolved strictly relative to THIS file, never CWD / --project dir
 # (both diverge from the install location). If this moves, update the Section 4
@@ -646,6 +648,226 @@ def write_template_only(args: argparse.Namespace, target_dir: Path, config_dir: 
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Non-interactive seams for the Claude-driven picker (no TTY)
+# ---------------------------------------------------------------------------
+#
+# Two thin, JSON-only seams let Claude Code act as the picker front-end while the
+# script stays the single source of truth for rendering/validation/writing:
+#   * --emit-catalog [--show-all PROVIDER] [--json]  — detection/catalog OUT.
+#   * --from-selections FILE                          — explicit selection IN.
+# The selection path reuses _write_interactive verbatim (render -> splice ->
+# parse-gate -> write -> recheck -> gitignore), so the managed-block contract,
+# outside-marker preservation, and validation cannot drift from the TTY flow.
+
+
+def _build_catalog_payload(
+    target_dir: Path, config_path: Path, *, show_all: "str | None", timeout: int
+) -> dict:
+    """Assemble the --emit-catalog payload from existing helpers (no new discovery).
+
+    Mirrors exactly what the TTY picker sees: installed providers, curated lists,
+    the base catalog (for the unverified-id annotation), and shadowed modes. The
+    full CLI listing is fetched ONLY for ``show_all`` (one provider), inheriting
+    ``list_models``' timeout/failure tolerance — absent it, NO listing command runs.
+    """
+    base = load_base_config()
+    providers_cfg = base.get("providers", {}) or {}
+    available = set(_available_providers(providers_cfg))
+
+    providers = []
+    for name in providers_cfg:  # dict preserves base-config declaration order
+        provider = get_provider(name)
+        curated = list(providers_cfg[name].get("models", []) or [])
+        entry = {
+            "name": name,
+            "available": name in available,
+            "can_list_models": bool(provider is not None and provider.can_list_models),
+            "curated": curated,
+        }
+        if show_all and name == show_all:
+            # The ONLY path that runs a listing command; never raises (list_models
+            # is timeout-bounded and falls back to curated on any failure).
+            if provider is not None:
+                listing = provider.list_models(curated, timeout=timeout)
+                entry["full"] = list(listing.models or curated)
+                entry["note"] = listing.note
+            else:
+                entry["full"] = list(curated)
+                entry["note"] = None
+        providers.append(entry)
+
+    payload = {
+        "target_dir": str(target_dir),
+        "config_path": str(config_path),
+        "config_exists": config_path.exists(),
+        "default_provider_base": base.get("default_provider"),
+        "git_tracked_default": True,
+        "providers": providers,
+        "base_catalog": sorted(_base_catalog_specs(providers_cfg)),
+        "shadowed_modes": _shadowed_modes(base, target_dir),
+    }
+    # A --show-all value that matches NO provider yields no full/note anywhere, which
+    # is indistinguishable from "this provider has no extra models". Surface the typo
+    # as a machine-readable signal so callers don't trust a stale curated listing.
+    if show_all and show_all not in providers_cfg:
+        payload["show_all_error"] = (
+            f"--show-all '{show_all}' is not a known provider "
+            f"(known: {', '.join(providers_cfg) or '(none)'})"
+        )
+    return payload
+
+
+def emit_catalog(args: argparse.Namespace, target_dir: Path, config_path: Path) -> int:
+    """Print the detection/catalog JSON to stdout and exit 0 (§ step 1, no write)."""
+    payload = _build_catalog_payload(
+        target_dir, config_path, show_all=args.show_all, timeout=args.timeout
+    )
+    # stdout is ALWAYS pure JSON so the caller (Claude) can parse it unconditionally;
+    # the optional human note goes to stderr.
+    print(json.dumps(payload, indent=2))
+    show_all_error = payload.get("show_all_error")
+    if show_all_error:
+        # The requested escalation never ran; fail loudly so the caller cannot mistake
+        # the curated-only catalog for a verified full listing.
+        print(f"ERROR: {show_all_error}", file=sys.stderr)
+        return 1
+    if not args.json:
+        print(
+            "(--emit-catalog: the JSON above is the machine format; pass --json to "
+            "silence this note)",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _is_wellformed_spec(spec: object) -> bool:
+    """True if ``spec`` is a well-formed ``provider:model`` string (both parts set)."""
+    if not isinstance(spec, str) or ":" not in spec:
+        return False
+    provider, model = spec.split(":", 1)
+    # The model half must be a usable bare id: non-empty, no whitespace, and no extra
+    # ':' (which would break the provider:model round-trip through parse_model_spec).
+    return bool(provider) and is_valid_bare_id(model)
+
+
+def _load_selections(path: Path) -> "tuple[dict | None, str | None]":
+    """Read + JSON-parse the selections file -> (data, error). Never raises."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return None, f"cannot read selections file {path}: {e}"
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        return None, f"selections file {path} is not valid JSON: {e}"
+    if not isinstance(data, dict):
+        return None, (
+            "selections JSON must be an object with default_provider / models / "
+            "quick_models keys"
+        )
+    return data, None
+
+
+def run_from_selections(
+    args: argparse.Namespace,
+    target_dir: Path,
+    config_dir: Path,
+    config_path: Path,
+) -> int:
+    """Materialize an explicit selection JSON via the existing writer (§ step 2).
+
+    Validates the JSON shape and the parity-critical invariants (non-empty
+    ``models`` brick guard; well-formed specs; known ``default_provider``), then
+    hands the picks to ``_write_interactive`` unchanged so every byte of YAML is
+    produced by the same render/splice/validate path as the TTY flow.
+    """
+    data, error = _load_selections(Path(args.from_selections))
+    if error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    default_provider = data.get("default_provider")
+    models = data.get("models")
+    # Parity with _choose_quick_models: an OMITTED quick panel is never silently
+    # disabled — it defaults to models[:2] (the same proposal heuristic the TTY
+    # picker offers). Only an EXPLICIT quick_models (including [] / null, the
+    # "disable --quick" confirmation) is taken verbatim.
+    quick_omitted = "quick_models" not in data
+    quick_models = data.get("quick_models", [])
+    if quick_models is None:
+        quick_models = []
+
+    # --- Shape checks --------------------------------------------------------
+    if not isinstance(default_provider, str) or not default_provider:
+        print("ERROR: selections 'default_provider' must be a non-empty string.", file=sys.stderr)
+        return 1
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        print("ERROR: selections 'models' must be a list of strings.", file=sys.stderr)
+        return 1
+    if not isinstance(quick_models, list) or not all(isinstance(m, str) for m in quick_models):
+        print("ERROR: selections 'quick_models' must be a list of strings.", file=sys.stderr)
+        return 1
+
+    # --- Brick guard backstop (parity with _collect_default_models_guarded) ---
+    if not models:
+        print(
+            "ERROR: selections 'models' is empty — an empty default panel would brick "
+            "every run; pick at least one model.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Quick-panel backstop (parity with _choose_quick_models) --------------
+    # An omitted quick_models defaults to models[:2] (never silently disabled); an
+    # explicit value — including [] / null — is the deliberate "disable --quick"
+    # choice and is respected verbatim. models is non-empty here, so the slice is safe.
+    if quick_omitted:
+        quick_models = list(models[:2])
+
+    # --- Well-formed provider:model specs ------------------------------------
+    bad = [m for m in (list(models) + list(quick_models)) if not _is_wellformed_spec(m)]
+    if bad:
+        print(
+            "ERROR: malformed model spec(s) (expected 'provider:model'): " + ", ".join(bad),
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- default_provider must be a known provider; warn if CLI not installed --
+    base = load_base_config()
+    providers_cfg = base.get("providers", {}) or {}
+    known = set(providers_cfg)
+    available = set(_available_providers(providers_cfg))
+    if default_provider not in known:
+        print(
+            f"ERROR: default_provider '{default_provider}' is not a known provider "
+            f"(known: {', '.join(sorted(known))}).",
+            file=sys.stderr,
+        )
+        return 1
+    if default_provider not in available:
+        print(
+            f"WARNING: default_provider '{default_provider}' is known but its CLI was "
+            "not detected on this machine; writing anyway.",
+            file=sys.stderr,
+        )
+
+    # --- quick_models ⊆ models is advisory (warn, don't fail) ----------------
+    extra_quick = [m for m in quick_models if m not in models]
+    if extra_quick:
+        print(
+            "WARNING: quick_models contains spec(s) not in models (allowed, unusual): "
+            + ", ".join(extra_quick),
+            file=sys.stderr,
+        )
+
+    return _write_interactive(
+        args, target_dir, config_dir, config_path,
+        default_provider, list(models), list(quick_models),
+    )
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(
         prog="init_config.py",
@@ -693,7 +915,50 @@ def main(argv: "list[str] | None" = None) -> int:
         metavar="SECONDS",
         help="Seconds to wait for a provider's `models` listing command (default: 10).",
     )
+    parser.add_argument(
+        "--emit-catalog",
+        action="store_true",
+        help=(
+            "Print provider/model detection + catalog as JSON to stdout and exit "
+            "(no write; safe over an existing file). The detection/catalog seam for "
+            "the Claude-driven picker."
+        ),
+    )
+    parser.add_argument(
+        "--show-all",
+        metavar="PROVIDER",
+        default=None,
+        help=(
+            "With --emit-catalog: also fetch PROVIDER's full CLI model listing "
+            "(timeout-bounded, failure-tolerant) and attach it as 'full'/'note'. The "
+            "only path that runs a listing command."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --emit-catalog: silence the human note (stdout is JSON regardless).",
+    )
+    parser.add_argument(
+        "--from-selections",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Write the config from an explicit selection JSON file "
+            "({default_provider, models, quick_models}) via the standard writer. The "
+            "selection seam for the Claude-driven picker."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    target_dir = resolve_target_dir(args.dir)
+    config_dir = target_dir / CONFIG_DIRNAME
+    config_path = config_dir / CONFIG_FILENAME
+
+    # Detection/catalog seam (§ step 1): a pure read — print JSON and exit without
+    # writing, so it works even over an existing file or a missing template.
+    if args.emit_catalog:
+        return emit_catalog(args, target_dir, config_path)
 
     if not TEMPLATE_PATH.exists():
         print(
@@ -703,16 +968,18 @@ def main(argv: "list[str] | None" = None) -> int:
         )
         return 1
 
-    target_dir = resolve_target_dir(args.dir)
-    config_dir = target_dir / CONFIG_DIRNAME
-    config_path = config_dir / CONFIG_FILENAME
-
     if config_path.exists() and not args.force:
         print(
             f"ERROR: {config_path} already exists. Use --force to overwrite.",
             file=sys.stderr,
         )
         return 1
+
+    # Explicit-selection seam (§ step 2): materialize a Claude-collected selection
+    # JSON through the SAME writer the TTY picker uses (shares the exists/force
+    # refusal above with every other write path).
+    if args.from_selections:
+        return run_from_selections(args, target_dir, config_dir, config_path)
 
     # Interactive only on a real TTY and when not explicitly opted out.
     use_interactive = not (args.template_only or args.non_interactive) and is_tty()
