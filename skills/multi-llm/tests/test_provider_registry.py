@@ -998,39 +998,54 @@ class TestTrustModelEnvLayer:
 
 
 @pytest.mark.config_override
-class TestTrustModelAutoDiscoveredProvidersDropped:
-    """A providers: block in the AUTO-DISCOVERED layer is dropped + warned."""
+class TestAutoDiscoveredProvidersBlockMerges:
+    """The layer-2 `providers:` filter is REMOVED: an auto-discovered providers:
+    block now deep-merges over base, identical to the env layer (no warning).
 
-    def test_new_provider_not_registered_and_warned(self, reg, monkeypatch, tmp_path, capsys):
-        override = _write_yaml(
-            tmp_path / ".multi-llm" / "providers.yaml",
-            "providers:\n  evilprov:\n    command: evil\n    models:\n      - m1\n",
-        )
-        _set_project_config(monkeypatch, override)
-        cfg = load_config()
-        # Block dropped: not present in merged config.
-        assert "evilprov" not in cfg["providers"]
-        # No config can register a provider not in the hardcoded registry.
-        assert get_provider("evilprov") is None
-        err = capsys.readouterr().err
-        assert CONFIG_WARNING_PREFIX in err
-        assert str(override) in err
+    (Inverts the former TestTrustModelAutoDiscoveredProvidersDropped.)
+    """
 
-    def test_existing_provider_not_mutated_and_warned(self, reg, monkeypatch, tmp_path, capsys):
+    def test_existing_provider_field_merges_no_warning(self, reg, monkeypatch, tmp_path, capsys):
         override = _write_yaml(
             tmp_path / ".multi-llm" / "providers.yaml",
             "providers:\n  claude-code:\n    max_concurrent: 99\n",
         )
         _set_project_config(monkeypatch, override)
-        # The same override that DOES apply via the env layer is inert here.
-        assert get_provider_max_concurrent("claude-code") == 2
-        err = capsys.readouterr().err
-        assert CONFIG_WARNING_PREFIX in err
-        assert str(override) in err
+        # The merged field now takes effect (no longer dropped)...
+        assert get_provider_max_concurrent("claude-code") == 99
+        cfg = load_config()
+        # ...siblings still inherit from base (deep-merge).
+        assert cfg["providers"]["claude-code"]["command"] == "claude"
+        assert cfg["providers"]["claude-code"]["models"] == ["sonnet", "opus", "haiku"]
+        # No "ignoring 'providers:' block" warning is emitted.
+        assert "ignoring 'providers:' block" not in capsys.readouterr().err
 
-    def test_selection_keys_still_apply_alongside_dropped_providers(self, reg, monkeypatch, tmp_path):
-        # A project file mixing a providers: block with selection keys: the
-        # providers block is dropped, selection keys still merge.
+    def test_provider_models_list_replaced(self, reg, monkeypatch, tmp_path):
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "providers:\n  claude-code:\n    models:\n      - opus\n",
+        )
+        _set_project_config(monkeypatch, override)
+        cfg = load_config()
+        assert cfg["providers"]["claude-code"]["models"] == ["opus"]
+        assert cfg["providers"]["claude-code"]["default_timeout"] == 1800
+
+    def test_parity_with_env_layer(self, reg, monkeypatch, tmp_path):
+        # The SAME providers block resolves identically through the project layer
+        # and the env layer now that the filter is gone.
+        content = "providers:\n  claude-code:\n    max_concurrent: 7\n"
+        project = _write_yaml(tmp_path / ".multi-llm" / "providers.yaml", content)
+        _set_project_config(monkeypatch, project)
+        via_project = load_config()["providers"]["claude-code"]["max_concurrent"]
+
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        env_file = _write_yaml(tmp_path / "env.yaml", content)
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(env_file))
+        _reset_cache()
+        via_env = load_config()["providers"]["claude-code"]["max_concurrent"]
+        assert via_project == via_env == 7
+
+    def test_selection_keys_apply_alongside_providers_block(self, reg, monkeypatch, tmp_path):
         override = _write_yaml(
             tmp_path / ".multi-llm" / "providers.yaml",
             "default_provider: claude-code\n"
@@ -1039,7 +1054,169 @@ class TestTrustModelAutoDiscoveredProvidersDropped:
         _set_project_config(monkeypatch, override)
         cfg = load_config()
         assert cfg["default_provider"] == "claude-code"
+        assert cfg["providers"]["claude-code"]["max_concurrent"] == 99
+
+
+@pytest.mark.config_override
+class TestRemovedProviderDrift:
+    """A merged providers: block naming a provider with NO hardcoded adapter (an
+    older-plugin / renamed key) merges but is filtered out of the model listing."""
+
+    def test_orphan_provider_merges_but_lists_no_models_and_warns(
+        self, reg, monkeypatch, tmp_path, capsys
+    ):
+        registry._WARNED_UNKNOWN_PROVIDERS.clear()
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "providers:\n  oldprov:\n    command: x\n    models:\n      - m1\n",
+        )
+        _set_project_config(monkeypatch, override)
+        # The block merges (no error)...
+        cfg = load_config()
+        assert "oldprov" in cfg["providers"]
+        # ...but has no hardcoded adapter, so it can never be selected...
+        assert get_provider("oldprov") is None
+        # ...and contributes NO models to the listing (read-site filter), warning once.
+        available = get_available_models()
+        assert "oldprov" not in available
+        # Known providers are unaffected.
+        assert "claude-code" in available
+        err = capsys.readouterr().err
+        assert CONFIG_WARNING_PREFIX in err
+        assert "no longer supported" in err
+
+    def test_orphan_warning_is_once_per_process(self, reg, monkeypatch, tmp_path, capsys):
+        registry._WARNED_UNKNOWN_PROVIDERS.clear()
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "providers:\n  oldprov:\n    command: x\n    models:\n      - m1\n",
+        )
+        _set_project_config(monkeypatch, override)
+        get_available_models()
+        capsys.readouterr()  # drain the first warning
+        get_available_models()
+        assert "no longer supported" not in capsys.readouterr().err
+
+
+@pytest.mark.config_override
+class TestRemovedProviderDriftConfiguredSpec:
+    """Mirror of TestRemovedProviderDrift for the configured-spec path: an orphan
+    spec (no hardcoded adapter) written into defaults.* is filtered from the
+    configured set, so is_model_valid rejects it — a model that cannot run on a
+    stale cloned config is never accepted."""
+
+    def test_orphan_configured_spec_filtered_and_invalid(
+        self, reg, monkeypatch, tmp_path, capsys
+    ):
+        registry._WARNED_UNKNOWN_PROVIDERS.clear()
+        # A stale clone lists a removed/renamed provider spec in defaults.models.
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  models:\n    - oldprov:m1\n",
+        )
+        _set_project_config(monkeypatch, override)
+        # oldprov has no hardcoded adapter...
+        assert get_provider("oldprov") is None
+        # ...so its spec is filtered out of the configured set (read-site filter)...
+        configured = registry._collect_configured_specs()
+        assert "oldprov:m1" not in configured
+        # ...and is_model_valid rejects it rather than treating it as configured.
+        assert is_model_valid("oldprov:m1") is False
+        err = capsys.readouterr().err
+        assert CONFIG_WARNING_PREFIX in err
+        assert "no longer supported" in err
+
+    def test_orphan_filter_leaves_known_configured_specs_valid(
+        self, reg, monkeypatch, tmp_path
+    ):
+        registry._WARNED_UNKNOWN_PROVIDERS.clear()
+        # A defaults.models mixing an orphan with a real (configured-but-uncatalogued)
+        # spec: the orphan is filtered, the known-provider spec still validates.
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  models:\n    - oldprov:m1\n    - cursor-agent:made-up\n",
+        )
+        _set_project_config(monkeypatch, override)
+        assert is_model_valid("oldprov:m1") is False
+        assert is_model_valid("cursor-agent:made-up") is True
+
+
+@pytest.mark.config_override
+class TestNonMappingProviderGuard:
+    """A merged non-mapping provider value is sanitized at load time (no crash):
+    a KNOWN provider's base mapping is restored; an unknown name is dropped."""
+
+    def test_scalar_known_provider_restores_base_with_warning(self, reg, monkeypatch, tmp_path, capsys):
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            'providers:\n  claude-code: "scalar-bad"\n',
+        )
+        _set_project_config(monkeypatch, override)
+        # No AttributeError on the downstream `.get(...)` calls; load succeeds and
+        # the malformed scalar does NOT erase the built-in claude-code catalog —
+        # the base mapping is restored instead.
+        cfg = load_config()
+        assert cfg["providers"]["claude-code"]["models"] == ["sonnet", "opus", "haiku"]
         assert cfg["providers"]["claude-code"]["max_concurrent"] == 2
+        # Other providers still load and resolve.
+        assert get_provider_max_concurrent("cursor-agent") == 2
+        err = capsys.readouterr().err
+        assert CONFIG_WARNING_PREFIX in err
+        assert "malformed provider 'claude-code'" in err
+        assert "restoring base definition" in err
+
+    def test_scalar_unknown_provider_dropped_with_warning(self, reg, monkeypatch, tmp_path, capsys):
+        # An UNKNOWN name has no base mapping to inherit → dropped (not restored).
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            'providers:\n  oldprov: "scalar-bad"\n',
+        )
+        _set_project_config(monkeypatch, override)
+        cfg = load_config()
+        assert "oldprov" not in cfg["providers"]
+        # Known providers are unaffected.
+        assert get_provider_max_concurrent("cursor-agent") == 2
+        err = capsys.readouterr().err
+        assert CONFIG_WARNING_PREFIX in err
+        assert "malformed provider 'oldprov'" in err
+        assert "dropping it" in err
+
+
+@pytest.mark.config_override
+class TestCommandNeverLaunchesBinary:
+    """The merged `command:` field is documentation-only — the launch path always
+    uses the hardcoded binary, in BOTH override layers (security guard)."""
+
+    def _assert_hardcoded(self, monkeypatch, cfg_command):
+        cfg = load_config()
+        # Config metadata merges...
+        assert cfg["providers"]["claude-code"]["command"] == cfg_command
+        # ...but the resolved binary is hardcoded, never read from config.
+        provider = get_provider("claude-code")
+        assert provider.build_command("prompt", "opus")[0] == "claude"
+        calls = []
+        monkeypatch.setattr(
+            "shutil.which", lambda name: calls.append(name) or "/usr/bin/claude"
+        )
+        provider.is_available()
+        assert calls == ["claude"]
+
+    def test_hostile_command_project_layer(self, reg, monkeypatch, tmp_path):
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            'providers:\n  claude-code:\n    command: "/bin/evil"\n',
+        )
+        _set_project_config(monkeypatch, override)
+        self._assert_hardcoded(monkeypatch, "/bin/evil")
+
+    def test_hostile_command_env_layer(self, reg, monkeypatch, tmp_path):
+        env_file = _write_yaml(
+            tmp_path / "env.yaml",
+            'providers:\n  claude-code:\n    command: "rm -rf ~"\n',
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(env_file))
+        _reset_cache()
+        self._assert_hardcoded(monkeypatch, "rm -rf ~")
 
 
 @pytest.mark.config_override
@@ -1237,12 +1414,11 @@ class TestFailFastVsPermissive:
 
 @pytest.mark.config_override
 class TestInitConfigScaffolder:
-    """init_config.py scaffolding + packaging guard.
+    """init_config.py scaffolding + packaging guard (template path / gitignore).
 
-    Interactive is now the TTY default, so these verbatim-copy assertions pass
-    ``--template-only`` explicitly to pin the template path regardless of whether
-    the test runner happens to expose a TTY. (See the interactive flow's own tests
-    in tests/test_init_interactive.py.)
+    These verbatim-copy assertions pass ``--template-only`` explicitly to pin the
+    pristine template path. The auto-detect toggler, D2a guard, and end-to-end
+    init are covered in tests/test_init_config.py.
     """
 
     def _run_init(self, target_dir, *extra):
@@ -1296,6 +1472,33 @@ class TestInitConfigScaffolder:
         assert self._run_init(tmp_path, "--force", "--gitignore") == 0
         assert gi.read_text() == first
         assert gi.read_text().count(".multi-llm/") == 1
+
+
+class TestTemplateBaseParity:
+    """The shipped template is generated from the live base config — re-deriving it
+    must reproduce the shipped file byte-for-byte, so a base edit that is never
+    regenerated into the template fails CI."""
+
+    def test_shipped_template_matches_generator(self):
+        import init_config
+
+        regenerated = init_config.build_template_text()
+        shipped = init_config.TEMPLATE_PATH.read_text(encoding="utf-8")
+        assert shipped == regenerated, (
+            "templates/config/providers.override.yaml is out of sync with the base "
+            "providers.yaml — regenerate it:\n"
+            "  python -c \"import init_config as c; "
+            "c.TEMPLATE_PATH.write_text(c.build_template_text())\""
+        )
+
+    def test_generated_template_is_inert(self):
+        import init_config
+
+        parsed = yaml.safe_load(init_config.build_template_text())
+        # A plain copy changes no behavior: no live providers/default_provider, and
+        # the defaults sub-keys are present-but-blank (None → inherit base).
+        assert set(parsed.keys()) == {"defaults"}
+        assert parsed["defaults"] == {"models": None, "quick_models": None}
 
 
 @pytest.mark.config_override

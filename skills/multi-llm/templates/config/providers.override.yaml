@@ -10,6 +10,16 @@
 #                or run init_config.py directly.
 #
 # ----------------------------------------------------------------------------
+# HOW `--init` BUILDS THIS FILE (auto-detect, zero prompts)
+# ----------------------------------------------------------------------------
+# `--init` scans PATH for the supported provider CLIs and UNCOMMENTS the lines
+# belonging to the ones it finds — the matching `providers:` sub-blocks, the
+# `defaults.models` / `quick_models` entries for detected providers, and
+# `default_provider`. Undetected providers stay commented. There are NO prompts
+# and NO model-listing subprocess calls. Re-run `--init --force` to refresh the
+# detection (e.g. after installing a CLI or updating the plugin).
+#
+# ----------------------------------------------------------------------------
 # HOW MERGING WORKS (read this before editing)
 # ----------------------------------------------------------------------------
 # Your file is deep-merged ON TOP OF the built-in base config:
@@ -41,15 +51,23 @@
 # (only overwrite its list, e.g. `<mode>: []`) — see the modes note below.
 #
 # ----------------------------------------------------------------------------
-# TRUST MODEL — provider DEFINITIONS are intentionally NOT overridable here
+# TRUST MODEL — provider definitions DO merge from this file (command stays inert)
 # ----------------------------------------------------------------------------
-# This auto-discovered file is restricted to SELECTION keys (which models/
-# providers a run picks). A `providers:` block here is IGNORED (dropped with a
-# warning) so a cloned repo cannot silently redefine provider capabilities.
-# Provider binaries are hardcoded in the plugin; the config `command` field is
-# documentation-only and is NEVER executed from config, in any layer.
-# (Use the MULTI_LLM_PROVIDERS_CONFIG env override for out-of-tree experiments
-# that need to deep-merge an existing `providers.<name>`.)
+# An UNCOMMENTED `providers:` block here deep-merges OVER the base, exactly like
+# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`,
+# `supports_json_output`, and each `models:` list all take effect (lists replace).
+# `--init` writes a full block for each detected provider so the file is a
+# complete, self-describing snapshot.
+#  * `command:` is DOCUMENTATION-ONLY and is NEVER executed — provider binaries
+#    are hardcoded in the plugin (utils/providers/). A `command:` value in ANY
+#    layer can never make the tool run a different program.
+#  * A provider name with no hardcoded adapter (e.g. one a newer plugin removed
+#    or renamed) still merges but is IGNORED at runtime — it lists no models and
+#    can never be selected.
+#  * DRIFT: a copied block pins base's scalar/model values AT INIT TIME and the
+#    SET of provider keys to whatever the plugin shipped then. Re-run
+#    `--init --force` after a plugin update to refresh pinned metadata AND prune
+#    providers the new base dropped.
 #
 # ----------------------------------------------------------------------------
 # ONE OVERRIDE PER REPO
@@ -66,65 +84,151 @@
 # managed block below are GLOBAL defaults. They apply to a mode (review-plan,
 # code-review, review-tasks, ask) ONLY when that mode has no
 # `defaults.modes.<mode>` entry here or in an inherited layer — a mode-specific
-# list still WINS for that mode. `--init`'s interactive writer sets only these
-# globals; to change a specific mode, add a `defaults.modes.<mode>` block here
-# yourself (see the modes example below).
+# list still WINS for that mode. `--init` sets only these globals; to change a
+# specific mode, add a `defaults.modes.<mode>` block here yourself (see the modes
+# example below).
 # =============================================================================
 
 
 # <<< multi-llm:init-managed >>>
-# Everything BETWEEN these two markers is the SELECTION block. `--init`'s
-# interactive writer REPLACES this whole region on each run; everything OUTSIDE
-# it (all comments above and below, including the MODE SHADOWING note) is
-# preserved verbatim across a re-init. Hand-edits inside the markers are
-# overwritten by the next `--init --force`.
+## Everything BETWEEN these two markers is the SELECTION block, REGENERATED on
+## every `--init --force` (it re-detects installed CLIs and re-uncomments their
+## lines). Everything OUTSIDE the markers — the comments above and below — is
+## preserved verbatim across a re-init; put any hand-maintained keys there.
+## Hand-edits INSIDE the markers are overwritten by the next `--init --force`.
 
-# --- default_provider --------------------------------------------------------
-# Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
-# Uncomment to change it:
-#
-# default_provider: claude-code
+## --- providers --------------------------------------------------------------
+## Full provider definitions. `--init` uncomments the block for each DETECTED
+## CLI; an uncommented block deep-merges OVER the base (lists replace).
+## `command:` is documentation-only and is NEVER executed.
+# providers:
+#   claude-code:
+#     command: claude
+#     default_timeout: 1800
+#     supports_json_output: true
+#     max_concurrent: 2
+#     models:
+#       - sonnet
+#       - opus
+#       - fable
+#       - haiku
+
+#   cursor-agent:
+#     command: cursor-agent
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     supports_json_output: true
+#     models:
+#       - auto
+#       - gpt-5.2-high
+#       - gpt-5.3-codex
+#       - gpt-5.3-codex-high
+#       - gpt-5.4-high
+#       - gpt-5.5-extra-high
+#       - gemini-3-pro
+#       - gemini-3.1-pro
+#       - grok
+#       - gemini-3-flash
+#       - gpt-5.2
+#       - kimi-k2.5
+#       - grok-4-20-thinking
+#       - grok-4.3
+#       - composer-2
+#       - composer-2.5
+
+#   gemini:
+#     command: gemini
+#     default_timeout: 1200
+#     supports_json_output: true
+#     models:
+#       - gemini-3-flash
+#       - gemini-3-pro
+#       - gemini-3.1-pro
+#       - gemini-2.5-flash
+#       - gemini-2.5-pro
+
+#   opencode:
+#     command: opencode
+#     default_timeout: 1200
+#     supports_json_output: true
+#     models:
+#       - opencode/big-pickle
+#       - opencode/sonnet
+
+#   codex:
+#     command: codex
+#     default_timeout: 1800
+#     supports_json_output: true
+#     models:
+#       - gpt-5.2-codex
+#       - gpt-5.5
+
+#   kilocode:
+#     command: kilocode
+#     default_timeout: 1200
+#     supports_json_output: false
+#     max_concurrent: 2
+#     models:
+#       - openrouter/moonshotai/kimi-k2.5
+#       - openrouter/moonshotai/kimi-k2.6
+#       - openrouter/moonshotai/kimi-k2.7-code
+#       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
+#       - openrouter/z-ai/glm-5.2
+#       - openrouter/minimax/minimax-m2.7
+#       - openrouter/minimax/minimax-m3
+#       - openrouter/x-ai/grok-4.20-multi-agent
+#       - openrouter/arcee-ai/trinity-large-thinking
+#       - openrouter/xiaomi/mimo-v2.5-pro
+#       - openrouter/qwen/qwen3.7-max
+
+## --- default_provider -------------------------------------------------------
+## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
+## `--init` sets it to the first detected provider; left commented when nothing
+## is detected (inherits the base default).
+# default_provider: cursor-agent
 
 
-# --- defaults ----------------------------------------------------------------
+## --- defaults ---------------------------------------------------------------
 defaults:
 
-  # --- defaults.models -------------------------------------------------------
-  # The model set used for normal (non-quick) runs. REPLACES the base list.
-  # NOTE (mode shadowing): setting ONLY `defaults.models` does NOT change modes
-  # that have a base `defaults.modes.<mode>` entry (e.g. review-plan /
-  # code-review) — those mode-specific lists keep winning. To change a specific
-  # mode's models, override `defaults.modes.<mode>` below (not just this list).
-  #
-  # models:
-  #   - claude-code:opus
-  #   - cursor-agent:composer-2.5
-  #   - gemini:gemini-3-pro
+  ## --- defaults.models ------------------------------------------------------
+  ## The model panel for normal (non-quick) runs. REPLACES the base list.
+  ## `--init` uncomments the candidates whose provider is detected; with none
+  ## uncommented the (blank) list inherits the base.
+  models:
+#     - cursor-agent:composer-2.5
+#     - cursor-agent:gemini-3.1-pro
+#     - cursor-agent:grok-4.3
+#     - kilocode:openrouter/moonshotai/kimi-k2.7-code
+#     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b
+#     - kilocode:openrouter/z-ai/glm-5.2
+#     - kilocode:openrouter/minimax/minimax-m3
+#     - kilocode:openrouter/xiaomi/mimo-v2.5-pro
+#     - kilocode:openrouter/qwen/qwen3.7-max
+#     - claude-code:opus
+#     - codex:gpt-5.5
 
-  # --- defaults.quick_models -------------------------------------------------
-  # Lightweight subset used with the --quick / -q flag. REPLACES the base list.
-  # `quick_models: []` disables quick mode (it will ERROR under --quick); a blank
-  # `quick_models:` instead inherits the base.
-  #
-  # quick_models:
-  #   - claude-code:opus
-  #   - cursor-agent:composer-2.5
+  ## --- defaults.quick_models ------------------------------------------------
+  ## Lightweight subset used with --quick / -q. REPLACES the base list. Same
+  ## uncommenting rule as defaults.models.
+  quick_models:
+#     - cursor-agent:composer-2.5
+#     - cursor-agent:gpt-5.5-extra-high
+#     - claude-code:opus
 
-  # --- defaults.modes --------------------------------------------------------
-  # Per-mode overrides. A mode's `models` (and optional `quick`) win over the
-  # global `defaults.models` / `defaults.quick_models` ABOVE for that mode.
-  # Override the specific mode here to change ONLY that mode's selection.
-  # You cannot delete an inherited mode entry — only overwrite its list
-  # (e.g. `code-review: { models: [] }` clears it).
-  #
-  # modes:
-  #   review-plan:
-  #     models:
-  #       - claude-code:opus
-  #       - cursor-agent:gemini-3.1-pro
-  #     quick:
-  #       - claude-code:opus
-  #   code-review:
-  #     models:
-  #       - cursor-agent:gpt-5.4-high
+  ## --- defaults.modes -------------------------------------------------------
+  ## Per-mode overrides (NOT written by `--init`). A mode's `models` (and optional
+  ## `quick`) win over the globals above FOR THAT MODE. Authored with `##` so the
+  ## toggler never uncomments these example lines — copy one down by hand to use
+  ## it (and see the MODE SHADOWING note in the header).
+  ## modes:
+  ##   review-plan:
+  ##     models:
+  ##       - claude-code:opus
+  ##       - cursor-agent:gemini-3.1-pro
+  ##     quick:
+  ##       - claude-code:opus
+  ##   code-review:
+  ##     models:
+  ##       - cursor-agent:gpt-5.5-extra-high
 # <<< /multi-llm:init-managed >>>

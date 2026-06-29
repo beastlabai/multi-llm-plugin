@@ -11,7 +11,7 @@ allowed-tools:
   - AskUserQuestion
   - Glob
   - Grep
-argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status|--init] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force] [--gitignore|--template-only|--non-interactive|--timeout SECONDS (--init only)]
+argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--full|--ask|--status|--init] <plan_path> ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force] [--dir PATH|--gitignore|--template-only (--init only)]
 ---
 
 # Multi-LLM Skill
@@ -51,7 +51,7 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 9. **Full Workflow** (`--full`): Run all modes in sequence
 10. **Status** (`--status`): Show current workflow state and suggested next action
 11. **Ask** (`--ask`): Ask each model a free-text question about a plan; aggregate answers into one markdown file
-12. **Init Config** (`--init`): Set up a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`). On a TTY it's interactive (detect installed CLIs, pick default + `--quick` model panels, "Show all…" reveals each CLI's full catalog); off a TTY or with `--template-only` / `--non-interactive` it writes the commented stub. Flags: `--gitignore`, `--force`, `--template-only`, `--non-interactive`, `--timeout SECONDS`.
+12. **Init Config** (`--init`): Set up a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`). Fully automatic and zero-prompt: it auto-detects which provider CLIs are installed on `PATH` and writes a preconfigured override (uncommenting the detected providers' blocks and `default_provider`); `--template-only` skips detection and writes the inert commented stub. Flags: `--dir PATH`, `--force`, `--gitignore`, `--template-only`.
 
 ## Quick Start
 
@@ -158,23 +158,24 @@ Providers and models are configured in `${CLAUDE_SKILL_DIR}/providers.yaml` (the
 
 ### Per-project override (optional)
 
-A repository can override the *selection* defaults (`default_provider`,
-`defaults.models`, `defaults.quick_models`, `defaults.modes`) without editing the
+A repository can override its provider/model defaults without editing the
 installed plugin by adding `<git-root>/.multi-llm/providers.yaml`. It is optional
 and auto-discovered; absent → base behavior, unchanged. Config is layered
 base → project-local → `MULTI_LLM_PROVIDERS_CONFIG` env override, deep-merged with
-**lists replacing wholesale**. Set one up with the **`--init`**
-flag (routed via `instructions/init-config.md`) — interactive on a TTY, commented
-stub otherwise:
+**lists replacing wholesale**. Set one up with the **`--init`** flag (routed via
+`instructions/init-config.md`) — fully automatic and zero-prompt, it auto-detects
+the installed provider CLIs and writes a preconfigured override:
 
 ```bash
-/multi-llm:multi-llm --init                 # interactive picker (TTY); writes <git-root>/.multi-llm/providers.yaml
-/multi-llm:multi-llm --init --template-only # write the commented stub to hand-edit
+/multi-llm:multi-llm --init                 # auto-detect installed CLIs; writes <git-root>/.multi-llm/providers.yaml
+/multi-llm:multi-llm --init --template-only # skip detection; write the inert commented stub to hand-edit
 /multi-llm:multi-llm --init --gitignore     # keep it developer-local (untracked)
 ```
 
-The auto-discovered file may only change selection (a `providers:` block there is
-ignored). See the README "Per-project configuration" section for full semantics.
+The auto-discovered file deep-merges its full contents (including a `providers:`
+block) over base, identical to the env layer; `command:` is documentation-only and
+is never executed. See the README "Per-project configuration" section for full
+semantics.
 
 ### providers.yaml Format
 

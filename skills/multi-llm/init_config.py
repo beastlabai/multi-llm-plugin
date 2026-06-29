@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
-"""Opt-in scaffolder for a per-project multi-llm config override.
+"""Auto-config scaffolder for a per-project multi-llm config override.
 
-On a TTY this walks the user through an **interactive** setup: it detects which
-provider CLIs are installed, lets them pick the default + ``--quick`` model panels
-(curated first, full CLI catalog opt-in behind "Show all…"), and writes the chosen
-*selection* keys into ``<git-root>/.multi-llm/providers.yaml``.
+``--init`` is a fully-automatic, zero-prompt config generator. It scans ``PATH``
+for the supported provider CLIs (the same ``provider.is_available()`` check the
+runtime uses), copies an **inert template** ``providers.yaml`` to
+``<git-root>/.multi-llm/providers.yaml``, and **uncomments** exactly the lines
+that belong to the **detected** providers:
 
-Off a TTY — or with ``--template-only`` / ``--non-interactive`` — it falls back to
-copying the fully-commented template stub verbatim (the historical behavior), so a
-repository can still hand-edit ``default_provider`` / ``defaults.models`` /
-``defaults.quick_models`` / ``defaults.modes`` without editing the installed plugin.
-The override file is optional and auto-discovered from the git root at run time.
+  * each detected provider's full ``providers:`` sub-block (command, timeouts,
+    concurrency, ``models:``) — undetected providers stay commented;
+  * the ``defaults.models`` / ``defaults.quick_models`` candidate entries whose
+    provider is detected;
+  * ``default_provider`` is set to the first detected provider (base declaration
+    order); left commented when nothing is detected.
+
+There is **no** interaction, **no** TTY, and **no** model-listing subprocess
+call at any point — the same deterministic text toggling runs identically inside
+Claude Code, an external terminal, or CI. The override file is optional and
+auto-discovered from the git root at run time.
 
 Usage (the way the skill invokes it):
 
     uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/init_config.py \\
-        [--dir PATH] [--force] [--gitignore] \\
-        [--template-only] [--non-interactive] [--timeout SECONDS]
+        [--dir PATH] [--force] [--gitignore] [--template-only]
 
 By default the file is left *trackable* (commit it for a team-wide, repo-standard
 selection). Pass --gitignore to instead keep it as a developer-local, untracked
-override.
+override. ``--template-only`` skips detection and writes the pristine inert
+template verbatim.
 """
 import argparse
-import json
 import os
-import shutil
+import re
 import sys
 from pathlib import Path
 
@@ -36,18 +42,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
-from utils.interactive import (  # noqa: E402
-    ACTION_ENTER_MANUAL,
-    ACTION_SHOW_ALL,
-    is_tty,
-    prompt_text,
-    prompt_yes_no,
-    select_multi,
-    select_one,
-    select_with_actions,
-)
 from utils.provider_registry import get_provider, load_base_config  # noqa: E402
-from utils.providers.base import is_valid_bare_id  # noqa: E402
 
 # Template is resolved strictly relative to THIS file, never CWD / --project dir
 # (both diverge from the install location). If this moves, update the Section 4
@@ -58,20 +53,20 @@ CONFIG_DIRNAME = ".multi-llm"
 CONFIG_FILENAME = "providers.yaml"
 GITIGNORE_ENTRY = ".multi-llm/"
 
-# Delimited region of the template that the interactive writer replaces. The
-# header comments (and the MODE SHADOWING note) live OUTSIDE these markers and are
-# copied verbatim, so a re-init never clobbers them. Keep in sync with the markers
-# in templates/config/providers.override.yaml.
+# Delimited region of the template that init regenerates. The header comments
+# (and the MODE SHADOWING note) live OUTSIDE these markers and are copied verbatim,
+# so a re-init never clobbers them. Keep in sync with the markers in
+# templates/config/providers.override.yaml.
 MARKER_START = "# <<< multi-llm:init-managed >>>"
 MARKER_END = "# <<< /multi-llm:init-managed >>>"
 
-# Sentinel labels shown in the per-provider picker first pass.
-SHOW_ALL_LABEL_FMT = "⤵  Show all models ({name} models)…"
-MANUAL_LABEL = "✎  Enter a model id manually…"
-
-# Above this many rows, the no-gum/no-fzf numbered fallback warns before dumping a
-# full "Show all…" catalog (the only place a long flat list can appear — §4).
-LONG_LIST_WARN_THRESHOLD = 40
+# Signatures of a header authored BEFORE the providers-block filter removal, so a
+# --force re-init can warn that the preserved outside-marker guidance is stale.
+_STALE_HEADER_SIGNATURES = (
+    "block here is IGNORED",
+    "dropped with a warning",
+    "dropped+warned",
+)
 
 
 def resolve_target_dir(requested: "str | None") -> Path:
@@ -133,7 +128,7 @@ def append_gitignore(target_dir: Path) -> "str | None":
 
 
 def _report_gitignore(args: argparse.Namespace, target_dir: Path) -> None:
-    """Shared tracking-state messaging for both the template and interactive paths."""
+    """Shared tracking-state messaging for the auto-config and template paths."""
     if args.gitignore:
         result = append_gitignore(target_dir)
         if result:
@@ -150,53 +145,6 @@ def _report_gitignore(args: argparse.Namespace, target_dir: Path) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Interactive flow
-# ---------------------------------------------------------------------------
-
-
-def _base_catalog_specs(providers_cfg: dict) -> set:
-    """Set of every ``provider:model`` spec present in the base catalog."""
-    specs = set()
-    for name, cfg in providers_cfg.items():
-        for model in (cfg.get("models", []) or []):
-            specs.add(f"{name}:{model}")
-    return specs
-
-
-def _shadowed_modes(base: dict, target_dir: Path) -> "list[str]":
-    """Modes whose mode-specific list will still win over the globals we write.
-
-    The plan (§Out of scope, acceptance criteria) wants the confirm step to warn
-    about ``defaults.modes`` present in the **base** config OR in any discovered
-    parent override on the resolution path — the project-local
-    ``.multi-llm/providers.yaml`` and the ``MULTI_LLM_PROVIDERS_CONFIG`` env layer.
-    Reading only ``load_base_config()`` misses modes a user set via those override
-    layers, which still shadow the freshly-written globals at runtime.
-
-    We read the same override layers ``load_config`` discovers (anchored on
-    ``target_dir``) directly, so a pre-existing project file or env override that
-    carries ``defaults.modes`` is surfaced too. Best-effort: any failure falls back
-    to the base-config modes alone (never raises).
-    """
-    modes: set = set((base.get("defaults", {}) or {}).get("modes", {}) or {})
-    try:
-        import utils.provider_registry as registry
-
-        permissive = registry._truthy_env(registry.ENV_PERMISSIVE_VAR)
-        for layer_name, path in registry._override_paths(anchor=str(target_dir)):
-            layer = registry._load_override_layer(layer_name, path, permissive=permissive)
-            if not isinstance(layer, dict):
-                continue
-            layer_modes = (layer.get("defaults", {}) or {}).get("modes", {}) or {}
-            if isinstance(layer_modes, dict):
-                modes |= set(layer_modes)
-    except Exception:
-        # Override-layer probing is advisory; fall back to base-config modes only.
-        pass
-    return sorted(modes)
-
-
 def _available_providers(providers_cfg: dict) -> "list[str]":
     """Base-config provider names whose CLI is installed, in declaration order."""
     available = []
@@ -207,227 +155,474 @@ def _available_providers(providers_cfg: dict) -> "list[str]":
     return available
 
 
-def _have_fuzzy_picker() -> bool:
-    """True if gum or fzf is available (so long lists get a fuzzy filter)."""
-    return bool(shutil.which("gum") or shutil.which("fzf"))
+# ---------------------------------------------------------------------------
+# Template generator (drift guard)
+# ---------------------------------------------------------------------------
+#
+# The shipped template is GENERATED from the base providers.yaml by
+# build_template_text(): its commented `providers:` block and `defaults`
+# candidate lists mirror the base config verbatim. A pytest parity test
+# re-derives the template from the live base config and fails CI when the shipped
+# file drifts (e.g. a new provider / changed model list never regenerated). To
+# regenerate after a base edit:
+#
+#   python -c "import init_config as c; \\
+#       c.TEMPLATE_PATH.write_text(c.build_template_text())"
+
+# Outside-marker header prose (fixed; not derived from base).
+_HEADER = """\
+# .multi-llm/providers.yaml — per-project provider/model selection override
+# =============================================================================
+# This file is OPTIONAL. When absent, multi-llm uses its built-in defaults and
+# behaves exactly as it would without it. It lets THIS repository pick which
+# providers/models the multi-llm skill selects, without editing the installed
+# plugin (which is global and gets clobbered on update).
+#
+# It lives at:   <git-root>/.multi-llm/providers.yaml
+# Scaffold it:   use the `--init` flag (see README "Per-project configuration"),
+#                or run init_config.py directly.
+#
+# ----------------------------------------------------------------------------
+# HOW `--init` BUILDS THIS FILE (auto-detect, zero prompts)
+# ----------------------------------------------------------------------------
+# `--init` scans PATH for the supported provider CLIs and UNCOMMENTS the lines
+# belonging to the ones it finds — the matching `providers:` sub-blocks, the
+# `defaults.models` / `quick_models` entries for detected providers, and
+# `default_provider`. Undetected providers stay commented. There are NO prompts
+# and NO model-listing subprocess calls. Re-run `--init --force` to refresh the
+# detection (e.g. after installing a CLI or updating the plugin).
+#
+# ----------------------------------------------------------------------------
+# HOW MERGING WORKS (read this before editing)
+# ----------------------------------------------------------------------------
+# Your file is deep-merged ON TOP OF the built-in base config:
+#   base providers.yaml  →  THIS file  →  MULTI_LLM_PROVIDERS_CONFIG (if set)
+#
+#  * Only set what you want to change. Everything you omit is INHERITED.
+#  * LISTS REPLACE, THEY DO NOT APPEND. If you set `defaults.models`, you get
+#    EXACTLY that list — the base list is discarded, not extended.
+#  * Nested dicts (maps) deep-merge; only list/scalar VALUES replace wholesale.
+#
+# ----------------------------------------------------------------------------
+# BLANK vs. CLEAR vs. OMIT (the three states of a key)
+# ----------------------------------------------------------------------------
+#  * OMIT a key entirely        → inherit the base value.
+#  * Leave a key BLANK / null   → ALSO inherit the base value (a blank value is
+#       e.g.  `models:`            skipped, NOT treated as "clear"). Uncommenting
+#                                  a key but leaving it empty is therefore inert.
+#  * Set an EXPLICIT EMPTY LIST  → deliberately WIPE OUT the inherited list.
+#       e.g.  `quick_models: []`   `quick_models: []` means "use NO quick models
+#                                  here" — under --quick that ERRORS; an empty
+#                                  `defaults.models` falls back to interactive
+#                                  selection (and fails in unattended runs).
+#                                  `[]` is a FOOTGUN, not a no-op — use only when
+#                                  you truly mean "none".
+#
+# You CANNOT unset an inherited SCALAR back to "absent": you can overwrite it
+# with a new value, but `key:` (blank) just keeps the base. There is no deletion
+# sentinel. Likewise you cannot PRUNE an inherited `defaults.modes.<mode>` entry
+# (only overwrite its list, e.g. `<mode>: []`) — see the modes note below.
+#
+# ----------------------------------------------------------------------------
+# TRUST MODEL — provider definitions DO merge from this file (command stays inert)
+# ----------------------------------------------------------------------------
+# An UNCOMMENTED `providers:` block here deep-merges OVER the base, exactly like
+# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`,
+# `supports_json_output`, and each `models:` list all take effect (lists replace).
+# `--init` writes a full block for each detected provider so the file is a
+# complete, self-describing snapshot.
+#  * `command:` is DOCUMENTATION-ONLY and is NEVER executed — provider binaries
+#    are hardcoded in the plugin (utils/providers/). A `command:` value in ANY
+#    layer can never make the tool run a different program.
+#  * A provider name with no hardcoded adapter (e.g. one a newer plugin removed
+#    or renamed) still merges but is IGNORED at runtime — it lists no models and
+#    can never be selected.
+#  * DRIFT: a copied block pins base's scalar/model values AT INIT TIME and the
+#    SET of provider keys to whatever the plugin shipped then. Re-run
+#    `--init --force` after a plugin update to refresh pinned metadata AND prune
+#    providers the new base dropped.
+#
+# ----------------------------------------------------------------------------
+# ONE OVERRIDE PER REPO
+# ----------------------------------------------------------------------------
+# Discovery anchors at the git ROOT, so a repository has exactly ONE
+# .multi-llm/providers.yaml shared repo-wide. A monorepo CANNOT set per-package
+# or per-subdirectory defaults via auto-discovery — use MULTI_LLM_PROVIDERS_CONFIG
+# per-invocation for that. There are no per-plan or per-subdirectory overrides.
+#
+# ----------------------------------------------------------------------------
+# MODE SHADOWING — these globals do NOT cover modes that set their own list
+# ----------------------------------------------------------------------------
+# The `default_provider` / `defaults.models` / `defaults.quick_models` in the
+# managed block below are GLOBAL defaults. They apply to a mode (review-plan,
+# code-review, review-tasks, ask) ONLY when that mode has no
+# `defaults.modes.<mode>` entry here or in an inherited layer — a mode-specific
+# list still WINS for that mode. `--init` sets only these globals; to change a
+# specific mode, add a `defaults.modes.<mode>` block here yourself (see the modes
+# example below).
+# ============================================================================="""
+
+# In-marker intro (## prose; the toggler never touches `## ` lines).
+_MANAGED_INTRO = [
+    "## Everything BETWEEN these two markers is the SELECTION block, REGENERATED on",
+    "## every `--init --force` (it re-detects installed CLIs and re-uncomments their",
+    "## lines). Everything OUTSIDE the markers — the comments above and below — is",
+    "## preserved verbatim across a re-init; put any hand-maintained keys there.",
+    "## Hand-edits INSIDE the markers are overwritten by the next `--init --force`.",
+]
+
+_PROVIDERS_COMMENTS = [
+    "## --- providers --------------------------------------------------------------",
+    "## Full provider definitions. `--init` uncomments the block for each DETECTED",
+    "## CLI; an uncommented block deep-merges OVER the base (lists replace).",
+    "## `command:` is documentation-only and is NEVER executed.",
+]
+
+_DEFAULT_PROVIDER_COMMENTS = [
+    "## --- default_provider -------------------------------------------------------",
+    "## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).",
+    "## `--init` sets it to the first detected provider; left commented when nothing",
+    "## is detected (inherits the base default).",
+]
+
+_DEFAULTS_COMMENTS = [
+    "## --- defaults ---------------------------------------------------------------",
+]
+
+_MODELS_COMMENTS = [
+    "  ## --- defaults.models ------------------------------------------------------",
+    "  ## The model panel for normal (non-quick) runs. REPLACES the base list.",
+    "  ## `--init` uncomments the candidates whose provider is detected; with none",
+    "  ## uncommented the (blank) list inherits the base.",
+]
+
+_QUICK_COMMENTS = [
+    "  ## --- defaults.quick_models ------------------------------------------------",
+    "  ## Lightweight subset used with --quick / -q. REPLACES the base list. Same",
+    "  ## uncommenting rule as defaults.models.",
+]
+
+_MODES_EXAMPLE = [
+    "  ## --- defaults.modes -------------------------------------------------------",
+    "  ## Per-mode overrides (NOT written by `--init`). A mode's `models` (and optional",
+    "  ## `quick`) win over the globals above FOR THAT MODE. Authored with `##` so the",
+    "  ## toggler never uncomments these example lines — copy one down by hand to use",
+    "  ## it (and see the MODE SHADOWING note in the header).",
+    "  ## modes:",
+    "  ##   review-plan:",
+    "  ##     models:",
+    "  ##       - claude-code:opus",
+    "  ##       - cursor-agent:gemini-3.1-pro",
+    "  ##     quick:",
+    "  ##       - claude-code:opus",
+    "  ##   code-review:",
+    "  ##     models:",
+    "  ##       - cursor-agent:gpt-5.5-extra-high",
+]
 
 
-def _manual_entry_loop(provider_name: str) -> "list[str]":
-    """Collect free-text bare model ids for ``provider_name`` (blank to finish)."""
-    entries: list[str] = []
-    print(f"Enter {provider_name} model ids one per line (blank line to finish):")
-    while True:
-        value = prompt_text(f"  {provider_name} model id:")
-        if not value:
-            break
-        entries.append(value)
-    return entries
+def _yaml_scalar(val) -> str:
+    """Render a base scalar back to YAML text (bools lowercase, others str())."""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    return str(val)
 
 
-def _pick_provider_models(provider, curated: "list[str]", timeout: int) -> "tuple[list[str], bool]":
-    """Two-tier picker for one provider → (chosen BARE model ids, manual-origin flag).
+def _emit_providers_block(providers_cfg: dict) -> "list[str]":
+    """Emit the base providers block as fully-commented YAML lines (`# ` prefix).
 
-    The second element is True when the ids came from the "Enter manually…"
-    free-text sentinel; those ids are always flagged "(unverified id)" at confirm
-    time per §5a, even when they happen to exist in the base catalog.
-
-    First pass shows the curated rows plus sentinels ("Show all…" only when the
-    provider can list, "Enter manually…" always). Sentinels are exclusive
-    (select_with_actions enforces the precedence); a cancel skips the provider.
+    Blank lines separate sub-blocks (mirrors base). Each provider's fields are
+    emitted in base declaration order; the `models:` list is rendered as a nested
+    sequence. The whole block is inert until init uncomments a detected provider.
     """
-    show_all_label = (
-        SHOW_ALL_LABEL_FMT.format(name=provider.name) if provider.can_list_models else None
-    )
-    result = select_with_actions(
-        list(curated),
-        f"Select {provider.name} models (curated):",
-        show_all_label=show_all_label,
-        manual_label=MANUAL_LABEL,
-    )
-
-    if result.cancelled:
-        return [], False
-
-    if result.action == ACTION_SHOW_ALL:
-        listing = provider.list_models(curated, timeout=timeout)
-        if listing.note:
-            print(f"  note: {listing.note}")
-        full = listing.models or list(curated)
-        if not _have_fuzzy_picker() and len(full) > LONG_LIST_WARN_THRESHOLD:
-            print(
-                f"  (no gum/fzf installed — showing all {len(full)} {provider.name} "
-                f"models as a numbered list; install gum or fzf for fuzzy filtering)"
-            )
-        picks = select_multi(full, f"Select {provider.name} models (type to filter):")
-        return list(picks), False
-
-    if result.action == ACTION_ENTER_MANUAL:
-        return _manual_entry_loop(provider.name), True
-
-    return list(result.selected), False
+    out = ["# providers:"]
+    first = True
+    for name, cfg in providers_cfg.items():
+        if not first:
+            out.append("")  # blank separator between sub-blocks
+        first = False
+        out.append(f"#   {name}:")
+        for key, val in (cfg or {}).items():
+            if key == "models":
+                out.append("#     models:")
+                for model in (val or []):
+                    out.append(f"#       - {model}")
+            else:
+                out.append(f"#     {key}: {_yaml_scalar(val)}")
+    return out
 
 
-def _collect_default_models(
-    available: "list[str]", providers_cfg: dict, timeout: int
-) -> "tuple[list[str], set]":
-    """Run the per-provider picker across all available providers.
+def _emit_defaults_items(specs: "list[str]") -> "list[str]":
+    """Emit `defaults.*` candidate specs as commented list items (`#     - spec`)."""
+    return [f"#     - {spec}" for spec in specs]
 
-    Returns ``(ordered specs, manual_specs)`` where ``manual_specs`` is the subset
-    of specs that came from a free-text "Enter manually…" entry — always flagged
-    "(unverified id)" at confirm time regardless of base-catalog membership.
+
+def build_template_text(base_config: "dict | None" = None) -> str:
+    """Build the full pristine template text from the base providers.yaml.
+
+    The commented `providers:` block and the `defaults.models` / `quick_models`
+    candidate lists mirror the live base config verbatim; everything else is
+    fixed prose. A plain copy of the result is INERT (the providers block is
+    commented; the `defaults` keys are live but blank → inherit base).
     """
-    specs: list[str] = []
-    seen = set()
-    manual_specs: set = set()
-    for name in available:
-        provider = get_provider(name)
-        curated = providers_cfg[name].get("models", []) or []
-        bare_ids, manual = _pick_provider_models(provider, curated, timeout)
-        for bare in bare_ids:
-            spec = f"{name}:{bare}"
-            if spec not in seen:
-                specs.append(spec)
-                seen.add(spec)
-            if manual:
-                manual_specs.add(spec)
-    return specs, manual_specs
+    base = base_config if base_config is not None else load_base_config()
+    providers_cfg = base.get("providers", {}) or {}
+    defaults = base.get("defaults", {}) or {}
+    d_models = defaults.get("models", []) or []
+    d_quick = defaults.get("quick_models", []) or []
+    default_provider = base.get("default_provider", "cursor-agent")
+
+    lines: "list[str]" = []
+    lines.append(_HEADER)
+    lines.append("")
+    lines.append("")
+    lines.append(MARKER_START)
+    lines.extend(_MANAGED_INTRO)
+    lines.append("")
+    lines.extend(_PROVIDERS_COMMENTS)
+    lines.extend(_emit_providers_block(providers_cfg))
+    lines.append("")
+    lines.extend(_DEFAULT_PROVIDER_COMMENTS)
+    lines.append(f"# default_provider: {default_provider}")
+    lines.append("")
+    lines.append("")
+    lines.extend(_DEFAULTS_COMMENTS)
+    lines.append("defaults:")
+    lines.append("")
+    lines.extend(_MODELS_COMMENTS)
+    lines.append("  models:")
+    lines.extend(_emit_defaults_items(d_models))
+    lines.append("")
+    lines.extend(_QUICK_COMMENTS)
+    lines.append("  quick_models:")
+    lines.extend(_emit_defaults_items(d_quick))
+    lines.append("")
+    lines.extend(_MODES_EXAMPLE)
+    lines.append(MARKER_END)
+    return "\n".join(lines) + "\n"
 
 
-def _collect_default_models_guarded(
-    available: "list[str]", providers_cfg: dict, timeout: int
-) -> "tuple[list[str], set] | None":
-    """Collect default models with the zero-selection guard (§3 step 3).
+# ---------------------------------------------------------------------------
+# The toggler — uncomment the lines belonging to detected providers
+# ---------------------------------------------------------------------------
 
-    Returns ``(specs, manual_specs)``, or None to signal an abort (caller exits 1)
-    when the user selects nothing even after a retry. Never returns empty specs.
+# Top-level key transitions (tested BEFORE the section dispatch; see auto_uncomment).
+_RE_DEFAULT_PROVIDER = re.compile(r"^#?\s*default_provider:")
+_RE_DEFAULTS = re.compile(r"^#?\s*defaults:\s*$")
+_RE_PROVIDERS = re.compile(r"^#?\s*providers:\s*$")
+# A commented provider-key line: `#` + the 3 spaces a 2-indent key gains under `# `.
+_RE_PROVIDER_KEY = re.compile(r"^#\s{3}(?P<name>[a-z0-9-]+):\s*$")
+# An UNCOMMENTED defaults sub-key (arms the items pass for that key).
+_RE_DEFAULTS_KEY = re.compile(r"^(?P<indent>\s*)(?P<key>models|quick_models):\s*$")
+# A commented `defaults.*` candidate item.
+_RE_DEFAULTS_ITEM = re.compile(r"^#(?P<indent>\s*)-\s*(?P<spec>\S+)")
+
+
+def _uncomment(line: str) -> str:
+    """Strip exactly the leading `# ` (hash + one space); a no-op otherwise.
+
+    Safe on `## ` prose (starts `##`, not `# `), bare `#`, and blank lines — none
+    begin with hash-space — so the toggler can call it on any classified line.
     """
-    for attempt in range(2):
-        specs, manual_specs = _collect_default_models(available, providers_cfg, timeout)
+    return line[2:] if line.startswith("# ") else line
+
+
+def _render_default_provider(line: str, detected, order: "list[str]") -> str:
+    """Rewrite the `default_provider:` line to the first detected provider.
+
+    Leaves the line commented (verbatim) when nothing is detected so the base
+    default is inherited.
+    """
+    chosen = next((p for p in order if p in detected), None)
+    if chosen is None:
+        return line
+    return f"default_provider: {chosen}"
+
+
+def _toggle_template(template_body: str, detected, order: "list[str]"):
+    """Toggle the managed template body for ``detected`` providers.
+
+    Returns ``(text, models_specs, quick_specs)`` where the spec lists are the
+    ``defaults.models`` / ``quick_models`` entries the pass uncommented (used by
+    the D2a guard and the post-write recheck). A single linear finite-state scan:
+    the three top-level keys (`providers:` / `default_provider:` / `defaults:`)
+    drive the section, and each resets ``cur_provider`` so a detected provider's
+    toggle state never bleeds across a section boundary.
+    """
+    out: "list[str]" = []
+    section = None          # None | "providers" | "defaults"
+    cur_provider = None
+    armed_key = None        # None | "models" | "quick_models" (defaults pass)
+    models_specs: "list[str]" = []
+    quick_specs: "list[str]" = []
+
+    for line in template_body.splitlines():
+        # default_provider: is a top-level key that ENDS the providers sub-block;
+        # it MUST be matched before the section dispatch (see plan: the FSM hoist).
+        if _RE_DEFAULT_PROVIDER.match(line):
+            section, cur_provider, armed_key = None, None, None
+            out.append(_render_default_provider(line, detected, order))
+            continue
+        if _RE_DEFAULTS.match(line):
+            section, cur_provider, armed_key = "defaults", None, None
+            out.append(line)
+            continue
+        if _RE_PROVIDERS.match(line):
+            section, cur_provider, armed_key = "providers", None, None
+            out.append(_uncomment(line) if detected else line)
+            continue
+
+        if section == "providers":
+            key_match = _RE_PROVIDER_KEY.match(line)
+            if key_match:
+                cur_provider = key_match.group("name")
+                out.append(_uncomment(line) if cur_provider in detected else line)
+            elif cur_provider in detected:
+                out.append(_uncomment(line))
+            else:
+                out.append(line)
+            continue
+
+        if section == "defaults":
+            key_match = _RE_DEFAULTS_KEY.match(line)
+            if key_match:
+                armed_key = key_match.group("key")
+                out.append(line)
+                continue
+            item_match = _RE_DEFAULTS_ITEM.match(line)
+            if item_match and armed_key:
+                spec = item_match.group("spec")
+                provider = spec.split(":", 1)[0]
+                if provider in detected:
+                    out.append(_uncomment(line))
+                    (models_specs if armed_key == "models" else quick_specs).append(spec)
+                else:
+                    out.append(line)
+                continue
+            # Neither an arming key nor an armed item: blank lines keep the armed
+            # state; anything else (prose, the `## modes:` example) disarms it.
+            if line.strip() != "":
+                armed_key = None
+            out.append(line)
+            continue
+
+        out.append(line)  # section is None → verbatim (header / prose / blank)
+
+    return "\n".join(out), models_specs, quick_specs
+
+
+def auto_uncomment(template_body: str, detected, order: "list[str]") -> str:
+    """Toggle ``template_body`` for ``detected`` providers (text only).
+
+    Thin wrapper over :func:`_toggle_template` for callers/tests that only want
+    the toggled text. ``detected`` is the set of installed provider names;
+    ``order`` is the base-config declaration order (drives ``default_provider``).
+    """
+    return _toggle_template(template_body, detected, order)[0]
+
+
+# ---------------------------------------------------------------------------
+# D2a guard — keep the panels runnable when detected providers aren't curated
+# ---------------------------------------------------------------------------
+
+
+def _inject_under_key(body: str, key: str, specs: "list[str]") -> str:
+    """Splice ``- spec`` lines directly beneath the uncommented ``key:`` line.
+
+    Anchors on the live `^(indent)key:$` line (the toggler leaves the defaults
+    sub-keys uncommented) and inserts at the key's indent + 2 spaces — the same
+    indent as the template's candidate items.
+
+    The match is SCOPED to the ``defaults:`` section. Otherwise the bare
+    `^(indent)key:$` pattern would also match the 4-space ``models:`` key inside
+    each DETECTED provider's now-uncommented ``providers:`` sub-block — and since
+    D2a fires precisely on a gemini/opencode-only machine (whose blocks are
+    uncommented), the injected ``provider:model`` specs would be spliced as bare
+    ids into those provider catalogs, corrupting them. Tracking the section so the
+    same FSM transitions as ``_toggle_template`` keeps injection to defaults only.
+    """
+    pattern = re.compile(rf"^(?P<indent>\s*){re.escape(key)}:\s*$")
+    out: "list[str]" = []
+    in_defaults = False
+    for line in body.splitlines():
+        if _RE_DEFAULTS.match(line):
+            in_defaults = True
+        elif _RE_PROVIDERS.match(line) or _RE_DEFAULT_PROVIDER.match(line):
+            in_defaults = False
+        out.append(line)
+        if not in_defaults:
+            continue
+        match = pattern.match(line)
+        if match:
+            child_indent = match.group("indent") + "  "
+            for spec in specs:
+                out.append(f"{child_indent}- {spec}")
+    return "\n".join(out)
+
+
+def _apply_d2a_guard(body, detected_list, models_specs, quick_specs, base_config):
+    """Ensure ``defaults.models`` / ``quick_models`` are runnable despite detection.
+
+    The base default panel omits some providers (gemini/opencode), so a machine
+    whose only detected providers are uncovered uncomments ZERO entries → the
+    list would inherit base (which references uninstalled providers). When that
+    happens for ≥1 detected provider, inject each detected provider's first base
+    catalog model into ``defaults.models`` (and the first detected provider's
+    first model into ``quick_models``) and return a notice.
+
+    Returns ``(body, expected_models, notices)`` where ``expected_models`` is the
+    final resolved ``defaults.models`` list (uncommented + injected), used by the
+    post-write recheck.
+    """
+    notices: "list[str]" = []
+    expected_models = list(models_specs)
+    if not detected_list:
+        return body, expected_models, notices
+
+    providers_cfg = base_config.get("providers", {}) or {}
+
+    def first_model(provider: str) -> "str | None":
+        models = providers_cfg.get(provider, {}).get("models", []) or []
+        return models[0] if models else None
+
+    if not models_specs:
+        specs = [f"{p}:{m}" for p in detected_list if (m := first_model(p))]
         if specs:
-            return specs, manual_specs
-        if attempt == 0:
-            print(
-                "\nYou didn't select any models. An empty default panel can't be "
-                "written (it would brick every run). Let's try again — pick at least "
-                "one model from any provider.\n",
-                file=sys.stderr,
-            )
-    return None
-
-
-def _choose_quick_models(default_specs: "list[str]") -> "list[str]":
-    """Propose + confirm the ``--quick`` panel (a ≤2 positional subset of defaults).
-
-    Never returns an empty list silently: if the user trims everything, they must
-    explicitly confirm disabling ``--quick`` (writing ``quick_models: []``);
-    otherwise the proposal is re-offered.
-    """
-    proposed = default_specs[:2]
-    while True:
-        print("\nProposed --quick panel (lightweight subset of your defaults):")
-        for spec in proposed:
-            print(f"  - {spec}")
-        if prompt_yes_no("Use these as your --quick panel?", default=True):
-            quick = list(proposed)
-        else:
-            quick = list(
-                select_multi(default_specs, "Select --quick models (subset of your defaults):")
+            body = _inject_under_key(body, "models", specs)
+            expected_models = specs
+            names = ", ".join(detected_list)
+            notices.append(
+                f"NOTE: detected provider(s) {{{names}}} are not in the base default "
+                f"panel; injected their first model into defaults.models so the "
+                f"config is runnable — edit as desired."
             )
 
-        if quick:
-            return quick
+    if not quick_specs:
+        first = detected_list[0]
+        model = first_model(first)
+        if model:
+            body = _inject_under_key(body, "quick_models", [f"{first}:{model}"])
+            notices.append(
+                f"NOTE: injected {first}:{model} into defaults.quick_models so "
+                f"`--quick` is runnable — edit as desired."
+            )
 
-        print(
-            "An empty --quick panel makes `--quick` error at runtime.",
-            file=sys.stderr,
-        )
-        if prompt_yes_no(
-            "Disable --quick entirely for this repo (write quick_models: [])?",
-            default=False,
-        ):
-            return []
-        # else: re-offer the proposal
-
-
-def _choose_default_provider(available: "list[str]", default_specs: "list[str]") -> str:
-    """Single-select ``default_provider``, defaulting to the first pick's provider."""
-    first_provider = default_specs[0].split(":", 1)[0]
-    default = first_provider if first_provider in available else available[0]
-    if len(available) == 1:
-        return available[0]
-    chosen = select_one(available, "Choose the default provider:", default=default)
-    return chosen if chosen in available else default
-
-
-def _confirm_write(
-    default_provider: str,
-    models: "list[str]",
-    quick_models: "list[str]",
-    base_catalog: set,
-    shadowed_modes: "list[str]",
-    manual_specs: "set | None" = None,
-) -> bool:
-    """Show the pre-write summary (§5a), flag unverified ids, gate the write."""
-    manual_specs = manual_specs or set()
-
-    def _is_unverified(spec: str) -> bool:
-        # A manually-entered id is always "unverified" per §5a, even when it
-        # happens to exist in the base catalog (the user typed it free-form).
-        return spec in manual_specs or spec not in base_catalog
-
-    def _annotate(spec: str) -> str:
-        return f"{spec}          (unverified id)" if _is_unverified(spec) else spec
-
-    print("\nAbout to write .multi-llm/providers.yaml:\n")
-    print(f"  default_provider: {default_provider}")
-    print("  defaults.models:")
-    for spec in models:
-        print(f"    - {_annotate(spec)}")
-    print("  defaults.quick_models:")
-    if quick_models:
-        for spec in quick_models:
-            print(f"    - {_annotate(spec)}")
-    else:
-        print("    [] (--quick disabled for this repo)")
-
-    if shadowed_modes:
-        print(
-            "\nNote: a mode-specific model list already exists for: "
-            + ", ".join(shadowed_modes)
-            + ".\n      Those per-mode lists still WIN over the globals above for "
-            "those modes."
-        )
-
-    if any(_is_unverified(spec) for spec in (models + quick_models)):
-        print("\n  (unverified id) = manual/Show-all pick not in the base catalog "
-              "(check for typos; it will still run).")
-
-    return prompt_yes_no("\nWrite this config?", default=False)
+    return body, expected_models, notices
 
 
 # ---------------------------------------------------------------------------
-# Rendering + writing
+# Splice / validate / write
 # ---------------------------------------------------------------------------
 
 
-def render_managed_block(
-    default_provider: str, models: "list[str]", quick_models: "list[str]"
-) -> str:
-    """Render the selection-key payload as a YAML block (no marker lines).
-
-    Uses ``yaml.safe_dump`` so every id (including ``/``- or ``:``-bearing specs)
-    is correctly quoted; ``sort_keys=False`` preserves
-    default_provider → models → quick_models order. ``quick_models`` is always
-    emitted (an explicit ``[]`` means "--quick disabled").
-    """
-    payload = {
-        "default_provider": default_provider,
-        "defaults": {
-            "models": list(models),
-            "quick_models": list(quick_models),
-        },
-    }
-    return yaml.safe_dump(payload, default_flow_style=False, sort_keys=False).rstrip("\n")
+def _extract_managed_body(template_text: str) -> str:
+    """Return the text BETWEEN the managed markers (exclusive of the marker lines)."""
+    start = template_text.find(MARKER_START)
+    end = template_text.find(MARKER_END)
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("init-managed markers missing or misordered in template")
+    start_line_end = template_text.find("\n", start) + 1
+    return template_text[start_line_end:end]
 
 
 def splice_managed_block(template_text: str, managed_body: str) -> str:
@@ -445,8 +640,9 @@ def splice_managed_block(template_text: str, managed_body: str) -> str:
     before = template_text[:start_line_end]
     after = template_text[end:]
     notice = (
-        "# Written by `multi-llm --init`. This block is REGENERATED on every\n"
-        "# `--init --force`; put any hand-maintained keys OUTSIDE the markers.\n"
+        "# Written by `multi-llm --init` (auto-detect). This block is REGENERATED on\n"
+        "# every `--init --force` — it re-detects the installed CLIs and re-uncomments\n"
+        "# their lines. Put any hand-maintained keys OUTSIDE the markers.\n"
         "#\n"
         "# These are GLOBAL selection defaults; a `defaults.modes.<mode>` entry (if\n"
         "# any) still wins for that mode. See the MODE SHADOWING note above.\n"
@@ -454,17 +650,71 @@ def splice_managed_block(template_text: str, managed_body: str) -> str:
     return before + notice + managed_body + "\n" + after
 
 
-def _parse_check(text: str) -> "str | None":
-    """Pre-write gate: the generated text must parse to a selection-keys mapping.
+def _validate_generated_config(text: str, detected, base_config: dict) -> "str | None":
+    """Pre-write gate over the generated config. Returns an error string or None.
 
-    Returns an error string (refuse to write) or None on success.
+    Stronger than a bare parse check: after text toggling + D2a injection + live
+    `providers:` merging, assert only known provider names appear, each provider
+    block is a mapping with sane timeout/concurrency, every `defaults.*` entry is
+    a string, `default_provider` resolves to a detected provider when detection is
+    non-empty, and the D2a invariant holds (the panels are non-empty whenever ≥1
+    provider was detected). Aborts the write on any failure.
     """
     try:
         parsed = yaml.safe_load(text)
     except yaml.YAMLError as e:
         return f"generated YAML does not parse: {e}"
-    if not isinstance(parsed, dict) or "defaults" not in parsed:
-        return "generated YAML is missing the expected selection keys"
+    if not isinstance(parsed, dict):
+        return "generated YAML is not a top-level mapping"
+    if "defaults" not in parsed:
+        return "generated YAML is missing the 'defaults' section"
+
+    known = set(base_config.get("providers", {}) or {})
+
+    providers_block = parsed.get("providers")
+    if providers_block is not None:
+        if not isinstance(providers_block, dict):
+            return "generated 'providers' is not a mapping"
+        for name, pcfg in providers_block.items():
+            if name not in known:
+                return f"generated 'providers' has an unknown provider '{name}'"
+            if not isinstance(pcfg, dict):
+                return f"generated provider '{name}' is not a mapping"
+            for tkey in ("default_timeout", "max_concurrent"):
+                if tkey in pcfg:
+                    val = pcfg[tkey]
+                    if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                        return f"generated provider '{name}' has an invalid {tkey}: {val!r}"
+
+    defaults = parsed.get("defaults") or {}
+    if not isinstance(defaults, dict):
+        return "generated 'defaults' is not a mapping"
+    for list_key in ("models", "quick_models"):
+        vals = defaults.get(list_key)
+        if vals is None:
+            continue
+        if not isinstance(vals, list):
+            return f"generated defaults.{list_key} is not a list"
+        for spec in vals:
+            if not isinstance(spec, str):
+                return f"generated defaults.{list_key} has a non-string entry: {spec!r}"
+            provider = spec.split(":", 1)[0]
+            if provider not in known:
+                return (
+                    f"generated defaults.{list_key} references an unknown provider "
+                    f"'{provider}'"
+                )
+
+    if detected:
+        dp = parsed.get("default_provider")
+        if dp is None:
+            return "default_provider is missing despite detected providers"
+        if dp not in detected:
+            return f"default_provider '{dp}' is not a detected provider"
+        for list_key in ("models", "quick_models"):
+            if not (defaults.get(list_key) or []):
+                return f"defaults.{list_key} is empty despite detected providers"
+
     return None
 
 
@@ -516,7 +766,7 @@ def _recheck_merged(target_dir: Path, expected_models: "list[str]", config_path:
 
 
 def _splice_source(config_path: Path) -> str:
-    """Pick the text to splice the managed block into.
+    """Pick the text to splice the managed block into (outside-marker preservation).
 
     The template contract (see templates/config/providers.override.yaml) promises
     that everything OUTSIDE the markers — hand-maintained keys, comments — survives a
@@ -525,6 +775,9 @@ def _splice_source(config_path: Path) -> str:
     outside-the-region content verbatim. The bundled template is used only for a
     first-time write (file absent) or a degraded/legacy file missing the markers
     (where there is no managed region to preserve and we reset to the stub).
+
+    The managed BODY is always toggled from the pristine template regardless; this
+    only chooses where the toggled body is spliced.
     """
     if config_path.exists():
         try:
@@ -536,111 +789,106 @@ def _splice_source(config_path: Path) -> str:
     return TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-def _write_interactive(
+def _warn_stale_header(config_path: Path) -> None:
+    """Warn when a --force re-init preserves a pre-filter-removal header."""
+    if not config_path.exists():
+        return
+    try:
+        existing = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if any(sig in existing for sig in _STALE_HEADER_SIGNATURES):
+        print(
+            "WARNING: this config's header predates the providers-block change; its "
+            "guidance is stale — re-init into a fresh file or refresh the header.",
+            file=sys.stderr,
+        )
+
+
+def _write_config(
     args: argparse.Namespace,
     target_dir: Path,
     config_dir: Path,
     config_path: Path,
-    default_provider: str,
-    models: "list[str]",
-    quick_models: "list[str]",
+    detected_list: "list[str]",
+    text: str,
+    expected_models: "list[str]",
+    notices: "list[str]",
 ) -> int:
-    """Render, validate, and write the interactive selection; report + gitignore."""
-    # Re-init over an existing marked config preserves its outside-the-markers edits
-    # (template contract); first-write / marker-less files use the bundled template.
-    source_text = _splice_source(config_path)
-    managed = render_managed_block(default_provider, models, quick_models)
-    text = splice_managed_block(source_text, managed)
-
-    # Pre-write gate: never write unparseable YAML.
-    error = _parse_check(text)
+    """Validate, write, recheck, and report the auto-detected config."""
+    detected = set(detected_list)
+    error = _validate_generated_config(text, detected, load_base_config())
     if error:
         print(f"ERROR: refusing to write an invalid config — {error}", file=sys.stderr)
         return 1
 
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(text, encoding="utf-8")
-    # Post-write: confirm the chosen specs resolve through load_config (fresh cache).
-    _recheck_merged(target_dir, models, config_path)
-    print(f"\nWrote {config_path}")
-    print(f"  default_provider: {default_provider}")
-    print(f"  defaults.models: {len(models)} model(s)")
-    print(
-        "  defaults.quick_models: "
-        + (f"{len(quick_models)} model(s)" if quick_models else "[] (--quick disabled)")
-    )
-    print(
-        "  (Validated: the file parses and its defaults.models resolve via "
-        "load_config.)\n"
-        "  These globals apply only to modes WITHOUT their own "
-        "defaults.modes.<mode> list.\n"
-        "  Smoke-test it, e.g.:  /multi-llm:multi-llm --review-plan <plan> --quick"
-    )
+
+    # Post-write recheck only when something was detected; the inert (nothing
+    # detected) file writes a blank defaults.models → inherits base, so comparing
+    # the resolved base list against the empty uncommented set would false-warn.
+    if detected:
+        _recheck_merged(target_dir, expected_models, config_path)
+
+    print(f"Wrote {config_path}")
+    if not detected_list:
+        print(
+            "No supported provider CLIs found on PATH; wrote an inert "
+            ".multi-llm/providers.yaml that inherits the built-in defaults.\n"
+            "Install one of: claude, cursor-agent, gemini, opencode, codex, "
+            "kilocode and re-run `--init`."
+        )
+    else:
+        chosen = detected_list[0]  # validation guarantees default_provider == this
+        # default_provider is the first DETECTED in base order; detected_list is
+        # already in base declaration order, so its head is that provider.
+        print(f"  Detected providers: {', '.join(detected_list)}")
+        print(f"  default_provider: {chosen}")
+        print(f"  defaults.models: {len(expected_models)} model(s)")
+        print(
+            "  (Validated: the file parses and its defaults.models resolve via "
+            "load_config.)\n"
+            "  These globals apply only to modes WITHOUT their own "
+            "defaults.modes.<mode> list.\n"
+            "  Smoke-test it, e.g.:  /multi-llm:multi-llm --review-plan <plan> --quick"
+        )
+        for notice in notices:
+            print(notice)
     _report_gitignore(args, target_dir)
     return 0
 
 
-def run_interactive(args: argparse.Namespace, target_dir: Path, config_dir: Path,
-                    config_path: Path) -> int:
-    """Drive the interactive init flow (§3). Returns a process exit code."""
+def run_auto_init(args: argparse.Namespace, target_dir: Path, config_dir: Path,
+                  config_path: Path) -> int:
+    """Detect installed CLIs and write a preconfigured override (zero prompts)."""
     base = load_base_config()
     providers_cfg = base.get("providers", {}) or {}
-    available = _available_providers(providers_cfg)
+    order = list(providers_cfg)
+    detected_list = _available_providers(providers_cfg)
+    detected = set(detected_list)
 
-    if not available:
-        print(
-            "No supported provider CLIs were detected on this machine.\n"
-            "multi-llm needs at least one of these installed and on PATH:\n"
-            "  - cursor-agent      (https://cursor.com)\n"
-            "  - claude            (Claude Code)\n"
-            "  - codex, gemini, opencode, kilocode\n"
-            "Install one and re-run `--init`. To scaffold a commented stub now "
-            "instead, re-run with --template-only.",
-            file=sys.stderr,
-        )
-        return 1
+    _warn_stale_header(config_path)
 
-    base_catalog = _base_catalog_specs(providers_cfg)
-    shadowed_modes = _shadowed_modes(base, target_dir)
-
-    print(
-        "Detected installed providers: " + ", ".join(available) + "\n"
-        "Pick the models for your default panel (curated list shown first; choose "
-        '"Show all…" to browse the full CLI catalog).'
+    # Always regenerate the managed region from the PRISTINE template; splice into
+    # the existing file (when marked) only to preserve its outside-marker content.
+    splice_target = _splice_source(config_path)
+    body = _extract_managed_body(TEMPLATE_PATH.read_text(encoding="utf-8"))
+    toggled, models_specs, quick_specs = _toggle_template(body, detected, order)
+    toggled, expected_models, notices = _apply_d2a_guard(
+        toggled, detected_list, models_specs, quick_specs, base
     )
+    text = splice_managed_block(splice_target, toggled)
 
-    while True:  # confirm/edit loop — no file is written until confirmed
-        collected = _collect_default_models_guarded(available, providers_cfg, args.timeout)
-        if collected is None:
-            print(
-                "Aborting: no default models were selected. Re-run `--init` and pick "
-                "at least one model.",
-                file=sys.stderr,
-            )
-            return 1
-        models, manual_specs = collected
-        quick_models = _choose_quick_models(models)
-        default_provider = _choose_default_provider(available, models)
-
-        if _confirm_write(
-            default_provider, models, quick_models, base_catalog, shadowed_modes, manual_specs
-        ):
-            break
-        if not prompt_yes_no(
-            "Edit your selections and try again? (No = quit without writing)",
-            default=True,
-        ):
-            print("No changes written.")
-            return 0
-
-    return _write_interactive(
-        args, target_dir, config_dir, config_path, default_provider, models, quick_models
+    return _write_config(
+        args, target_dir, config_dir, config_path,
+        detected_list, text, expected_models, notices,
     )
 
 
 def write_template_only(args: argparse.Namespace, target_dir: Path, config_dir: Path,
                         config_path: Path) -> int:
-    """Copy the commented template stub verbatim (historical behavior)."""
+    """Copy the pristine inert template verbatim (skip detection)."""
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
     print(f"Wrote {config_path}")
@@ -648,234 +896,14 @@ def write_template_only(args: argparse.Namespace, target_dir: Path, config_dir: 
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Non-interactive seams for the Claude-driven picker (no TTY)
-# ---------------------------------------------------------------------------
-#
-# Two thin, JSON-only seams let Claude Code act as the picker front-end while the
-# script stays the single source of truth for rendering/validation/writing:
-#   * --emit-catalog [--show-all PROVIDER] [--json]  — detection/catalog OUT.
-#   * --from-selections FILE                          — explicit selection IN.
-# The selection path reuses _write_interactive verbatim (render -> splice ->
-# parse-gate -> write -> recheck -> gitignore), so the managed-block contract,
-# outside-marker preservation, and validation cannot drift from the TTY flow.
-
-
-def _build_catalog_payload(
-    target_dir: Path, config_path: Path, *, show_all: "str | None", timeout: int
-) -> dict:
-    """Assemble the --emit-catalog payload from existing helpers (no new discovery).
-
-    Mirrors exactly what the TTY picker sees: installed providers, curated lists,
-    the base catalog (for the unverified-id annotation), and shadowed modes. The
-    full CLI listing is fetched ONLY for ``show_all`` (one provider), inheriting
-    ``list_models``' timeout/failure tolerance — absent it, NO listing command runs.
-    """
-    base = load_base_config()
-    providers_cfg = base.get("providers", {}) or {}
-    available = set(_available_providers(providers_cfg))
-
-    providers = []
-    for name in providers_cfg:  # dict preserves base-config declaration order
-        provider = get_provider(name)
-        curated = list(providers_cfg[name].get("models", []) or [])
-        entry = {
-            "name": name,
-            "available": name in available,
-            "can_list_models": bool(provider is not None and provider.can_list_models),
-            "curated": curated,
-        }
-        if show_all and name == show_all:
-            # The ONLY path that runs a listing command; never raises (list_models
-            # is timeout-bounded and falls back to curated on any failure).
-            if provider is not None:
-                listing = provider.list_models(curated, timeout=timeout)
-                entry["full"] = list(listing.models or curated)
-                entry["note"] = listing.note
-            else:
-                entry["full"] = list(curated)
-                entry["note"] = None
-        providers.append(entry)
-
-    payload = {
-        "target_dir": str(target_dir),
-        "config_path": str(config_path),
-        "config_exists": config_path.exists(),
-        "default_provider_base": base.get("default_provider"),
-        "git_tracked_default": True,
-        "providers": providers,
-        "base_catalog": sorted(_base_catalog_specs(providers_cfg)),
-        "shadowed_modes": _shadowed_modes(base, target_dir),
-    }
-    # A --show-all value that matches NO provider yields no full/note anywhere, which
-    # is indistinguishable from "this provider has no extra models". Surface the typo
-    # as a machine-readable signal so callers don't trust a stale curated listing.
-    if show_all and show_all not in providers_cfg:
-        payload["show_all_error"] = (
-            f"--show-all '{show_all}' is not a known provider "
-            f"(known: {', '.join(providers_cfg) or '(none)'})"
-        )
-    return payload
-
-
-def emit_catalog(args: argparse.Namespace, target_dir: Path, config_path: Path) -> int:
-    """Print the detection/catalog JSON to stdout and exit 0 (§ step 1, no write)."""
-    payload = _build_catalog_payload(
-        target_dir, config_path, show_all=args.show_all, timeout=args.timeout
-    )
-    # stdout is ALWAYS pure JSON so the caller (Claude) can parse it unconditionally;
-    # the optional human note goes to stderr.
-    print(json.dumps(payload, indent=2))
-    show_all_error = payload.get("show_all_error")
-    if show_all_error:
-        # The requested escalation never ran; fail loudly so the caller cannot mistake
-        # the curated-only catalog for a verified full listing.
-        print(f"ERROR: {show_all_error}", file=sys.stderr)
-        return 1
-    if not args.json:
-        print(
-            "(--emit-catalog: the JSON above is the machine format; pass --json to "
-            "silence this note)",
-            file=sys.stderr,
-        )
-    return 0
-
-
-def _is_wellformed_spec(spec: object) -> bool:
-    """True if ``spec`` is a well-formed ``provider:model`` string (both parts set)."""
-    if not isinstance(spec, str) or ":" not in spec:
-        return False
-    provider, model = spec.split(":", 1)
-    # The model half must be a usable bare id: non-empty, no whitespace, and no extra
-    # ':' (which would break the provider:model round-trip through parse_model_spec).
-    return bool(provider) and is_valid_bare_id(model)
-
-
-def _load_selections(path: Path) -> "tuple[dict | None, str | None]":
-    """Read + JSON-parse the selections file -> (data, error). Never raises."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as e:
-        return None, f"cannot read selections file {path}: {e}"
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        return None, f"selections file {path} is not valid JSON: {e}"
-    if not isinstance(data, dict):
-        return None, (
-            "selections JSON must be an object with default_provider / models / "
-            "quick_models keys"
-        )
-    return data, None
-
-
-def run_from_selections(
-    args: argparse.Namespace,
-    target_dir: Path,
-    config_dir: Path,
-    config_path: Path,
-) -> int:
-    """Materialize an explicit selection JSON via the existing writer (§ step 2).
-
-    Validates the JSON shape and the parity-critical invariants (non-empty
-    ``models`` brick guard; well-formed specs; known ``default_provider``), then
-    hands the picks to ``_write_interactive`` unchanged so every byte of YAML is
-    produced by the same render/splice/validate path as the TTY flow.
-    """
-    data, error = _load_selections(Path(args.from_selections))
-    if error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
-
-    default_provider = data.get("default_provider")
-    models = data.get("models")
-    # Parity with _choose_quick_models: an OMITTED quick panel is never silently
-    # disabled — it defaults to models[:2] (the same proposal heuristic the TTY
-    # picker offers). Only an EXPLICIT quick_models (including [] / null, the
-    # "disable --quick" confirmation) is taken verbatim.
-    quick_omitted = "quick_models" not in data
-    quick_models = data.get("quick_models", [])
-    if quick_models is None:
-        quick_models = []
-
-    # --- Shape checks --------------------------------------------------------
-    if not isinstance(default_provider, str) or not default_provider:
-        print("ERROR: selections 'default_provider' must be a non-empty string.", file=sys.stderr)
-        return 1
-    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
-        print("ERROR: selections 'models' must be a list of strings.", file=sys.stderr)
-        return 1
-    if not isinstance(quick_models, list) or not all(isinstance(m, str) for m in quick_models):
-        print("ERROR: selections 'quick_models' must be a list of strings.", file=sys.stderr)
-        return 1
-
-    # --- Brick guard backstop (parity with _collect_default_models_guarded) ---
-    if not models:
-        print(
-            "ERROR: selections 'models' is empty — an empty default panel would brick "
-            "every run; pick at least one model.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # --- Quick-panel backstop (parity with _choose_quick_models) --------------
-    # An omitted quick_models defaults to models[:2] (never silently disabled); an
-    # explicit value — including [] / null — is the deliberate "disable --quick"
-    # choice and is respected verbatim. models is non-empty here, so the slice is safe.
-    if quick_omitted:
-        quick_models = list(models[:2])
-
-    # --- Well-formed provider:model specs ------------------------------------
-    bad = [m for m in (list(models) + list(quick_models)) if not _is_wellformed_spec(m)]
-    if bad:
-        print(
-            "ERROR: malformed model spec(s) (expected 'provider:model'): " + ", ".join(bad),
-            file=sys.stderr,
-        )
-        return 1
-
-    # --- default_provider must be a known provider; warn if CLI not installed --
-    base = load_base_config()
-    providers_cfg = base.get("providers", {}) or {}
-    known = set(providers_cfg)
-    available = set(_available_providers(providers_cfg))
-    if default_provider not in known:
-        print(
-            f"ERROR: default_provider '{default_provider}' is not a known provider "
-            f"(known: {', '.join(sorted(known))}).",
-            file=sys.stderr,
-        )
-        return 1
-    if default_provider not in available:
-        print(
-            f"WARNING: default_provider '{default_provider}' is known but its CLI was "
-            "not detected on this machine; writing anyway.",
-            file=sys.stderr,
-        )
-
-    # --- quick_models ⊆ models is advisory (warn, don't fail) ----------------
-    extra_quick = [m for m in quick_models if m not in models]
-    if extra_quick:
-        print(
-            "WARNING: quick_models contains spec(s) not in models (allowed, unusual): "
-            + ", ".join(extra_quick),
-            file=sys.stderr,
-        )
-
-    return _write_interactive(
-        args, target_dir, config_dir, config_path,
-        default_provider, list(models), list(quick_models),
-    )
-
-
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(
         prog="init_config.py",
         description=(
             "Set up a per-project multi-llm config override at "
-            "<dir>/.multi-llm/providers.yaml. On a TTY this is interactive "
-            "(detect installed CLIs, pick default + quick model panels); off a TTY "
-            "or with --template-only / --non-interactive it copies a commented stub."
+            "<dir>/.multi-llm/providers.yaml. Auto-detects which provider CLIs are "
+            "installed and uncomments their lines in an inert template — fully "
+            "automatic, zero prompts, no model-listing subprocess calls."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -901,64 +929,13 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument(
         "--template-only",
         action="store_true",
-        help="Skip the interactive picker; write the commented template stub verbatim.",
-    )
-    parser.add_argument(
-        "--non-interactive",
-        action="store_true",
-        help="Never prompt (CI/unattended). Implies --template-only; also implied off a TTY.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=10,
-        metavar="SECONDS",
-        help="Seconds to wait for a provider's `models` listing command (default: 10).",
-    )
-    parser.add_argument(
-        "--emit-catalog",
-        action="store_true",
-        help=(
-            "Print provider/model detection + catalog as JSON to stdout and exit "
-            "(no write; safe over an existing file). The detection/catalog seam for "
-            "the Claude-driven picker."
-        ),
-    )
-    parser.add_argument(
-        "--show-all",
-        metavar="PROVIDER",
-        default=None,
-        help=(
-            "With --emit-catalog: also fetch PROVIDER's full CLI model listing "
-            "(timeout-bounded, failure-tolerant) and attach it as 'full'/'note'. The "
-            "only path that runs a listing command."
-        ),
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="With --emit-catalog: silence the human note (stdout is JSON regardless).",
-    )
-    parser.add_argument(
-        "--from-selections",
-        metavar="FILE",
-        default=None,
-        help=(
-            "Write the config from an explicit selection JSON file "
-            "({default_provider, models, quick_models}) via the standard writer. The "
-            "selection seam for the Claude-driven picker."
-        ),
+        help="Skip detection; write the pristine inert template stub verbatim.",
     )
     args = parser.parse_args(argv)
 
     target_dir = resolve_target_dir(args.dir)
     config_dir = target_dir / CONFIG_DIRNAME
     config_path = config_dir / CONFIG_FILENAME
-
-    # Detection/catalog seam (§ step 1): a pure read — print JSON and exit without
-    # writing, so it works even over an existing file or a missing template.
-    if args.emit_catalog:
-        return emit_catalog(args, target_dir, config_path)
 
     if not TEMPLATE_PATH.exists():
         print(
@@ -975,17 +952,9 @@ def main(argv: "list[str] | None" = None) -> int:
         )
         return 1
 
-    # Explicit-selection seam (§ step 2): materialize a Claude-collected selection
-    # JSON through the SAME writer the TTY picker uses (shares the exists/force
-    # refusal above with every other write path).
-    if args.from_selections:
-        return run_from_selections(args, target_dir, config_dir, config_path)
-
-    # Interactive only on a real TTY and when not explicitly opted out.
-    use_interactive = not (args.template_only or args.non_interactive) and is_tty()
-    if use_interactive:
-        return run_interactive(args, target_dir, config_dir, config_path)
-    return write_template_only(args, target_dir, config_dir, config_path)
+    if args.template_only:
+        return write_template_only(args, target_dir, config_dir, config_path)
+    return run_auto_init(args, target_dir, config_dir, config_path)
 
 
 if __name__ == "__main__":

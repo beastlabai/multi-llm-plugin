@@ -1,1 +1,0 @@
-Error: not authenticated. Please run `cursor-agent login` first.

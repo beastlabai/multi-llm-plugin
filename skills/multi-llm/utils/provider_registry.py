@@ -4,10 +4,18 @@ Configuration is assembled from up to three layers, lowest → highest precedenc
 each deep-merged over the one below:
 
 1. Built-in base   — ``${skill_dir}/providers.yaml`` (always present).
-2. Project-local   — ``<git-root>/.multi-llm/providers.yaml`` (auto-discovered,
-   restricted to *selection* keys; a ``providers:`` block here is dropped).
+2. Project-local   — ``<git-root>/.multi-llm/providers.yaml`` (auto-discovered).
 3. Env override    — ``MULTI_LLM_PROVIDERS_CONFIG=/path.yaml`` (escape hatch;
    relative values resolve against CWD).
+
+Both override layers deep-merge their **full** contents — including a
+``providers:`` block — over base, identical to each other. ``command`` is
+documentation-only and is NEVER executed (binaries are hardcoded in
+``utils/providers/``), so no execution metadata is honored from config in any
+layer. A merged provider name with no hardcoded adapter is ignored at runtime
+(filtered out of :func:`get_available_models` *and* configured-spec validation); a
+non-mapping provider value is restored from base when it shadows a known provider
+(else dropped) at load time. ``--init`` writes layer 2 by uncommenting an inert template.
 
 List values *replace* wholesale on merge; only nested dicts deep-merge. A blank
 (``None``) override value is skipped (keeps base); an explicit empty list ``[]``
@@ -54,6 +62,10 @@ ENV_PERMISSIVE_VAR = "MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE"
 # capsys-assert on this exact prefix; do not vary it per call site. Fail-fast
 # raises are errors, not warnings, and do NOT use this prefix.
 CONFIG_WARNING_PREFIX = "multi-llm config warning:"
+
+# Provider names already warned about as "no hardcoded adapter" (re-init drift),
+# so the read-site filter warns once per name per process instead of every call.
+_WARNED_UNKNOWN_PROVIDERS: set = set()
 
 
 class ConfigError(RuntimeError):
@@ -272,22 +284,14 @@ def _load_override_layer(layer_name: str, path: Path, permissive: bool) -> Optio
             f"mapping, got {type(data).__name__}: {path}"
         )
 
-    # Trust model: an auto-discovered (project-local) layer may NOT introduce or
-    # mutate provider *capabilities* — a freshly cloned repo could otherwise ship
-    # one. A `providers:` block in the project-local layer is dropped before
-    # merge with a warning. The explicit env layer (an out-of-tree path the user
-    # chose) keeps the full deep-merge. NOTE: `command`/argv is NEVER honored
-    # from config in any layer — provider binaries stay hardcoded in their
-    # provider classes; `command` here is documentation-only. Any future change
-    # that feeds config into command construction MUST revisit this trust model.
-    if not is_env and "providers" in data:
-        print(
-            f"{CONFIG_WARNING_PREFIX} ignoring 'providers:' block in "
-            f"auto-discovered config: {path}",
-            file=sys.stderr,
-        )
-        data = {k: v for k, v in data.items() if k != "providers"}
-
+    # Trust model: BOTH override layers deep-merge their full contents (including a
+    # `providers:` block) over base, identically. The residual surface is
+    # availability-only metadata (timeouts/concurrency/model lists) — `command`/argv
+    # is NEVER honored from config in any layer (provider binaries stay hardcoded in
+    # their provider classes; `command` here is documentation-only), an unknown
+    # provider name has no adapter and is ignored at runtime, and a non-mapping
+    # provider value is dropped by the load-time guard in load_config. Any future
+    # change that feeds config into command construction MUST revisit this.
     return data
 
 
@@ -329,11 +333,40 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     if _config is not None and _config_key == key:
         return _config
 
-    config = _load_base_config()
+    base_config = _load_base_config()
+    config = base_config
     for layer_name, path in _override_paths(anchor):
         data = _load_override_layer(layer_name, path, permissive)
         if data:
             config = _deep_merge(config, data)
+
+    # Load-time guard (post-merge): a clone-authored override can deep-merge a
+    # malformed (non-mapping) provider value, e.g. `providers: {claude-code: "x"}`,
+    # which REPLACES the base mapping during deep-merge and would later
+    # AttributeError on `.get(...)`. Sanitize each such entry so the rest of the
+    # config still loads and the residual stays availability-only: for a KNOWN base
+    # provider, RESTORE its base mapping — the malformed scalar must not erase the
+    # built-in catalog/metadata for the whole repo; for an unknown name (nothing to
+    # inherit) drop it. ``base_config`` is the untouched base load (deep-merge seeds
+    # from a deepcopy, so it is never mutated), giving the pristine entry to restore.
+    base_providers = base_config.get("providers")
+    base_providers = base_providers if isinstance(base_providers, dict) else {}
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for name in [k for k, v in providers.items() if not isinstance(v, dict)]:
+            base_entry = base_providers.get(name)
+            restore = isinstance(base_entry, dict)
+            print(
+                f"{CONFIG_WARNING_PREFIX} ignoring malformed provider '{name}' in "
+                f"merged config (expected a mapping, got "
+                f"{type(providers[name]).__name__}) — "
+                f"{'restoring base definition' if restore else 'dropping it'}",
+                file=sys.stderr,
+            )
+            if restore:
+                providers[name] = copy.deepcopy(base_entry)
+            else:
+                del providers[name]
 
     _config = config
     _config_key = key
@@ -360,6 +393,30 @@ def parse_model_spec(spec: str, anchor: Optional[Union[str, Path]] = None) -> Tu
     return default, spec
 
 
+def _provider_has_adapter(provider_name: str) -> bool:
+    """Read-site drift filter: True iff ``provider_name`` has a hardcoded adapter.
+
+    A config (e.g. one an OLDER plugin ``--init`` wrote, or a stale clone) can carry
+    a ``providers:`` block or a ``defaults.*`` spec for a name the current base
+    removed/renamed — one with no hardcoded adapter. Such a name merges but can never
+    run (``get_provider`` returns None), so it MUST NOT be surfaced as a usable model
+    source NOR validate as an explicitly-configured spec. Returns False (and warns
+    once per name per process via ``_WARNED_UNKNOWN_PROVIDERS``) for such names, so
+    BOTH read sites — :func:`get_available_models` and :func:`_collect_configured_specs`
+    — filter them identically.
+    """
+    if get_provider(provider_name) is not None:
+        return True
+    if provider_name not in _WARNED_UNKNOWN_PROVIDERS:
+        _WARNED_UNKNOWN_PROVIDERS.add(provider_name)
+        print(
+            f"{CONFIG_WARNING_PREFIX} provider '{provider_name}' in your "
+            f"config is no longer supported — re-init to refresh",
+            file=sys.stderr,
+        )
+    return False
+
+
 def get_available_models(anchor: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
     """Get all available models grouped by provider.
 
@@ -370,6 +427,10 @@ def get_available_models(anchor: Optional[Union[str, Path]] = None) -> Dict[str,
     config = load_config(anchor=anchor)
     result = {}
     for provider_name, provider_config in config.get("providers", {}).items():
+        # Skip a merged provider name with no hardcoded adapter (warn once) so it
+        # contributes no models — see _provider_has_adapter for the rationale.
+        if not _provider_has_adapter(provider_name):
+            continue
         result[provider_name] = provider_config.get("models", [])
     return result
 
@@ -403,6 +464,12 @@ def _collect_configured_specs(anchor: Optional[Union[str, Path]] = None) -> set:
     {"models": [...], "quick": [...]} dict shape), then canonicalizes each raw
     entry through parse_model_spec so a bare (prefix-less) id resolves against the
     same anchor-aware default_provider and compares equal to a resolved warned spec.
+
+    Specs whose provider has **no hardcoded adapter** (a stale clone naming a
+    removed/renamed provider) are filtered out via ``_provider_has_adapter`` — the
+    same read-site drift filter ``get_available_models`` applies — so an orphan spec
+    in ``defaults.*`` is NOT treated as "explicitly configured" and a model that
+    cannot run is never validated.
     """
     config = load_config(anchor=anchor)
     defaults = config.get("defaults", {}) or {}
@@ -421,6 +488,8 @@ def _collect_configured_specs(anchor: Optional[Union[str, Path]] = None) -> set:
         if not isinstance(spec, str) or not spec.strip():
             continue
         provider, model = parse_model_spec(spec, anchor=anchor)
+        if not _provider_has_adapter(provider):       # orphan provider → filter out
+            continue
         canon.add(f"{provider}:{model}")
     return canon
 
@@ -447,9 +516,11 @@ def is_model_valid(spec: str, anchor: Optional[Union[str, Path]] = None, *,
 
     The spec is canonicalized through ``parse_model_spec`` *before* the membership
     test so a bare spec compares canonically against the canonical configured set.
-    Provider-existence is NOT short-circuited: a spec naming a non-existent
-    provider only matches ``configured`` if that exact typo was written into
-    ``defaults.*``; otherwise the catalog-membership path still returns False.
+    A spec whose provider has **no hardcoded adapter** (a removed/renamed key or a
+    typo) is filtered out of the configured set by ``_collect_configured_specs``
+    (warning once), so even an orphan spec written into ``defaults.*`` does NOT
+    validate as "explicitly configured"; the catalog-membership path likewise skips
+    it, so a model that cannot run is rejected rather than accepted on a stale config.
     """
     if configured is None:
         configured = _collect_configured_specs(anchor=anchor)

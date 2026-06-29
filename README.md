@@ -15,6 +15,8 @@ In Claude Code:
 ```text
 /plugin marketplace add beastlabai/multi-llm-plugin
 /plugin install multi-llm@beastlabai
+/reload-plugins
+/multi-llm:multi-llm --init
 ```
 
 Then invoke the skill (plugin skills are namespaced `plugin:skill`):
@@ -24,6 +26,16 @@ Then invoke the skill (plugin skills are namespaced `plugin:skill`):
 ```
 
 > Claude can also load the skill automatically when you ask it to "review my plan with multiple models", "run a multi-LLM code review", etc.
+
+Updating:
+
+```
+/plugin marketplace update beastlabai
+/plugin update multi-llm@beastlabai
+/reload-plugins
+/reload-skills
+```
+
 
 ### Configure providers (required before first use)
 
@@ -158,13 +170,13 @@ Model selection priority (highest first): `--models`, then `--interactive`, then
 ## Per-project configuration
 
 `providers.yaml` (above) is the **base** layer shared by every repo. To give one
-repository its own model/provider **selection** defaults — without editing the
-installed plugin — add an optional, auto-discovered override file at
+repository its own provider/model defaults — without editing the installed
+plugin — add an optional, auto-discovered override file at
 `<git-root>/.multi-llm/providers.yaml`. When it's absent, behavior is unchanged.
 
-It overrides only the *selection* keys (`default_provider`, `defaults.models`,
-`defaults.quick_models`, `defaults.modes`) and inherits everything else from the
-base, so it stays tiny:
+It deep-merges its full contents over the base and inherits everything you omit,
+so it can stay tiny — change just the *selection* keys (`default_provider`,
+`defaults.models`, `defaults.quick_models`, `defaults.modes`) and leave the rest:
 
 ```yaml
 # .multi-llm/providers.yaml — only what this repo changes
@@ -177,17 +189,18 @@ defaults:
     - claude-code:opus
 ```
 
-Create one with `/multi-llm:multi-llm --init`. On a terminal this is
-**interactive**: it detects which provider CLIs are installed, shows each one's
-curated models first (choose **"Show all…"** to browse that CLI's full catalog
-behind a fuzzy filter, or **"Enter a model id manually…"** for anything else),
-then has you pick the default and `--quick` panels and a `default_provider`, and
-writes only those selection keys after a confirm step. Off a terminal — or with
-`--template-only` / `--non-interactive` (e.g. CI) — it instead writes the
-commented stub for you to hand-edit. Add `--gitignore` to keep the file
-developer-local, `--force` to overwrite an existing one, and `--timeout SECONDS`
-to bound how long a `models` listing may take (default 10s; a listing that
-fails, times out, or needs auth silently falls back to the curated list).
+Create one with `/multi-llm:multi-llm --init`. This is **fully automatic and
+zero-prompt** — it works the same in a terminal, inside Claude Code, or in CI. It
+scans your `PATH` for the supported provider CLIs and writes a preconfigured
+override: starting from an inert template, it **uncomments** the full `providers:`
+block, `defaults.models` / `quick_models` entries, and `default_provider` for each
+CLI it detects, leaving the rest commented. `default_provider` is set to the
+**first detected provider** in base order (claude-code, cursor-agent, gemini,
+opencode, codex, kilocode). With **no CLIs installed** it writes the inert
+template (which inherits the built-in defaults) and exits 0 with an install
+notice — it never errors. Pass `--template-only` to skip detection and write the
+pristine commented stub for hand-editing. Add `--gitignore` to keep the file
+developer-local, and `--force` to overwrite an existing one.
 
 ### Good to know
 
@@ -211,9 +224,12 @@ fails, times out, or needs auth silently falls back to the curated list).
 
 A repo's override is auto-loaded, so a cloned repo can change which models a run
 selects — but never *what executes*: provider binaries are hardcoded and the config
-`command` field is never run. The override is limited to selection keys (a
-`providers:` block is ignored, with a warning). A present-but-malformed explicit
-override fails fast with a clear error naming the file; set
+`command` field is never run, in any layer. The override now deep-merges its full
+contents (including a `providers:` block) over base, exactly like the
+`MULTI_LLM_PROVIDERS_CONFIG` env layer — but since `command` is documentation-only,
+a merged block can only retune metadata (timeouts, model lists), and a provider
+name with no hardcoded adapter is ignored at runtime. A present-but-malformed
+explicit override fails fast with a clear error naming the file; set
 `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to warn-and-skip instead.
 
 ---

@@ -3,10 +3,11 @@
 # This is the built-in BASE layer. Config is assembled lowest -> highest:
 #   1. this file (base; always present)
 #   2. <git-root>/.multi-llm/providers.yaml   (optional per-project override,
-#      auto-discovered; restricted to SELECTION keys — default_provider,
-#      defaults.models, defaults.quick_models, defaults.modes)
+#      auto-discovered; deep-merges its FULL contents — including a `providers:`
+#      block — over base, identical to the env layer below)
 #   3. MULTI_LLM_PROVIDERS_CONFIG=/path.yaml   (optional env escape hatch)
 # Each layer is deep-merged over the one below; LIST values replace wholesale.
+# (`command:` is documentation-only and is NEVER executed in any layer.)
 # Scaffold a per-project override with `--init`. See the README
 # "Per-project configuration" section for the full semantics.
 #
