@@ -1,4 +1,4 @@
-# multi-llm - a Claude Code plugin
+# multi-llm - Harness the harnesses
 
 **Wisdom of crowds for your codebase.** Use this plugin to improve planning, implementation, and code review by running the same work through multiple AI coding tools and LLMs in parallel - then consolidating their feedback so you catch bugs, blind spots, and improvements a single model might miss.
 
