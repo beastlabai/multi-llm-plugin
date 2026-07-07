@@ -16,6 +16,7 @@ In Claude Code:
 /plugin marketplace add beastlabai/multi-llm-plugin
 /plugin install multi-llm@beastlabai
 /reload-plugins
+/reload-skills
 /multi-llm:multi-llm --init
 ```
 
@@ -95,6 +96,47 @@ Two notes on the table above:
 
 - **`--full`** chains the phases end to end: review-plan -> apply-suggestions -> generate-tasks -> review-tasks -> apply-task-suggestions -> implement -> review-code -> apply-code-fixes. It pauses at each apply step to let you approve `needs-human-decision` findings; pass `--yes` (alias `--non-interactive`) to run the whole pipeline fully unattended — zero prompts: non-interactive model selection, Claude decides every `needs-human-decision` item, and review-tasks runs automatically. For finer control, add just `--no-confirm` and/or `--claude-decide` (see [below](#letting-claude-decide-ambiguous-findings)) instead.
 - **Applying code fixes** can happen two ways. Run `--apply-code-fixes` as a standalone pass to apply a previous review's fixes - this is the phase that handles `needs-human-decision` items (prompts, salvage, HTML badges). Or, to apply only the clearly-valid fixes inline during the review itself, add `--apply-fixes` to a `--review-code` run.
+
+### Pipeline flow
+
+The mode flags are designed to run as an ordered pipeline (exactly what `--full` chains for you). Each **review** step fans the work out to multiple LLMs in parallel; each **apply** step is where Claude Code writes the changes back and pauses for any `needs-human-decision` findings.
+
+```mermaid
+flowchart TD
+    START(["plan.md"]) -.-> FULL["--full"]:::full
+    FULL -. "runs every step in order" .-> DONE(["done"])
+
+    subgraph PLAN ["Implementation Plan"]
+        RP["--review-plan"]:::review --> AS["--apply-suggestions"]:::apply
+    end
+
+    subgraph TASKS ["Implementation Tasks"]
+        GT["--generate-tasks"]:::gen --> RT["--review-tasks"]:::review --> ATS["--apply-task-suggestions"]:::apply
+    end
+
+    subgraph IMPLEMENT ["Implement"]
+        IMP["--implement"]:::gen
+    end
+
+    subgraph CODE ["Code Review"]
+        RC["--review-code"]:::review --> ACF["--apply-code-fixes"]:::apply
+    end
+
+    START --> RP
+    AS --> GT
+    ATS --> IMP
+    IMP --> RC
+    ACF --> DONE
+
+    classDef review fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef gen fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef apply fill:#ffedd5,stroke:#f97316,color:#7c2d12;
+    classDef full fill:#dcfce7,stroke:#22c55e,color:#14532d;
+```
+
+<sub>🔵 **Review** steps query multiple models in parallel · 🟠 **Apply** steps let Claude Code write changes and pause for `needs-human-decision` items · 🟣 **Generate & implement** steps produce tasks and write code · 🟢 **`--full`** runs the entire flow with one command.</sub>
+
+You don't have to run the whole chain: **every step is also a standalone entry point** that reads/writes the shared `{plan}/state.json`, so you can start, stop, and resume at any phase. A few modes sit outside the pipeline - **`--ask`** (read-only Q&A about a plan), **`--status`** (show progress and the suggested next step), and **`--init`** (write a per-project config) - while **`--full`** simply runs the entire flow above end to end.
 
 ### Examples
 
@@ -183,10 +225,10 @@ so it can stay tiny — change just the *selection* keys (`default_provider`,
 default_provider: claude-code
 defaults:
   models:
-    - claude-code:opus
+    - claude-code:fable
     - cursor-agent:composer-2.5
   quick_models:
-    - claude-code:opus
+    - claude-code:fable
 ```
 
 Create one with `/multi-llm:multi-llm --init`. This is **fully automatic and
