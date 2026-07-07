@@ -121,8 +121,7 @@ defaults:
     - kilocode:openrouter/minimax/minimax-m3
     - kilocode:openrouter/xiaomi/mimo-v2.5-pro
     - kilocode:openrouter/qwen/qwen3.7-max
-    - claude-code:opus
-    #- claude-code:fable
+    - claude-code:fable
     - codex:gpt-5.5
 
   # Lightweight model subset for the --quick / -q flag
@@ -131,8 +130,7 @@ defaults:
   quick_models:
     - cursor-agent:composer-2.5
     - cursor-agent:gpt-5.5-extra-high
-    - claude-code:opus
-    #- claude-code:fable
+    - claude-code:fable
 
   # Optional: only use defaults for specific modes
   # modes:
