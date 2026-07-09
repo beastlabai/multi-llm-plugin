@@ -204,11 +204,11 @@ defaults:
     - kilocode:openrouter/qwen/qwen3.7-max
     - claude-code:fable
     - codex:gpt-5.5
-    - grok:grok-4.5
-    - cline:openrouter/z-ai/glm-5.2
-    - goose:openrouter/z-ai/glm-5.2
-    - aider:openrouter/z-ai/glm-5.2
-    - "agy:Gemini 3.1 Pro (High)"
+    #- grok:grok-4.5
+    #- cline:openrouter/z-ai/glm-5.2
+    #- goose:openrouter/z-ai/glm-5.2
+    #- aider:openrouter/z-ai/glm-5.2
+    #- "agy:Gemini 3.1 Pro (High)"
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models
