@@ -237,7 +237,7 @@ class TestGetAvailableModels:
 
         # Check some known cursor-agent models
         assert "auto" in cursor_models
-        assert "gpt-5.2-high" in cursor_models
+        assert "composer-2.5" in cursor_models
 
     def test_get_available_models_gemini(self):
         """Verify gemini has expected models."""

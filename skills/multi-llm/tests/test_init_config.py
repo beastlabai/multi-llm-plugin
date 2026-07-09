@@ -252,8 +252,17 @@ class TestD2aGuard:
         # NEVER splice the prefixed spec into a detected provider's OWN models
         # catalog (whose `models:` key is uncommented at a deeper indent). The
         # provider blocks must stay BARE model ids after D2a.
+        opencode_catalog = [
+            "opencode/big-pickle",
+            "opencode/sonnet",
+            "opencode/deepseek-v4-flash-free",
+            "opencode/hy3-free",
+            "opencode/nemotron-3-ultra-free",
+            "google/gemini-3.1-pro-preview",
+            "openai/gpt-5.5",
+        ]
         for detected, catalogs in (
-            (["opencode"], {"opencode": ["opencode/big-pickle", "opencode/sonnet"]}),
+            (["opencode"], {"opencode": opencode_catalog}),
             (
                 ["gemini"],
                 {
@@ -276,7 +285,7 @@ class TestD2aGuard:
                         "gemini-2.5-flash",
                         "gemini-2.5-pro",
                     ],
-                    "opencode": ["opencode/big-pickle", "opencode/sonnet"],
+                    "opencode": opencode_catalog,
                 },
             ),
         ):
@@ -321,7 +330,7 @@ class TestEndToEndInit:
         assert written["defaults"]["models"] == [
             "cursor-agent:composer-2.5",
             "cursor-agent:gemini-3.1-pro",
-            "cursor-agent:grok-4.3",
+            "cursor-agent:grok-4.5-xhigh",
             "claude-code:fable",
         ]
 

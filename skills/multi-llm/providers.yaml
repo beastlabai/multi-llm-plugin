@@ -60,6 +60,15 @@ providers:
       - gemini-2.5-flash
       - gemini-2.5-pro
 
+  grok:
+    command: grok
+    default_timeout: 1200
+    supports_json_output: true  # Single JSON object with "text" field
+    # Run "grok models" to see the full list of available models
+    models:
+      - grok-4.5
+      - grok-composer-2.5-fast
+
   opencode:
     command: opencode
     default_timeout: 1200
@@ -134,6 +143,7 @@ defaults:
     - kilocode:openrouter/qwen/qwen3.7-max
     - claude-code:fable
     - codex:gpt-5.5
+    - grok:grok-4.5
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models

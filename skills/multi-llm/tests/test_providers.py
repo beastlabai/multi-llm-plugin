@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
+from utils.providers.grok import GrokProvider
 from utils.providers.kilocode import KiloCodeProvider
 from utils.providers.opencode import OpenCodeProvider
 
@@ -490,6 +491,162 @@ class TestGeminiProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("gemini")
+
+
+class TestGrokProvider:
+    """Tests for the GrokProvider class."""
+
+    @pytest.fixture
+    def provider(self):
+        """Create a GrokProvider instance."""
+        return GrokProvider()
+
+    def test_name_property(self, provider):
+        """Test that name property returns correct identifier."""
+        assert provider.name == "grok"
+
+    def test_default_timeout(self, provider):
+        """Test that default_timeout is set correctly."""
+        assert provider.default_timeout == 600
+
+    def test_grok_parse_text_field(self, provider):
+        """Extract JSON from Grok's text field.
+
+        Grok returns: {"text": "...", "stopReason": "...", "sessionId": "..."}
+        """
+        inner_data = [
+            {"title": "Finding 1", "desc": "Description", "importance": "medium"}
+        ]
+        wrapper = {
+            "text": json.dumps(inner_data),
+            "stopReason": "EndTurn",
+            "sessionId": "abc123",
+        }
+        stdout = json.dumps(wrapper)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_grok_parse_text_with_object(self, provider):
+        """Parse Grok text field containing a JSON object."""
+        inner_data = {"status": "complete", "findings": []}
+        wrapper = {
+            "text": json.dumps(inner_data),
+            "stopReason": "EndTurn",
+        }
+        stdout = json.dumps(wrapper)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_grok_parse_text_code_block(self, provider):
+        """Extract JSON from code block in Grok text."""
+        inner_json = [{"task": "T001", "status": "done"}]
+        response_text = f"""Analysis complete:
+
+```json
+{json.dumps(inner_json)}
+```
+"""
+        wrapper = {"text": response_text, "stopReason": "EndTurn"}
+        stdout = json.dumps(wrapper)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_grok_parse_text_prose_with_json(self, provider):
+        """Extract embedded JSON when prose precedes it in the text field."""
+        inner_json = {"result": "success"}
+        response_text = f"I'll return only the JSON. {json.dumps(inner_json)}"
+        wrapper = {"text": response_text, "stopReason": "EndTurn"}
+        stdout = json.dumps(wrapper)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_grok_parse_non_json_text(self, provider):
+        """Handle text that contains no JSON."""
+        wrapper = {
+            "text": "This is just plain text without any JSON.",
+            "stopReason": "EndTurn",
+        }
+        stdout = json.dumps(wrapper)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+        assert "raw" in result
+
+    def test_grok_parse_empty_text(self, provider):
+        """Handle an empty text field."""
+        stdout = json.dumps({"text": "", "stopReason": "EndTurn"})
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_grok_parse_malformed_wrapper(self, provider):
+        """Handle malformed JSON in stdout."""
+        stdout = "not valid json at all"
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_grok_parse_direct_json_fallback(self, provider):
+        """Fallback to extraction when wrapper is invalid but JSON is embedded."""
+        stdout = "Error prefix [1, 2, 3] suffix"
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_grok_build_command(self, provider):
+        """Test command building for Grok Build CLI."""
+        prompt = "Analyze this"
+        model = "grok-4.5"
+
+        cmd = provider.build_command(prompt, model)
+
+        assert cmd == [
+            "grok",
+            "--no-auto-update",
+            "--always-approve",
+            "-p",
+            "Analyze this",
+            "--output-format",
+            "json",
+            "-m",
+            "grok-4.5",
+        ]
+
+    @patch("shutil.which")
+    def test_grok_is_available_true(self, mock_which, provider):
+        """Test is_available returns True when grok is found."""
+        mock_which.return_value = "/usr/bin/grok"
+
+        assert provider.is_available() is True
+        mock_which.assert_called_once_with("grok")
+
+    @patch("shutil.which")
+    def test_grok_is_available_false(self, mock_which, provider):
+        """Test is_available returns False when grok is not found."""
+        mock_which.return_value = None
+
+        assert provider.is_available() is False
+        mock_which.assert_called_once_with("grok")
 
 
 class TestOpenCodeProvider:

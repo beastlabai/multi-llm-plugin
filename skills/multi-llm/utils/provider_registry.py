@@ -33,6 +33,7 @@ from .providers.claude_code import ClaudeCodeProvider
 from .providers.codex import CodexProvider
 from .providers.cursor_agent import CursorAgentProvider
 from .providers.gemini import GeminiProvider
+from .providers.grok import GrokProvider
 from .providers.kilocode import KiloCodeProvider
 from .providers.opencode import OpenCodeProvider
 from .providers.base import LLMProvider
@@ -43,6 +44,7 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "codex": CodexProvider(),
     "cursor-agent": CursorAgentProvider(),
     "gemini": GeminiProvider(),
+    "grok": GrokProvider(),
     "kilocode": KiloCodeProvider(),
     "opencode": OpenCodeProvider(),
 }

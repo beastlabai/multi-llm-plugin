@@ -4,6 +4,7 @@ from .base import LLMProvider
 from .codex import CodexProvider
 from .cursor_agent import CursorAgentProvider
 from .gemini import GeminiProvider
+from .grok import GrokProvider
 from .kilocode import KiloCodeProvider
 from .opencode import OpenCodeProvider
 
@@ -12,6 +13,7 @@ __all__ = [
     "CodexProvider",
     "CursorAgentProvider",
     "GeminiProvider",
+    "GrokProvider",
     "KiloCodeProvider",
     "OpenCodeProvider",
 ]

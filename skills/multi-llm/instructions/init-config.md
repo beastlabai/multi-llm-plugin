@@ -10,7 +10,8 @@ it is handled entirely by this instruction file routing to the standalone
 
 `--init` is **fully automatic and zero-prompt**. It scans `PATH` for the
 supported provider CLIs (claude-code→`claude`, cursor-agent→`cursor-agent`,
-gemini→`gemini`, opencode→`opencode`, codex→`codex`, kilocode→`kilocode`),
+gemini→`gemini`, grok→`grok`, opencode→`opencode`, codex→`codex`,
+kilocode→`kilocode`),
 copies an **inert template** to the target path, then **uncomments** the lines
 that belong to the detected providers — their full `providers:` sub-blocks
 (command, timeouts, concurrency, `models:` list), the `defaults.models` /
@@ -56,8 +57,8 @@ Claude Code, a plain terminal, or CI.
 ## What gets written
 
 - **`default_provider`** is set to the **first detected provider in base
-  declaration order** (claude-code, cursor-agent, gemini, opencode, codex,
-  kilocode). So with both claude-code and cursor-agent installed it becomes
+  declaration order** (claude-code, cursor-agent, gemini, grok, opencode,
+  codex, kilocode). So with both claude-code and cursor-agent installed it becomes
   `claude-code`. When **nothing** is detected it is left commented and inherits
   the base default.
 - **Nothing detected → no error.** With no provider CLIs on `PATH` the script

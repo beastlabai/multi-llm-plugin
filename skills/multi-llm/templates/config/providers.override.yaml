@@ -120,20 +120,16 @@
 #     supports_json_output: true
 #     models:
 #       - auto
-#       - gpt-5.2-high
-#       - gpt-5.3-codex
-#       - gpt-5.3-codex-high
-#       - gpt-5.4-high
+#       - glm-5.2-max
+#       - gpt-5.4-xhigh
 #       - gpt-5.5-extra-high
-#       - gemini-3-pro
 #       - gemini-3.1-pro
-#       - grok
-#       - gemini-3-flash
-#       - gpt-5.2
-#       - kimi-k2.5
-#       - grok-4-20-thinking
-#       - grok-4.3
-#       - composer-2
+#       - gemini-3.5-flash
+#       - kimi-k2.7-code
+#       - grok-4.5-xhigh
+#       - claude-sonnet-5-thinking-xhigh
+#       - claude-opus-4-8-thinking-xhigh
+#       - claude-fable-5-high
 #       - composer-2.5
 
 #   gemini:
@@ -147,6 +143,14 @@
 #       - gemini-2.5-flash
 #       - gemini-2.5-pro
 
+#   grok:
+#     command: grok
+#     default_timeout: 1200
+#     supports_json_output: true
+#     models:
+#       - grok-4.5
+#       - grok-composer-2.5-fast
+
 #   opencode:
 #     command: opencode
 #     default_timeout: 1200
@@ -154,6 +158,11 @@
 #     models:
 #       - opencode/big-pickle
 #       - opencode/sonnet
+#       - opencode/deepseek-v4-flash-free
+#       - opencode/hy3-free
+#       - opencode/nemotron-3-ultra-free
+#       - google/gemini-3.1-pro-preview
+#       - openai/gpt-5.5
 
 #   codex:
 #     command: codex
@@ -169,17 +178,27 @@
 #     supports_json_output: false
 #     max_concurrent: 2
 #     models:
-#       - openrouter/moonshotai/kimi-k2.5
-#       - openrouter/moonshotai/kimi-k2.6
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
 #       - openrouter/z-ai/glm-5.2
+#       - kilo/z-ai/glm-5.2
 #       - openrouter/minimax/minimax-m2.7
 #       - openrouter/minimax/minimax-m3
 #       - openrouter/x-ai/grok-4.20-multi-agent
 #       - openrouter/arcee-ai/trinity-large-thinking
 #       - openrouter/xiaomi/mimo-v2.5-pro
 #       - openrouter/qwen/qwen3.7-max
+#       - openrouter/tencent/hy3
+#       - openrouter/stepfun/step-3.7-flash
+#       - openrouter/openai/gpt-5.5-pro
+#       - openai/gpt-5.5-pro
+#       - openrouter/nex-agi/nex-n2-pro
+#       - openrouter/inclusionai/ring-2.6-1t
+#       - openrouter/google/gemini-3.5-flash
+#       - google/gemini-3.1-pro-preview
+#       - openrouter/deepseek/deepseek-v4-pro
+#       - openrouter/anthropic/claude-sonnet-5
+#       - openrouter/anthropic/claude-fable-5
 
 ## --- default_provider -------------------------------------------------------
 ## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
@@ -198,7 +217,7 @@ defaults:
   models:
 #     - cursor-agent:composer-2.5
 #     - cursor-agent:gemini-3.1-pro
-#     - cursor-agent:grok-4.3
+#     - cursor-agent:grok-4.5-xhigh
 #     - kilocode:openrouter/moonshotai/kimi-k2.7-code
 #     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b
 #     - kilocode:openrouter/z-ai/glm-5.2
@@ -207,6 +226,7 @@ defaults:
 #     - kilocode:openrouter/qwen/qwen3.7-max
 #     - claude-code:fable
 #     - codex:gpt-5.5
+#     - grok:grok-4.5
 
   ## --- defaults.quick_models ------------------------------------------------
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same

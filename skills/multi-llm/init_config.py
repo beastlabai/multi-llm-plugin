@@ -836,8 +836,8 @@ def _write_config(
         print(
             "No supported provider CLIs found on PATH; wrote an inert "
             ".multi-llm/providers.yaml that inherits the built-in defaults.\n"
-            "Install one of: claude, cursor-agent, gemini, opencode, codex, "
-            "kilocode and re-run `--init`."
+            "Install one of: claude, cursor-agent, gemini, grok, opencode, "
+            "codex, kilocode and re-run `--init`."
         )
     else:
         chosen = detected_list[0]  # validation guarantees default_provider == this
