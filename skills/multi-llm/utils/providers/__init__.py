@@ -1,5 +1,6 @@
 """LLM CLI provider implementations."""
 
+from .agy import AgyProvider
 from .aider import AiderProvider
 from .base import LLMProvider
 from .cline import ClineProvider
@@ -13,6 +14,7 @@ from .opencode import OpenCodeProvider
 
 __all__ = [
     "LLMProvider",
+    "AgyProvider",
     "AiderProvider",
     "ClineProvider",
     "CodexProvider",

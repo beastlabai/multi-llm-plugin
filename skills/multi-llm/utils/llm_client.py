@@ -203,7 +203,11 @@ def invoke_with_provider(
             text=True,
             timeout=effective_timeout,
             env=env,
-            cwd=cwd
+            cwd=cwd,
+            # No provider reads stdin (prompts are passed via argv); closing it
+            # prevents CLIs that poll stdin for piped input (e.g. agy) from
+            # blocking forever when the orchestrator's stdin is a non-EOF pipe.
+            stdin=subprocess.DEVNULL
         )
         duration = time.time() - start_time
 

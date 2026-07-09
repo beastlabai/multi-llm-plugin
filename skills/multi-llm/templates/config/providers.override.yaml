@@ -228,6 +228,20 @@
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/openai/gpt-5.5
 
+#   agy:
+#     command: agy
+#     default_timeout: 1200
+#     supports_json_output: true
+#     models:
+#       - Gemini 3.5 Flash (Medium)
+#       - Gemini 3.5 Flash (High)
+#       - Gemini 3.5 Flash (Low)
+#       - Gemini 3.1 Pro (Low)
+#       - Gemini 3.1 Pro (High)
+#       - Claude Sonnet 4.6 (Thinking)
+#       - Claude Opus 4.6 (Thinking)
+#       - GPT-OSS 120B (Medium)
+
 ## --- default_provider -------------------------------------------------------
 ## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
 ## `--init` sets it to the first detected provider; left commented when nothing
@@ -258,6 +272,7 @@ defaults:
 #     - cline:openrouter/z-ai/glm-5.2
 #     - goose:openrouter/z-ai/glm-5.2
 #     - aider:openrouter/z-ai/glm-5.2
+#     - agy:Gemini 3.1 Pro (High)
 
   ## --- defaults.quick_models ------------------------------------------------
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same

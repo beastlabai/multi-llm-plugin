@@ -162,6 +162,26 @@ providers:
       - openrouter/moonshotai/kimi-k2.7-code
       - openrouter/openai/gpt-5.5
 
+  agy:
+    command: agy
+    default_timeout: 1200
+    supports_json_output: true  # Single JSON envelope with "response" field
+    # Model names are the exact DISPLAY NAMES from `agy models` (spaces and
+    # parentheses included). GOTCHA: an invalid model name is SILENTLY
+    # ignored — agy falls back to its default model with status SUCCESS —
+    # so keep these matching `agy models` output exactly.
+    # Auth is Google OAuth only: requires a one-time `agy` sign-in
+    # (persisted in ~/.gemini/antigravity-cli/); no API keys involved.
+    models:
+      - "Gemini 3.5 Flash (Medium)"
+      - "Gemini 3.5 Flash (High)"
+      - "Gemini 3.5 Flash (Low)"
+      - "Gemini 3.1 Pro (Low)"
+      - "Gemini 3.1 Pro (High)"
+      - "Claude Sonnet 4.6 (Thinking)"
+      - "Claude Opus 4.6 (Thinking)"
+      - "GPT-OSS 120B (Medium)"
+
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
 
@@ -188,6 +208,7 @@ defaults:
     - cline:openrouter/z-ai/glm-5.2
     - goose:openrouter/z-ai/glm-5.2
     - aider:openrouter/z-ai/glm-5.2
+    - "agy:Gemini 3.1 Pro (High)"
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models

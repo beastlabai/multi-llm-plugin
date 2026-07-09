@@ -14,6 +14,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.providers.agy import AgyProvider
 from utils.providers.aider import AiderProvider
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
@@ -1664,6 +1665,182 @@ class TestAiderProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("aider")
+
+
+class TestAgyProvider:
+    """Tests for the AgyProvider class."""
+
+    @pytest.fixture
+    def provider(self):
+        """Create an AgyProvider instance."""
+        return AgyProvider()
+
+    @staticmethod
+    def _envelope(response, status="SUCCESS", error=None):
+        """Build representative agy --output-format json stdout."""
+        envelope = {
+            "conversation_id": "conv-123" if status == "SUCCESS" else "",
+            "status": status,
+            "response": response,
+            "duration_seconds": 4.2,
+            "num_turns": 1,
+            "usage": {"input_tokens": 50, "output_tokens": 50},
+        }
+        if error is not None:
+            envelope["error"] = error
+        return json.dumps(envelope)
+
+    def test_name_property(self, provider):
+        """Test that name property returns correct identifier."""
+        assert provider.name == "agy"
+
+    def test_default_timeout(self, provider):
+        """Test that default_timeout is set correctly."""
+        assert provider.default_timeout == 600
+
+    def test_agy_parse_success_array(self, provider):
+        """Extract a JSON array from the response field."""
+        inner_data = [
+            {"title": "Finding 1", "desc": "Description", "importance": "medium"}
+        ]
+        stdout = self._envelope(json.dumps(inner_data))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_agy_parse_success_object(self, provider):
+        """Extract a JSON object from the response field."""
+        inner_data = {"first_heading": "Probe Widget"}
+        stdout = self._envelope(json.dumps(inner_data))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_agy_parse_code_block_json(self, provider):
+        """Extract JSON from a ```json code block in the response."""
+        inner_json = [{"task": "T001", "status": "done"}]
+        response = f"Analysis complete:\n\n```json\n{json.dumps(inner_json)}\n```\n"
+        stdout = self._envelope(response)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_agy_parse_prose_with_json(self, provider):
+        """Extract embedded JSON when prose surrounds it in the response."""
+        inner_json = {"result": "success"}
+        stdout = self._envelope(f"Here is the JSON you asked for: {json.dumps(inner_json)}")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_agy_parse_trailing_newline_response(self, provider):
+        """The response field carries a trailing newline; it is stripped."""
+        stdout = self._envelope("[1, 2, 3]\n")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_agy_parse_error_envelope(self, provider):
+        """ERROR status (exit 1) -> failure carrying the envelope's error."""
+        error_message = "You must sign in to use the Antigravity CLI."
+        stdout = self._envelope("", status="ERROR", error=error_message)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert result["error"] == error_message
+        assert result["data"] is None
+
+    def test_agy_parse_non_success_status_without_error(self, provider):
+        """A non-SUCCESS status with no error field gets a fallback message."""
+        stdout = self._envelope("", status="TIMEOUT")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "TIMEOUT" in result["error"]
+        assert result["data"] is None
+
+    def test_agy_parse_empty_response(self, provider):
+        """SUCCESS with an empty response field -> failure."""
+        stdout = self._envelope("")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_agy_parse_envelope_missing_status(self, provider):
+        """A JSON dict without a status field is returned as the data itself."""
+        stdout = json.dumps({"result": "success", "items": [1, 2]})
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == {"result": "success", "items": [1, 2]}
+
+    def test_agy_parse_non_json_stdout_fallback(self, provider):
+        """Fallback extraction when stdout is not a JSON envelope but embeds JSON."""
+        stdout = "Some banner text [1, 2, 3] trailing text"
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_agy_parse_garbage_stdout(self, provider):
+        """Handle stdout with no envelope and no extractable JSON."""
+        stdout = "not valid json at all"
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+        assert "raw" in result
+
+    def test_agy_build_command(self, provider):
+        """Exact argv: flags order, display-name model verbatim, -p prompt."""
+        cmd = provider.build_command("Analyze this", "Gemini 3.1 Pro (High)")
+
+        assert cmd == [
+            "agy",
+            "--new-project",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            "20m",
+            "--model",
+            "Gemini 3.1 Pro (High)",
+            "-p",
+            "Analyze this",
+        ]
+
+    @patch("shutil.which")
+    def test_agy_is_available_true(self, mock_which, provider):
+        """Test is_available returns True when agy is found."""
+        mock_which.return_value = "/usr/bin/agy"
+
+        assert provider.is_available() is True
+        mock_which.assert_called_once_with("agy")
+
+    @patch("shutil.which")
+    def test_agy_is_available_false(self, mock_which, provider):
+        """Test is_available returns False when agy is not found."""
+        mock_which.return_value = None
+
+        assert provider.is_available() is False
+        mock_which.assert_called_once_with("agy")
 
 
 class TestProviderBinaryNotFound:
