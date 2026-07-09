@@ -1,7 +1,22 @@
 """Base protocol for LLM CLI providers."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Collection, Dict, List, Optional, Tuple
+
+
+def split_reasoning_effort(model: str, efforts: Collection[str]) -> Tuple[str, Optional[str]]:
+    """Split an optional trailing ``:effort`` suffix off a model string.
+
+    Returns ``(base_model, effort)`` when the substring after the LAST colon
+    is a member of ``efforts`` and the part before it is non-empty; otherwise
+    ``(model, None)`` and the model string passes through verbatim. Splitting
+    on the last colon keeps model ids that legitimately contain colons (e.g.
+    openrouter ``:free`` variants) intact unless the suffix is whitelisted.
+    """
+    base, _, suffix = model.rpartition(":")
+    if base and suffix in efforts:
+        return base, suffix
+    return model, None
 
 
 class LLMProvider(ABC):

@@ -4,7 +4,13 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Thinking effort values accepted by goose's ThinkingEffort parser, aliases
+# included (verified on goose 1.41.0). goose has no CLI flag for this — the
+# value goes via the GOOSE_THINKING_EFFORT env var / config key; invalid
+# values are silently ignored by goose.
+REASONING_EFFORTS = frozenset({"off", "none", "low", "medium", "high", "max", "xhigh"})
 
 
 class GooseProvider(LLMProvider):
@@ -22,6 +28,15 @@ class GooseProvider(LLMProvider):
     maps to --provider (the goose backend provider) and the remainder to
     --model. A name without "/" is passed straight to --model and uses
     the GOOSE_PROVIDER env / configured default provider.
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``openrouter/z-ai/glm-5.2:high``), stripped off the full string BEFORE
+    the provider/model split. goose has no CLI flag for reasoning effort,
+    so get_env() maps the suffix to the GOOSE_THINKING_EFFORT env var
+    instead; without a suffix the var is left unset so goose falls back to
+    the user's own config. Valid efforts are listed in REASONING_EFFORTS;
+    anything else passes through verbatim as the model name (keeping
+    ``:free``-style ids intact).
 
     Gotcha: goose exits 0 EVEN ON PROVIDER ERRORS (401, rate limit).
     Failure manifests as the final assistant text containing
@@ -61,13 +76,24 @@ class GooseProvider(LLMProvider):
             "--with-builtin",
             "developer",
         ]
-        head, _sep, rest = model.partition("/")
+        base_model, _effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        head, _sep, rest = base_model.partition("/")
         if rest:
             cmd += ["--provider", head, "--model", rest]
         else:
-            cmd += ["--model", model]
+            cmd += ["--model", base_model]
         cmd += ["-t", prompt]
         return cmd
+
+    def get_env(self, model: str) -> Dict[str, str]:
+        # goose has no CLI flag for reasoning effort; a ``:effort`` model
+        # suffix is delivered via GOOSE_THINKING_EFFORT instead. Without a
+        # suffix the var is deliberately NOT set, so goose falls back to
+        # the user's own config.
+        _base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        if effort is not None:
+            return {"GOOSE_THINKING_EFFORT": effort}
+        return {}
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse the single JSON envelope emitted by goose --output-format json.

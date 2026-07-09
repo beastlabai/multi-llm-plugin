@@ -17,6 +17,12 @@
 # - default_timeout: Provider-specific timeout in seconds
 # - supports_json_output: Whether provider supports JSON output natively
 # - models: List of supported model names for this provider
+#
+# Effort convention: most providers accept an optional ":effort" suffix on
+# model entries, parsed on the LAST colon against a per-provider whitelist
+# (see each provider's comment; unknown suffixes pass through as part of the
+# model name). Exceptions: cursor-agent and agy encode effort in the model
+# name itself; gemini is config-file-only.
 
 providers:
   claude-code:
@@ -24,6 +30,10 @@ providers:
     default_timeout: 1800
     supports_json_output: true
     max_concurrent: 2
+    # Model entries may carry an optional ":effort" suffix (e.g. fable:max),
+    # translated to "--effort <level>". Valid: low, medium, high, xhigh, max;
+    # unsupported levels are silently downgraded by the CLI per model.
+    # Without a suffix, the CLI's default effort applies.
     models:
       - sonnet
       - opus
@@ -35,14 +45,17 @@ providers:
     default_timeout: 1200
     max_concurrent: 2
     supports_json_output: true
+    # Effort is encoded directly in cursor-agent's own model names (e.g. the
+    # -xhigh variants); no ":effort" suffix support needed or implemented.
     models:
       - auto
       - glm-5.2-max
-      - gpt-5.4-xhigh
       - gpt-5.5-extra-high
+      - gpt-5.6-sol-xhigh
       - gemini-3.1-pro
       - gemini-3.5-flash
       - kimi-k2.7-code
+      - glm-5.2-high
       - grok-4.5-xhigh
       - claude-sonnet-5-thinking-xhigh
       - claude-opus-4-8-thinking-xhigh
@@ -53,6 +66,11 @@ providers:
     command: gemini
     default_timeout: 1200  # Gemini can be slower
     supports_json_output: true
+    # No per-run effort control in gemini-cli (no flag, no env var). To control
+    # thinking, define a custom alias with a thinkingConfig under
+    # modelConfigs.customAliases in ~/.gemini/settings.json (or the project's
+    # .gemini/settings.json) and list that alias name here as the model.
+    # Gemini 3 models take thinkingLevel LOW/HIGH; 2.5 takes a numeric thinkingBudget.
     models:
       - gemini-3-flash
       - gemini-3-pro
@@ -65,8 +83,11 @@ providers:
     default_timeout: 1200
     supports_json_output: true  # Single JSON object with "text" field
     # Run "grok models" to see the full list of available models
+    # ":effort" suffix (e.g. grok-4.5:low) -> "--reasoning-effort <level>".
+    # Valid: none, minimal, low, medium, high, xhigh, max. Per-model support
+    # varies: grok-4.5 supports high/medium/low; grok-composer-2.5-fast has none.
     models:
-      - grok-4.5
+      - grok-4.5:high
       - grok-composer-2.5-fast
 
   opencode:
@@ -74,6 +95,9 @@ providers:
     default_timeout: 1200
     supports_json_output: true  # Uses --format json (NDJSON event stream)
     # Run "opencode models" to see the full list of available models
+    # ":effort" suffix (e.g. openai/gpt-5.5:high) -> "run --variant <name>".
+    # Variant names are provider-specific (OpenAI: none/minimal/low/medium/high/xhigh;
+    # Anthropic: high/max); unknown variants are resolved/ignored server-side.
     models:
       - opencode/big-pickle
       - opencode/sonnet
@@ -87,9 +111,16 @@ providers:
     command: codex
     default_timeout: 1800
     supports_json_output: true  # Uses --json (NDJSON event stream)
+    # Model entries may carry an optional ":effort" suffix (e.g. gpt-5.5:high),
+    # translated by the codex adapter to "-c model_reasoning_effort=<effort>".
+    # Valid efforts: none, minimal, low, medium, high, xhigh.
+    # Without a suffix, codex uses the default from the user's ~/.codex/config.toml
     models:
-      - gpt-5.2-codex
       - gpt-5.5
+      - gpt-5.5:high
+      - gpt-5.6-terra
+      - gpt-5.6-sol
+      - gpt-5.6-sol:xhigh
 
   kilocode:
     command: kilocode
@@ -97,20 +128,26 @@ providers:
     supports_json_output: false  # Plain text output; --json streams too much data
     # Run "kilocode models" to see the full list of available models
     # Model names use 3-part format: backend/provider/model
+    # ":variant" suffix -> "run --variant <name>". Variant names are MODEL-specific
+    # (glm-5.2: high/xhigh; kimi/minimax: thinking/instant; qwen, nemotron, mimo
+    # have none) — discover via "kilocode models <backend> --verbose".
+    # GOTCHA: an invalid/unsupported variant is SILENTLY ignored. Whitelisted
+    # suffixes: none, minimal, low, medium, high, xhigh, max, thinking, instant;
+    # anything else (e.g. ":free" model ids) passes through as part of the model name.
     max_concurrent: 2
     models:
       - openrouter/moonshotai/kimi-k2.7-code
       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
-      - openrouter/z-ai/glm-5.2
+      - openrouter/z-ai/glm-5.2:xhigh
       - kilo/z-ai/glm-5.2
       - openrouter/minimax/minimax-m2.7
-      - openrouter/minimax/minimax-m3
+      - openrouter/minimax/minimax-m3:xhigh
       - openrouter/x-ai/grok-4.20-multi-agent
       - openrouter/arcee-ai/trinity-large-thinking
       - openrouter/xiaomi/mimo-v2.5-pro
-      - openrouter/qwen/qwen3.7-max
-      - openrouter/tencent/hy3
-      - openrouter/stepfun/step-3.7-flash
+      - openrouter/qwen/qwen3.7-max:xhigh
+      - openrouter/tencent/hy3:xhigh
+      - openrouter/stepfun/step-3.7-flash:xhigh
       - openrouter/openai/gpt-5.5-pro
       - openai/gpt-5.5-pro
       - openrouter/nex-agi/nex-n2-pro
@@ -129,6 +166,10 @@ providers:
     # openrouter/z-ai/glm-5.2 — the segment before the first "/" is the cline
     # backend provider (-P), the rest is the model id (-m).
     # -m mutates the saved default in ~/.cline, so cap concurrency.
+    # ":effort" suffix -> "--thinking <level>". Valid: none, low, medium, high,
+    # xhigh; the CLI hard-errors (exit 1) on invalid levels. Unlike -m,
+    # --thinking does NOT mutate the saved default in ~/.cline.
+    # Note: xhigh may be downgraded to high on some provider paths inside cline.
     max_concurrent: 2
     models:
       - openrouter/z-ai/glm-5.2
@@ -144,6 +185,10 @@ providers:
     # backend provider (--provider), the rest is the model id (--model).
     # Auth is env-only: the openrouter backend needs OPENROUTER_API_KEY in
     # the environment.
+    # ":effort" suffix -> exported as GOOSE_THINKING_EFFORT env var for the
+    # subprocess (goose has no CLI flag). Valid: off, none, low, medium, high,
+    # max, xhigh. GOTCHA: goose SILENTLY ignores it for openrouter models it
+    # doesn't classify as reasoning-capable, and silently ignores invalid values.
     models:
       - openrouter/z-ai/glm-5.2
       - openrouter/moonshotai/kimi-k2.7-code
@@ -157,6 +202,10 @@ providers:
     # openrouter/z-ai/glm-5.2 (no provider/model splitting).
     # Auth is env-only: openrouter/ models need OPENROUTER_API_KEY in the
     # environment.
+    # ":effort" suffix -> "--reasoning-effort <value>". Whitelist: none, minimal,
+    # low, medium, high, xhigh. Aider passes the value through unvalidated:
+    # openrouter/ models always accept it (sent as OpenRouter's reasoning.effort),
+    # other models warn-and-ignore.
     models:
       - openrouter/z-ai/glm-5.2
       - openrouter/moonshotai/kimi-k2.7-code
@@ -172,6 +221,8 @@ providers:
     # so keep these matching `agy models` output exactly.
     # Auth is Google OAuth only: requires a one-time `agy` sign-in
     # (persisted in ~/.gemini/antigravity-cli/); no API keys involved.
+    # Effort is already encoded in the display-name model strings ("(High)",
+    # "(Low)" etc.); no ":effort" suffix support.
     models:
       - "Gemini 3.5 Flash (Medium)"
       - "Gemini 3.5 Flash (High)"
@@ -191,19 +242,19 @@ default_provider: cursor-agent
 defaults:
   models:
     - cursor-agent:composer-2.5
-    #- cursor-agent:gpt-5.5-extra-high
+    #- cursor-agent:gpt-5.6-sol-xhigh
     - cursor-agent:gemini-3.1-pro
     - cursor-agent:grok-4.5-xhigh
     #- cursor-agent:kimi-k2.7-code
     #- opencode:opencode/big-pickle
-    - kilocode:openrouter/moonshotai/kimi-k2.7-code
-    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b
-    - kilocode:openrouter/z-ai/glm-5.2
-    - kilocode:openrouter/minimax/minimax-m3
-    - kilocode:openrouter/xiaomi/mimo-v2.5-pro
-    - kilocode:openrouter/qwen/qwen3.7-max
-    - claude-code:fable
-    - codex:gpt-5.5
+    - kilocode:openrouter/moonshotai/kimi-k2.7-code:xhigh
+    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
+    - kilocode:openrouter/z-ai/glm-5.2:xhigh
+    - kilocode:openrouter/minimax/minimax-m3:xhigh
+    - kilocode:openrouter/xiaomi/mimo-v2.5-pro:xhigh
+    - kilocode:openrouter/qwen/qwen3.7-max:xhigh
+    - claude-code:fable:high
+    - codex:gpt-5.6-sol:xhigh
     #- grok:grok-4.5
     #- cline:openrouter/z-ai/glm-5.2
     #- goose:openrouter/z-ai/glm-5.2
@@ -215,8 +266,8 @@ defaults:
   # Omit --quick to use the full defaults.models list, or pass --interactive to pick manually
   quick_models:
     - cursor-agent:composer-2.5
-    - cursor-agent:gpt-5.5-extra-high
-    - claude-code:fable
+    - cursor-agent:gpt-5.6-sol-xhigh
+    - claude-code:fable:high
 
   # Optional: only use defaults for specific modes
   # modes:

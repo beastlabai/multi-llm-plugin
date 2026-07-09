@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Reasoning effort values passed to aider's --reasoning-effort, which is an
+# unvalidated pass-through (verified on aider 0.86.2): for openrouter/ models
+# aider always accepts it and sends OpenRouter's reasoning.effort param;
+# other models warn-and-ignore.
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 
 # aider prints the model's reply after this marker (with --no-pretty).
 # Reasoning models emit an optional "► **THINKING**" block first, which may
@@ -62,6 +68,12 @@ class AiderProvider(LLMProvider):
     "openrouter/z-ai/glm-5.2") — no partition/splitting. Auth is env-only:
     openrouter/ models need OPENROUTER_API_KEY in the environment (the
     subprocess inherits it).
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``openrouter/z-ai/glm-5.2:high``), translated to
+    ``--reasoning-effort <effort>`` right after the --model pair. Valid
+    efforts are listed in REASONING_EFFORTS; anything else passes through
+    verbatim as the model name (keeping ``:free``-style ids intact).
 
     Gotcha: aider exits 0 EVEN on auth failure and rate-limit give-up (the
     error text, e.g. "litellm.AuthenticationError ...", goes to stdout,
@@ -125,10 +137,15 @@ class AiderProvider(LLMProvider):
         # git the model is blind. Absolute paths mentioned in the prompt
         # (the plan file etc.) are additionally passed via --read, because
         # aider's mention auto-add never matches absolute paths.
+        base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         cmd = [
             "aider",
             "--model",
-            model,
+            base_model,
+        ]
+        if effort is not None:
+            cmd += ["--reasoning-effort", effort]
+        cmd += [
             "--message",
             "/ask " + prompt,
             "--yes-always",

@@ -4,7 +4,11 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Reasoning effort values accepted by `grok --reasoning-effort`
+# (verified live against grok 0.2.93).
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 class GrokProvider(LLMProvider):
@@ -15,6 +19,11 @@ class GrokProvider(LLMProvider):
 
     The provider unwraps the "text" field and attempts to parse it as JSON,
     with fallback extraction for code blocks and JSON embedded in prose.
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``grok-4:high``), translated to ``--reasoning-effort <effort>``. Valid
+    efforts are listed in REASONING_EFFORTS; anything else passes through
+    verbatim as the model name.
     """
 
     @property
@@ -29,11 +38,13 @@ class GrokProvider(LLMProvider):
         return shutil.which("grok") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
-        # grok --no-auto-update --always-approve -p <prompt> --output-format json -m <model>
+        # grok --no-auto-update --always-approve -p <prompt> --output-format json
+        #   -m <model> [--reasoning-effort <effort>]
         # --no-auto-update skips background update checks in automated runs;
         # --always-approve auto-approves tool executions (headless runs would
         # otherwise stall waiting for interactive approval).
-        return [
+        base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        cmd = [
             "grok",
             "--no-auto-update",
             "--always-approve",
@@ -42,8 +53,11 @@ class GrokProvider(LLMProvider):
             "--output-format",
             "json",
             "-m",
-            model,
+            base_model,
         ]
+        if effort is not None:
+            cmd += ["--reasoning-effort", effort]
+        return cmd
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse JSON wrapper output from Grok Build CLI."""

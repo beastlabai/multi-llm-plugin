@@ -5,7 +5,11 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Reasoning effort values accepted by `claude --effort`
+# (verified live against claude 2.1.205).
+REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 class ClaudeCodeProvider(LLMProvider):
@@ -15,6 +19,11 @@ class ClaudeCodeProvider(LLMProvider):
     wrapper format: {"type":"result","result":"..."}. The provider handles
     extraction of the actual response content and JSON parsing with fallback
     strategies for code blocks and raw JSON.
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``opus:high``), translated to ``--effort <effort>``. Valid efforts are
+    listed in REASONING_EFFORTS; anything else passes through verbatim as
+    the model name.
 
     When invoked from within a Claude Code session, the CLAUDECODE env var is
     stripped to avoid the nested-session guard.
@@ -44,16 +53,20 @@ class ClaudeCodeProvider(LLMProvider):
         Returns:
             Command arguments for Claude Code CLI invocation.
         """
-        # claude -p --output-format json --model <model> <prompt>
-        return [
+        # claude -p --output-format json --model <model> [--effort <effort>] <prompt>
+        base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        cmd = [
             "claude",
             "-p",
             "--output-format",
             "json",
             "--model",
-            model,
-            prompt,
+            base_model,
         ]
+        if effort is not None:
+            cmd += ["--effort", effort]
+        cmd.append(prompt)
+        return cmd
 
     def get_remove_env(self) -> List[str]:
         """Strip CLAUDECODE env var to bypass nested-session guard.

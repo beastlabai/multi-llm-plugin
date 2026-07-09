@@ -4,7 +4,11 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Reasoning effort values accepted by the OpenAI API for reasoning.effort
+# (verified live against codex-cli 0.144.0).
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 class CodexProvider(LLMProvider):
@@ -12,6 +16,11 @@ class CodexProvider(LLMProvider):
 
     Codex outputs NDJSON (newline-delimited JSON) events when using --json flag.
     Uses 'codex exec --full-auto --json' for non-interactive execution.
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``gpt-5.5:high``), translated to ``-c model_reasoning_effort=<effort>``.
+    Valid efforts are listed in REASONING_EFFORTS; anything else passes
+    through verbatim as the model name.
     """
 
     @property
@@ -26,6 +35,14 @@ class CodexProvider(LLMProvider):
         return shutil.which("codex") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
+        base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        if effort is not None:
+            return [
+                "codex", "exec", "--full-auto", "--json",
+                "--model", base_model,
+                "-c", f"model_reasoning_effort={effort}",
+                prompt,
+            ]
         return ["codex", "exec", "--full-auto", "--json", "--model", model, prompt]
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:

@@ -4,7 +4,12 @@ import shutil
 from typing import Any, Dict, List
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, split_reasoning_effort
+
+# Reasoning effort values accepted by `opencode run --variant` — the values are
+# provider-specific, so this is the practical union across providers
+# (verified live against opencode 1.17.15).
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 class OpenCodeProvider(LLMProvider):
@@ -13,6 +18,11 @@ class OpenCodeProvider(LLMProvider):
     OpenCode outputs NDJSON (newline-delimited JSON) events when using --format json.
     Event types include: step_start, text, tool_use, step_finish
     The actual LLM response is in the "text" events' part.text field.
+
+    Model strings support an optional ``model[:effort]`` suffix (e.g.
+    ``openai/gpt-5.5:high``), translated to ``--variant <effort>``. Valid
+    efforts are listed in REASONING_EFFORTS; anything else passes through
+    verbatim as the model name.
     """
 
     @property
@@ -27,8 +37,13 @@ class OpenCodeProvider(LLMProvider):
         return shutil.which("opencode") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
-        # opencode run --format json --model <model> "<prompt>"
-        return ["opencode", "run", "--format", "json", "--model", model, prompt]
+        # opencode run --format json --model <model> [--variant <effort>] "<prompt>"
+        base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        cmd = ["opencode", "run", "--format", "json", "--model", base_model]
+        if effort is not None:
+            cmd += ["--variant", effort]
+        cmd.append(prompt)
+        return cmd
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse NDJSON event stream output from OpenCode.

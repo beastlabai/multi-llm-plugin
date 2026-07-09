@@ -16,14 +16,51 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers.agy import AgyProvider
 from utils.providers.aider import AiderProvider
+from utils.providers.base import split_reasoning_effort
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
+from utils.providers.codex import CodexProvider
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
 from utils.providers.goose import GooseProvider
 from utils.providers.grok import GrokProvider
 from utils.providers.kilocode import KiloCodeProvider
 from utils.providers.opencode import OpenCodeProvider
+
+
+class TestSplitReasoningEffort:
+    """Tests for the split_reasoning_effort helper in providers.base."""
+
+    EFFORTS = frozenset({"low", "medium", "high"})
+
+    def test_effort_suffix_split(self):
+        """A whitelisted suffix after the last colon is split off."""
+        assert split_reasoning_effort("gpt-5.5:high", self.EFFORTS) == ("gpt-5.5", "high")
+
+    def test_no_colon_passthrough(self):
+        """A model without a colon passes through verbatim."""
+        assert split_reasoning_effort("gpt-5.5", self.EFFORTS) == ("gpt-5.5", None)
+
+    def test_unknown_suffix_passthrough(self):
+        """A suffix not in the whitelist keeps the full model string."""
+        assert split_reasoning_effort("gpt-5.5:turbo", self.EFFORTS) == ("gpt-5.5:turbo", None)
+
+    def test_empty_base_passthrough(self):
+        """An empty base before the colon (":high") passes through verbatim."""
+        assert split_reasoning_effort(":high", self.EFFORTS) == (":high", None)
+
+    def test_empty_suffix_passthrough(self):
+        """A trailing colon with no suffix passes through verbatim."""
+        assert split_reasoning_effort("m:", self.EFFORTS) == ("m:", None)
+
+    def test_multi_colon_splits_on_last(self):
+        """Multi-colon models split on the LAST colon only."""
+        assert split_reasoning_effort("a:b:high", self.EFFORTS) == ("a:b", "high")
+
+    def test_whitelist_sensitivity(self):
+        """The same string splits or passes through depending on the whitelist."""
+        assert split_reasoning_effort("m:max", frozenset({"max"})) == ("m", "max")
+        assert split_reasoning_effort("m:max", frozenset({"high"})) == ("m:max", None)
 
 
 class TestClaudeCodeProvider:
@@ -170,6 +207,61 @@ This concludes the review."""
             "sonnet",
             "Review this code",
         ]
+
+    def test_claude_code_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the five valid efforts."""
+        from utils.providers.claude_code import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"low", "medium", "high", "xhigh", "max"}
+
+    def test_claude_code_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --effort pair after --model <base>."""
+        cmd = provider.build_command("Review this code", "fable:max")
+
+        assert cmd == [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--model",
+            "fable",
+            "--effort",
+            "max",
+            "Review this code",
+        ]
+
+    def test_claude_code_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --effort <effort> form."""
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            cmd = provider.build_command("Review this code", f"fable:{effort}")
+
+            assert cmd == [
+                "claude",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "fable",
+                "--effort",
+                effort,
+                "Review this code",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_claude_code_build_command_effort_passthrough(self, provider):
+        """Non-effort models pass through verbatim with no --effort flag."""
+        for model in ("fable", "fable:med", "fable:none", "fable:HIGH", ":max"):
+            cmd = provider.build_command("Review this code", model)
+
+            assert cmd == [
+                "claude",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                model,
+                "Review this code",
+            ], f"model {model!r} was not passed through verbatim"
 
     @patch("shutil.which")
     def test_claude_code_is_available_true(self, mock_which, provider):
@@ -636,6 +728,67 @@ class TestGrokProvider:
             "grok-4.5",
         ]
 
+    def test_grok_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the seven valid efforts."""
+        from utils.providers.grok import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def test_grok_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --reasoning-effort pair after -m <base>."""
+        cmd = provider.build_command("Analyze this", "grok-4.5:low")
+
+        assert cmd == [
+            "grok",
+            "--no-auto-update",
+            "--always-approve",
+            "-p",
+            "Analyze this",
+            "--output-format",
+            "json",
+            "-m",
+            "grok-4.5",
+            "--reasoning-effort",
+            "low",
+        ]
+
+    def test_grok_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --reasoning-effort form."""
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            cmd = provider.build_command("Analyze this", f"grok-4.5:{effort}")
+
+            assert cmd == [
+                "grok",
+                "--no-auto-update",
+                "--always-approve",
+                "-p",
+                "Analyze this",
+                "--output-format",
+                "json",
+                "-m",
+                "grok-4.5",
+                "--reasoning-effort",
+                effort,
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_grok_build_command_effort_passthrough(self, provider):
+        """Non-effort models pass through verbatim with no --reasoning-effort flag."""
+        for model in ("grok-4.5", "grok-4.5:turbo"):
+            cmd = provider.build_command("Analyze this", model)
+
+            assert cmd == [
+                "grok",
+                "--no-auto-update",
+                "--always-approve",
+                "-p",
+                "Analyze this",
+                "--output-format",
+                "json",
+                "-m",
+                model,
+            ], f"model {model!r} was not passed through verbatim"
+
     @patch("shutil.which")
     def test_grok_is_available_true(self, mock_which, provider):
         """Test is_available returns True when grok is found."""
@@ -789,6 +942,61 @@ class TestOpenCodeProvider:
 
         assert cmd == ["opencode", "run", "--format", "json", "--model", "claude-3", "Generate code"]
 
+    def test_opencode_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the seven valid efforts."""
+        from utils.providers.opencode import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def test_opencode_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --variant pair after --model <base>, prompt last."""
+        cmd = provider.build_command("Generate code", "openai/gpt-5.5:high")
+
+        assert cmd == [
+            "opencode",
+            "run",
+            "--format",
+            "json",
+            "--model",
+            "openai/gpt-5.5",
+            "--variant",
+            "high",
+            "Generate code",
+        ]
+
+    def test_opencode_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --variant form."""
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            cmd = provider.build_command("Generate code", f"openai/gpt-5.5:{effort}")
+
+            assert cmd == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "openai/gpt-5.5",
+                "--variant",
+                effort,
+                "Generate code",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_opencode_build_command_effort_passthrough(self, provider):
+        """Non-effort models pass through verbatim with no --variant flag."""
+        for model in ("openai/gpt-5.5", "opencode/big-pickle"):
+            cmd = provider.build_command("Generate code", model)
+
+            assert cmd == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                model,
+                "Generate code",
+            ], f"model {model!r} was not passed through verbatim"
+
     @patch("shutil.which")
     def test_opencode_is_available_true(self, mock_which, provider):
         """Test is_available returns True when opencode is found."""
@@ -855,6 +1063,80 @@ class TestKiloCodeProvider:
         cmd = provider.build_command(prompt, model)
 
         assert cmd == ["kilocode", "run", "--auto", "-m", "kilo/z-ai/glm-5:free", "Analyze this"]
+
+    def test_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the nine valid efforts."""
+        from utils.providers.kilocode import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "thinking", "instant",
+        }
+
+    def test_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --variant pair after -m <base>, prompt last."""
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2:xhigh")
+
+        assert cmd == [
+            "kilocode",
+            "run",
+            "--auto",
+            "-m",
+            "openrouter/z-ai/glm-5.2",
+            "--variant",
+            "xhigh",
+            "Review this code",
+        ]
+
+    def test_build_command_thinking_variant_suffix(self, provider):
+        """The kilocode-specific :thinking suffix maps to --variant thinking."""
+        cmd = provider.build_command("Review this code", "openrouter/moonshotai/kimi-k2.7-code:thinking")
+
+        assert cmd == [
+            "kilocode",
+            "run",
+            "--auto",
+            "-m",
+            "openrouter/moonshotai/kimi-k2.7-code",
+            "--variant",
+            "thinking",
+            "Review this code",
+        ]
+
+    def test_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --variant form."""
+        efforts = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "thinking", "instant")
+        for effort in efforts:
+            cmd = provider.build_command("Review this code", f"openrouter/z-ai/glm-5.2:{effort}")
+
+            assert cmd == [
+                "kilocode",
+                "run",
+                "--auto",
+                "-m",
+                "openrouter/z-ai/glm-5.2",
+                "--variant",
+                effort,
+                "Review this code",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_build_command_effort_passthrough(self, provider):
+        """Non-effort models pass through verbatim with no --variant flag.
+
+        Critically, openrouter ":free" variants are NOT effort suffixes:
+        the whole string stays the model.
+        """
+        for model in ("openrouter/z-ai/glm-5.2", "openrouter/deepseek/deepseek-r1:free"):
+            cmd = provider.build_command("Review this code", model)
+
+            assert cmd == [
+                "kilocode",
+                "run",
+                "--auto",
+                "-m",
+                model,
+                "Review this code",
+            ], f"model {model!r} was not passed through verbatim"
 
     def test_parse_output_direct_json_array(self, provider):
         """Parse direct JSON array output."""
@@ -1093,6 +1375,89 @@ class TestClineProvider:
         cmd = provider.build_command("Analyze this", "some-model")
 
         assert cmd == ["cline", "--json", "-m", "some-model", "Analyze this"]
+
+    def test_cline_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the five valid efforts."""
+        from utils.providers.cline import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"none", "low", "medium", "high", "xhigh"}
+
+    def test_cline_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --thinking pair right after --json.
+
+        The suffix is stripped off the FULL string first; the remaining base
+        then splits on the first "/" into -P/-m as usual.
+        """
+        cmd = provider.build_command("Analyze this", "openrouter/z-ai/glm-5.2:high")
+
+        assert cmd == [
+            "cline",
+            "--json",
+            "--thinking",
+            "high",
+            "-P",
+            "openrouter",
+            "-m",
+            "z-ai/glm-5.2",
+            "Analyze this",
+        ]
+
+    def test_cline_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --thinking form."""
+        for effort in ("none", "low", "medium", "high", "xhigh"):
+            cmd = provider.build_command("Analyze this", f"openrouter/z-ai/glm-5.2:{effort}")
+
+            assert cmd == [
+                "cline",
+                "--json",
+                "--thinking",
+                effort,
+                "-P",
+                "openrouter",
+                "-m",
+                "z-ai/glm-5.2",
+                "Analyze this",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_cline_build_command_effort_without_provider_prefix(self, provider):
+        """An :effort suffix on a model without "/" still yields --thinking, no -P."""
+        cmd = provider.build_command("Analyze this", "some-model:high")
+
+        assert cmd == [
+            "cline",
+            "--json",
+            "--thinking",
+            "high",
+            "-m",
+            "some-model",
+            "Analyze this",
+        ]
+
+    def test_cline_build_command_effort_passthrough(self, provider):
+        """Non-effort suffixes stay part of the model id; no --thinking flag.
+
+        ":free" (openrouter variant) and ":minimal" (not in cline's whitelist)
+        must survive intact in the -m argument.
+        """
+        cases = [
+            (
+                "openrouter/z-ai/glm-5.2",
+                ["cline", "--json", "-P", "openrouter", "-m", "z-ai/glm-5.2", "Analyze this"],
+            ),
+            (
+                "openrouter/deepseek/deepseek-r1:free",
+                ["cline", "--json", "-P", "openrouter", "-m", "deepseek/deepseek-r1:free", "Analyze this"],
+            ),
+            (
+                "openrouter/z-ai/glm-5.2:minimal",
+                ["cline", "--json", "-P", "openrouter", "-m", "z-ai/glm-5.2:minimal", "Analyze this"],
+            ),
+        ]
+        for model, expected in cases:
+            cmd = provider.build_command("Analyze this", model)
+
+            assert cmd == expected, f"model {model!r} was not passed through verbatim"
 
     @patch("shutil.which")
     def test_cline_is_available_true(self, mock_which, provider):
@@ -1341,6 +1706,105 @@ class TestGooseProvider:
             "-t",
             "Analyze this",
         ]
+
+    def test_goose_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the seven valid efforts."""
+        from utils.providers.goose import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"off", "none", "low", "medium", "high", "max", "xhigh"}
+
+    def test_goose_build_command_effort_suffix_stripped(self, provider):
+        """:effort is stripped BEFORE the provider/model split; argv has no effort flag."""
+        cmd = provider.build_command("Analyze this", "openrouter/z-ai/glm-5.2:high")
+
+        assert cmd == [
+            "goose",
+            "run",
+            "--no-session",
+            "-q",
+            "--output-format",
+            "json",
+            "--no-profile",
+            "--max-turns",
+            "25",
+            "--with-builtin",
+            "developer",
+            "--provider",
+            "openrouter",
+            "--model",
+            "z-ai/glm-5.2",
+            "-t",
+            "Analyze this",
+        ]
+
+    def test_goose_build_command_effort_suffix_without_provider_prefix(self, provider):
+        """:effort stripping also applies to models without a provider prefix."""
+        cmd = provider.build_command("Analyze this", "some-model:high")
+
+        assert cmd == [
+            "goose",
+            "run",
+            "--no-session",
+            "-q",
+            "--output-format",
+            "json",
+            "--no-profile",
+            "--max-turns",
+            "25",
+            "--with-builtin",
+            "developer",
+            "--model",
+            "some-model",
+            "-t",
+            "Analyze this",
+        ]
+
+    def test_goose_build_command_unknown_suffix_passthrough(self, provider):
+        """":free" is not an effort: the whole remainder stays the model id."""
+        cmd = provider.build_command("Analyze this", "openrouter/deepseek/deepseek-r1:free")
+
+        assert cmd == [
+            "goose",
+            "run",
+            "--no-session",
+            "-q",
+            "--output-format",
+            "json",
+            "--no-profile",
+            "--max-turns",
+            "25",
+            "--with-builtin",
+            "developer",
+            "--provider",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-r1:free",
+            "-t",
+            "Analyze this",
+        ]
+
+    def test_goose_get_env_with_effort_suffix(self, provider):
+        """An :effort suffix is delivered via the GOOSE_THINKING_EFFORT env var."""
+        for effort in ("off", "none", "low", "medium", "high", "max", "xhigh"):
+            env = provider.get_env(f"openrouter/z-ai/glm-5.2:{effort}")
+
+            assert env.get("GOOSE_THINKING_EFFORT") == effort, (
+                f"effort {effort!r} was not mapped to GOOSE_THINKING_EFFORT"
+            )
+
+    def test_goose_get_env_without_effort_suffix(self, provider):
+        """Without a whitelisted suffix GOOSE_THINKING_EFFORT is left unset."""
+        for model in (
+            "openrouter/z-ai/glm-5.2",
+            "openrouter/deepseek/deepseek-r1:free",
+            "some-model",
+        ):
+            env = provider.get_env(model)
+
+            assert "GOOSE_THINKING_EFFORT" not in env, (
+                f"model {model!r} must not set GOOSE_THINKING_EFFORT"
+            )
 
     @patch("shutil.which")
     def test_goose_is_available_true(self, mock_which, provider):
@@ -1650,6 +2114,104 @@ class TestAiderProvider:
 
         assert env == {"BROWSER": "true", "COLUMNS": "10000"}
 
+    def test_aider_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the six valid efforts."""
+        from utils.providers.aider import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+    def test_aider_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --reasoning-effort pair after --model <base>."""
+        cmd = provider.build_command("Analyze this", "openrouter/z-ai/glm-5.2:high")
+
+        assert cmd == [
+            "aider",
+            "--model",
+            "openrouter/z-ai/glm-5.2",
+            "--reasoning-effort",
+            "high",
+            "--message",
+            "/ask Analyze this",
+            "--yes-always",
+            "--no-auto-commits",
+            "--no-pretty",
+            "--no-stream",
+            "--no-check-update",
+            "--no-show-model-warnings",
+            "--no-analytics",
+            "--no-gitignore",
+            "--no-show-release-notes",
+            "--no-detect-urls",
+            "--no-fancy-input",
+            "--chat-history-file",
+            "/dev/null",
+            "--input-history-file",
+            "/dev/null",
+        ]
+
+    def test_aider_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --reasoning-effort form."""
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+            cmd = provider.build_command("Analyze this", f"openrouter/z-ai/glm-5.2:{effort}")
+
+            assert cmd == [
+                "aider",
+                "--model",
+                "openrouter/z-ai/glm-5.2",
+                "--reasoning-effort",
+                effort,
+                "--message",
+                "/ask Analyze this",
+                "--yes-always",
+                "--no-auto-commits",
+                "--no-pretty",
+                "--no-stream",
+                "--no-check-update",
+                "--no-show-model-warnings",
+                "--no-analytics",
+                "--no-gitignore",
+                "--no-show-release-notes",
+                "--no-detect-urls",
+                "--no-fancy-input",
+                "--chat-history-file",
+                "/dev/null",
+                "--input-history-file",
+                "/dev/null",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_aider_build_command_effort_passthrough(self, provider):
+        """Non-effort models pass through verbatim with no --reasoning-effort flag."""
+        for model in (
+            "openrouter/z-ai/glm-5.2",
+            "openrouter/deepseek/deepseek-r1:free",
+            "openrouter/z-ai/glm-5.2:turbo",
+        ):
+            cmd = provider.build_command("Analyze this", model)
+
+            assert cmd == [
+                "aider",
+                "--model",
+                model,
+                "--message",
+                "/ask Analyze this",
+                "--yes-always",
+                "--no-auto-commits",
+                "--no-pretty",
+                "--no-stream",
+                "--no-check-update",
+                "--no-show-model-warnings",
+                "--no-analytics",
+                "--no-gitignore",
+                "--no-show-release-notes",
+                "--no-detect-urls",
+                "--no-fancy-input",
+                "--chat-history-file",
+                "/dev/null",
+                "--input-history-file",
+                "/dev/null",
+            ], f"model {model!r} was not passed through verbatim"
+
     @patch("shutil.which")
     def test_aider_is_available_true(self, mock_which, provider):
         """Test is_available returns True when aider is found."""
@@ -1841,6 +2403,130 @@ class TestAgyProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("agy")
+
+
+class TestCodexProvider:
+    """Tests for the CodexProvider class."""
+
+    @pytest.fixture
+    def provider(self):
+        """Create a CodexProvider instance."""
+        return CodexProvider()
+
+    def test_name_property(self, provider):
+        """Test that name property returns correct identifier."""
+        assert provider.name == "codex"
+
+    def test_default_timeout(self, provider):
+        """Test that default_timeout is set correctly."""
+        assert provider.default_timeout == 600
+
+    def test_codex_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the six valid efforts."""
+        from utils.providers.codex import REASONING_EFFORTS
+
+        assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+    def test_codex_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: -c pair after --model <base>, prompt last."""
+        cmd = provider.build_command("p", "gpt-5.5:high")
+
+        assert cmd == [
+            "codex",
+            "exec",
+            "--full-auto",
+            "--json",
+            "--model",
+            "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=high",
+            "p",
+        ]
+
+    def test_codex_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the -c model_reasoning_effort form."""
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+            cmd = provider.build_command("Review this code", f"gpt-5.5:{effort}")
+
+            assert cmd == [
+                "codex",
+                "exec",
+                "--full-auto",
+                "--json",
+                "--model",
+                "gpt-5.5",
+                "-c",
+                f"model_reasoning_effort={effort}",
+                "Review this code",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_codex_build_command_multi_colon_splits_on_last(self, provider):
+        """Multi-colon model rsplits on the LAST colon: base foo:bar, effort high."""
+        cmd = provider.build_command("p", "foo:bar:high")
+
+        assert cmd == [
+            "codex",
+            "exec",
+            "--full-auto",
+            "--json",
+            "--model",
+            "foo:bar",
+            "-c",
+            "model_reasoning_effort=high",
+            "p",
+        ]
+
+    def test_codex_build_command_passthrough_no_colon(self, provider):
+        """A model without a colon is passed verbatim with no -c argument."""
+        cmd = provider.build_command("p", "gpt-5.5")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5", "p"]
+
+    def test_codex_build_command_passthrough_unknown_suffix(self, provider):
+        """An unknown suffix is not an effort: model passed verbatim, no -c."""
+        cmd = provider.build_command("p", "gpt-5.5:turbo")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:turbo", "p"]
+
+    def test_codex_build_command_passthrough_wrong_case_suffix(self, provider):
+        """Effort matching is case-sensitive: :HIGH is passed verbatim, no -c."""
+        cmd = provider.build_command("p", "gpt-5.5:HIGH")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:HIGH", "p"]
+
+    def test_codex_build_command_passthrough_empty_suffix(self, provider):
+        """A trailing colon with no effort is passed verbatim, no -c."""
+        cmd = provider.build_command("p", "gpt-5.5:")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:", "p"]
+
+    def test_codex_build_command_passthrough_bare_effort_word(self, provider):
+        """A bare effort word as the full model name (no colon) is passed verbatim."""
+        cmd = provider.build_command("p", "high")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "high", "p"]
+
+    def test_codex_build_command_passthrough_empty_base(self, provider):
+        """An empty base before the colon (:high) is passed verbatim, no -c."""
+        cmd = provider.build_command("p", ":high")
+
+        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", ":high", "p"]
+
+    @patch("shutil.which")
+    def test_codex_is_available_true(self, mock_which, provider):
+        """Test is_available returns True when codex is found."""
+        mock_which.return_value = "/usr/bin/codex"
+
+        assert provider.is_available() is True
+        mock_which.assert_called_once_with("codex")
+
+    @patch("shutil.which")
+    def test_codex_is_available_false(self, mock_which, provider):
+        """Test is_available returns False when codex is not found."""
+        mock_which.return_value = None
+
+        assert provider.is_available() is False
+        mock_which.assert_called_once_with("codex")
 
 
 class TestProviderBinaryNotFound:

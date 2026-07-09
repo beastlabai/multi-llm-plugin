@@ -121,11 +121,12 @@
 #     models:
 #       - auto
 #       - glm-5.2-max
-#       - gpt-5.4-xhigh
 #       - gpt-5.5-extra-high
+#       - gpt-5.6-sol-xhigh
 #       - gemini-3.1-pro
 #       - gemini-3.5-flash
 #       - kimi-k2.7-code
+#       - glm-5.2-high
 #       - grok-4.5-xhigh
 #       - claude-sonnet-5-thinking-xhigh
 #       - claude-opus-4-8-thinking-xhigh
@@ -169,8 +170,11 @@
 #     default_timeout: 1800
 #     supports_json_output: true
 #     models:
-#       - gpt-5.2-codex
 #       - gpt-5.5
+#       - gpt-5.5:high
+#       - gpt-5.6-terra
+#       - gpt-5.6-sol
+#       - gpt-5.6-sol:xhigh
 
 #   kilocode:
 #     command: kilocode
@@ -267,19 +271,14 @@ defaults:
 #     - kilocode:openrouter/xiaomi/mimo-v2.5-pro
 #     - kilocode:openrouter/qwen/qwen3.7-max
 #     - claude-code:fable
-#     - codex:gpt-5.5
-#     - grok:grok-4.5
-#     - cline:openrouter/z-ai/glm-5.2
-#     - goose:openrouter/z-ai/glm-5.2
-#     - aider:openrouter/z-ai/glm-5.2
-#     - agy:Gemini 3.1 Pro (High)
+#     - codex:gpt-5.6-sol:xhigh
 
   ## --- defaults.quick_models ------------------------------------------------
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same
   ## uncommenting rule as defaults.models.
   quick_models:
 #     - cursor-agent:composer-2.5
-#     - cursor-agent:gpt-5.5-extra-high
+#     - cursor-agent:gpt-5.6-sol-xhigh
 #     - claude-code:fable
 
   ## --- defaults.modes -------------------------------------------------------
