@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from .git_utils import get_project_root_from_dir
 from .providers.claude_code import ClaudeCodeProvider
+from .providers.cline import ClineProvider
 from .providers.codex import CodexProvider
 from .providers.cursor_agent import CursorAgentProvider
 from .providers.gemini import GeminiProvider
@@ -41,6 +42,7 @@ from .providers.base import LLMProvider
 # Built-in providers
 _PROVIDERS: Dict[str, LLMProvider] = {
     "claude-code": ClaudeCodeProvider(),
+    "cline": ClineProvider(),
     "codex": CodexProvider(),
     "cursor-agent": CursorAgentProvider(),
     "gemini": GeminiProvider(),

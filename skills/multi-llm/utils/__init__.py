@@ -179,6 +179,7 @@ from .provider_registry import (
 
 from .providers import (
     LLMProvider,
+    ClineProvider,
     CodexProvider,
     CursorAgentProvider,
     GeminiProvider,
@@ -332,6 +333,7 @@ __all__ = [
     "has_quick_models",
     # providers
     "LLMProvider",
+    "ClineProvider",
     "CodexProvider",
     "CursorAgentProvider",
     "GeminiProvider",
