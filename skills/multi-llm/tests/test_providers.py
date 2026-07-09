@@ -14,6 +14,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.providers.aider import AiderProvider
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.cursor_agent import CursorAgentProvider
@@ -1355,6 +1356,314 @@ class TestGooseProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("goose")
+
+
+class TestAiderProvider:
+    """Tests for the AiderProvider class."""
+
+    @pytest.fixture
+    def provider(self):
+        """Create an AiderProvider instance."""
+        return AiderProvider()
+
+    BANNER = (
+        "\nAider v0.86.2\n"
+        "Model: openrouter/z-ai/glm-5.2 with whole edit format\n"
+        "Git repo: .git with 12 files\n"
+        "Repo-map: using 4096 tokens, auto refresh\n"
+    )
+
+    @classmethod
+    def _stdout(cls, answer, thinking=None, tokens_line=True):
+        """Build representative aider --no-pretty stdout."""
+        parts = [cls.BANNER, "\n"]
+        if thinking is not None:
+            parts.append(f"--------------\n► **THINKING**\n\n{thinking}\n\n")
+        parts.append(f"------------\n► **ANSWER**\n\n{answer}\n")
+        if tokens_line:
+            parts.append(
+                "\nTokens: 210 sent, 703 received. "
+                "Cost: $0.0023 message, $0.0023 session.\n"
+            )
+        return "".join(parts)
+
+    def test_name_property(self, provider):
+        """Test that name property returns correct identifier."""
+        assert provider.name == "aider"
+
+    def test_default_timeout(self, provider):
+        """Test that default_timeout is set correctly."""
+        assert provider.default_timeout == 600
+
+    def test_aider_parse_answer_array(self, provider):
+        """Extract a JSON array from the text after the ANSWER marker."""
+        inner_data = [
+            {"title": "Finding 1", "desc": "Description", "importance": "medium"}
+        ]
+        stdout = self._stdout(json.dumps(inner_data))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_aider_parse_answer_object(self, provider):
+        """Extract a JSON object from the text after the ANSWER marker."""
+        inner_data = {"first_heading": "Probe Widget"}
+        stdout = self._stdout(json.dumps(inner_data))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_data
+
+    def test_aider_parse_thinking_decoy_ignored(self, provider):
+        """Decoy JSON in the THINKING block is ignored; post-ANSWER wins."""
+        stdout = self._stdout(
+            "[4, 5, 6]",
+            thinking='Draft of the reply:\n[1, 2, 3]\nAlso {"wrong": 1} here.',
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [4, 5, 6]
+
+    def test_aider_parse_multiple_answer_markers_last_wins(self, provider):
+        """When several ANSWER markers appear, only the LAST one is parsed."""
+        first = "------------\n► **ANSWER**\n\n[1, 2, 3]\n\n"
+        stdout = self.BANNER + first + self._stdout("[7, 8, 9]")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [7, 8, 9]
+
+    def test_aider_parse_strips_tokens_cost_line(self, provider):
+        """The trailing "Tokens: ... Cost: ..." line does not break parsing."""
+        stdout = self._stdout("[1, 2, 3]", tokens_line=True)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_aider_parse_prose_with_json(self, provider):
+        """Extract embedded JSON when prose surrounds it in the answer."""
+        inner_json = {"result": "success"}
+        stdout = self._stdout(
+            f"Here is the JSON you asked for: {json.dumps(inner_json)}"
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_aider_parse_code_block_json(self, provider):
+        """Extract JSON from a ```json code block in the answer."""
+        inner_json = [{"task": "T001", "status": "done"}]
+        stdout = self._stdout(
+            f"Analysis complete:\n\n```json\n{json.dumps(inner_json)}\n```"
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_aider_parse_file_write_envelope_unwrapped(self, provider):
+        """A pseudo file-write envelope ({"file_path", "content"}) is unwrapped.
+
+        In read-only /ask mode some models emulate the requested file write
+        by answering with the target path and the JSON as a string content
+        field (observed live with kimi-k2.7-code).
+        """
+        inner = [{"title": "Finding", "desc": "D", "importance": "high"}]
+        envelope = {"file_path": "/some/out.json", "content": json.dumps(inner)}
+        stdout = self._stdout(json.dumps(envelope))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner
+
+    def test_aider_parse_code_interpreter_envelope_unwrapped(self, provider):
+        """A hallucinated code_interpreter call ({"code": ...}) is unwrapped."""
+        inner = [{"title": "Finding", "desc": "D", "importance": "high"}]
+        code = (
+            'import json\nissues = ' + json.dumps(inner, indent=2)
+            + '\nwith open("/out.json", "w") as f:\n    json.dump(issues, f)\n'
+        )
+        stdout = self._stdout(json.dumps({"code": code}))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner
+
+    def test_aider_parse_ordinary_object_not_unwrapped(self, provider):
+        """A dict with extra keys (a real answer) is NOT treated as envelope."""
+        data = {"content": "[1]", "title": "x", "extra": True}
+        stdout = self._stdout(json.dumps(data))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == data
+
+    def test_aider_parse_wrapped_json_mid_string_fails(self, provider):
+        """Hard-wrapped JSON (literal newline INSIDE a string) is unparseable.
+
+        This documents why get_env() sets COLUMNS=10000: without it aider
+        wraps output at ~80 columns and long string values get literal
+        newlines inserted, which json.loads rejects (and
+        extract_json_from_text does not repair). Newlines BETWEEN tokens
+        are fine — only mid-string breaks matter.
+        """
+        wrapped = (
+            '[\n  {\n    "title": "Missing Input Validation",\n'
+            '    "desc": "The function responsible for parsing user-supplied \n'
+            'configuration parameters lacks proper validation checks."\n  }\n]'
+        )
+        stdout = self._stdout(wrapped)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_aider_parse_wrapped_between_tokens_ok(self, provider):
+        """Newlines between JSON tokens (not inside strings) parse fine."""
+        stdout = self._stdout('[\n  1,\n  2,\n  3\n]')
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_aider_parse_no_answer_marker_fallback(self, provider):
+        """No ANSWER marker: fall back to extraction on the full stdout."""
+        stdout = self.BANNER + "\nSome text [1, 2, 3] trailing text\n"
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_aider_parse_auth_error_stdout(self, provider):
+        """aider exits 0 on auth failure; no extractable JSON -> failure."""
+        stdout = (
+            self.BANNER
+            + "\nlitellm.AuthenticationError: AuthenticationError: "
+            "OpenrouterException - Invalid credentials. Check your API key.\n"
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "litellm.AuthenticationError" in result["error"]
+        assert result["data"] is None
+
+    def test_aider_parse_empty_answer_after_marker(self, provider):
+        """An empty answer after the ANSWER marker is an explicit failure."""
+        stdout = self._stdout("", tokens_line=True)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_aider_parse_empty_stdout(self, provider):
+        """Empty stdout is an explicit failure."""
+        result = provider.parse_output("", "")
+
+        assert result["success"] is False
+        assert "error" in result
+        assert result["data"] is None
+
+    def test_aider_build_command(self, provider):
+        """Exact argv: model verbatim, /ask prefix, all headless flags."""
+        cmd = provider.build_command("Analyze this", "openrouter/z-ai/glm-5.2")
+
+        assert cmd == [
+            "aider",
+            "--model",
+            "openrouter/z-ai/glm-5.2",
+            "--message",
+            "/ask Analyze this",
+            "--yes-always",
+            "--no-auto-commits",
+            "--no-pretty",
+            "--no-stream",
+            "--no-check-update",
+            "--no-show-model-warnings",
+            "--no-analytics",
+            "--no-gitignore",
+            "--no-show-release-notes",
+            "--no-detect-urls",
+            "--no-fancy-input",
+            "--chat-history-file",
+            "/dev/null",
+            "--input-history-file",
+            "/dev/null",
+        ]
+
+    def test_aider_build_command_read_flags_for_existing_paths(self, provider, tmp_path):
+        """Existing absolute file paths in the prompt are passed via --read."""
+        plan = tmp_path / "my-plan.md"
+        plan.write_text("# Plan")
+        missing = tmp_path / "review-plan" / "aider_model.json"  # not yet written
+        prompt = (
+            f"## Plan File\n{plan}\n\nRead this file.\n"
+            f"Write your JSON output to this file: {missing}\n"
+            f"Also mentioned twice: {plan}."
+        )
+
+        cmd = provider.build_command(prompt, "openrouter/z-ai/glm-5.2")
+
+        assert cmd.count("--read") == 1  # deduped; missing path skipped
+        assert cmd[cmd.index("--read") + 1] == str(plan)
+        assert str(missing) not in cmd
+
+    def test_aider_build_command_no_read_flags_without_paths(self, provider):
+        """No --read args when the prompt mentions no existing files."""
+        cmd = provider.build_command(
+            "Analyze this plan about /nonexistent/path/plan.md", "some-model"
+        )
+
+        assert "--read" not in cmd
+
+    def test_aider_build_command_model_verbatim(self, provider):
+        """Model IDs are litellm specs passed verbatim — no splitting."""
+        cmd = provider.build_command("Hi", "openrouter/moonshotai/kimi-k2.7-code")
+
+        model_idx = cmd.index("--model") + 1
+        assert cmd[model_idx] == "openrouter/moonshotai/kimi-k2.7-code"
+        assert "--provider" not in cmd
+        assert "-P" not in cmd
+
+    def test_aider_get_env(self, provider):
+        """get_env sets BROWSER (webbrowser no-op) and COLUMNS (no wrap)."""
+        env = provider.get_env("openrouter/z-ai/glm-5.2")
+
+        assert env == {"BROWSER": "true", "COLUMNS": "10000"}
+
+    @patch("shutil.which")
+    def test_aider_is_available_true(self, mock_which, provider):
+        """Test is_available returns True when aider is found."""
+        mock_which.return_value = "/usr/bin/aider"
+
+        assert provider.is_available() is True
+        mock_which.assert_called_once_with("aider")
+
+    @patch("shutil.which")
+    def test_aider_is_available_false(self, mock_which, provider):
+        """Test is_available returns False when aider is not found."""
+        mock_which.return_value = None
+
+        assert provider.is_available() is False
+        mock_which.assert_called_once_with("aider")
 
 
 class TestProviderBinaryNotFound:

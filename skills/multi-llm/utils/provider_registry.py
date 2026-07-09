@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 from .git_utils import get_project_root_from_dir
+from .providers.aider import AiderProvider
 from .providers.claude_code import ClaudeCodeProvider
 from .providers.cline import ClineProvider
 from .providers.codex import CodexProvider
@@ -42,6 +43,7 @@ from .providers.base import LLMProvider
 
 # Built-in providers
 _PROVIDERS: Dict[str, LLMProvider] = {
+    "aider": AiderProvider(),
     "claude-code": ClaudeCodeProvider(),
     "cline": ClineProvider(),
     "codex": CodexProvider(),

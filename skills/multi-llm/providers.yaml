@@ -149,6 +149,19 @@ providers:
       - openrouter/moonshotai/kimi-k2.7-code
       - openrouter/openai/gpt-5.5
 
+  aider:
+    command: aider
+    default_timeout: 1200
+    supports_json_output: false  # Plain text output after a "► **ANSWER**" marker
+    # Model names are litellm model specs passed VERBATIM to --model, e.g.
+    # openrouter/z-ai/glm-5.2 (no provider/model splitting).
+    # Auth is env-only: openrouter/ models need OPENROUTER_API_KEY in the
+    # environment.
+    models:
+      - openrouter/z-ai/glm-5.2
+      - openrouter/moonshotai/kimi-k2.7-code
+      - openrouter/openai/gpt-5.5
+
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
 
@@ -174,6 +187,7 @@ defaults:
     - grok:grok-4.5
     - cline:openrouter/z-ai/glm-5.2
     - goose:openrouter/z-ai/glm-5.2
+    - aider:openrouter/z-ai/glm-5.2
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models
