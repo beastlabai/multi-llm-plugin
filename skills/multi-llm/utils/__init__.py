@@ -183,6 +183,7 @@ from .providers import (
     CodexProvider,
     CursorAgentProvider,
     GeminiProvider,
+    GooseProvider,
     GrokProvider,
     OpenCodeProvider,
 )
@@ -337,6 +338,7 @@ __all__ = [
     "CodexProvider",
     "CursorAgentProvider",
     "GeminiProvider",
+    "GooseProvider",
     "GrokProvider",
     "OpenCodeProvider",
 ]

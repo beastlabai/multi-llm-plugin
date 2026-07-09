@@ -4,13 +4,13 @@
 
 **Wisdom of crowds for your codebase.** Use this plugin to improve planning, implementation, and code review by running the same work through multiple AI coding tools and LLMs in parallel - then consolidating their feedback so you catch bugs, blind spots, and improvements a single model might miss.
 
-The diversity works on two axes: not only do you get different **LLM models** (Opus, GPT, Gemini, Grok, Composer, ...), you also get different **code harnesses** (Codex, OpenCode, Cursor Agent, Gemini CLI, Grok Build, Cline, ...) - each with its own prompting, tooling, and context-gathering behavior. Two harnesses running the *same* model can still surface different findings, so combining both axes widens the crowd further.
+The diversity works on two axes: not only do you get different **LLM models** (Opus, GPT, Gemini, Grok, Composer, ...), you also get different **code harnesses** (Codex, OpenCode, Cursor Agent, Gemini CLI, Grok Build, Cline, goose, ...) - each with its own prompting, tooling, and context-gathering behavior. Two harnesses running the *same* model can still surface different findings, so combining both axes widens the crowd further.
 
 📺 **[Watch the video tutorial](https://www.youtube.com/watch?v=_ySRt7rr0r8)** for a walkthrough of the plugin in action.
 
 Orchestrate **plan reviews, task generation, implementation, and code reviews across multiple LLM providers in parallel** - or ask every model the same free-text question about a plan and get one consolidated answer.
 
-`multi-llm` fans a single workflow out to several CLI-based LLMs ([Cursor Agent](https://cursor.com/docs/cli/overview), [Gemini CLI](https://geminicli.com/docs/get-started/), [Grok Build](https://docs.x.ai/build), [Codex](https://developers.openai.com/codex/cli), [OpenCode](https://opencode.ai/docs/cli/), [Kilocode](https://kilo.ai/docs/cli), [Cline](https://docs.cline.bot/), and [Claude Code](https://code.claude.com/docs/en/) itself), validates and consolidates their suggestions, and hands Claude Code structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that Claude Code executes through its own tools, so every change stays reviewable.
+`multi-llm` fans a single workflow out to several CLI-based LLMs ([Cursor Agent](https://cursor.com/docs/cli/overview), [Gemini CLI](https://geminicli.com/docs/get-started/), [Grok Build](https://docs.x.ai/build), [Codex](https://developers.openai.com/codex/cli), [OpenCode](https://opencode.ai/docs/cli/), [Kilocode](https://kilo.ai/docs/cli), [Cline](https://docs.cline.bot/), [goose](https://block.github.io/goose/), and [Claude Code](https://code.claude.com/docs/en/) itself), validates and consolidates their suggestions, and hands Claude Code structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that Claude Code executes through its own tools, so every change stays reviewable.
 
 ---
 
@@ -215,6 +215,7 @@ Unlike the blanket approve/skip flags, "Let Claude decide" is a **per-item** jud
 | `opencode` | `opencode` | [OpenCode CLI](https://opencode.ai/docs/cli/) |
 | `kilocode` | `kilocode` | [Kilo Code CLI](https://kilo.ai/docs/cli) |
 | `cline` | `cline` | [Cline](https://docs.cline.bot/) |
+| `goose` | `goose` | [goose](https://block.github.io/goose/) |
 
 A model is referenced as `provider:model` (e.g. `codex:gpt-5.5`). A bare model name uses `default_provider` from `providers.yaml`.
 
@@ -253,7 +254,7 @@ override: starting from an inert template, it **uncomments** the full `providers
 block, `defaults.models` / `quick_models` entries, and `default_provider` for each
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
-grok, opencode, codex, kilocode, cline). With **no CLIs installed** it writes the inert
+grok, opencode, codex, kilocode, cline, goose). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file
@@ -350,7 +351,7 @@ Contributions are welcome - pull requests, bug reports, feature suggestions, and
 
 This plugin is maintained by [BeastLab.ai](https://beastlab.ai) - a frontier lab building multi-agent reasoning models. Beast models run multiple internal agents that deliberate at inference time for deeper reasoning on complex coding, agentic workflows, and research tasks. If you want to try one of the most capable LLM offerings available today, visit [beastlab.ai](https://beastlab.ai) to explore the lineup and integration guide.
 
-**Disclaimer:** BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any kind. BeastLab.ai is not affiliated with, endorsed by, or sponsored by any of the code harnesses (Cursor, Claude Code, Codex, OpenCode, Gemini CLI, Grok Build, Kilo Code, Cline, etc.) or third-party LLM providers referenced in this project. Trademarks and product names belong to their respective owners.
+**Disclaimer:** BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any kind. BeastLab.ai is not affiliated with, endorsed by, or sponsored by any of the code harnesses (Cursor, Claude Code, Codex, OpenCode, Gemini CLI, Grok Build, Kilo Code, Cline, goose, etc.) or third-party LLM providers referenced in this project. Trademarks and product names belong to their respective owners.
 
 ---
 

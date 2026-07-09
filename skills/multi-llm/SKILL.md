@@ -119,7 +119,7 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 The repo where multi-llm runs should have one or more `AGENTS.md` files
 throughout (root and/or subdirectories) so every code harness gets consistent
 project context. `AGENTS.md` is supported by most harnesses that multi-llm
-invokes (Cursor Agent, Codex, OpenCode, Gemini CLI, Grok Build, Cline, etc.).
+invokes (Cursor Agent, Codex, OpenCode, Gemini CLI, Grok Build, Cline, goose, etc.).
 
 For a single source of truth with Claude Code, add a matching `CLAUDE.md`
 alongside each `AGENTS.md` containing only:

@@ -210,6 +210,15 @@
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/openai/gpt-5.5
 
+#   goose:
+#     command: goose
+#     default_timeout: 1200
+#     supports_json_output: true
+#     models:
+#       - openrouter/z-ai/glm-5.2
+#       - openrouter/moonshotai/kimi-k2.7-code
+#       - openrouter/openai/gpt-5.5
+
 ## --- default_provider -------------------------------------------------------
 ## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
 ## `--init` sets it to the first detected provider; left commented when nothing
@@ -238,6 +247,7 @@ defaults:
 #     - codex:gpt-5.5
 #     - grok:grok-4.5
 #     - cline:openrouter/z-ai/glm-5.2
+#     - goose:openrouter/z-ai/glm-5.2
 
   ## --- defaults.quick_models ------------------------------------------------
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same
