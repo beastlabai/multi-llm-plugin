@@ -16,6 +16,7 @@ and UNCOMMENTS their lines in an inert template. This module covers:
 
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -415,6 +416,96 @@ class TestReinitForce:
         # Outside-marker hand-edit survived verbatim.
         assert sentinel.strip() in text
         _reset_cache()
+
+
+@pytest.mark.config_override
+class TestBackupOnOverwrite:
+    def _backups(self, out: Path) -> "list[Path]":
+        return sorted(out.parent.glob(out.name + ".bak.*"))
+
+    def test_first_init_makes_no_backup(self, tmp_path, monkeypatch):
+        _git_init(tmp_path)
+        monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["cursor-agent"])
+        _reset_cache()
+        assert init_config.main(["--dir", str(tmp_path)]) == 0
+        out = tmp_path / ".multi-llm" / "providers.yaml"
+        assert self._backups(out) == []
+        _reset_cache()
+
+    def test_force_overwrite_backs_up_and_notifies(self, tmp_path, monkeypatch, capsys):
+        _git_init(tmp_path)
+        out = tmp_path / ".multi-llm" / "providers.yaml"
+
+        monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["cursor-agent"])
+        _reset_cache()
+        assert init_config.main(["--dir", str(tmp_path)]) == 0
+        original = out.read_text()
+        capsys.readouterr()
+
+        # Detection changes → the regenerated file differs → backup fires.
+        monkeypatch.setattr(
+            init_config, "_available_providers", lambda cfg: ["claude-code", "cursor-agent"]
+        )
+        _reset_cache()
+        assert init_config.main(["--dir", str(tmp_path), "--force"]) == 0
+        backups = self._backups(out)
+        assert len(backups) == 1
+        # The backup preserves the pre-overwrite content verbatim...
+        assert backups[0].read_text() == original
+        assert out.read_text() != original
+        # ...and the user is told where it went.
+        stdout = capsys.readouterr().out
+        assert "Backed up the previous config to" in stdout
+        assert str(backups[0]) in stdout
+        _reset_cache()
+
+    def test_identical_force_rerun_skips_backup(self, tmp_path, monkeypatch, capsys):
+        _git_init(tmp_path)
+        out = tmp_path / ".multi-llm" / "providers.yaml"
+        monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["cursor-agent"])
+        _reset_cache()
+        assert init_config.main(["--dir", str(tmp_path)]) == 0
+        capsys.readouterr()
+        # Same detection → byte-identical regeneration → nothing to preserve.
+        _reset_cache()
+        assert init_config.main(["--dir", str(tmp_path), "--force"]) == 0
+        assert self._backups(out) == []
+        assert "Backed up" not in capsys.readouterr().out
+        _reset_cache()
+
+    def test_template_only_force_backs_up_custom_content(self, tmp_path, capsys):
+        assert init_config.main(["--dir", str(tmp_path), "--template-only"]) == 0
+        out = tmp_path / ".multi-llm" / "providers.yaml"
+        out.write_text("custom: content\n")
+        capsys.readouterr()
+        assert init_config.main(["--dir", str(tmp_path), "--template-only", "--force"]) == 0
+        backups = self._backups(out)
+        assert len(backups) == 1
+        assert backups[0].read_text() == "custom: content\n"
+        assert out.read_text() == init_config.TEMPLATE_PATH.read_text()
+        assert "Backed up the previous config to" in capsys.readouterr().out
+
+    def test_same_second_collision_gets_counter_suffix(self, tmp_path, monkeypatch):
+        _git_init(tmp_path)
+        out = tmp_path / ".multi-llm" / "providers.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("v1\n")
+        fixed = datetime(2026, 7, 10, 12, 0, 0)
+
+        class _FixedDatetime:
+            @staticmethod
+            def now():
+                return fixed
+
+        monkeypatch.setattr(init_config, "datetime", _FixedDatetime)
+        first = init_config._backup_existing_config(out, "new1\n")
+        out.write_text("v2\n")
+        second = init_config._backup_existing_config(out, "new2\n")
+        assert first is not None and second is not None
+        assert first != second
+        assert second.name.endswith("-1")
+        assert first.read_text() == "v1\n"
+        assert second.read_text() == "v2\n"
 
 
 @pytest.mark.config_override

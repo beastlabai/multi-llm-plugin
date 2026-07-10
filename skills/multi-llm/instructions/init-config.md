@@ -31,7 +31,7 @@ Claude Code, a plain terminal, or CI.
 | Arg | Meaning |
 | --- | --- |
 | `--dir PATH` | Target directory (defaults to the git root; falls back to CWD outside a repo, with a printed notice). |
-| `--force` | Overwrite an existing `.multi-llm/providers.yaml` (the script refuses by default). |
+| `--force` | Overwrite an existing `.multi-llm/providers.yaml` (the script refuses by default). Before overwriting, the previous file is automatically backed up alongside as `providers.yaml.bak.<timestamp>` and the script prints the backup path (skipped when the new content is identical). |
 | `--gitignore` | Also append `.multi-llm/` to the repo's `.gitignore` (idempotent) so the override stays developer-local and untracked. Default: leave it trackable (commit it for a team-wide standard). |
 | `--template-only` | Skip detection entirely; write the pristine inert template verbatim (every provider left commented) for hand-editing. |
 
@@ -52,7 +52,9 @@ Claude Code, a plain terminal, or CI.
 
 3. **Report the result.** Print the path the script wrote and its git-tracking
    state (the script prints both), plus any notice it emitted (see below). If it
-   refused to overwrite an existing file, relay that and offer `--force`.
+   refused to overwrite an existing file, relay that and offer `--force`. If it
+   backed up a previous config, relay the backup path prominently and remind the
+   user to port any custom settings from the backup into the new file.
 
 ## What gets written
 
@@ -70,7 +72,9 @@ Claude Code, a plain terminal, or CI.
   runnable, and prints a notice saying so.
 - **Re-running.** Re-run `--init --force` after installing a new CLI (to pick it
   up) or after a plugin update (to refresh the pinned provider metadata and prune
-  providers the new base dropped) — see the DRIFT note below.
+  providers the new base dropped) — see the DRIFT note below. Overwriting is
+  safe: the previous file is backed up as `providers.yaml.bak.<timestamp>` first,
+  so hand-tuned settings can always be recovered or ported over.
 
 ## Notes
 

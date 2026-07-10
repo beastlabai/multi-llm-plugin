@@ -28,11 +28,17 @@ By default the file is left *trackable* (commit it for a team-wide, repo-standar
 selection). Pass --gitignore to instead keep it as a developer-local, untracked
 override. ``--template-only`` skips detection and writes the pristine inert
 template verbatim.
+
+Overwriting an existing config (``--force``) first copies it aside as
+``providers.yaml.bak.<timestamp>`` and prints the backup path, so custom
+settings are never silently lost and can be ported into the fresh file.
 """
 import argparse
 import os
 import re
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -805,6 +811,44 @@ def _warn_stale_header(config_path: Path) -> None:
         )
 
 
+def _backup_existing_config(config_path: Path, new_text: str) -> "Path | None":
+    """Copy an existing, about-to-be-overwritten config aside before writing.
+
+    The backup lands next to the original as ``providers.yaml.bak.<timestamp>``
+    (a ``-N`` suffix disambiguates same-second collisions). Skipped when the
+    existing content is byte-identical to ``new_text`` — nothing would be lost,
+    and repeated ``--force`` re-runs shouldn't accumulate identical backups.
+    Returns the backup path, or None when no backup was made. A failing copy
+    raises: refusing to overwrite what we could not back up beats losing it.
+    """
+    if not config_path.exists():
+        return None
+    try:
+        if config_path.read_text(encoding="utf-8") == new_text:
+            return None
+    except OSError:
+        pass  # unreadable text is still worth a byte-level copy attempt
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = config_path.with_name(f"{config_path.name}.bak.{stamp}")
+    counter = 1
+    while backup_path.exists():
+        backup_path = config_path.with_name(f"{config_path.name}.bak.{stamp}-{counter}")
+        counter += 1
+    shutil.copy2(config_path, backup_path)
+    return backup_path
+
+
+def _report_backup(backup_path: "Path | None") -> None:
+    """Tell the user where their previous config went (no-op without a backup)."""
+    if backup_path is None:
+        return
+    print(
+        f"Backed up the previous config to {backup_path}\n"
+        f"  Your old settings are preserved there — port anything custom into the "
+        f"new file, then delete the backup."
+    )
+
+
 def _write_config(
     args: argparse.Namespace,
     target_dir: Path,
@@ -822,6 +866,7 @@ def _write_config(
         print(f"ERROR: refusing to write an invalid config — {error}", file=sys.stderr)
         return 1
 
+    backup_path = _backup_existing_config(config_path, text)
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(text, encoding="utf-8")
 
@@ -832,6 +877,7 @@ def _write_config(
         _recheck_merged(target_dir, expected_models, config_path)
 
     print(f"Wrote {config_path}")
+    _report_backup(backup_path)
     if not detected_list:
         print(
             "No supported provider CLIs found on PATH; wrote an inert "
@@ -889,9 +935,12 @@ def run_auto_init(args: argparse.Namespace, target_dir: Path, config_dir: Path,
 def write_template_only(args: argparse.Namespace, target_dir: Path, config_dir: Path,
                         config_path: Path) -> int:
     """Copy the pristine inert template verbatim (skip detection)."""
+    template_text = TEMPLATE_PATH.read_text(encoding="utf-8")
+    backup_path = _backup_existing_config(config_path, template_text)
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(template_text, encoding="utf-8")
     print(f"Wrote {config_path}")
+    _report_backup(backup_path)
     _report_gitignore(args, target_dir)
     return 0
 
@@ -916,7 +965,11 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite an existing .multi-llm/providers.yaml (refuses by default).",
+        help=(
+            "Overwrite an existing .multi-llm/providers.yaml (refuses by default). "
+            "The previous file is first backed up alongside as "
+            "providers.yaml.bak.<timestamp> and the backup path is printed."
+        ),
     )
     parser.add_argument(
         "--gitignore",

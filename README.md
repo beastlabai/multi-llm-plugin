@@ -265,7 +265,9 @@ grok, opencode, codex, kilocode, cline, goose, aider, agy). With **no CLIs insta
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file
-developer-local, and `--force` to overwrite an existing one.
+developer-local, and `--force` to overwrite an existing one — overwriting first
+backs up the previous file alongside as `providers.yaml.bak.<timestamp>` (and
+prints the path), so you can port any custom settings into the regenerated file.
 
 ### Good to know
 
