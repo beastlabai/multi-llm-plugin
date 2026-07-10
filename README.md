@@ -26,6 +26,8 @@ In Claude Code:
 /multi-llm:multi-llm --init
 ```
 
+> **Already added the marketplace before (e.g. in another project)?** `/plugin marketplace add` does **not** refetch an existing marketplace - it silently reuses the locally cached copy, so `/plugin install` will give you a stale version. Follow [Updating](#updating) instead.
+
 Then invoke the skill (plugin skills are namespaced `plugin:skill`):
 
 ```text
@@ -34,13 +36,16 @@ Then invoke the skill (plugin skills are namespaced `plugin:skill`):
 
 > Claude can also load the skill automatically when you ask it to "review my plan with multiple models", "run a multi-LLM code review", etc.
 
-Updating:
+### Updating
 
-```
+The marketplace cache only refreshes when you explicitly ask it to - `/plugin marketplace update` is the step that actually pulls the latest commits from GitHub. Then update (or install) the plugin and reload:
+
+```text
 /plugin marketplace update beastlabai
 /plugin update multi-llm@beastlabai
 /reload-plugins
 /reload-skills
+/multi-llm:multi-llm --init --force
 ```
 
 
