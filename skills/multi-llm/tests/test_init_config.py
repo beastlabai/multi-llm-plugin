@@ -234,10 +234,10 @@ class TestD2aGuard:
         assert "gemini" in models_notice and "opencode" in models_notice
 
     def test_covered_provider_present_no_injection(self):
-        # {gemini, claude-code}: claude-code:fable is already in the panel, so the
-        # guard does NOT fire and gemini is simply absent from the panel.
+        # {gemini, claude-code}: claude-code:fable:high is already in the panel, so
+        # the guard does NOT fire and gemini is simply absent from the panel.
         parsed, _expected, notices = _real_init(["gemini", "claude-code"])
-        assert parsed["defaults"]["models"] == ["claude-code:fable"]
+        assert parsed["defaults"]["models"] == ["claude-code:fable:high"]
         assert notices == []
 
     def test_notice_text_single_vs_multi(self):
@@ -332,7 +332,7 @@ class TestEndToEndInit:
             "cursor-agent:composer-2.5",
             "cursor-agent:gemini-3.1-pro",
             "cursor-agent:grok-4.5-xhigh",
-            "claude-code:fable",
+            "claude-code:fable:high",
         ]
 
         # The file resolves cleanly through load_config (fresh cache), with the

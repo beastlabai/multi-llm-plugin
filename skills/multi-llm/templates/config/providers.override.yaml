@@ -149,7 +149,7 @@
 #     default_timeout: 1200
 #     supports_json_output: true
 #     models:
-#       - grok-4.5
+#       - grok-4.5:high
 #       - grok-composer-2.5-fast
 
 #   opencode:
@@ -184,16 +184,16 @@
 #     models:
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
-#       - openrouter/z-ai/glm-5.2
+#       - openrouter/z-ai/glm-5.2:xhigh
 #       - kilo/z-ai/glm-5.2
 #       - openrouter/minimax/minimax-m2.7
-#       - openrouter/minimax/minimax-m3
+#       - openrouter/minimax/minimax-m3:xhigh
 #       - openrouter/x-ai/grok-4.20-multi-agent
 #       - openrouter/arcee-ai/trinity-large-thinking
 #       - openrouter/xiaomi/mimo-v2.5-pro
-#       - openrouter/qwen/qwen3.7-max
-#       - openrouter/tencent/hy3
-#       - openrouter/stepfun/step-3.7-flash
+#       - openrouter/qwen/qwen3.7-max:xhigh
+#       - openrouter/tencent/hy3:xhigh
+#       - openrouter/stepfun/step-3.7-flash:xhigh
 #       - openrouter/openai/gpt-5.5-pro
 #       - openai/gpt-5.5-pro
 #       - openrouter/nex-agi/nex-n2-pro
@@ -264,13 +264,13 @@ defaults:
 #     - cursor-agent:composer-2.5
 #     - cursor-agent:gemini-3.1-pro
 #     - cursor-agent:grok-4.5-xhigh
-#     - kilocode:openrouter/moonshotai/kimi-k2.7-code
-#     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b
-#     - kilocode:openrouter/z-ai/glm-5.2
-#     - kilocode:openrouter/minimax/minimax-m3
-#     - kilocode:openrouter/xiaomi/mimo-v2.5-pro
-#     - kilocode:openrouter/qwen/qwen3.7-max
-#     - claude-code:fable
+#     - kilocode:openrouter/moonshotai/kimi-k2.7-code:xhigh
+#     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
+#     - kilocode:openrouter/z-ai/glm-5.2:xhigh
+#     - kilocode:openrouter/minimax/minimax-m3:xhigh
+#     - kilocode:openrouter/xiaomi/mimo-v2.5-pro:xhigh
+#     - kilocode:openrouter/qwen/qwen3.7-max:xhigh
+#     - claude-code:fable:high
 #     - codex:gpt-5.6-sol:xhigh
 
   ## --- defaults.quick_models ------------------------------------------------
@@ -279,7 +279,7 @@ defaults:
   quick_models:
 #     - cursor-agent:composer-2.5
 #     - cursor-agent:gpt-5.6-sol-xhigh
-#     - claude-code:fable
+#     - claude-code:fable:high
 
   ## --- defaults.modes -------------------------------------------------------
   ## Per-mode overrides (NOT written by `--init`). A mode's `models` (and optional
