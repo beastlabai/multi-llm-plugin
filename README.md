@@ -59,7 +59,7 @@ Edit [`skills/multi-llm/providers.yaml`](skills/multi-llm/providers.yaml) manual
 
 | Requirement | Why |
 | --- | --- |
-| [`uv`](https://docs.astral.sh/uv/) on your `PATH` | The orchestrators run as `uv run` Python scripts. uv installs their dependencies (just `pyyaml`) on first use. |
+| [`uv`](https://docs.astral.sh/uv/) on your `PATH` | The orchestrators run as `uv run` Python scripts. uv installs their dependencies (just `pyyaml`) on first use. If `uv` is missing when a mode starts (`--init`, `--review-plan`, `--review-code`, ...), the skill detects that and offers to install it before running anything. |
 | One or more provider CLIs | You only need the CLIs for the models you actually run. See [Providers](#providers). |
 
 The plugin ships its own `pyproject.toml`/`uv.lock`, so no manual Python setup is required - `uv` resolves the environment the first time a mode runs.

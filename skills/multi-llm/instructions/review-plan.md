@@ -108,6 +108,15 @@ Items with `needs-human-decision` status are included in the report for the user
 
 ## Step-by-Step Execution
 
+0. **Check `uv` is available** (BEFORE the first `uv run` command)
+
+   Every command below runs through `uv run`. Follow
+   `references/uv-check.md`: run `command -v uv`; if missing, check
+   `~/.local/bin/uv` / `~/.cargo/bin/uv` and use the absolute path, otherwise
+   use AskUserQuestion to offer installing uv (official installer or package
+   manager). If the user declines, abort this mode — do not fall back to bare
+   `python`.
+
 1. **Validate plan file exists**
 
 2. **Model selection:**

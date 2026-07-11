@@ -37,6 +37,16 @@ Claude Code, a plain terminal, or CI.
 
 ## Process (Claude Code executes these steps)
 
+0. **Check `uv` is available** (BEFORE the scaffolder command)
+
+   The scaffolder runs through `uv run`. Follow `references/uv-check.md`: run
+   `command -v uv`; if missing, check `~/.local/bin/uv` / `~/.cargo/bin/uv` and
+   use the absolute path, otherwise use AskUserQuestion to offer installing uv
+   (official installer or package manager). If the user declines, abort — do
+   not fall back to bare `python`. This is the one exception to `--init` being
+   zero-prompt: it only fires when the Python runtime manager itself is absent,
+   never during provider detection.
+
 1. **Map flags.** Pass through any `--dir`, `--force`, `--gitignore` the user
    supplied. Use `--template-only` only when the user explicitly wants the
    untouched stub ("just write the template / give me the stub to edit / don't
