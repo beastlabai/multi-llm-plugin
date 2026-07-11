@@ -42,7 +42,8 @@ The marketplace cache only refreshes when you explicitly ask it to - `/plugin ma
 
 ```text
 /plugin marketplace update beastlabai
-/plugin update multi-llm@beastlabai
+# remove "--scope local" if you installed it as user scope
+! claude plugin update multi-llm@beastlabai --scope local
 /reload-plugins
 /reload-skills
 /multi-llm:multi-llm --init --force
