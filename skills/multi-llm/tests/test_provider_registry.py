@@ -11,12 +11,33 @@ This module tests the provider registry functionality including:
 import copy
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 import sys
 
 import pytest
 import yaml
+
+
+def _can_symlink() -> bool:
+    """Probe whether this host can actually create symlinks.
+
+    Platform checks are wrong in both directions: on Windows os.symlink
+    succeeds with Developer Mode or elevation (e.g. GitHub's windows-latest
+    runners), while a privilege-restricted POSIX sandbox can lack it.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            os.symlink(os.path.join(d, "t"), os.path.join(d, "l"))
+            return True
+        except (OSError, NotImplementedError):
+            return False
+
+
+_requires_symlinks = pytest.mark.skipif(
+    not _can_symlink(), reason="requires symlink-creation privilege"
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -1311,7 +1332,14 @@ class TestFailFastVsPermissive:
             load_config()
         assert str(a_dir) in str(exc.value)
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses file permissions",
+    )
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod(0o000) does not revoke read access on Windows",
+    )
     def test_unreadable_file_raises(self, reg, monkeypatch, tmp_path):
         env_file = _write_yaml(tmp_path / "noperm.yaml", "default_provider: gemini\n")
         os.chmod(env_file, 0o000)
@@ -1354,6 +1382,7 @@ class TestFailFastVsPermissive:
         assert CONFIG_WARNING_PREFIX in err
         assert str(missing.resolve()) in err
 
+    @_requires_symlinks
     def test_broken_env_symlink_raises(self, reg, monkeypatch, tmp_path):
         # A broken symlink at the env path is present-as-a-link (not absent), so
         # _resolve_env_path keeps it unresolved and the loader fails fast.
@@ -1367,6 +1396,7 @@ class TestFailFastVsPermissive:
         assert "broken symlink" in str(exc.value)
         assert str(link) in str(exc.value)
 
+    @_requires_symlinks
     def test_broken_project_symlink_raises(self, reg, monkeypatch, tmp_path):
         # A broken symlink at the project-local path is surfaced by
         # _find_project_config (exists() or is_symlink()) and fails fast.
@@ -1380,6 +1410,7 @@ class TestFailFastVsPermissive:
         assert "broken symlink" in str(exc.value)
         assert str(override) in str(exc.value)
 
+    @_requires_symlinks
     def test_broken_env_symlink_permissive_warns_and_skips(
         self, reg, monkeypatch, tmp_path, capsys
     ):
@@ -1395,6 +1426,7 @@ class TestFailFastVsPermissive:
         assert "broken symlink" in err
         assert str(link) in err
 
+    @_requires_symlinks
     def test_broken_project_symlink_permissive_warns_and_skips(
         self, reg, monkeypatch, tmp_path, capsys
     ):

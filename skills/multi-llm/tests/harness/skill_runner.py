@@ -77,7 +77,8 @@ class SkillRunner:
     """Runs skill orchestrators via subprocess with mock LLM support.
 
     Creates an isolated environment for each run with:
-    - Mock LLM binaries symlinked in tmp_path/bin/
+    - Mock LLM binaries in tmp_path/bin/ (symlinks to mock_llm.py on POSIX,
+      per-provider .cmd launcher scripts on Windows)
     - PATH prepended to use mock binaries
     - MULTI_LLM_TEST_MODE=1 to enable test mode
     - MOCK_LLM_CALL_LOG set to a unique file for call logging
@@ -89,7 +90,7 @@ class SkillRunner:
         assert result.mock_was_invoked()
     """
 
-    # Default providers to create mock symlinks for
+    # Default providers to create mock launchers for
     PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
 
     # Orchestrator command mappings
@@ -143,31 +144,50 @@ class SkillRunner:
         self.scenario_path = scenario_path
         self.extra_env = extra_env or {}
 
-        # Create the bin directory and symlinks
+        # Create the bin directory and provider launchers
         self._setup_mock_binaries()
 
     def _setup_mock_binaries(self) -> None:
-        """Create the bin directory with provider symlinks to mock_llm.py."""
+        """Create the bin directory with per-provider launchers for mock_llm.py.
+
+        On POSIX each provider name is a symlink to mock_llm.py, executed via
+        its shebang. On Windows symlink creation requires privilege and
+        shebangs are not honored, so per-provider ``.cmd`` launcher scripts
+        are written instead, invoking the current Python interpreter on
+        mock_llm.py.
+        """
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure mock_llm.py exists and is executable
+        # Ensure mock_llm.py exists
         if not self.mock_llm_path.exists():
             raise FileNotFoundError(
                 f"mock_llm.py not found at {self.mock_llm_path}. "
                 "Ensure tests/mocks/mock_llm.py exists."
             )
 
-        # Make mock_llm.py executable if it isn't already
-        current_mode = self.mock_llm_path.stat().st_mode
-        if not (current_mode & stat.S_IXUSR):
-            self.mock_llm_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        if os.name == "nt":
+            # Windows: write .cmd launcher scripts (resolved via PATHEXT)
+            for provider in self.PROVIDERS:
+                launcher_path = self.bin_dir / f"{provider}.cmd"
+                launcher_path.write_text(
+                    "@echo off\n"
+                    f'"{sys.executable}" "{self.mock_llm_path}" %*\n',
+                    encoding="utf-8",
+                )
+        else:
+            # POSIX: make mock_llm.py executable if it isn't already
+            current_mode = self.mock_llm_path.stat().st_mode
+            if not (current_mode & stat.S_IXUSR):
+                self.mock_llm_path.chmod(
+                    current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                )
 
-        # Create symlinks for each provider
-        for provider in self.PROVIDERS:
-            symlink_path = self.bin_dir / provider
-            if symlink_path.exists() or symlink_path.is_symlink():
-                symlink_path.unlink()
-            symlink_path.symlink_to(self.mock_llm_path)
+            # Create symlinks for each provider
+            for provider in self.PROVIDERS:
+                symlink_path = self.bin_dir / provider
+                if symlink_path.exists() or symlink_path.is_symlink():
+                    symlink_path.unlink()
+                symlink_path.symlink_to(self.mock_llm_path)
 
     def _build_env(self) -> Dict[str, str]:
         """Build environment variables for subprocess execution."""
@@ -175,7 +195,7 @@ class SkillRunner:
 
         # Prepend our bin directory to PATH
         original_path = env.get("PATH", "")
-        env["PATH"] = f"{self.bin_dir}:{original_path}"
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{original_path}"
 
         # Enable test mode
         env["MULTI_LLM_TEST_MODE"] = "1"
@@ -279,6 +299,8 @@ class SkillRunner:
                 command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env=env,
                 cwd=str(self.skill_dir),
