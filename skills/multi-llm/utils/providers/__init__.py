@@ -11,6 +11,7 @@ from .goose import GooseProvider
 from .grok import GrokProvider
 from .kilocode import KiloCodeProvider
 from .opencode import OpenCodeProvider
+from .pi import PiProvider
 
 __all__ = [
     "LLMProvider",
@@ -24,4 +25,5 @@ __all__ = [
     "GrokProvider",
     "KiloCodeProvider",
     "OpenCodeProvider",
+    "PiProvider",
 ]

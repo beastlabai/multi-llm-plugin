@@ -40,6 +40,7 @@ from .providers.goose import GooseProvider
 from .providers.grok import GrokProvider
 from .providers.kilocode import KiloCodeProvider
 from .providers.opencode import OpenCodeProvider
+from .providers.pi import PiProvider
 from .providers.base import LLMProvider
 
 # Built-in providers
@@ -55,6 +56,7 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "grok": GrokProvider(),
     "kilocode": KiloCodeProvider(),
     "opencode": OpenCodeProvider(),
+    "pi": PiProvider(),
 }
 
 # Process-global config cache. Keyed on the resolved discovery anchor + env (see

@@ -233,6 +233,24 @@ providers:
       - "Claude Opus 4.6 (Thinking)"
       - "GPT-OSS 120B (Medium)"
 
+  pi:
+    command: pi
+    default_timeout: 1200
+    supports_json_output: false  # -p print mode emits the final answer as plain text
+    # Model names are pi model patterns passed VERBATIM to --model; pi resolves
+    # "provider/id" forms itself (e.g. openrouter/z-ai/glm-5.2). Run
+    # "pi --list-models" to see the full list.
+    # Auth: provider API-key env vars (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, ...)
+    # inherited by the subprocess, or keys stored via pi's /login.
+    # ":effort" suffix -> "--thinking <level>". Valid: off, minimal, low, medium,
+    # high, xhigh, max. The suffix is stripped before --model, so pi's own
+    # native ":level" model-suffix parsing never sees it; unknown suffixes
+    # (e.g. ":free" ids, bedrock "...-v1:0") stay part of the model name.
+    models:
+      - openrouter/z-ai/glm-5.2
+      - openrouter/moonshotai/kimi-k2.7-code
+      - openrouter/openai/gpt-5.5
+
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
 
@@ -260,6 +278,7 @@ defaults:
     #- goose:openrouter/z-ai/glm-5.2
     #- aider:openrouter/z-ai/glm-5.2
     #- "agy:Gemini 3.1 Pro (High)"
+    #- pi:openrouter/z-ai/glm-5.2
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models

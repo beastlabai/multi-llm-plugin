@@ -188,6 +188,7 @@ from .providers import (
     GooseProvider,
     GrokProvider,
     OpenCodeProvider,
+    PiProvider,
 )
 
 __all__ = [
@@ -345,4 +346,5 @@ __all__ = [
     "GooseProvider",
     "GrokProvider",
     "OpenCodeProvider",
+    "PiProvider",
 ]

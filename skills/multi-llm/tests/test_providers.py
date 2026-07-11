@@ -26,6 +26,7 @@ from utils.providers.goose import GooseProvider
 from utils.providers.grok import GrokProvider
 from utils.providers.kilocode import KiloCodeProvider
 from utils.providers.opencode import OpenCodeProvider
+from utils.providers.pi import PiProvider
 
 
 class TestSplitReasoningEffort:
@@ -2403,6 +2404,188 @@ class TestAgyProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("agy")
+
+
+class TestPiProvider:
+    """Tests for the PiProvider class."""
+
+    @pytest.fixture
+    def provider(self):
+        """Create a PiProvider instance."""
+        return PiProvider()
+
+    def test_name_property(self, provider):
+        """Test that name property returns correct identifier."""
+        assert provider.name == "pi"
+
+    def test_default_timeout(self, provider):
+        """Test that default_timeout is set correctly."""
+        assert provider.default_timeout == 600
+
+    @patch("shutil.which")
+    def test_is_available_true(self, mock_which, provider):
+        """Test is_available returns True when pi is found."""
+        mock_which.return_value = "/usr/local/bin/pi"
+
+        assert provider.is_available() is True
+        mock_which.assert_called_once_with("pi")
+
+    @patch("shutil.which")
+    def test_is_available_false(self, mock_which, provider):
+        """Test is_available returns False when pi is not found."""
+        mock_which.return_value = None
+
+        assert provider.is_available() is False
+        mock_which.assert_called_once_with("pi")
+
+    def test_build_command(self, provider):
+        """Model patterns pass VERBATIM to --model; prompt goes last."""
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        assert cmd == [
+            "pi",
+            "--no-session",
+            "-p",
+            "--model",
+            "openrouter/z-ai/glm-5.2",
+            "Review this code",
+        ]
+
+    def test_build_command_bare_model(self, provider):
+        """A bare model pattern without a provider prefix passes through."""
+        cmd = provider.build_command("Analyze this", "sonnet")
+
+        assert cmd == ["pi", "--no-session", "-p", "--model", "sonnet", "Analyze this"]
+
+    def test_reasoning_efforts_constant(self):
+        """Module-level REASONING_EFFORTS holds exactly the seven valid levels."""
+        from utils.providers.pi import REASONING_EFFORTS
+
+        assert isinstance(REASONING_EFFORTS, frozenset)
+        assert REASONING_EFFORTS == {
+            "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        }
+
+    def test_build_command_effort_suffix_exact(self, provider):
+        """Exact argv for an :effort suffix: --thinking pair before --model."""
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2:high")
+
+        assert cmd == [
+            "pi",
+            "--no-session",
+            "-p",
+            "--thinking",
+            "high",
+            "--model",
+            "openrouter/z-ai/glm-5.2",
+            "Review this code",
+        ]
+
+    def test_build_command_all_reasoning_efforts(self, provider):
+        """Every valid effort suffix produces the --thinking form."""
+        efforts = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+        for effort in efforts:
+            cmd = provider.build_command("Review this code", f"openrouter/z-ai/glm-5.2:{effort}")
+
+            assert cmd == [
+                "pi",
+                "--no-session",
+                "-p",
+                "--thinking",
+                effort,
+                "--model",
+                "openrouter/z-ai/glm-5.2",
+                "Review this code",
+            ], f"effort {effort!r} did not build the expected command"
+
+    def test_build_command_effort_passthrough(self, provider):
+        """Non-effort suffixes stay part of the model name, no --thinking flag.
+
+        Critically, openrouter ":free" variants and bedrock ":0" version
+        suffixes are NOT effort suffixes: the whole string stays the model.
+        """
+        models = (
+            "openrouter/deepseek/deepseek-r1:free",
+            "amazon-bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+        )
+        for model in models:
+            cmd = provider.build_command("Review this code", model)
+
+            assert cmd == [
+                "pi",
+                "--no-session",
+                "-p",
+                "--model",
+                model,
+                "Review this code",
+            ], f"model {model!r} was not passed through verbatim"
+
+    def test_parse_output_direct_json_array(self, provider):
+        """Parse direct JSON array output."""
+        data = [{"item": 1}, {"item": 2}]
+        stdout = json.dumps(data)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == data
+
+    def test_parse_output_direct_json_object(self, provider):
+        """Parse direct JSON object output."""
+        data = {"status": "ok", "items": [1, 2, 3]}
+        stdout = json.dumps(data)
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == data
+
+    def test_parse_output_code_block(self, provider):
+        """Extract JSON from markdown code block."""
+        inner_json = [{"title": "Suggestion 1", "importance": "high"}]
+        stdout = f"""Here is my analysis:
+
+```json
+{json.dumps(inner_json, indent=2)}
+```
+
+This concludes the review."""
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_parse_output_embedded_json(self, provider):
+        """Extract embedded JSON from plain text."""
+        inner_json = [{"id": 1}, {"id": 2}]
+        stdout = f"The results are: {json.dumps(inner_json)} end of results."
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == inner_json
+
+    def test_parse_output_empty(self, provider):
+        """Handle empty output."""
+        result = provider.parse_output("", "")
+
+        assert result["success"] is False
+        assert "Empty output" in result["error"]
+
+    def test_parse_output_whitespace_only(self, provider):
+        """Handle whitespace-only output."""
+        result = provider.parse_output("   \n\t  ", "")
+
+        assert result["success"] is False
+        assert "Empty output" in result["error"]
+
+    def test_parse_output_no_json(self, provider):
+        """Handle output with no extractable JSON."""
+        result = provider.parse_output("Just plain text with no JSON at all.", "")
+
+        assert result["success"] is False
+        assert "error" in result
 
 
 class TestCodexProvider:
