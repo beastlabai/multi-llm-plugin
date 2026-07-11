@@ -2070,9 +2070,9 @@ class TestAiderProvider:
             "--no-detect-urls",
             "--no-fancy-input",
             "--chat-history-file",
-            "/dev/null",
+            os.devnull,
             "--input-history-file",
-            "/dev/null",
+            os.devnull,
         ]
 
     def test_aider_build_command_read_flags_for_existing_paths(self, provider, tmp_path):
@@ -2146,9 +2146,9 @@ class TestAiderProvider:
             "--no-detect-urls",
             "--no-fancy-input",
             "--chat-history-file",
-            "/dev/null",
+            os.devnull,
             "--input-history-file",
-            "/dev/null",
+            os.devnull,
         ]
 
     def test_aider_build_command_all_reasoning_efforts(self, provider):
@@ -2176,9 +2176,9 @@ class TestAiderProvider:
                 "--no-detect-urls",
                 "--no-fancy-input",
                 "--chat-history-file",
-                "/dev/null",
+                os.devnull,
                 "--input-history-file",
-                "/dev/null",
+                os.devnull,
             ], f"effort {effort!r} did not build the expected command"
 
     def test_aider_build_command_effort_passthrough(self, provider):
@@ -2208,9 +2208,9 @@ class TestAiderProvider:
                 "--no-detect-urls",
                 "--no-fancy-input",
                 "--chat-history-file",
-                "/dev/null",
+                os.devnull,
                 "--input-history-file",
-                "/dev/null",
+                os.devnull,
             ], f"model {model!r} was not passed through verbatim"
 
     @patch("shutil.which")
@@ -2228,6 +2228,115 @@ class TestAiderProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("aider")
+
+    def test_aider_build_command_uses_os_devnull(self, provider):
+        """History files are routed to os.devnull (portable null device)."""
+        cmd = provider.build_command("Analyze this", "some-model")
+
+        assert cmd[cmd.index("--chat-history-file") + 1] == os.devnull
+        assert cmd[cmd.index("--input-history-file") + 1] == os.devnull
+
+    def test_aider_abs_path_re_matches_full_backslash_windows_path(self):
+        """The regex matches an entire backslash Windows path, not just C:\\."""
+        from utils.providers.aider import _ABS_PATH_RE
+
+        matches = _ABS_PATH_RE.findall(r"Read C:\Users\foo\bar.md for context.")
+
+        assert matches == [r"C:\Users\foo\bar.md"]
+
+    def test_aider_abs_path_re_matches_forward_slash_windows_path(self):
+        """Drive-letter paths with forward slashes match in full too."""
+        from utils.providers.aider import _ABS_PATH_RE
+
+        matches = _ABS_PATH_RE.findall("Read C:/Users/foo/bar.md for context.")
+
+        assert matches == ["C:/Users/foo/bar.md"]
+
+    def test_aider_abs_path_re_posix_branch_unchanged(self):
+        """POSIX paths match exactly as with the historical pattern."""
+        from utils.providers.aider import _ABS_PATH_RE
+
+        matches = _ABS_PATH_RE.findall(
+            "See /home/user/plans/my-plan.md and /tmp/out.json"
+        )
+
+        assert matches == ["/home/user/plans/my-plan.md", "/tmp/out.json"]
+
+    def test_aider_extract_read_files_full_windows_path(self, provider, monkeypatch):
+        """_extract_read_files yields the whole Windows path, not a truncated C:\\."""
+        win_path = r"C:\Users\foo\bar.md"
+        monkeypatch.setattr(Path, "is_file", lambda self: str(self) == win_path)
+
+        found = provider._extract_read_files(f"## Plan File\n{win_path}\n\nRead it.")
+
+        assert found == [win_path]
+
+    def test_aider_extract_read_files_posix_unchanged(self, provider, tmp_path):
+        """Existing POSIX extraction behavior is unchanged by the Windows branch."""
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan")
+
+        found = provider._extract_read_files(
+            f"Read {plan} and the missing /nonexistent/file.md"
+        )
+
+        assert found == [str(plan)]
+
+
+# Per-provider prompt transport table: every current provider CLI receives
+# the prompt as a single argv element (none has a documented stdin or
+# prompt-file mode used anywhere in this codebase), so all adapters declare
+# prompt_transport == "argv" and rely on llm_client's Windows argv-length
+# check. An adapter that moves to stdin/file transport must update both its
+# prompt_transport and this table.
+TRANSPORT_CASES = [
+    (AgyProvider, "argv", "Gemini 3.1 Pro (High)"),
+    (AiderProvider, "argv", "openrouter/z-ai/glm-5.2"),
+    (ClaudeCodeProvider, "argv", "sonnet"),
+    (ClineProvider, "argv", "openrouter/z-ai/glm-5.2"),
+    (CodexProvider, "argv", "gpt-5.5"),
+    (CursorAgentProvider, "argv", "auto"),
+    (GeminiProvider, "argv", "gemini-2.5-pro"),
+    (GooseProvider, "argv", "openrouter/z-ai/glm-5.2"),
+    (GrokProvider, "argv", "grok-4"),
+    (KiloCodeProvider, "argv", "openai-native/gpt-5.5"),
+    (OpenCodeProvider, "argv", "openai/gpt-5.5"),
+    (PiProvider, "argv", "anthropic/claude-opus-4-8"),
+]
+
+
+class TestPromptTransport:
+    """Locks the per-provider prompt transport decision (see TRANSPORT_CASES)."""
+
+    PROMPT = "Analyze this plan carefully"
+
+    @pytest.mark.parametrize(
+        "provider_cls,transport,model",
+        TRANSPORT_CASES,
+        ids=[cls.__name__ for cls, _, _ in TRANSPORT_CASES],
+    )
+    def test_declared_transport_matches_build_command(
+        self, provider_cls, transport, model
+    ):
+        """prompt_transport is declared as decided AND matches the built argv."""
+        provider = provider_cls()
+
+        assert provider.prompt_transport == transport
+        assert transport == "argv"
+
+        cmd = provider.build_command(self.PROMPT, model)
+        # The full prompt travels as exactly ONE argv element (aider
+        # prefixes "/ask " but keeps the prompt intact in that element).
+        prompt_args = [arg for arg in cmd if self.PROMPT in arg]
+        assert len(prompt_args) == 1
+
+    def test_table_covers_every_registered_provider(self):
+        """The transport table stays in sync with the provider registry."""
+        from utils.provider_registry import _PROVIDERS
+
+        registered = {type(p) for p in _PROVIDERS.values()}
+
+        assert registered == {cls for cls, _, _ in TRANSPORT_CASES}
 
 
 class TestAgyProvider:
@@ -3243,7 +3352,8 @@ Done."""
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]  # First positional arg is the command list
 
-        assert cmd[0] == "claude"
+        # cmd[0] is which-resolved to the absolute path before launch
+        assert cmd[0] == "/usr/local/bin/claude"
         assert "-p" in cmd
         assert "--output-format" in cmd
         assert "json" in cmd

@@ -8,7 +8,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 
@@ -29,11 +29,97 @@ ERROR_PARSE_ERROR = "PARSE_ERROR"
 ERROR_BINARY_NOT_FOUND = "BINARY_NOT_FOUND"
 ERROR_SUBPROCESS_FAILED = "SUBPROCESS_FAILED"
 ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
+ERROR_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
+
+# Windows-only concern: POSIX exec passes argv verbatim (no reparsing) and
+# has generous per-arg limits, so prompt length is never enforced there.
+_IS_WINDOWS = os.name == "nt"
+
+# Safe prompt budgets for prompt-on-argv transport on Windows, with headroom
+# for the flags around the prompt: cmd.exe — which executes .cmd/.bat npm
+# shims — caps the whole command line at 8,191 chars; native CreateProcess
+# caps at 32,767.
+MAX_ARGV_PROMPT_CHARS_BATCH = 8000
+MAX_ARGV_PROMPT_CHARS_NATIVE = 32000
+
+_BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
 
 
 def check_cursor_agent_available() -> bool:
     """Check if cursor-agent CLI is available."""
     return shutil.which("cursor-agent") is not None
+
+
+def _resolve_executable(name: str) -> Tuple[str, bool]:
+    """Resolve a command name to an absolute path via shutil.which.
+
+    Returns ``(path_or_name, is_batch_shim)``. When ``shutil.which`` finds
+    nothing, the bare name is returned unchanged so downstream error text
+    stays meaningful. Resolution makes Windows ``CreateProcess`` find
+    npm-installed provider CLIs; on POSIX the resolved path is exactly what
+    PATH lookup would have executed anyway.
+
+    Batch-shim hazard: npm installs CLIs on Windows as ``.cmd``/``.bat``
+    shims, which are executed by cmd.exe. cmd.exe REPARSES the command line
+    (metacharacters/newlines in argv corrupt the prompt or can escape into
+    executed commands — the BatBadBut / CVE-2024-24576 class) and caps it at
+    8,191 chars. To avoid the shim entirely, prefer a sibling ``.exe`` with
+    the same stem when one exists; otherwise return the shim path with
+    ``is_batch_shim=True`` so the caller enforces the stricter prompt budget.
+    """
+    resolved = shutil.which(name)
+    if resolved is None:
+        return name, False
+    path = Path(resolved)
+    if path.suffix.lower() in _BATCH_SUFFIXES:
+        sibling_exe = path.with_suffix(".exe")
+        try:
+            if sibling_exe.is_file():
+                return str(sibling_exe), False
+        except OSError:
+            pass
+        return resolved, True
+    return resolved, False
+
+
+def _prompt_length_error(
+    prompt: str,
+    provider_name: str,
+    model: str,
+    is_batch_shim: bool
+) -> Optional[Dict[str, Any]]:
+    """Return a structured PROMPT_TOO_LONG error dict, or None if within budget.
+
+    Guard for providers whose prompt travels on argv (see
+    ``LLMProvider.prompt_transport``): exceeding the cmd.exe/CreateProcess
+    command-line caps would otherwise fail with a cryptic
+    ``[WinError 206]``/cmd.exe error. Callers gate on ``_IS_WINDOWS``.
+    """
+    limit = MAX_ARGV_PROMPT_CHARS_BATCH if is_batch_shim else MAX_ARGV_PROMPT_CHARS_NATIVE
+    if len(prompt) <= limit:
+        return None
+    launcher = (
+        "a .cmd/.bat shim run via cmd.exe (8,191-char command-line cap)"
+        if is_batch_shim
+        else "a native executable (32,767-char CreateProcess cap)"
+    )
+    return {
+        "success": False,
+        "error": (
+            f"Prompt is {len(prompt)} chars, but {provider_name} receives the "
+            f"prompt on the command line and resolves to {launcher} on "
+            f"Windows; the safe limit is {limit} chars. Shorten the prompt — "
+            f"e.g. reference large files by path instead of embedding their "
+            f"contents inline."
+        ),
+        "error_code": ERROR_PROMPT_TOO_LONG,
+        "details": {
+            "provider": provider_name,
+            "model": model,
+            "prompt_chars": len(prompt),
+            "prompt_chars_limit": limit,
+        }
+    }
 
 
 MAX_LOGGED_PROMPT_LENGTH = 5000
@@ -151,8 +237,9 @@ def invoke_with_provider(
     Error codes:
         BINARY_NOT_FOUND: Provider CLI tool not found in PATH
         TIMEOUT: Command timed out
-        SUBPROCESS_FAILED: Command exited with non-zero code
+        SUBPROCESS_FAILED: Command exited with non-zero code (or failed to launch)
         PARSE_ERROR: Failed to parse output
+        PROMPT_TOO_LONG: Prompt exceeds the Windows argv length budget
     """
     provider_name, model = parse_model_spec(model_spec)
     provider = get_provider(provider_name)
@@ -182,8 +269,20 @@ def invoke_with_provider(
     # Use provided timeout or provider's default
     effective_timeout = timeout or get_provider_timeout(provider_name)
 
-    # Build command using provider
+    # Build command using provider, resolving cmd[0] to an absolute path
+    # (and past any Windows .cmd/.bat npm shim — see _resolve_executable).
     cmd = provider.build_command(prompt, model)
+    executable, is_batch_shim = _resolve_executable(cmd[0])
+    cmd = [executable, *cmd[1:]]
+
+    # Prompt-on-argv transport hits hard command-line length caps on Windows;
+    # fail fast with an actionable error instead of a cryptic
+    # CreateProcess/cmd.exe failure. Never enforced on POSIX.
+    if _IS_WINDOWS and provider.prompt_transport == "argv":
+        length_error = _prompt_length_error(prompt, provider_name, model, is_batch_shim)
+        if length_error is not None:
+            return length_error
+
     start_time = time.time()
 
     # Build subprocess environment: add provider vars, remove blacklisted ones
@@ -201,6 +300,13 @@ def invoke_with_provider(
             cmd,
             capture_output=True,
             text=True,
+            # Provider output is not under our control: errors="replace" is
+            # lossy for non-UTF-8 bytes but guarantees a total decode — the
+            # standard choice for LLM/tool output. surrogateescape rejected
+            # (lone surrogates raise on downstream UTF-8 re-encode);
+            # backslashreplace rejected (noisier in model-visible output).
+            encoding="utf-8",
+            errors="replace",
             timeout=effective_timeout,
             env=env,
             cwd=cwd,
@@ -271,7 +377,8 @@ def invoke_with_provider(
 
     except subprocess.TimeoutExpired as e:
         duration = time.time() - start_time
-        # Handle both str (text=True) and bytes (text=False) modes
+        # TimeoutExpired may carry partial output as str or bytes; decode
+        # bytes with the same utf-8/replace policy as the run() call above.
         if e.stdout is None:
             stdout = ""
         elif isinstance(e.stdout, str):
@@ -307,6 +414,44 @@ def invoke_with_provider(
                 "provider": provider_name,
                 "model": model,
                 "timeout": effective_timeout,
+                "duration_seconds": duration
+            }
+        }
+
+    except OSError as e:
+        # Process creation failed (executable removed after detection, an
+        # invalid resolved shim, or any other CreateProcess/exec failure):
+        # return a structured error through the same result-dict path as
+        # other provider errors instead of aborting the orchestrator.
+        duration = time.time() - start_time
+        if isinstance(e, FileNotFoundError):
+            error_code = ERROR_BINARY_NOT_FOUND
+            error_msg = f"{provider_name} CLI not found when launching: {e}"
+        else:
+            error_code = ERROR_SUBPROCESS_FAILED
+            error_msg = f"Failed to launch {provider_name} CLI: {e}"
+
+        # Save log on launch failure if requested
+        if log_file:
+            _save_log(
+                log_file=log_file,
+                model=f"{provider_name}:{model}",
+                prompt=prompt,
+                stdout="",
+                stderr=str(e),
+                returncode=-1,
+                success=False,
+                error=error_msg,
+                duration_seconds=duration
+            )
+
+        return {
+            "success": False,
+            "error": error_msg,
+            "error_code": error_code,
+            "details": {
+                "provider": provider_name,
+                "model": model,
                 "duration_seconds": duration
             }
         }

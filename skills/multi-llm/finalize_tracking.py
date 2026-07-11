@@ -25,6 +25,7 @@ from typing import Set
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils import get_modified_files as utils_get_modified_files
 from utils import get_staged_files
 
@@ -50,6 +51,7 @@ def get_all_modified_files() -> Set[str]:
 
 def main() -> int:
     """Main entry point."""
+    bootstrap_streams()
     parser = argparse.ArgumentParser(
         description="Finalize file tracking after implementation"
     )

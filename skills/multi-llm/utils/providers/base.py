@@ -27,6 +27,16 @@ class LLMProvider(ABC):
     interface for invoking different LLM CLI tools.
     """
 
+    # How build_command() delivers the prompt to the CLI. Every current
+    # provider CLI takes the prompt as an argv element (none has a documented
+    # stdin or prompt-file mode used anywhere in this codebase), so "argv" is
+    # the default. On Windows, argv transport is subject to hard command-line
+    # length caps (cmd.exe: 8,191 chars for .cmd/.bat shims; CreateProcess:
+    # 32,767), so llm_client enforces a prompt-length check for "argv"
+    # providers there. An adapter that grows a stdin ("stdin") or prompt-file
+    # ("file") mode should override this to opt out of that check.
+    prompt_transport: str = "argv"
+
     @property
     @abstractmethod
     def name(self) -> str:

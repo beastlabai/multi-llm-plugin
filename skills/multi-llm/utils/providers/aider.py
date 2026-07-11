@@ -1,5 +1,6 @@
 """Aider CLI provider implementation with ANSWER-marker text parsing."""
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -25,7 +26,13 @@ ANSWER_MARKER = "► **ANSWER**"
 # aider's own file-mention auto-add splits the message on whitespace and
 # only matches repo-RELATIVE paths / bare basenames, so the absolute paths
 # used by the orchestrator prompts never trigger it.
-_ABS_PATH_RE = re.compile(r"/[\w.\-/]+")
+# Two-branch alternation: Windows drive-letter paths (backslash included in
+# the character class so C:\Users\foo\bar.md matches in full) and POSIX
+# paths (branch byte-identical to the historical pattern). Known accepted
+# limitations: UNC paths (\\server\share\...) and paths containing spaces
+# are not matched — extraction is best-effort enrichment behind an
+# existence check, so a miss just means no extra --read context.
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][\w.\-/\\]+|/[\w.\-/]+)")
 _MAX_READ_FILES = 20
 
 
@@ -105,7 +112,7 @@ class AiderProvider(LLMProvider):
         These are passed via --read (read-only context; allowed OUTSIDE the
         repo root, unlike editable files). Non-existent paths — notably the
         not-yet-written {output_json_path} — are skipped, as are
-        directories and special files (/dev/null is not a regular file).
+        directories and special files (os.devnull is not a regular file).
         """
         found: List[str] = []
         for match in _ABS_PATH_RE.findall(prompt):
@@ -130,7 +137,7 @@ class AiderProvider(LLMProvider):
         # channels), --no-show-model-warnings / --no-detect-urls /
         # --no-fancy-input (no extra prompts), --no-gitignore (don't touch
         # the target repo's .gitignore), --chat-history-file /
-        # --input-history-file /dev/null (no litter files). The "/ask "
+        # --input-history-file os.devnull (no litter files). The "/ask "
         # prefix keeps aider in read-only chat mode (see class docstring).
         # Do NOT pass --no-git: in a git repo aider sends a repo-map and
         # --yes-always auto-adds in-repo files the model requests; without
@@ -160,9 +167,9 @@ class AiderProvider(LLMProvider):
             "--no-detect-urls",
             "--no-fancy-input",
             "--chat-history-file",
-            "/dev/null",
+            os.devnull,
             "--input-history-file",
-            "/dev/null",
+            os.devnull,
         ]
         for path in self._extract_read_files(prompt):
             cmd += ["--read", path]

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.apply_orchestrator_base import (
     ApplyOrchestratorBase,
     OrchestratorError,
@@ -573,6 +574,7 @@ Suggestion N: Already addressed by prior changes - skipped
 
 def main():
     """Main entry point."""
+    bootstrap_streams()
     args = ApplyTaskSuggestionsOrchestrator.parse_args()
     orchestrator = ApplyTaskSuggestionsOrchestrator(args)
     exit_code = orchestrator.run()

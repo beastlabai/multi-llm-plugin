@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # NOTE: prepare_validation_task and prepare_batched_validation_tasks are used
 # via utils.review_orchestrator_base which handles validation orchestration.
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import sanitize_prefix, get_phase_dir
 from utils.prompt_loader import load_prompt
 from utils.state_manager import load_groups_payload
@@ -689,14 +690,9 @@ def reaggregate_consolidation_mode(
 
 async def main():
     """Main entry point."""
-    # Force line buffering so backgrounded runs (stdout redirected to a file,
-    # i.e. non-TTY) stream progress/validation/salvage markers instead of
-    # block-buffering for minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(line_buffering=True)
-        except (AttributeError, ValueError):
-            pass
+    # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
+    # see utils/stream_bootstrap.py for the full rationale.
+    bootstrap_streams()
 
     args = parse_args()
 

@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import get_phase_dir, slugify_question
 from utils.prompt_loader import load_prompt
 from utils.interactive import resolve_models
@@ -638,14 +639,9 @@ Examples:
 # ---------------------------------------------------------------------------
 
 async def main(argv: Optional[List[str]] = None) -> int:
-    # Force line buffering so backgrounded runs (stdout redirected to a file,
-    # i.e. non-TTY) stream progress markers instead of block-buffering for
-    # minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(line_buffering=True)
-        except (AttributeError, ValueError):
-            pass
+    # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
+    # see utils/stream_bootstrap.py for the full rationale.
+    bootstrap_streams()
 
     args = parse_args(argv)
 

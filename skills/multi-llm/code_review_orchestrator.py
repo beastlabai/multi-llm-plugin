@@ -50,6 +50,7 @@ from utils import (
     intent_to_add_untracked,
     PlanUpdater,
 )
+from utils.stream_bootstrap import bootstrap_streams
 from utils.state_manager import (
     load_groups_payload,
     save_groups_payload,
@@ -1240,14 +1241,9 @@ async def reaggregate_from_existing_files(
 
 async def main():
     """Main entry point."""
-    # Force line buffering so backgrounded runs (stdout redirected to a file,
-    # i.e. non-TTY) stream progress/validation/salvage markers instead of
-    # block-buffering for minutes. Defense-in-depth alongside PYTHONUNBUFFERED.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(line_buffering=True)
-        except (AttributeError, ValueError):
-            pass
+    # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
+    # see utils/stream_bootstrap.py for the full rationale.
+    bootstrap_streams()
 
     args = parse_args()
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, List
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import get_output_paths, get_relative_output_path
 from utils.plan_updater import insert_tasks_file_reference
 from utils.state_manager import get_or_create_state
@@ -204,6 +205,7 @@ def validate_tasks_json(data: Any) -> tuple[bool, str]:
 
 def main() -> int:
     """Main entry point."""
+    bootstrap_streams()
     parser = argparse.ArgumentParser(
         description="Update plan file with generated tasks"
     )

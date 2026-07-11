@@ -34,7 +34,7 @@ def write_and_emit_output(
     """
     os.makedirs(phase_dir, exist_ok=True)
     output_file = Path(phase_dir) / filename
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(output, f, indent=2)
     print(f"[OUTPUT_FILE] {output_file}", file=sys.stderr)
     return output_file

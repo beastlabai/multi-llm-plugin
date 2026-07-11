@@ -14,10 +14,17 @@ class GitError(Exception):
 
 def _run_git(*args: str, check: bool = True) -> Tuple[str, str, int]:
     """Run a git command and return (stdout, stderr, returncode)."""
+    # Decode git output as UTF-8 with errors="replace": lossy for non-UTF-8
+    # bytes but guarantees a total decode, the standard choice for tool/LLM
+    # text output. Rejected alternatives: surrogateescape (lone surrogates
+    # raise UnicodeEncodeError on downstream UTF-8 re-encode) and
+    # backslashreplace (noisier in model-visible output).
     result = subprocess.run(
         ["git"] + list(args),
         capture_output=True,
-        text=True
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if check and result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {result.stderr}")
@@ -36,6 +43,7 @@ def get_project_root(from_path: str) -> Optional[str]:
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         cwd=os.path.dirname(from_path) or "."
     )
     if result.returncode == 0:
@@ -62,6 +70,7 @@ def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         cwd=directory or "."
     )
     if result.returncode == 0:
@@ -229,6 +238,8 @@ def validate_git_ref(ref: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return ref
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -253,6 +264,8 @@ def validate_git_ref(ref: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return "HEAD~1"
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -496,6 +509,8 @@ def capture_diff_hunks(
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_SECONDS,
         )
         if status_result.returncode == 0 and status_result.stdout.strip():
@@ -523,6 +538,8 @@ def capture_diff_hunks(
             ["git", "diff", base_ref, "--"] + list(file_paths),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
@@ -595,6 +612,8 @@ def capture_diff_hunks(
                     ["git", "show", f"{base_ref}:{fpath}"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=_GIT_TIMEOUT_SECONDS,
                 )
                 if show_result.returncode == 0:

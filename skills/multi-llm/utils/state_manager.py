@@ -312,7 +312,7 @@ class StateManager:
         if old_state_file.exists() and not self.state_file.exists():
             try:
                 # Validate JSON is parseable before migrating
-                with open(old_state_file, 'r') as f:
+                with open(old_state_file, 'r', encoding='utf-8') as f:
                     json.load(f)
 
                 # Use copy+delete instead of rename (works across filesystems)
@@ -849,7 +849,7 @@ def list_active_sessions(plans_dir: Optional[Path] = None) -> List[Dict[str, Any
     # e.g., plans/*/state.json
     for state_file in plans_dir.glob('*/state.json'):
         try:
-            with open(state_file, 'r') as f:
+            with open(state_file, 'r', encoding='utf-8') as f:
                 state = json.load(f)
             sessions.append({
                 'plan_path': state_file.parent.parent / f"{state_file.parent.name}.md",

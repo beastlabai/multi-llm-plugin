@@ -58,10 +58,14 @@ def _try_gum_choose(options: List[str], prompt: str):
     try:
         # gum choose --no-limit allows multi-select
         # --header provides the prompt text
+        # UTF-8 + errors="replace": lossy for non-UTF-8 bytes but guarantees a
+        # total decode of tool output (vs. locale-codec UnicodeDecodeError).
         result = subprocess.run(
             ["gum", "choose", "--no-limit", "--header", prompt] + options,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=False  # We handle returncode manually
         )
@@ -98,6 +102,8 @@ def _try_fzf_multi(options: List[str], prompt: str):
             input=input_text,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=False  # We handle returncode manually
         )

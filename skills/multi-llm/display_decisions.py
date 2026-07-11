@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import sanitize_prefix, get_phase_dir
 
 
@@ -227,6 +228,7 @@ def resolve_output_file(args: argparse.Namespace) -> str:
 
 
 def main():
+    bootstrap_streams()
     parser = argparse.ArgumentParser(description="Display decision summary from orchestrator output")
     parser.add_argument("--output-file", help="Path to orchestrator_output.json")
     parser.add_argument("--plan-file", help="Path to plan file (used with --phase)")

@@ -1344,7 +1344,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2)
         print(f"[OUTPUT_FILE] {output_path}", file=sys.stderr)
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.apply_orchestrator_base import (
     ApplyOrchestratorBase,
     OrchestratorError,
@@ -292,7 +293,7 @@ Bulk Approval Examples:
 
         if output_format == "json":
             # Read back and emit to stdout for JSON format
-            with open(output_path, "r") as f:
+            with open(output_path, "r", encoding="utf-8") as f:
                 output = json.load(f)
             print(json.dumps(output, indent=2))
         else:
@@ -344,6 +345,7 @@ Bulk Approval Examples:
 
 def main():
     """Main entry point."""
+    bootstrap_streams()
     args = ApplySuggestionsOrchestrator.parse_args()
     orchestrator = ApplySuggestionsOrchestrator(args)
     exit_code = orchestrator.run()

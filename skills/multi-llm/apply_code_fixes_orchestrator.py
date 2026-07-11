@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.apply_orchestrator_base import (
     VALID_OVERRIDE_VALUES,
     ApplyOrchestratorBase,
@@ -908,7 +909,7 @@ Bulk Approval Examples:
         output_format = getattr(self.args, "output_format", "text")
 
         if output_format == "json":
-            with open(output_path, "r") as f:
+            with open(output_path, "r", encoding="utf-8") as f:
                 output = json.load(f)
             print(json.dumps(output, indent=2))
         else:
@@ -966,6 +967,7 @@ Bulk Approval Examples:
 
 def main():
     """Main entry point."""
+    bootstrap_streams()
     args = ApplyCodeFixesOrchestrator.parse_args()
     orchestrator = ApplyCodeFixesOrchestrator(args)
     exit_code = orchestrator.run()

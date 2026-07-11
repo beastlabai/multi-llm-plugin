@@ -309,3 +309,67 @@ class TestSelectMultiCascade:
 
         result = select_multi(["model-a", "model-b"], "prompt")
         assert result == ["model-a"]
+
+
+class TestSubprocessDecoding:
+    """UTF-8 + errors='replace' decoding for gum/fzf output (task 3 tier 2)."""
+
+    def _capture_run_kwargs(self, monkeypatch, captured):
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            mock = MagicMock()
+            mock.returncode = 0
+            mock.stdout = "model-a\n"
+            return mock
+
+        monkeypatch.setattr('utils.interactive.subprocess.run', fake_run)
+
+    def test_gum_choose_requests_utf8_replace(self, monkeypatch):
+        """_try_gum_choose decodes subprocess output as UTF-8 with replace."""
+        monkeypatch.setattr(
+            'utils.interactive.shutil.which', lambda name: '/usr/bin/gum'
+        )
+        captured = {}
+        self._capture_run_kwargs(monkeypatch, captured)
+
+        result = _try_gum_choose(["model-a", "model-b"], "prompt")
+
+        assert result == ["model-a"]
+        assert captured["encoding"] == "utf-8"
+        assert captured["errors"] == "replace"
+
+    def test_fzf_multi_requests_utf8_replace(self, monkeypatch):
+        """_try_fzf_multi decodes subprocess output as UTF-8 with replace."""
+        monkeypatch.setattr(
+            'utils.interactive.shutil.which', lambda name: '/usr/bin/fzf'
+        )
+        captured = {}
+        self._capture_run_kwargs(monkeypatch, captured)
+
+        result = _try_fzf_multi(["model-a", "model-b"], "prompt")
+
+        assert result == ["model-a"]
+        assert captured["encoding"] == "utf-8"
+        assert captured["errors"] == "replace"
+
+    def test_gum_choose_decodes_invalid_utf8_with_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        """A real gum shim emitting invalid UTF-8 decodes with U+FFFD.
+
+        Exercises the actual decode path: no UnicodeDecodeError, replacement
+        characters in the selection result.
+        """
+        import os
+
+        fake_gum = tmp_path / "gum"
+        # \351 (0xE9) is cp1252 'e-acute'; invalid as a standalone UTF-8 byte.
+        fake_gum.write_bytes(b"#!/bin/sh\nprintf 'caf\\351-model\\n'\n")
+        fake_gum.chmod(0o755)
+        monkeypatch.setenv(
+            "PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"
+        )
+
+        result = _try_gum_choose(["caf\xe9-model"], "prompt")
+
+        assert result == ["caf�-model"]

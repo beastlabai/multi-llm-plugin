@@ -26,7 +26,7 @@ def _load_entries(path: Path) -> list[dict]:
     if not path.exists():
         return []
     entries = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -89,7 +89,7 @@ def cmd_append(args: argparse.Namespace) -> None:
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
+    with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     print(f"Appended entry {args.id}/{args.phase}", file=sys.stderr)
 

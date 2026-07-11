@@ -9,6 +9,7 @@ from pathlib import Path
 # Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams
 from utils.state_manager import StateManager
 from utils.output_handler import get_output_dir
 
@@ -56,7 +57,7 @@ def check_apply_suggestions_prerequisite(state: StateManager, plan_dir: Path) ->
 
     # Count valid suggestions that would be applied
     try:
-        with open(validation_path, 'r') as f:
+        with open(validation_path, 'r', encoding='utf-8') as f:
             validation = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {"met": True, "reason": "Could not read validation results"}
@@ -134,7 +135,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
     # Load grouped.json and count actionable suggestions
     try:
-        with open(grouped_path, 'r') as f:
+        with open(grouped_path, 'r', encoding='utf-8') as f:
             grouped_data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {"met": True, "reason": "Could not read grouped results"}
@@ -162,7 +163,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
     if validation_path.exists():
         try:
-            with open(validation_path, 'r') as f:
+            with open(validation_path, 'r', encoding='utf-8') as f:
                 validation = json.load(f)
 
             # Handle both v1 (flat dict keyed by group_id) and v2 (envelope
@@ -336,6 +337,7 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
 
 
 def main():
+    bootstrap_streams()
     parser = argparse.ArgumentParser(description="Check workflow prerequisites")
     parser.add_argument("--plan-file", required=True, help="Path to plan file")
     parser.add_argument("--status", action="store_true",

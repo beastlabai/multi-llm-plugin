@@ -47,6 +47,7 @@ import yaml
 # Make the skill's own packages importable regardless of the caller's CWD.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
 from utils.provider_registry import get_provider, load_base_config  # noqa: E402
 
@@ -946,6 +947,7 @@ def write_template_only(args: argparse.Namespace, target_dir: Path, config_dir: 
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    bootstrap_streams()
     parser = argparse.ArgumentParser(
         prog="init_config.py",
         description=(

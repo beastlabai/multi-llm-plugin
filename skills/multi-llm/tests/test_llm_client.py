@@ -35,8 +35,13 @@ from utils.llm_client import (
     ERROR_BINARY_NOT_FOUND,
     ERROR_SUBPROCESS_FAILED,
     ERROR_FILE_NOT_FOUND,
+    ERROR_PROMPT_TOO_LONG,
+    MAX_ARGV_PROMPT_CHARS_BATCH,
+    MAX_ARGV_PROMPT_CHARS_NATIVE,
     check_cursor_agent_available,
     _save_log,
+    _resolve_executable,
+    _prompt_length_error,
     invoke_with_provider,
     _is_valid_parsed_data,
     invoke_with_file_output,
@@ -1146,6 +1151,7 @@ class TestErrorConstants:
         assert isinstance(ERROR_BINARY_NOT_FOUND, str)
         assert isinstance(ERROR_SUBPROCESS_FAILED, str)
         assert isinstance(ERROR_FILE_NOT_FOUND, str)
+        assert isinstance(ERROR_PROMPT_TOO_LONG, str)
 
     def test_error_codes_are_unique(self):
         """Verify error codes are unique."""
@@ -1155,6 +1161,7 @@ class TestErrorConstants:
             ERROR_BINARY_NOT_FOUND,
             ERROR_SUBPROCESS_FAILED,
             ERROR_FILE_NOT_FOUND,
+            ERROR_PROMPT_TOO_LONG,
         ]
         assert len(codes) == len(set(codes))
 
@@ -1165,6 +1172,7 @@ class TestErrorConstants:
         assert ERROR_BINARY_NOT_FOUND == "BINARY_NOT_FOUND"
         assert ERROR_SUBPROCESS_FAILED == "SUBPROCESS_FAILED"
         assert ERROR_FILE_NOT_FOUND == "FILE_NOT_FOUND"
+        assert ERROR_PROMPT_TOO_LONG == "PROMPT_TOO_LONG"
 
 
 class TestExceptions:
@@ -1192,3 +1200,340 @@ class TestExceptions:
             raise SubagentTimeoutError("timeout")
         except LLMClientError as e:
             assert "timeout" in str(e)
+
+
+class TestResolveExecutable:
+    """Tests for _resolve_executable() — npm-shim-aware which-resolution."""
+
+    def test_which_hit_returns_absolute_path(self):
+        """A which hit substitutes the absolute path (not a batch shim)."""
+        with patch("shutil.which", return_value="/usr/local/bin/cursor-agent"):
+            resolved, is_batch_shim = _resolve_executable("cursor-agent")
+
+        assert resolved == "/usr/local/bin/cursor-agent"
+        assert is_batch_shim is False
+
+    def test_which_miss_keeps_bare_name(self):
+        """A which miss keeps the bare name so error text stays meaningful."""
+        with patch("shutil.which", return_value=None):
+            resolved, is_batch_shim = _resolve_executable("cursor-agent")
+
+        assert resolved == "cursor-agent"
+        assert is_batch_shim is False
+
+    def test_cmd_shim_prefers_sibling_exe(self, tmp_path):
+        """A .cmd shim with a same-stem sibling .exe resolves to the .exe."""
+        shim = tmp_path / "codex.cmd"
+        shim.write_text("@echo off")
+        exe = tmp_path / "codex.exe"
+        exe.write_text("")
+
+        with patch("shutil.which", return_value=str(shim)):
+            resolved, is_batch_shim = _resolve_executable("codex")
+
+        assert resolved == str(exe)
+        assert is_batch_shim is False
+
+    def test_cmd_shim_without_sibling_exe_is_flagged(self, tmp_path):
+        """A .cmd shim with no sibling .exe is kept but flagged as a shim."""
+        shim = tmp_path / "codex.cmd"
+        shim.write_text("@echo off")
+
+        with patch("shutil.which", return_value=str(shim)):
+            resolved, is_batch_shim = _resolve_executable("codex")
+
+        assert resolved == str(shim)
+        assert is_batch_shim is True
+
+    def test_bat_shim_suffix_case_insensitive(self, tmp_path):
+        """.BAT (any case) is treated as a batch shim too."""
+        shim = tmp_path / "codex.BAT"
+        shim.write_text("@echo off")
+
+        with patch("shutil.which", return_value=str(shim)):
+            resolved, is_batch_shim = _resolve_executable("codex")
+
+        assert resolved == str(shim)
+        assert is_batch_shim is True
+
+
+class TestInvokeCommandResolution:
+    """invoke_with_provider() resolves cmd[0] before launching."""
+
+    @pytest.fixture
+    def mock_subprocess(self):
+        """Create a mock for subprocess.run."""
+        with patch("utils.llm_client.subprocess.run") as mock:
+            yield mock
+
+    @staticmethod
+    def _success_result():
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[]"})
+        mock_result.stderr = ""
+        return mock_result
+
+    def test_cmd0_is_which_resolved(self, mock_subprocess):
+        """cmd[0] is replaced by the which-resolved absolute path."""
+        mock_subprocess.return_value = self._success_result()
+
+        with patch("shutil.which", return_value="/opt/tools/cursor-agent"):
+            invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+
+        cmd = mock_subprocess.call_args[0][0]
+        assert cmd[0] == "/opt/tools/cursor-agent"
+        # The rest of the argv is untouched
+        assert cmd[1] == "--print"
+        assert cmd[-1] == "Test"
+
+    def test_cmd0_falls_back_to_bare_name(self, mock_subprocess):
+        """When which stops resolving (race), the bare name is kept."""
+        mock_subprocess.return_value = self._success_result()
+
+        # First which call: is_available() detection; second: resolution.
+        with patch("shutil.which", side_effect=["/usr/bin/cursor-agent", None]):
+            invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+
+        cmd = mock_subprocess.call_args[0][0]
+        assert cmd[0] == "cursor-agent"
+
+
+class TestLaunchFailureStructuredErrors:
+    """Launch-time OSError returns structured errors instead of raising."""
+
+    @pytest.fixture
+    def mock_subprocess(self):
+        """Create a mock for subprocess.run."""
+        with patch("utils.llm_client.subprocess.run") as mock:
+            yield mock
+
+    @pytest.fixture
+    def mock_provider_available(self):
+        """Mock provider to appear available."""
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"):
+            yield
+
+    def test_launch_race_filenotfound_returns_binary_not_found(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """Detection succeeds but launch raises FileNotFoundError -> BINARY_NOT_FOUND."""
+        mock_subprocess.side_effect = FileNotFoundError(2, "No such file or directory")
+
+        result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:gpt-4")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_BINARY_NOT_FOUND
+        assert "cursor-agent" in result["error"]
+        assert result["details"]["provider"] == "cursor-agent"
+        assert result["details"]["model"] == "gpt-4"
+        assert "duration_seconds" in result["details"]
+
+    def test_launch_oserror_returns_subprocess_failed(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """Any other launch OSError (e.g. EACCES) -> SUBPROCESS_FAILED."""
+        mock_subprocess.side_effect = PermissionError(13, "Permission denied")
+
+        result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:gpt-4")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "cursor-agent" in result["error"]
+        assert result["details"]["provider"] == "cursor-agent"
+        assert result["details"]["model"] == "gpt-4"
+
+    def test_launch_failure_saves_log(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """Launch failures are logged when a log_file is given."""
+        log_file = tmp_path / "launch_failure.log"
+        mock_subprocess.side_effect = FileNotFoundError(2, "No such file or directory")
+
+        invoke_with_provider(
+            prompt="Test", model_spec="cursor-agent:gpt-4", log_file=log_file
+        )
+
+        assert log_file.exists()
+        content = log_file.read_text()
+        assert "Success: False" in content
+        assert "not found" in content
+
+
+class TestSubprocessDecoding:
+    """Provider output is decoded as UTF-8 with errors='replace'."""
+
+    @pytest.fixture
+    def mock_provider_available(self):
+        """Mock provider to appear available."""
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"):
+            yield
+
+    @pytest.fixture
+    def real_emitter(self, monkeypatch):
+        """Route the provider launch to a real python child emitting raw bytes.
+
+        The child replaces the provider command but every subprocess.run
+        kwarg (text/encoding/errors/timeout/stdin/...) passes through
+        unchanged, exercising the actual decode path end-to-end.
+        """
+        def install(child_code):
+            real_run = subprocess.run
+
+            def fake_run(cmd, **kwargs):
+                return real_run([sys.executable, "-c", child_code], **kwargs)
+
+            monkeypatch.setattr("utils.llm_client.subprocess.run", fake_run)
+
+        return install
+
+    def test_run_called_with_utf8_replace(self, mock_provider_available):
+        """subprocess.run gets text=True, encoding='utf-8', errors='replace'."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[]"})
+        mock_result.stderr = ""
+
+        with patch("utils.llm_client.subprocess.run", return_value=mock_result) as mock_run:
+            invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+
+    def test_non_ascii_stdout_decodes_with_replace(
+        self, mock_provider_available, real_emitter
+    ):
+        """Invalid-UTF-8 stdout decodes to U+FFFD instead of raising."""
+        # \xe9 is a lone latin-1 byte: invalid UTF-8, valid cp1252 ("é") —
+        # exactly the locale-codec hazard the explicit encoding removes.
+        payload = b'{"type": "result", "result": "[\\"caf\xe9\\"]"}'
+        real_emitter(f"import sys; sys.stdout.buffer.write({payload!r})")
+
+        result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+
+        assert result["success"] is True
+        assert result["data"] == ["caf�"]
+
+    def test_non_ascii_stderr_decodes_with_replace(
+        self, mock_provider_available, real_emitter
+    ):
+        """Invalid-UTF-8 stderr on failure decodes to U+FFFD instead of raising."""
+        payload = b"auth \xe9rror"
+        real_emitter(
+            f"import sys; sys.stderr.buffer.write({payload!r}); sys.exit(1)"
+        )
+
+        result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert result["details"]["stderr"] == "auth �rror"
+
+    def test_timeout_partial_bytes_decode_with_replace(
+        self, mock_provider_available, tmp_path
+    ):
+        """Non-ASCII partial output on timeout decodes as UTF-8/replace."""
+        log_file = tmp_path / "timeout.log"
+        exc = subprocess.TimeoutExpired(cmd=["cursor-agent"], timeout=1)
+        exc.stdout = b"partial caf\xe9"
+        exc.stderr = b"stderr \xff"
+
+        with patch("utils.llm_client.subprocess.run", side_effect=exc):
+            result = invoke_with_provider(
+                prompt="Test", model_spec="cursor-agent:auto", log_file=log_file
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        content = log_file.read_text()
+        assert "partial caf�" in content
+        assert "stderr �" in content
+
+
+class TestPromptLengthGuard:
+    """Windows argv prompt-length check for prompt-on-argv providers."""
+
+    def test_within_batch_budget_returns_none(self):
+        """A prompt at the batch-shim budget passes."""
+        prompt = "x" * MAX_ARGV_PROMPT_CHARS_BATCH
+
+        assert _prompt_length_error(prompt, "codex", "gpt-5.5", True) is None
+
+    def test_batch_shim_over_budget_returns_structured_error(self):
+        """Over the 8,000-char budget with a .cmd shim -> PROMPT_TOO_LONG."""
+        prompt = "x" * (MAX_ARGV_PROMPT_CHARS_BATCH + 1)
+
+        error = _prompt_length_error(prompt, "codex", "gpt-5.5", True)
+
+        assert error["success"] is False
+        assert error["error_code"] == ERROR_PROMPT_TOO_LONG
+        assert error["details"]["provider"] == "codex"
+        assert error["details"]["model"] == "gpt-5.5"
+        assert error["details"]["prompt_chars"] == MAX_ARGV_PROMPT_CHARS_BATCH + 1
+        assert error["details"]["prompt_chars_limit"] == MAX_ARGV_PROMPT_CHARS_BATCH
+        # Actionable: names the cause and suggests a fix
+        assert "cmd.exe" in error["error"]
+        assert "Shorten the prompt" in error["error"]
+
+    def test_native_budget_is_32000(self):
+        """Native executables get the larger CreateProcess budget."""
+        assert _prompt_length_error(
+            "x" * MAX_ARGV_PROMPT_CHARS_NATIVE, "codex", "gpt-5.5", False
+        ) is None
+
+        error = _prompt_length_error(
+            "x" * (MAX_ARGV_PROMPT_CHARS_NATIVE + 1), "codex", "gpt-5.5", False
+        )
+        assert error["error_code"] == ERROR_PROMPT_TOO_LONG
+        assert error["details"]["prompt_chars_limit"] == MAX_ARGV_PROMPT_CHARS_NATIVE
+
+    def test_enforced_on_windows_before_launch(self, tmp_path):
+        """On Windows, an over-budget prompt fails fast without launching."""
+        shim = tmp_path / "cursor-agent.cmd"
+        shim.write_text("@echo off")
+        prompt = "x" * (MAX_ARGV_PROMPT_CHARS_BATCH + 1)
+
+        with patch("shutil.which", return_value=str(shim)), \
+             patch("utils.llm_client._IS_WINDOWS", True), \
+             patch("utils.llm_client.subprocess.run") as mock_run:
+            result = invoke_with_provider(prompt=prompt, model_spec="cursor-agent:auto")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PROMPT_TOO_LONG
+        mock_run.assert_not_called()
+
+    def test_native_executable_allows_longer_prompt_on_windows(self):
+        """The same prompt is fine on Windows with a native executable."""
+        prompt = "x" * (MAX_ARGV_PROMPT_CHARS_BATCH + 1)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[]"})
+        mock_result.stderr = ""
+
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+             patch("utils.llm_client._IS_WINDOWS", True), \
+             patch("utils.llm_client.subprocess.run", return_value=mock_result) as mock_run:
+            result = invoke_with_provider(prompt=prompt, model_spec="cursor-agent:auto")
+
+        assert result["success"] is True
+        mock_run.assert_called_once()
+
+    def test_not_enforced_on_posix(self, tmp_path):
+        """On POSIX, prompt length is never enforced — even via a .cmd path."""
+        shim = tmp_path / "cursor-agent.cmd"
+        shim.write_text("@echo off")
+        prompt = "x" * (MAX_ARGV_PROMPT_CHARS_NATIVE + 1)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[]"})
+        mock_result.stderr = ""
+
+        with patch("shutil.which", return_value=str(shim)), \
+             patch("utils.llm_client._IS_WINDOWS", False), \
+             patch("utils.llm_client.subprocess.run", return_value=mock_result) as mock_run:
+            result = invoke_with_provider(prompt=prompt, model_spec="cursor-agent:auto")
+
+        assert result["success"] is True
+        mock_run.assert_called_once()

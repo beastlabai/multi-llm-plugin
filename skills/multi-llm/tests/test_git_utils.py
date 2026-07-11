@@ -78,7 +78,9 @@ class TestRunGit:
         mock_run.assert_called_once_with(
             ["git", "status"],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
 
     @patch("utils.git_utils.subprocess.run")
@@ -95,7 +97,9 @@ class TestRunGit:
         mock_run.assert_called_once_with(
             ["git", "diff", "--cached", "--name-only"],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
 
     @patch("utils.git_utils.subprocess.run")
@@ -1654,3 +1658,43 @@ class TestIntentToAddUntracked:
         # Staged and modified files unchanged
         assert _porcelain_status(temp_git_repo, "staged.py") == "A "
         assert _porcelain_status(temp_git_repo, "seed.txt") == " M"
+
+
+class TestRunGitDecoding:
+    """Tests for UTF-8 + errors='replace' decoding of git output (task 2)."""
+
+    def test_run_git_decodes_invalid_utf8_with_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        """Real subprocess emitting invalid UTF-8 bytes decodes with U+FFFD.
+
+        Uses a fake `git` executable on PATH that writes raw cp1252/invalid
+        bytes to stdout, so the actual decode path in _run_git is exercised
+        (no UnicodeDecodeError, replacement characters in the result).
+        """
+        fake_git = tmp_path / "git"
+        # \351 (0xE9) is cp1252 'e-acute'; \377 (0xFF) is invalid UTF-8
+        # in any position.
+        fake_git.write_bytes(
+            b"#!/bin/sh\nprintf 'caf\\351 \\377 done\\n'\n"
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setenv(
+            "PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"
+        )
+
+        stdout, stderr, code = _run_git("anything", check=False)
+
+        assert code == 0
+        assert "caf� � done" in stdout
+
+    @patch("utils.git_utils.subprocess.run")
+    def test_run_git_passes_utf8_replace_kwargs(self, mock_run):
+        """_run_git requests utf-8/replace decoding from subprocess.run."""
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        _run_git("status", check=False)
+
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
