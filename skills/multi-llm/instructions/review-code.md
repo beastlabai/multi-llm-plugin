@@ -159,12 +159,12 @@ Items with `needs-human-decision` status are included in the report for the user
 
    A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" --models <selected> [--base-ref REF] [--apply-fixes] \
+   PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+     --plan-file "$PLAN_PATH" --models <selected> [--base-ref REF] [--apply-fixes] \
      > "{plan}/code-review/orchestrator-run.log" 2>&1
    ```
 
-   **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path, and `--project` (not `--directory`).
+   **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
    Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
 
@@ -181,8 +181,8 @@ Items with `needs-human-decision` status are included in the report for the user
 
    The reaggregation command for this mode is:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+     --plan-file "$PLAN_PATH" \
      --reaggregate
    ```
 
@@ -274,7 +274,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each validation subagent. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Validation batch {N}" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -290,7 +290,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` once from `{plan}/code-review/`
    2. Count the number of batches as `{total_batches}` and mark the phase start:
       ```bash
-      uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
         --state-file "$STATE_FILE" --phase "review-code-batches" --total-batches {total_batches}
       ```
    3. Choose a strategy:
@@ -311,13 +311,13 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After validation completes, run the `reaggregate_command` from validation_tasks.json:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" --reaggregate
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+     --plan-file "$PLAN_PATH" --reaggregate
    ```
 
    After reaggregation, mark the validation phase finish (only if `start` was called above):
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
      --state-file "$STATE_FILE" --phase "review-code-batches"
    ```
 
@@ -329,7 +329,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    Before the fix loop, mark the phase start where `{total_fixes}` is the number of fix tasks:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
      --state-file "$STATE_FILE" --phase "review-code-fixes" --total-batches {total_fixes}
    ```
 
@@ -362,7 +362,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each fix subagent:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Fix: {task_title}" --subagent-type "{subagent_type}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -372,7 +372,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    d. After all fixes are attempted, mark the phase finish:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
      --state-file "$STATE_FILE" --phase "review-code-fixes"
    ```
 
@@ -432,7 +432,7 @@ After spawning subagents to apply fixes:
 
    Generate resource usage:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
      --state-file "$STATE_FILE" --phase "code-review"
    ```
    Include the output (if non-empty) in the results report.
@@ -459,7 +459,7 @@ Claude:
    "Which models would you like to use for the code review?" (multi-select)
    Options: auto, gpt-5.2, gemini-3-pro, grok, gemini-3-flash, kimi-k2
 2. User selects: gpt-5.2
-3. Runs: uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath plans/my-feature.md)" --models gpt-5.2
+3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-feature.md --models gpt-5.2
 4. Claude reports review findings and output files
 ```
 
@@ -471,7 +471,7 @@ User: /multi-llm:multi-llm --review-code --apply-fixes plans/my-feature.md
 Claude:
 1. No models in args, so Claude uses AskUserQuestion to prompt for model selection
 2. User selects: gemini-3-pro
-3. Runs: uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath plans/my-feature.md)" --models gemini-3-pro --apply-fixes
+3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-feature.md --models gemini-3-pro --apply-fixes
 4. Orchestrator outputs:
    - my-feature_code_review.md (report)
    - my-feature_fix_tasks.json (3 valid issues to fix)

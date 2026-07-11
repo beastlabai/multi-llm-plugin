@@ -111,7 +111,7 @@ There are unapplied suggestions from plan review. Parse the JSON that follows th
      ```
      **Do NOT** proceed further. Stop execution after displaying this message.
 
-   - **"Skip suggestions, proceed"**: Run `uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
+   - **"Skip suggestions, proceed"**: Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
    - **"Cancel"**: Stop and inform user
 
 #### If output contains `[TASKS_MISSING]`:
@@ -159,7 +159,7 @@ Handle the response:
   ```
   **Do NOT** proceed further. Stop execution after displaying this message.
 
-- **"Skip, proceed to implement"** (default): Run `uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --skip` to mark the phase as skipped, then continue with implementation.
+- **"Skip, proceed to implement"** (default): Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip` to mark the phase as skipped, then continue with implementation.
 
 - **"Cancel"**: Stop and inform user.
 
@@ -173,12 +173,20 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 1. **Validate plan file exists**
 
-2. **Run the orchestrator to generate task JSON:**
-   ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/implement_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --output /tmp/implementation_tasks.json [--resume]
-   ```
+2. **Resolve the project root, then run the orchestrator to generate task JSON:**
 
-   **IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
+   Intermediate artifacts live in the **workspace temp dir** `$PROJECT_ROOT/.multi-llm/tmp/` — never the system temp dir, so Bash commands, native processes, and harness Read/Write tools resolve the same file on every OS. Resolve the root first and treat failure as a hard prerequisite failure:
+   ```bash
+   PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+   ```
+   If the command fails or `$PROJECT_ROOT` is empty, STOP with the error: "multi-llm requires running inside a git repository." Never fall back to a relative path or `$PWD`.
+
+   ```bash
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH" --output "$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_{plan_stem}.json" [--resume]
+   ```
+   Where `{plan_stem}` is the plan filename without extension (deterministic per plan, so concurrent runs on different plans cannot clobber each other, and a re-run for the same plan simply overwrites the previous artifact — there is no cleanup step; the orchestrator writes `.multi-llm/tmp/.gitignore` containing `*` so the directory ignores itself, and the user may delete `.multi-llm/tmp/` at any time — the next run recreates it).
+
+   **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
    **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates task JSON, it does not execute tasks — so 10 minutes is far more than enough.
 
@@ -186,8 +194,9 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 4. **Read the task JSON file:**
    ```
-   Use Read tool to load /tmp/implementation_tasks.json
+   Use the Read tool to load {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_{plan_stem}.json
    ```
+   The Read tool requires an **absolute** path: join the resolved project root (from step 2) with the relative part `.multi-llm/tmp/implementation_tasks_{plan_stem}.json` — the same file the Bash `--output` above wrote.
 
 #### 4a. Human Task Strategy (if applicable)
 
@@ -219,7 +228,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
 
    Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
      --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
    ```
 
@@ -322,7 +331,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
      ```
    - **Record metrics**: Run the metrics utility to store Task tool metrics:
      ```bash
-     uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+     uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
        --state-file "$STATE_FILE" --phase "implement" \
        --label "{task_id}: {task_title}" --subagent-type "{subagent_type}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -338,9 +347,9 @@ This ensures `--resume` can recover the strategy without re-prompting.
 7. **Finalize file tracking:**
    After all tasks complete (before generating summary), mark the phase finish and run finalization:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
      --state-file "$STATE_FILE" --phase "implement"
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/finalize_tracking.py --state-file "$STATE_FILE"
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/finalize_tracking.py" --state-file "$STATE_FILE"
    ```
    Where `$STATE_FILE` is the `state_file` path from the JSON output.
 
@@ -354,7 +363,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
 
    - If plan modifies `${CLAUDE_SKILL_DIR}/` files:
      ```bash
-     uv run --project ${CLAUDE_SKILL_DIR} -- pytest ${CLAUDE_SKILL_DIR}/tests/ -v --tb=short 2>&1 | tail -50
+     uv run --project "${CLAUDE_SKILL_DIR}" -- pytest "${CLAUDE_SKILL_DIR}/tests/" -v --tb=short 2>&1 | tail -50
      ```
    - Otherwise, detect common test runners:
      - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
@@ -406,7 +415,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
 
    Before writing the summary, generate the resource usage section:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
      --state-file "$STATE_FILE" --phase "implement"
    ```
    Include the output (if non-empty) in the summary before "## Notes for Code Review".
@@ -417,20 +426,20 @@ This ensures `--resume` can recover the strategy without re-prompting.
    ```
 
 10. **Update the original plan:**
-   Add a reference to the implementation summary in the original plan using the absolute `plan_file` path and the `summary_file_relative` path from the JSON:
+   Add a reference to the implementation summary in the original plan using the absolute `plan_file` path and the `summary_file_relative` path from the JSON. The three paths are passed as quoted arguments *after* the `-c` script and read via `sys.argv` — never substitute a shell variable inside a Python string literal (on Windows the expanded backslash paths would become invalid or silently corrupting escape sequences):
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python -c "
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python -c "
    from pathlib import Path
    import sys
-   sys.path.insert(0, '${CLAUDE_SKILL_DIR}')
+   sys.path.insert(0, sys.argv[1])
    from utils import insert_implementation_summary_reference
-   plan_path = Path('$PLAN_FILE')  # Use absolute plan_file from orchestrator JSON
+   plan_path = Path(sys.argv[2])  # absolute plan_file from orchestrator JSON
    content = plan_path.read_text()
-   summary_file = '$SUMMARY_FILE_RELATIVE'  # Use summary_file_relative from JSON
+   summary_file = sys.argv[3]  # summary_file_relative from JSON
    updated = insert_implementation_summary_reference(content, summary_file)
    plan_path.write_text(updated)
    print(f'Updated {plan_path} with reference to {summary_file}')
-   "
+   " "${CLAUDE_SKILL_DIR}" "$PLAN_FILE" "$SUMMARY_FILE_RELATIVE"
    ```
 
 11. **Report results** including:
@@ -451,14 +460,15 @@ This ensures `--resume` can recover the strategy without re-prompting.
 User: /multi-llm:multi-llm --implement plans/my-feature.md
 
 Claude:
-1. Runs: uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/implement_orchestrator.py --plan-file "$(realpath plans/my-feature.md)" --output /tmp/tasks.json
+1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+   then: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-feature.md --output "$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_my-feature.json"
 2. Orchestrator outputs:
-   - /tmp/tasks.json (5 tasks in 3 batches)
+   - $PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_my-feature.json (5 tasks in 3 batches)
    - State file: ${CLAUDE_SKILL_DIR}/state/abc123.json
    - Summary file path: plans/my-feature/my-feature_implementation_summary.md
    - Tasks file path: plans/my-feature/my-feature_tasks.md
    - Summary file relative: my-feature/my-feature_implementation_summary.md
-3. Claude reads /tmp/tasks.json
+3. Claude reads {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_my-feature.json (Read tool, absolute path)
 4. For each batch, Claude spawns Task subagents:
    - Batch 0 (1 task): Task(subagent_type="general-purpose", prompt="Create database schema...")
    - Batch 1 (2 tasks, parallel):

@@ -22,7 +22,7 @@ Task tool call:
        - Fix common syntax errors (trailing commas, etc.)
     3. Validate each item has the required fields from `expected_schema`
     4. Backup any existing file at `output_path` before overwriting:
-       uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/backup.py "{output_path}"
+       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/backup.py" "{output_path}"
        - If the file exists, it will be copied to: `{filename}-BEFORE-SALVAGE-{timestamp}.json`
        - Report "Backed up existing file to: {backup_path}" if backup was created
     5. Write the valid JSON array to `output_path`

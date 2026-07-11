@@ -58,7 +58,7 @@ Claude Code, a plain terminal, or CI.
    skill-directory path (per the SKILL.md path-resolution rules), then run:
 
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/init_config.py [--dir PATH] [--force] [--gitignore] [--template-only]
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/init_config.py" [--dir PATH] [--force] [--gitignore] [--template-only]
    ```
 
 3. **Report the result.** Print the path the script wrote and its git-tracking

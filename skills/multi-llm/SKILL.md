@@ -3,8 +3,14 @@ name: multi-llm
 description: "Orchestrate code plan reviews, task generation, implementation, and code reviews using multiple LLM providers in parallel, or ask each model a free-text question about a plan. Use this skill whenever the user wants to review a plan with multiple models, generate implementation tasks, implement tasks with subagent delegation, review code changes against a plan, ask the models a question about a plan, or run any multi-model workflow. Triggers on: 'review my plan', 'multi-llm', 'run code review', 'generate tasks from plan', 'implement this plan', 'use multiple models to review', 'ask the models about my plan', 'ask a question about this plan', '--ask'."
 allowed-tools:
   - Bash(uv:*)
+  - Bash(PYTHONUNBUFFERED=1 uv:*)
   - Bash(command -v uv)
-  - Bash(grep:.*)
+  - Bash(ls:*)
+  - Bash(grep:*)
+  - Bash(diff:*)
+  - Bash(realpath:*)
+  - Bash(git rev-parse:*)
+  - Bash(mkdir:*)
   - Read
   - Edit
   - Write
@@ -38,6 +44,12 @@ argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-task
 > path shown above before running the command or reading the file. The shell
 > does **not** export this variable, so never run a command that still contains
 > an unexpanded `CLAUDE_SKILL_DIR`.
+>
+> **Always double-quote the substituted skill path in shell commands** — write
+> `--project "${CLAUDE_SKILL_DIR}"` and `"${CLAUDE_SKILL_DIR}/script.py"`, never
+> the unquoted form. The path may contain spaces (e.g. Windows user profiles
+> like `C:\Users\John Smith\...`), and an unquoted expansion word-splits and
+> breaks the command.
 
 A unified skill for multi-LLM plan automation. Supports eleven workflow modes plus a status command:
 

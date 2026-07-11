@@ -848,13 +848,18 @@ class TestRoutingAndDocs:
     def test_instruction_file_exists_with_usage_and_invocation(self):
         ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
         assert "/multi-llm:multi-llm --ask" in ask_md
-        # Foreground --project orchestrator invocation.
-        assert "--project ${CLAUDE_SKILL_DIR}" in ask_md
+        # Foreground --project orchestrator invocation — the skill-dir expansion
+        # must be double-quoted (Windows install paths may contain spaces).
+        assert '--project "${CLAUDE_SKILL_DIR}"' in ask_md
         assert "ask_orchestrator.py" in ask_md
-        # Shell-safe mechanisms + realpath quoting.
+        # Shell-safe mechanisms + portable plan-path passing (Phase 3): the plan
+        # path is passed as given and the orchestrator resolves it natively —
+        # no $(realpath ...), whose POSIX /c/... output breaks native Windows
+        # processes.
         assert "--question-file" in ask_md
         assert "--question-env" in ask_md
-        assert '"$(realpath "$PLAN_PATH")"' in ask_md
+        assert '--plan-file "$PLAN_PATH"' in ask_md
+        assert '$(realpath "$PLAN_PATH")' not in ask_md
         # Single-quoted-question rule + error cases.
         assert "single argument" in ask_md
         assert "empty/whitespace-only question is an error" in ask_md or "empty question" in ask_md.lower()

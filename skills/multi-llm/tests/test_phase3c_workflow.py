@@ -130,8 +130,16 @@ EMPTY_GROUPED_ENVELOPE = {"format_version": 2, "groups": []}
 
 @pytest.fixture
 def temp_dir():
-    """Create a temporary directory for test files."""
+    """Create a temporary directory for test files.
+
+    Initialized as a git work tree: real plans always live inside a
+    repository, and implement_orchestrator's default --output fails fast
+    when the plan is outside one (its default path anchors at the git root).
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
+        subprocess.run(
+            ["git", "init", "-q"], cwd=tmpdir, check=True, capture_output=True
+        )
         yield Path(tmpdir)
 
 

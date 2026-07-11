@@ -164,10 +164,10 @@ If not found, inform user to run `--review-code` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" [options]
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" [options]
 ```
 
-**IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
+**IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
 **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
 
@@ -198,7 +198,7 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which fixes will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/display_decisions.py --plan-file "$(realpath "$PLAN_PATH")" --phase apply-code-fixes
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" --plan-file "$PLAN_PATH" --phase apply-code-fixes
 ```
 
 This prints a formatted summary with each fix's title and status. Display this output to the user before proceeding.
@@ -219,7 +219,7 @@ Use the batch data already loaded from the Read tool in step 4. Do NOT use Bash/
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
   --state-file "$STATE_FILE" --phase "apply-code-fixes" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -228,7 +228,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/prior_changes.py read \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" read \
      --output-dir "{plan}/apply-fixes"
    ```
    Capture stdout as `prior_changes_text`.
@@ -254,7 +254,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/prior_changes.py append \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" append \
      --output-dir "{plan}/apply-fixes" \
      --id "{file_key}" --phase "apply-fixes" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
@@ -269,7 +269,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 8. **Log the result** - Track success/failure for the summary
 9. **Record metrics** — Run:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
      --label "Batch {N} ({file_key})" --subagent-type "{subagent_type}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -281,7 +281,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
   --state-file "$STATE_FILE" --phase "apply-code-fixes"
 ```
 
@@ -376,14 +376,14 @@ Fixes whose decision was offloaded to Claude — via `--claude-decide`, the batc
 
    Generate resource usage:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
      --state-file "$STATE_FILE" --phase "apply-code-fixes"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/code-review/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/html_report_generator.py \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/html_report_generator.py" \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/code-review" \
      --state-file "$STATE_FILE" \
@@ -627,7 +627,7 @@ Fix 2: [What was changed]
 To process fixes one-at-a-time (legacy mode):
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-batch
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -685,14 +685,14 @@ If validation produces many `validation_failed` items due to parsing errors or t
 
 ```bash
 # Option 1: Re-run validation with a different model
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --revalidate \
   --revalidate-model cursor-agent:opus
 
 # Option 2: Bulk approve validation failures (if you trust the fixes)
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --approve-validation-failed
 ```
 
@@ -810,13 +810,13 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --fresh
 ```
 

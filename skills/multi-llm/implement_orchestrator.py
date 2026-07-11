@@ -36,7 +36,9 @@ from utils import (
     get_staged_files,
     get_current_head,
 )
+from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import get_phase_dir, get_output_dir
+from utils.git_utils import get_project_root
 from check_workflow_prerequisites import check_apply_task_suggestions_prerequisite
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
 
     # Count valid suggestions
     try:
-        with open(validation_path, 'r') as f:
+        with open(validation_path, 'r', encoding='utf-8') as f:
             validation = json.load(f)
         valid_count = sum(1 for v in validation.values() if v.get("status") == "valid")
         if valid_count == 0:
@@ -88,8 +90,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--output',
         type=str,
-        default='/tmp/implementation_tasks.json',
-        help='Output path for tasks JSON (default: /tmp/implementation_tasks.json)'
+        default=None,
+        help='Output path for tasks JSON (default: '
+             '<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json, '
+             'resolved from the plan file after argument parsing)'
     )
 
     parser.add_argument(
@@ -111,6 +115,54 @@ def parse_args() -> argparse.Namespace:
     )
 
     return parser.parse_args()
+
+
+def resolve_default_output(plan_path: Path) -> str:
+    """Resolve the default --output path anchored at the git project root.
+
+    The default lives inside the repo workspace
+    (``<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json``) so
+    the Bash side and harness Read/Write tools resolve the same file on every
+    OS. This must stay byte-identical to the path documented in
+    ``instructions/implement.md``. Never fall back to the system temp dir
+    (``tempfile.gettempdir()``): on Git for Windows the MSYS ``/tmp`` and the
+    native temp dir are different directories, which is exactly the boundary
+    hazard this default avoids.
+
+    Args:
+        plan_path: Resolved path to the plan file (used both for git-root
+            detection and for the ``{plan_stem}`` filename suffix).
+
+    Returns:
+        Absolute output path as a string.
+
+    Exits:
+        With status 1 when the plan file is not inside a git work tree.
+    """
+    project_root = get_project_root(str(plan_path))
+    if not project_root:
+        print("ERROR: multi-llm requires running inside a git repository")
+        print("       (the default --output path is anchored at the git root; "
+              "run from within a repository or pass --output explicitly)")
+        sys.exit(1)
+    return str(
+        Path(project_root) / ".multi-llm" / "tmp"
+        / f"implementation_tasks_{plan_path.stem}.json"
+    )
+
+
+def _write_temp_dir_gitignore(directory: Path) -> None:
+    """Make ``.multi-llm/tmp/`` self-ignoring by writing ``.gitignore`` (``*``).
+
+    Only applies when ``directory`` actually is a ``.multi-llm/tmp`` dir (a
+    user-supplied ``--output`` elsewhere must not receive a stray ignore-all
+    file). Keeps transient run artifacts out of ``git status`` regardless of
+    whether the consuming repo ever ran ``--init --gitignore``.
+    """
+    if directory.name == "tmp" and directory.parent.name == ".multi-llm":
+        gitignore_path = directory / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text("*\n", encoding="utf-8")
 
 
 def record_pre_existing_changes(state: StateManager) -> None:
@@ -441,6 +493,7 @@ def format_batches_for_output(
 
 def main():
     """Main entry point."""
+    bootstrap_streams()
     args = parse_args()
 
     # Validate plan file (resolve to absolute path first to handle
@@ -450,6 +503,12 @@ def main():
         print(f"ERROR: Plan file not found: {args.plan_file}")
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
+
+    # Resolve the default --output now that the plan argument is known (the
+    # default depends on the git root and the plan stem, so it cannot be a
+    # static argparse default).
+    if args.output is None:
+        args.output = resolve_default_output(plan_path)
 
     # Load plan
     plan_content = plan_path.read_text(encoding="utf-8")
@@ -623,6 +682,7 @@ def main():
     # Write output JSON
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_temp_dir_gitignore(output_path.parent)
     output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
 
     # Print summary

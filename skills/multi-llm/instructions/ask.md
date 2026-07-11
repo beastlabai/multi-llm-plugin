@@ -67,30 +67,64 @@ two layers cannot diverge.
    `$PLAN_PATH`) would break the invocation or execute unintended shell syntax.
    Use a safe argv-construction mechanism, in this order of preference:
 
-   **Preferred — write the question to a temp file and pass `--question-file`.**
-   Write the verbatim question bytes to a temp file (no trailing newline — use
-   `printf '%s'`), so no question bytes ever transit the shell command line:
+   **Preferred — write the question to a workspace temp file and pass
+   `--question-file`.** Temp artifacts live in the workspace temp dir
+   `$PROJECT_ROOT/.multi-llm/tmp/` (never the system temp dir, so Bash, native
+   processes, and harness tools resolve the same file on every OS). Resolve the
+   project root first and treat failure as a hard prerequisite failure:
 
    ```bash
-   QUESTION_TMPFILE="$(mktemp)"
-   printf '%s' "$RAW_QUESTION" > "$QUESTION_TMPFILE"
-   PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- \
-     python ${CLAUDE_SKILL_DIR}/ask_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" --question-file "$QUESTION_TMPFILE" [--models ...] \
+   PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+   ```
+
+   If the command fails or `$PROJECT_ROOT` is empty, STOP with the error:
+   "multi-llm requires running inside a git repository." Never fall back to a
+   relative path or `$PWD`.
+
+   Then write the **verbatim question text** (no trailing newline) with the
+   **Write tool** (NOT Bash) — no question bytes ever transit the shell command
+   line, and the Write tool creates parent directories automatically:
+
+   - file_path: `{PROJECT_ROOT}/.multi-llm/tmp/ask_question_{plan_stem}.txt`
+     (absolute path — join the resolved project root with the relative part;
+     `{plan_stem}` is the plan filename without extension)
+   - content: the raw question text exactly as the user supplied it
+   - If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also
+     Write it with content `*` so the temp dir ignores itself. Filenames are
+     deterministic per plan: each run overwrites the previous file — there is
+     no cleanup step, and the user may delete `.multi-llm/tmp/` at any time
+     (the next run recreates it).
+
+   Then launch the orchestrator, passing the same path in Bash:
+
+   ```bash
+   QUESTION_FILE="$PROJECT_ROOT/.multi-llm/tmp/ask_question_{plan_stem}.txt"
+   PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- \
+     python "${CLAUDE_SKILL_DIR}/ask_orchestrator.py" \
+     --plan-file "$PLAN_PATH" --question-file "$QUESTION_FILE" [--models ...] \
      > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
    ```
 
    (Launch DETACHED — see step 3. The `<question-slug>-<hash8>` log dir matches the
-   orchestrator's output dir; if you don't know it yet, redirect to a temp log such
-   as `$(mktemp)` and read markers/paths from there.)
+   orchestrator's output dir; if you don't know it yet, redirect to the workspace
+   temp log instead — a Bash redirect does not create directories, so include the
+   `mkdir -p` in the same command block:
+
+   ```bash
+   mkdir -p "$PROJECT_ROOT/.multi-llm/tmp"
+   ... > "$PROJECT_ROOT/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log" 2>&1
+   ```
+
+   then read markers/paths from that log with the Read tool, using the absolute
+   path built from the resolved project root.)
 
    **Alternatively — pass the question via a strictly-quoted environment
    variable** the orchestrator reads:
 
    ```bash
-   ASK_QUESTION="$RAW_QUESTION" uv run --project ${CLAUDE_SKILL_DIR} -- \
-     python ${CLAUDE_SKILL_DIR}/ask_orchestrator.py \
-     --plan-file "$(realpath "$PLAN_PATH")" --question-env ASK_QUESTION [--models ...]
+   ASK_QUESTION="$RAW_QUESTION" uv run --project "${CLAUDE_SKILL_DIR}" -- \
+     python "${CLAUDE_SKILL_DIR}/ask_orchestrator.py" \
+     --plan-file "$PLAN_PATH" --question-env ASK_QUESTION [--models ...]
    ```
 
    **If passing `--question "<text>"` inline is unavoidable**, the value **must**
@@ -98,11 +132,13 @@ two layers cannot diverge.
    escaped. Prefer the temp-file or env-var mechanisms above precisely so this
    brittle escaping is never required.
 
-   Always quote `"$(realpath "$PLAN_PATH")"` consistently (inner **and** outer
-   quotes) regardless of which question-passing mechanism is used. Use
-   `--project`, not `--directory` (known path-duplication bug). Exactly one of
-   `--question` / `--question-file` / `--question-env` is required (they are
-   mutually exclusive).
+   Always quote `"$PLAN_PATH"`, and pass it **as given** — the orchestrator
+   resolves it to an OS-native absolute path itself. Do NOT wrap it in
+   `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...`
+   path that a native Windows Python process cannot use. Use `--project`, not
+   `--directory` (known path-duplication bug). Exactly one of `--question` /
+   `--question-file` / `--question-env` is required (they are mutually
+   exclusive).
 
 3. **Run the orchestrator DETACHED** (Critical Rule 1). Ask mode fans out across
    many models and routinely runs well past **10 minutes** — and the Claude Code
@@ -113,8 +149,8 @@ two layers cannot diverge.
    `PYTHONUNBUFFERED=1` (see the command block in step 2):
 
    ```bash
-   ... ask_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" \
-     --question-file "$QUESTION_TMPFILE" [--models ...] \
+   ... ask_orchestrator.py --plan-file "$PLAN_PATH" \
+     --question-file "$QUESTION_FILE" [--models ...] \
      > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
    ```
 

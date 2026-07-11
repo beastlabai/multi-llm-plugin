@@ -165,7 +165,10 @@ class TestParseArgs:
             args = parse_args()
 
         assert args.plan_file == 'plans/my-plan.md'
-        assert args.output == '/tmp/implementation_tasks.json'  # default
+        # The default output is resolved AFTER parsing (it depends on the git
+        # root and the plan stem — see resolve_default_output), so argparse
+        # leaves it unset.
+        assert args.output is None
         assert args.resume is False
         assert args.dry_run is False
         assert args.task is None
@@ -218,6 +221,44 @@ class TestParseArgs:
         with patch.object(sys, 'argv', ['implement_orchestrator.py'] + test_args):
             with pytest.raises(SystemExit):
                 parse_args()
+
+
+class TestDefaultOutputResolution:
+    """Tests for the git-root-anchored default --output path (Phase 3).
+
+    The default must stay byte-identical to the path documented in
+    instructions/implement.md
+    (<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json) and must
+    never fall back to the system temp dir.
+    """
+
+    def test_default_output_uses_git_root_and_plan_stem(self):
+        """Expected path is computed with the same primitives the code uses
+        (get_project_root() + plan stem + Path joining) — never a hardcoded
+        POSIX-separator literal, which would pass on Linux while silently
+        diverging on Windows."""
+        from implement_orchestrator import resolve_default_output
+        from utils.git_utils import get_project_root
+
+        # A plan path inside this repo, so git-root detection succeeds.
+        plan_path = (Path(__file__).parent / "my-sample-plan.md").resolve()
+        project_root = get_project_root(str(plan_path))
+        assert project_root, "test suite must run from inside the git repo"
+
+        expected = Path(project_root) / ".multi-llm" / "tmp" / (
+            f"implementation_tasks_{plan_path.stem}.json"
+        )
+        assert resolve_default_output(plan_path) == str(expected)
+
+    def test_default_output_fails_fast_outside_git_repo(self, temp_dir):
+        """Outside a git work tree the resolution exits with an error instead
+        of falling back to tempfile.gettempdir()."""
+        from implement_orchestrator import resolve_default_output
+
+        plan_path = temp_dir / "plan.md"
+        with patch('implement_orchestrator.get_project_root', return_value=None):
+            with pytest.raises(SystemExit):
+                resolve_default_output(plan_path)
 
 
 class TestRecordPreExistingChanges:
@@ -815,6 +856,42 @@ class TestTaskProcessing:
         assert data["total_tasks"] == 1
         assert len(data["batches"]) == 1
         assert data["batches"][0]["tasks"][0]["id"] == "T001"
+
+    def test_creates_nested_workspace_tmp_output_and_gitignore(self, sample_plan_with_tasks, mock_state_manager, temp_dir):
+        """Regression (Phase 3): the nested `.multi-llm/tmp/...` output path is
+        created on demand (mkdir parents=True covers the new default) and the
+        temp dir is made self-ignoring via a `.gitignore` containing `*`."""
+        from implement_orchestrator import main
+
+        output_path = temp_dir / ".multi-llm" / "tmp" / "implementation_tasks_sample-plan.json"
+        assert not output_path.parent.exists()
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('implement_orchestrator.get_output_paths', return_value=temp_dir / "tasks.md"), \
+             patch('implement_orchestrator.get_relative_output_path', return_value="tasks.md"), \
+             patch('sys.exit'):
+
+            mock_args.return_value = MagicMock(
+                plan_file=str(sample_plan_with_tasks),
+                output=str(output_path),
+                resume=False,
+                task=None,
+                dry_run=False
+            )
+
+            main()
+
+        # Task JSON landed in the freshly-created nested directory
+        assert output_path.exists()
+        data = json.loads(output_path.read_text())
+        assert data["total_tasks"] == 3
+
+        # The temp dir ignores itself so run artifacts never hit git status
+        gitignore_path = output_path.parent / ".gitignore"
+        assert gitignore_path.exists()
+        assert gitignore_path.read_text(encoding="utf-8").strip() == "*"
 
     def test_task_not_found_exits(self, sample_plan_with_tasks, mock_state_manager, temp_dir):
         """Test that requesting non-existent task exits with error."""

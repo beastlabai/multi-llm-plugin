@@ -53,12 +53,12 @@ By default, full mode still stops to ask you a few questions (model selection, `
 Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-plan.md` and execute.
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --models <selected>
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the orchestrator instead of `--models`:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --quick
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --quick
 ```
 
 Wait for completion, then proceed to Phase 2.
@@ -71,7 +71,7 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 1. Run the consolidation orchestrator:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --consolidate
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --consolidate
    ```
 
 2. Handle subagent batches using the same Strategy A/B logic from review-plan instructions:
@@ -83,7 +83,7 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 3. Run reaggregation:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --reaggregate-consolidation
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --reaggregate-consolidation
    ```
 
 4. Present consolidated report paths to user:
@@ -98,12 +98,12 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-suggestions.md` and execute.
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended (Claude judges every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --claude-decide --no-confirm
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase applies validated suggestions sequentially:
@@ -147,29 +147,37 @@ Task tool call:
        - Set appropriate subagent_type:
          - general-purpose: All implementation tasks (default)
          - human: Manual steps requiring user action
-    4. Write the tasks JSON to a temporary file:
-       cat > /tmp/generated_tasks_{plan_stem}.json << 'EOF'
-       {
-         "plan_preamble": "3-5 sentences: overall goal, architecture, tech choices, conventions",
-         "tasks": [
-           {
-             "id": "T001",
-             "title": "Short title (5-10 words)",
-             "description": "Detailed description (2-5 sentences)",
-             "depends_on": [],
-             "files_to_modify": [],
-             "files_to_create": [],
-             "acceptance_criteria": [],
-             "estimated_complexity": "low|medium|high",
-             "subagent_type": "general-purpose"
-           }
-         ]
-       }
-       EOF
+    4. Write the tasks JSON to a temporary file using the Write tool (NOT Bash):
+       - Resolve the project root first: PROJECT_ROOT=$(git rev-parse --show-toplevel)
+         (if this fails or prints nothing, STOP: multi-llm requires running inside
+         a git repository — never fall back to a relative path or $PWD)
+       - file_path: {PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json
+         (absolute path; the Write tool creates parent directories automatically —
+         no mkdir step. Use plan stem in filename to avoid conflicts if multiple
+         instances run; each run overwrites the previous file, no cleanup step.)
+       - content: a JSON document of this shape:
+         {
+           "plan_preamble": "3-5 sentences: overall goal, architecture, tech choices, conventions",
+           "tasks": [
+             {
+               "id": "T001",
+               "title": "Short title (5-10 words)",
+               "description": "Detailed description (2-5 sentences)",
+               "depends_on": [],
+               "files_to_modify": [],
+               "files_to_create": [],
+               "acceptance_criteria": [],
+               "estimated_complexity": "low|medium|high",
+               "subagent_type": "general-purpose"
+             }
+           ]
+         }
+       - If {PROJECT_ROOT}/.multi-llm/tmp/.gitignore does not exist yet, also
+         Write it with content `*` so the temp dir ignores itself
     5. Run the update script:
-       uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/update_plan_tasks.py \
+       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" \
          --plan-file "{PLAN_PATH_ABSOLUTE}" \
-         --tasks-file /tmp/generated_tasks_{plan_stem}.json
+         --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
     6. Report: number of tasks generated, task IDs with titles, and the tasks file path.
 
     ## Constraints
@@ -178,7 +186,7 @@ Task tool call:
     - Do NOT run any prerequisite checks (Step 0) — already handled
 ```
 
-Where `{PLAN_PATH_ABSOLUTE}` is `$(realpath "$PLAN_PATH")` and `{plan_stem}` is the plan filename without extension.
+Where `{PLAN_PATH_ABSOLUTE}` is the OS-native absolute path to the plan file — join the resolved project root (`git rev-parse --show-toplevel`) with the plan path relative to it. Do NOT compute it with `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that neither harness tools nor native processes can use. `{plan_stem}` is the plan filename without extension.
 
 **Error handling**: After the subagent completes:
 
@@ -199,7 +207,7 @@ After task generation completes successfully, determine whether to run the revie
 **No-TTY automation without `--yes`**: When running in a non-interactive context (no TTY) and `--yes` was NOT passed, skip `review-tasks` by default without prompting. To opt in during such runs, the user must pass `--review-tasks` (or `--yes`) explicitly on the CLI. If skipping without prompt, run:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode review-tasks --skip --reason "Non-interactive mode: skipped by default"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks --skip --reason "Non-interactive mode: skipped by default"
 ```
 
 Then proceed directly to Phase 3c.
@@ -215,7 +223,7 @@ Then proceed directly to Phase 3c.
 **If no**: Mark the phase as skipped for workflow tracking so `--status` output and rerun logic never show review-tasks as perpetually pending:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode review-tasks --skip --reason "User declined"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks --skip --reason "User declined"
 ```
 
 Then proceed to Phase 3c.
@@ -229,7 +237,7 @@ After Phase 3b completes (or is skipped), determine whether to run the apply-tas
 **(a) Review-tasks was skipped**: If Phase 3b was skipped (user declined or non-interactive mode), skip apply-task-suggestions as well. Record the skip:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks was not executed"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks was not executed"
 ```
 
 Then proceed directly to Phase 4.
@@ -237,7 +245,7 @@ Then proceed directly to Phase 4.
 **(b) Review-tasks ran but produced zero findings**: Check `{plan}/review-tasks/grouped.json`. If the file exists but contains zero groups (empty `groups` array or all groups have zero valid suggestions), skip apply-task-suggestions:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks produced zero findings"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks produced zero findings"
 ```
 
 Then proceed directly to Phase 4.
@@ -245,12 +253,12 @@ Then proceed directly to Phase 4.
 **(c) Review-tasks produced findings**: If `{plan}/review-tasks/grouped.json` contains valid findings, auto-run apply-task-suggestions:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-confirm
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-confirm
 ```
 
 If `--yes` (or `--non-interactive`) was specified, also append `--claude-decide` so any `needs-human-decision` task suggestions are judged by Claude rather than prompted:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-confirm --claude-decide
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-confirm --claude-decide
 ```
 
 This phase:
@@ -267,7 +275,7 @@ Follow the full apply-task-suggestions instruction file (`${CLAUDE_SKILL_DIR}/in
 Load instructions from `${CLAUDE_SKILL_DIR}/instructions/implement.md` and execute.
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/implement_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH"
 ```
 
 Wait for completion, then proceed to Phase 5.
@@ -277,12 +285,12 @@ Wait for completion, then proceed to Phase 5.
 Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-code.md` and execute.
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --models <selected>
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the code review orchestrator:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --quick
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file "$PLAN_PATH" --quick
 ```
 
 Use the **same models resolved in Phase 1** (Critical Rule 4). Under `--yes`, resolve models the same non-interactive way as Phase 1 (never prompt). This phase only *reviews* the code and produces `{plan}/code-review/` outputs — the fixes are applied in Phase 6.
@@ -296,7 +304,7 @@ Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-code-fixes.md` an
 **Conditional — skip if there is nothing to apply.** Check `{plan}/code-review/grouped.json`. If it does not exist, or contains zero groups / zero valid (HIGH/MEDIUM) findings, skip this phase:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode apply-code-fixes --skip --reason "Skipped: code review produced zero actionable findings"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-code-fixes --skip --reason "Skipped: code review produced zero actionable findings"
 ```
 
 Then proceed to the report.
@@ -304,12 +312,12 @@ Then proceed to the report.
 **Otherwise, run the apply-code-fixes orchestrator:**
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --claude-decide --no-confirm
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase:
@@ -379,7 +387,7 @@ After all phases complete, provide a comprehensive summary:
 
    Generate combined resource usage:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
      --state-file "$STATE_FILE" --all-phases
    ```
    Include the output (if non-empty) after "### All Output Files".

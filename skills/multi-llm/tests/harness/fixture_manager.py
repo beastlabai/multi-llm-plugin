@@ -6,6 +6,7 @@ Creates isolated test directories and validates fixtures against JSON schemas.
 
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -121,6 +122,17 @@ class FixtureManager:
 
         # Create tmp_path structure
         self.tmp_path.mkdir(parents=True, exist_ok=True)
+
+        # Make the fixture dir a git work tree: real plans always live inside a
+        # repository, and implement_orchestrator's default --output fails fast
+        # when the plan is outside one (its default path anchors at the git root).
+        if not (self.tmp_path / ".git").exists():
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=str(self.tmp_path),
+                check=True,
+                capture_output=True,
+            )
 
     def create_plan(
         self,

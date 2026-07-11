@@ -147,10 +147,10 @@ If not found, inform user to run `--review-tasks` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" [options]
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" [options]
 ```
 
-**IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path.
+**IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
 **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
 
@@ -192,7 +192,7 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which suggestions will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/display_decisions.py --plan-file "$(realpath "$PLAN_PATH")" --phase apply-task-suggestions
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" --plan-file "$PLAN_PATH" --phase apply-task-suggestions
 ```
 
 This prints a formatted summary with each suggestion's title and status. Display this output to the user before proceeding.
@@ -213,7 +213,7 @@ Use the batch data already loaded from the Read tool in step 4. Do NOT use Bash/
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
   --state-file "$STATE_FILE" --phase "apply-task-suggestions" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -222,7 +222,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/prior_changes.py read \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" read \
      --output-dir "{plan}/apply-task-suggestions"
    ```
    Capture stdout as `prior_changes_text`.
@@ -231,15 +231,18 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
 
-3. **Read current tasks.md state and snapshot it** — Always read the latest version of tasks.md before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git. Use the `tasks_file` path from `orchestrator_output.json` as `$TASKS_PATH`:
+3. **Read current tasks.md state and snapshot it** — Always read the latest version of tasks.md before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git. (tasks.md is frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed it. Snapshot the file and diff against the snapshot instead.)
+
+   The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository". Use the `tasks_file` path from `orchestrator_output.json` as `$TASKS_PATH`:
    ```bash
-   # tasks.md is frequently untracked (freshly created). Every `git diff` variant
-   # silently ignores fully-untracked files, so it CANNOT detect whether a batch
-   # changed tasks.md. Snapshot the file and diff against the snapshot instead.
    TASKS_PATH="<tasks_file from orchestrator_output.json>"
-   BATCH_SNAPSHOT="$(mktemp)"
-   cp "$TASKS_PATH" "$BATCH_SNAPSHOT"
+   PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+   BATCH_SNAPSHOT="$PROJECT_ROOT/.multi-llm/tmp/batch_snapshot_{plan_stem}.md"
    ```
+   Where `{plan_stem}` is the plan filename without extension.
+
+   Capture the snapshot with harness tools, not Bash: **Read** `$TASKS_PATH` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
+
    This batch only ever touches the single `tasks.md` file, so one snapshot covers it. Keep `$BATCH_SNAPSHOT` for step 6.
 
 4. **Spawn a Task subagent** using the substituted prompt
@@ -251,12 +254,12 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
    ```bash
    diff -u "$BATCH_SNAPSHOT" "$TASKS_PATH"
    ```
-   An empty diff means the file is byte-for-byte unchanged; a non-empty diff means it was modified. (If you do want git's view, first run `git add -N -- "$TASKS_PATH"` so an untracked tasks.md shows up — but the snapshot diff above is the authoritative detector here.) Classify the result:
+   An empty diff means the file is byte-for-byte unchanged; a non-empty diff means it was modified. The snapshot diff is the authoritative, fully git-independent detector — no git intent-to-add step is needed here (flows that genuinely need untracked files visible to git diffs, like code review, handle that inside their Python orchestrator via `utils/git_utils.intent_to_add_untracked`). Classify the result:
    - **Success**: The snapshot diff is non-empty **and** the expected changes are present (grep spot-check the modified tasks.md for the intended task IDs / fields from the batch).
    - **Failure (clean)**: The subagent failed **and** the snapshot diff is empty (tasks.md is byte-for-byte identical to its pre-batch snapshot).
    - **Partial application**: The snapshot diff is non-empty but the expected changes are incomplete, **or** the subagent failed but the snapshot diff is non-empty.
 
-   On **success** or **clean failure**, remove the snapshot (`rm -f "$BATCH_SNAPSHOT"`). On **partial application**, keep `$BATCH_SNAPSHOT` so a human can inspect what changed.
+   There is **no snapshot cleanup step**: the snapshot lives in the self-gitignored workspace temp dir and is simply overwritten by the next batch. On **partial application** the loop stops (below), so `$BATCH_SNAPSHOT` still holds the pre-batch content for a human to inspect.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 
@@ -266,7 +269,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 8. **Append to prior changes (only after verification)** — This step runs **only** after step 6 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/prior_changes.py append \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" append \
      --output-dir "{plan}/apply-task-suggestions" \
      --id "{section_key}" --phase "apply-task-suggestions" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
@@ -281,7 +284,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 9. **Log the result** - Track success/failure for the summary
 10. **Record metrics** — Run:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions" \
      --label "Batch {N} ({section_key})" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -293,7 +296,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
   --state-file "$STATE_FILE" --phase "apply-task-suggestions"
 ```
 
@@ -368,14 +371,14 @@ Suggestions whose decision was offloaded to Claude — via `--claude-decide`, th
 
    Generate resource usage:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/review-tasks/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/html_report_generator.py \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/html_report_generator.py" \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/review-tasks" \
      --state-file "$STATE_FILE" \
@@ -388,7 +391,7 @@ Suggestions whose decision was offloaded to Claude — via `--claude-decide`, th
 After the summary report is generated, mark the apply-task-suggestions phase as completed in state.json:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --mark-completed
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --mark-completed
 ```
 
 This ensures subsequent phases (e.g., `--implement`) recognize that task suggestions have been applied.
@@ -655,7 +658,7 @@ Suggestion N: Already addressed by prior changes - skipped
 To process suggestions one-at-a-time (legacy mode):
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file "$(realpath "$PLAN_PATH")" --no-batch
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -673,13 +676,13 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" \
+  --plan-file "$PLAN_PATH" \
   --fresh
 ```
 

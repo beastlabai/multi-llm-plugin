@@ -58,7 +58,7 @@ When items have `needs-human-decision` status, Claude should use `AskUserQuestio
 Before reviewing tasks, verify that `generate-tasks` has been completed:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode review-tasks
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks
 ```
 
 Parse the JSON output. If `prerequisites_met` is `false`:
@@ -98,12 +98,12 @@ Check for existing output to avoid expensive duplicate runs. Follow the detectio
 A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
 
 ```bash
-PYTHONUNBUFFERED=1 uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" --models <selected> \
+PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --models <selected> \
   > "{plan}/review-tasks/orchestrator-run.log" 2>&1
 ```
 
-**IMPORTANT**: Always use `$(realpath "$PLAN_PATH")` to convert to absolute path, and `--project` (not `--directory`).
+**IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
 Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-tasks/orchestrator-run.log`**, not from terminal stdout.
 
@@ -124,8 +124,8 @@ After the background task completes, check the log file `{plan}/review-tasks/orc
 
 The reaggregation command for this mode is:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" --reaggregate
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --reaggregate
 ```
 
 ### 6. Validation Handling (Post-Orchestrator)
@@ -205,7 +205,7 @@ If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
 1. Read `validation_tasks.json` once from `{plan}/review-tasks/`
 2. Count the number of batches as `{total_batches}` and mark the phase start:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py start \
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
      --state-file "$STATE_FILE" --phase "review-tasks" --total-batches {total_batches}
    ```
 3. Choose a strategy:
@@ -226,8 +226,8 @@ Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
 After validation completes, run the `reaggregate_command` from validation_tasks.json:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py \
-  --plan-file "$(realpath "$PLAN_PATH")" --reaggregate
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --reaggregate
 ```
 
 **CRITICAL**: Do NOT report results to the user until reaggregation is complete.
@@ -242,7 +242,7 @@ Report all generated files in `{plan}/review-tasks/`:
 
 **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py record \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
   --state-file "$STATE_FILE" --phase "review-tasks" \
   --label "Validation batch {N}" --subagent-type "general-purpose" \
   --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -252,13 +252,13 @@ Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. 
 
 After all batches and reaggregation finish, mark the phase finish:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py finish \
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
   --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 Optionally generate and include resource usage report:
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/utils/metrics.py report --state-file "$STATE_FILE" --phase "review-tasks"
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 #### High-Volume Results (>25 groups)

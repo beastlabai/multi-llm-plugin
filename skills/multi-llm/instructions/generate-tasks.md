@@ -27,13 +27,14 @@ Generates detailed implementation tasks from a high-level plan. **Claude Code it
 
 4. **Output Tasks as JSON**
    - Generate JSON matching the schema below
-   - Write to temporary file using Bash with `cat > file << 'EOF'` (not Write tool, which requires reading first)
-   - Use unique filename based on plan name to avoid conflicts: `/tmp/generated_tasks_{plan_stem}.json`
+   - Write it with the **Write tool** (NOT Bash) to the workspace temp dir:
+     `{PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json`
+   - Use unique filename based on plan name to avoid conflicts (full details in Step-by-Step Execution step 5)
 
 5. **Update the Plan**
    - Call the helper script to insert tasks into the plan:
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/update_plan_tasks.py --plan-file "$(realpath "$PLAN_PATH")" --tasks-file /tmp/generated_tasks_{plan_stem}.json
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" --plan-file "$PLAN_PATH" --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
    ```
 
 ## Task JSON Schema
@@ -204,7 +205,7 @@ When running `--implement`, the orchestrator checks if the plan has tasks:
 Before generating tasks, check if there are unapplied suggestions from plan review:
 
 ```bash
-uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py --plan-file "$(realpath "$PLAN_PATH")" --mode generate-tasks
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode generate-tasks
 ```
 
 Parse the JSON output. If `prerequisites_met` is `false`:
@@ -220,7 +221,7 @@ Parse the JSON output. If `prerequisites_met` is `false`:
      3. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
 
      **Do NOT** proceed further. Stop execution after displaying this message.
-   - **"Skip suggestions, proceed"**: Run `uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file "$PLAN_PATH" --skip` to mark as skipped, then continue
+   - **"Skip suggestions, proceed"**: Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip` to mark as skipped, then continue
    - **"Cancel"**: Stop and inform the user that generate-tasks was cancelled
 
 If `prerequisites_met` is `true`, proceed with task generation.
@@ -246,19 +247,29 @@ If `prerequisites_met` is `true`, proceed with task generation.
    - Write descriptions covering what, how, and interface contracts (see Task Descriptions guidance above)
    - Define specific, verifiable acceptance criteria for each task (see Acceptance Criteria guidance above)
 
-5. **Write tasks JSON to temporary file:**
-   ```bash
-   # Use Bash with heredoc (Write tool requires reading first, which fails for new files)
-   # Use plan stem in filename to avoid conflicts if multiple instances run
-   cat > /tmp/generated_tasks_{plan_stem}.json << 'EOF'
-   [... JSON content ...]
-   EOF
-   ```
+5. **Write tasks JSON to a temporary file using the Write tool (NOT Bash):**
+   - Resolve the project root first: `PROJECT_ROOT=$(git rev-parse --show-toplevel)`.
+     If this fails or prints nothing, STOP with the error: "multi-llm requires
+     running inside a git repository." Never fall back to a relative path or `$PWD`.
+   - file_path: `{PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json`
+     (absolute path; the Write tool creates parent directories automatically —
+     no mkdir step. Use plan stem in filename to avoid conflicts if multiple
+     instances run.)
+   - content: the tasks JSON document
+   - If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write
+     it with content `*` so the temp dir ignores itself (run artifacts must never
+     appear in `git status`).
+   - Cleanup semantics: filenames are deterministic per plan, so each run simply
+     overwrites the previous run's file. No deletion step exists or is needed;
+     the user may delete `.multi-llm/tmp/` at any time — the next run recreates it.
 
 6. **Run the update script:**
    ```bash
-   uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/update_plan_tasks.py --plan-file "$(realpath "$PLAN_PATH")" --tasks-file /tmp/generated_tasks_{plan_stem}.json
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" --plan-file "$PLAN_PATH" --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
    ```
+   Pass `$PLAN_PATH` as given — the script resolves it to an OS-native absolute
+   path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that
+   emits a POSIX `/c/...` path a native process cannot use).
 
 7. **Report results:**
    - Path to generated tasks file (`{plan_subfolder}/{plan_stem}_tasks.md`)

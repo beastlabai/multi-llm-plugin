@@ -18,6 +18,10 @@ htmlcov/
 # Test scratch: integration tests generate fixtures under the skill's plans/ dir
 skills/multi-llm/plans/
 
+# Multi-LLM local config & workspace temp dir (this repo dogfoods its own skill;
+# .multi-llm/tmp/ is additionally self-ignored via its own .gitignore in consuming repos)
+.multi-llm/
+
 # Multi-LLM generated artifacts (plan-local state & outputs)
 # These are created next to plans at runtime and must not be committed.
 **/plans/**/state.json
