@@ -49,7 +49,7 @@ Description here.
 Another description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == set()
 
@@ -75,7 +75,7 @@ Description here.
 Another description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == {"S002"}
 
@@ -111,7 +111,7 @@ Another description.
 Third description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == {"S001", "S003"}
 
@@ -143,7 +143,7 @@ Description.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == {"S001", "S002", "S003"}
 
@@ -172,7 +172,7 @@ Description.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == {"S001", "S002"}
 
@@ -204,7 +204,7 @@ Description.
 **Validation:** ✓ Valid
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_suggestions(str(report))
         assert result == {"S001", "S002", "S003", "S004"}
 
@@ -294,7 +294,7 @@ Description.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_issues(str(report))
         assert result == set()
 
@@ -320,7 +320,7 @@ Description.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_issues(str(report))
         assert result == {2}
 
@@ -346,7 +346,7 @@ Description.
 **Validation:** ✗ Invalid
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_issues(str(report))
         assert result == {1, 3}
 
@@ -398,7 +398,7 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == set()
 
@@ -414,7 +414,7 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == {"aabb000000000001"}
 
@@ -446,7 +446,7 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == {"aabb000000000001", "aabb000000000003"}
 
@@ -464,7 +464,7 @@ class TestParseSkippedGroups:
 - [ x ] skip this group
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == {"aabb000000000001", "aabb000000000002"}
 
@@ -487,7 +487,7 @@ class TestParseSkippedGroups:
 - [x] Skip This Group
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == {"aabb000000000001", "aabb000000000002", "aabb000000000003"}
 
@@ -503,7 +503,7 @@ class TestParseSkippedGroups:
 - [x] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == set()
 
@@ -546,7 +546,7 @@ class TestParseSkippedGroups:
 - [x] Skip this group
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_groups(str(report))
         assert result == {"aabb000000000001"}
 
@@ -569,7 +569,7 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_group_suggestions(str(report))
         assert result == set()
 
@@ -588,7 +588,7 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_group_suggestions(str(report))
         assert result == {"ccdd000000000001"}
 
@@ -623,7 +623,7 @@ class TestParseSkippedGroupSuggestions:
 - [x] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_group_suggestions(str(report))
         assert result == {"ccdd000000000002", "ccdd000000000004"}
 
@@ -639,7 +639,7 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_group_suggestions(str(report))
         assert result == set()
 
@@ -661,7 +661,7 @@ class TestParseSkippedGroupSuggestions:
 - [x] skip
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_skipped_group_suggestions(str(report))
         assert result == {"ccdd000000000001", "ccdd000000000002", "ccdd000000000003"}
 
@@ -760,7 +760,7 @@ class TestParseSuggestionDescriptions:
 Description for G1S1.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         assert result == {"G1S1": "Description for G1S1."}
 
@@ -795,7 +795,7 @@ Second description.
 Third description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         assert result == {
             "G1S1": "First description.",
@@ -840,7 +840,7 @@ Description G2S1.
 Description G3S1.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         assert result == {
             "G1S1": "Description G1S1.",
@@ -863,7 +863,7 @@ This is line two.
 This is a new paragraph.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         assert result == {
             "G1S1": "This is line one.\nThis is line two.\n\nThis is a new paragraph."
@@ -888,7 +888,7 @@ except Exception as e:
 ```
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         expected = """Add error handling like this:
 
@@ -914,7 +914,7 @@ except Exception as e:
 The actual description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         # The description includes the validation blockquote as raw text
         # (parse_suggestion_descriptions doesn't normalize, that's for comparison)
@@ -931,7 +931,7 @@ The actual description.
 **Validation:** Valid
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         # Empty descriptions are not included
         assert result == {}
@@ -946,7 +946,7 @@ The actual description.
 **Validation:** Valid
 
 Description without separator.
-""")
+""", encoding="utf-8")
         result = parse_suggestion_descriptions(str(report))
         assert result == {"G1S1": "Description without separator."}
 
@@ -987,7 +987,7 @@ class TestParseIssueDescriptions:
 Description for issue 1.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_issue_descriptions(str(report))
         assert result == {1: "Description for issue 1."}
 
@@ -1019,7 +1019,7 @@ Second description.
 Third description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_issue_descriptions(str(report))
         assert result == {
             1: "First description.",
@@ -1055,7 +1055,7 @@ Desc 3.
 Desc 5.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_issue_descriptions(str(report))
         assert result == {1: "Desc 1.", 3: "Desc 3.", 5: "Desc 5."}
 
@@ -1073,7 +1073,7 @@ Desc 5.
 The actual description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_issue_descriptions(str(report))
         assert 1 in result
         assert "The actual description." in result[1]
@@ -1111,7 +1111,7 @@ Grouped description.
 Another numeric description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_issue_descriptions(str(report))
         assert result == {
             1: "Numeric description.",
@@ -1134,7 +1134,7 @@ class TestFindEditedDescriptions:
 Edited description.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1169,7 +1169,7 @@ Edited first.
 Edited second.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1197,7 +1197,7 @@ Edited second.
 Same description.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1221,7 +1221,7 @@ Same description.
 Same description.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1247,7 +1247,7 @@ Original description.
 User added this additional context.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1274,7 +1274,7 @@ User added this additional context.
 Completely different text.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1300,7 +1300,7 @@ Completely different text.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1337,7 +1337,7 @@ Same description.
 Extra suggestion.
 
 ---
-""")
+""", encoding="utf-8")
         grouped = [
             {
                 "theme": "Group 1",
@@ -1360,7 +1360,7 @@ class TestParseValidationOverridesGroups:
         report.write_text("""## G1: Theme
 - [ ] Skip this group
 **Validation:** Valid
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {}
 
@@ -1372,7 +1372,7 @@ class TestParseValidationOverridesGroups:
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "valid"}
 
@@ -1384,7 +1384,7 @@ class TestParseValidationOverridesGroups:
 - [ ] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "invalid"}
 
@@ -1396,7 +1396,7 @@ class TestParseValidationOverridesGroups:
 - [x] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "invalid"}
 
@@ -1424,7 +1424,7 @@ class TestParseValidationOverridesGroups:
 **Validation:** ? Validation Failed
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "valid", "aabb000000000003": "invalid"}
 
@@ -1436,7 +1436,7 @@ class TestParseValidationOverridesGroups:
 - [x] MARK VALID
 - [ ] mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "valid"}
 
@@ -1468,7 +1468,7 @@ class TestParseValidationOverridesGroups:
 - [ ] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {}
 
@@ -1491,7 +1491,7 @@ class TestParseValidationOverridesGroups:
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000002": "valid"}
 
@@ -1520,7 +1520,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** Valid
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {}
 
@@ -1545,7 +1545,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000002": "valid"}
 
@@ -1562,7 +1562,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000001": "invalid"}
 
@@ -1576,7 +1576,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000001": "invalid"}
 
@@ -1624,7 +1624,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Validation Failed
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000001": "valid", "ccdd000000000005": "invalid"}
 
@@ -1644,7 +1644,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** Valid
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {}
 
@@ -1693,7 +1693,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         # Should only contain suggestion-level entries, not group-level ones
         assert result == {"ccdd000000000002": "invalid", "ccdd000000000003": "valid"}
@@ -1711,7 +1711,7 @@ class TestParseValidationOverridesIssues:
         report.write_text("""### 1. Issue Title
 - [ ] Skip
 **Validation:** Valid
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {}
 
@@ -1723,7 +1723,7 @@ class TestParseValidationOverridesIssues:
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "valid"}
 
@@ -1735,7 +1735,7 @@ class TestParseValidationOverridesIssues:
 - [ ] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "invalid"}
 
@@ -1747,7 +1747,7 @@ class TestParseValidationOverridesIssues:
 - [x] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "invalid"}
 
@@ -1781,7 +1781,7 @@ Description.
 Description.
 
 ---
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "valid", 3: "invalid"}
 
@@ -1793,7 +1793,7 @@ Description.
 - [x] MARK VALID
 - [ ] mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "valid"}
 
@@ -1813,7 +1813,7 @@ Description.
 - [ ] Mark valid
 - [X] Mark invalid
 **Validation:** ? Validation Failed
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "valid", 2: "invalid"}
 
@@ -1830,7 +1830,7 @@ Description.
 - [ ] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {}
 
@@ -1850,7 +1850,7 @@ class TestParseConsolidatedSkippedGroups:
 - [ ] Needs human attention
 
 Description.
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == set()
 
@@ -1866,7 +1866,7 @@ Description.
 - [ ] Needs human attention
 
 Description.
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == {"abc123def456"}
 
@@ -1889,7 +1889,7 @@ Description B.
 - [x] Skip this group
 
 Description C.
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == {"abc123def456", "ddd444eee555"}
 
@@ -1898,7 +1898,7 @@ Description C.
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [x] SKIP THIS GROUP
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == {"abc123def456"}
 
@@ -1910,7 +1910,7 @@ Description C.
 
 ## CG2 [bbb222ccc333]: Section B
 - [X] Skip this group
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == {"abc123def456", "bbb222ccc333"}
 
@@ -1920,7 +1920,7 @@ Description C.
         report.write_text("""## CG1 [abc123def456]: Section A
 
 - [x] Skip this group
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == {"abc123def456"}
 
@@ -1934,7 +1934,7 @@ Description C.
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == set()
 
@@ -1946,7 +1946,7 @@ Description C.
 
 ## CG1 [abc123def456]: Consolidated Group
 - [ ] Skip this group
-""")
+""", encoding="utf-8")
         result = parse_consolidated_skipped_groups(str(report))
         assert result == set()
 
@@ -1962,7 +1962,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {}
 
@@ -1974,7 +1974,7 @@ class TestParseConsolidatedValidationOverrides:
 - [x] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "valid"}
 
@@ -1986,7 +1986,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [x] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
@@ -1998,7 +1998,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "needs-human-decision"}
 
@@ -2010,7 +2010,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [x] Mark invalid
 - [x] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
@@ -2022,7 +2022,7 @@ class TestParseConsolidatedValidationOverrides:
 - [x] Mark valid
 - [x] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
@@ -2034,7 +2034,7 @@ class TestParseConsolidatedValidationOverrides:
 - [x] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "needs-human-decision"}
 
@@ -2046,7 +2046,7 @@ class TestParseConsolidatedValidationOverrides:
 - [x] Mark valid
 - [x] Mark invalid
 - [x] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
@@ -2076,7 +2076,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {
             "abc123def456": "valid",
@@ -2094,7 +2094,7 @@ class TestParseConsolidatedValidationOverrides:
 - [x] MARK VALID
 - [ ] MARK INVALID
 - [ ] NEEDS HUMAN ATTENTION
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "valid"}
 
@@ -2112,7 +2112,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [X] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "valid", "bbb222ccc333": "invalid"}
 
@@ -2134,7 +2134,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {}
 
@@ -2340,7 +2340,7 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark invalid
 - [x] Let Claude decide
 **Validation:** ? Needs Review
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "claude_decide"}
 
@@ -2350,7 +2350,7 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark valid
 - [x] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "invalid"}
 
@@ -2360,7 +2360,7 @@ class TestParseClaudeDecideOverrides:
 - [x] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "valid"}
 
@@ -2372,7 +2372,7 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000001": "claude_decide"}
 
@@ -2381,7 +2381,7 @@ class TestParseClaudeDecideOverrides:
         report.write_text("""### G1S1 [ccdd000000000001]: Title
 - [x] Mark valid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
         assert result == {"ccdd000000000001": "valid"}
 
@@ -2393,7 +2393,7 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "claude_decide"}
 
@@ -2402,7 +2402,7 @@ class TestParseClaudeDecideOverrides:
         report.write_text("""### 1. Title
 - [x] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
         assert result == {1: "invalid"}
 
@@ -2414,7 +2414,7 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark invalid
 - [ ] Needs human attention
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "claude_decide"}
 
@@ -2423,7 +2423,7 @@ class TestParseClaudeDecideOverrides:
         report.write_text("""## CG1 [abc123def456]: Section
 - [x] Mark invalid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
@@ -2432,7 +2432,7 @@ class TestParseClaudeDecideOverrides:
         report.write_text("""## CG1 [abc123def456]: Section
 - [x] Mark valid
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "valid"}
 
@@ -2443,6 +2443,6 @@ class TestParseClaudeDecideOverrides:
 - [ ] Mark invalid
 - [x] Needs human attention
 - [x] Let Claude decide
-""")
+""", encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "needs-human-decision"}

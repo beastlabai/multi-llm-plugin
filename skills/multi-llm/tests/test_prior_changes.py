@@ -22,11 +22,17 @@ UTIL_PATH = str(Path(__file__).parent.parent / "utils" / "prior_changes.py")
 
 
 def _run_cli(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-    """Run the prior_changes CLI utility and return the completed process."""
+    """Run the prior_changes CLI utility and return the completed process.
+
+    The child bootstraps its streams to UTF-8, so the parent must decode with
+    UTF-8 too — `text=True` alone would use the locale codec (cp1252 on
+    Windows) and mangle non-ASCII output such as the em dash in DEFAULT_TEXT.
+    """
     return subprocess.run(
         [sys.executable, UTIL_PATH, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         input=stdin,
     )
 
@@ -193,7 +199,7 @@ class TestPriorChanges:
     def test_read_corrupted_jsonl_returns_default(self, tmp_path: Path) -> None:
         """Corrupted JSON lines in the file cause read to return the default text."""
         jsonl_file = tmp_path / FILENAME
-        jsonl_file.write_text("this is not json\n{broken\n")
+        jsonl_file.write_text("this is not json\n{broken\n", encoding="utf-8")
 
         result = _read(str(tmp_path))
         assert result.stdout.strip() == DEFAULT_TEXT
@@ -372,7 +378,7 @@ class TestPriorChangesIntegration:
         # Set up a plan file and output directory that match the orchestrator's
         # derive_prefix / find_output_dir conventions.
         plan_file = tmp_path / "plan.md"
-        plan_file.write_text("# stub plan\n")
+        plan_file.write_text("# stub plan\n", encoding="utf-8")
 
         out_dir = tmp_path / "plan"  # sanitize_prefix("plan.md") -> "plan"
         out_dir.mkdir()

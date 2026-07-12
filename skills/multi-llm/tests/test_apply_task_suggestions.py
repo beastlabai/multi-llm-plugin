@@ -56,13 +56,13 @@ def plan_with_tasks_file_marker(tmp_path):
 Some plan content.
 """
     plan_path = plan_dir / "my-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create the tasks file at the referenced location
     tasks_dir = plan_dir / "my-plan" / "tasks"
     tasks_dir.mkdir(parents=True)
     tasks_file = tasks_dir / "tasks.md"
-    tasks_file.write_text("# Tasks\n\n## T001: First task\nDo something.\n")
+    tasks_file.write_text("# Tasks\n\n## T001: First task\nDo something.\n", encoding="utf-8")
 
     return plan_path, tasks_file
 
@@ -75,14 +75,14 @@ def plan_with_default_tasks(tmp_path):
 
     plan_content = "# Test Plan\n\n## Overview\nA test plan.\n"
     plan_path = plan_dir / "test-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create tasks file at the default location: {plan_dir}/{prefix}/tasks/tasks.md
     prefix = derive_prefix(str(plan_path))
     tasks_dir = plan_dir / prefix / "tasks"
     tasks_dir.mkdir(parents=True)
     tasks_file = tasks_dir / "tasks.md"
-    tasks_file.write_text("# Tasks\n\n## T001: Setup project\nInitialize.\n")
+    tasks_file.write_text("# Tasks\n\n## T001: Setup project\nInitialize.\n", encoding="utf-8")
 
     return plan_path, tasks_file
 
@@ -187,7 +187,7 @@ class TestFindTasksFile:
     def test_raises_on_missing_tasks_file(self, tmp_path):
         """Raises FileNotFoundError when no tasks file exists."""
         plan_path = tmp_path / "orphan-plan.md"
-        plan_path.write_text("# No tasks\n\nJust a plan.\n")
+        plan_path.write_text("# No tasks\n\nJust a plan.\n", encoding="utf-8")
 
         with pytest.raises(FileNotFoundError, match="No tasks file found"):
             find_tasks_file(str(plan_path))
@@ -198,7 +198,7 @@ class TestFindTasksFile:
         plan_dir.mkdir()
         plan_content = "# Plan\n<!-- TASKS_FILE: nonexistent/tasks.md -->\n"
         plan_path = plan_dir / "broken.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         with pytest.raises(FileNotFoundError, match="not found"):
             find_tasks_file(str(plan_path))
@@ -209,11 +209,11 @@ class TestFindTasksFile:
         plan_dir.mkdir()
         plan_content = "# Plan\n<!-- TASKS_FILE: empty-plan/tasks/tasks.md -->\n"
         plan_path = plan_dir / "empty-plan.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         tasks_dir = plan_dir / "empty-plan" / "tasks"
         tasks_dir.mkdir(parents=True)
-        (tasks_dir / "tasks.md").write_text("")
+        (tasks_dir / "tasks.md").write_text("", encoding="utf-8")
 
         with pytest.raises(ValueError, match="empty"):
             find_tasks_file(str(plan_path))
@@ -224,11 +224,11 @@ class TestFindTasksFile:
         plan_dir.mkdir()
         plan_content = "# Plan\n<!-- TASKS_FILE: bad/tasks/tasks.md -->\n"
         plan_path = plan_dir / "bad.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         tasks_dir = plan_dir / "bad" / "tasks"
         tasks_dir.mkdir(parents=True)
-        (tasks_dir / "tasks.md").write_text("# Tasks\n\nNo actual task headers here.\n")
+        (tasks_dir / "tasks.md").write_text("# Tasks\n\nNo actual task headers here.\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="malformed"):
             find_tasks_file(str(plan_path))
@@ -239,7 +239,7 @@ class TestFindTasksFile:
         plan_dir.mkdir()
         plan_content = "# Plan\n<!-- TASKS_FILE: /etc/passwd -->\n"
         plan_path = plan_dir / "evil.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         # find_tasks_file calls sys.exit(1) for absolute paths
         with pytest.raises(SystemExit):
@@ -251,7 +251,7 @@ class TestFindTasksFile:
         plan_dir.mkdir()
         plan_content = "# Plan\n<!-- TASKS_FILE: ../../etc/passwd -->\n"
         plan_path = plan_dir / "traversal.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         with pytest.raises(SystemExit):
             find_tasks_file(str(plan_path))
@@ -1241,14 +1241,18 @@ class TestHelperFunctions:
         assert "(" not in result
 
     def test_find_output_dir(self):
-        """find_output_dir returns correct path."""
+        """find_output_dir returns correct path.
+
+        Compared through Path() because find_output_dir uses os.path.join,
+        which yields an OS-native separator (backslash on Windows).
+        """
         result = find_output_dir("plans/my-plan.md")
-        assert result == "plans/my-plan"
+        assert Path(result) == Path("plans/my-plan")
 
     def test_load_json_file_valid(self, tmp_path):
         """load_json_file loads valid JSON."""
         f = tmp_path / "test.json"
-        f.write_text(json.dumps({"key": "value"}))
+        f.write_text(json.dumps({"key": "value"}), encoding="utf-8")
         result = load_json_file(str(f))
         assert result == {"key": "value"}
 
@@ -1260,7 +1264,7 @@ class TestHelperFunctions:
     def test_load_json_file_invalid(self, tmp_path):
         """load_json_file returns None for invalid JSON."""
         f = tmp_path / "bad.json"
-        f.write_text("not json{")
+        f.write_text("not json{", encoding="utf-8")
         result = load_json_file(str(f))
         assert result is None
 
@@ -1312,7 +1316,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         orch.prefix = "feat"
         # build_output_json backs up the tasks file, so it must exist on disk.
         tasks_file = tmp_path / "tasks.md"
-        tasks_file.write_text("# Tasks\n\n## T001: First task\nDo something.\n")
+        tasks_file.write_text("# Tasks\n\n## T001: First task\nDo something.\n", encoding="utf-8")
         orch.tasks_file = str(tasks_file)
         orch.formatted_valid = []
         orch.formatted_human = []
@@ -1350,7 +1354,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         # Serialize to disk and read back to assert the on-disk shape.
         out_path = tmp_path / "orchestrator_output.json"
         out_path.write_text(json.dumps(output), encoding="utf-8")
-        on_disk = json.loads(out_path.read_text())
+        on_disk = json.loads(out_path.read_text(encoding="utf-8"))
 
         nhr = on_disk["needs_human_review"]
         # Every human-review item carries group_id == source group_hash.

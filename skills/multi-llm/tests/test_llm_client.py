@@ -184,22 +184,32 @@ class TestSaveLog:
         # Should not contain the full 10000 chars
         assert len(content) < 10000 + 1000  # Some overhead for log formatting
 
-    def test_save_log_io_error(self, tmp_path):
-        """Return False on IO error."""
-        # Use a path that can't be written to
-        log_file = Path("/nonexistent/readonly/path/log.txt")
+    def test_save_log_io_error(self, tmp_path, capsys):
+        """Swallow an IO error, warn, and return False.
 
-        result = _save_log(
-            log_file=log_file,
-            model="test",
-            prompt="test",
-            stdout="",
-            stderr="",
-            returncode=0,
-            success=True,
-        )
+        The write is mocked to raise OSError rather than relying on a
+        magic unwritable path: `_save_log` creates parent directories, so
+        no portable filesystem path reliably fails on every OS.
+        """
+        log_file = tmp_path / "log.txt"
+
+        with patch(
+            "utils.llm_client.open", side_effect=OSError(13, "Permission denied")
+        ) as mock_open_fn:
+            result = _save_log(
+                log_file=log_file,
+                model="test",
+                prompt="test",
+                stdout="",
+                stderr="",
+                returncode=0,
+                success=True,
+            )
 
         assert result is False
+        assert mock_open_fn.called
+        assert not log_file.exists()
+        assert "Failed to save log" in capsys.readouterr().out
 
     def test_save_log_empty_outputs(self, tmp_path):
         """Handle empty stdout and stderr gracefully."""

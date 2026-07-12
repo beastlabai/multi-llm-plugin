@@ -163,7 +163,7 @@ def _make_args(**overrides) -> argparse.Namespace:
 def _setup_plan_with_output(tmp_path: Path, plan_name: str = "test-plan") -> Path:
     """Create a plan file and its output directory structure for testing."""
     plan_path = tmp_path / f"{plan_name}.md"
-    plan_path.write_text("# Test Plan\n")
+    plan_path.write_text("# Test Plan\n", encoding="utf-8")
 
     # Create the output directory structure
     out_dir = tmp_path / plan_name
@@ -172,7 +172,7 @@ def _setup_plan_with_output(tmp_path: Path, plan_name: str = "test-plan") -> Pat
     # Create review-plan subdirectory with report.md
     review_dir = out_dir / "review-plan"
     review_dir.mkdir(exist_ok=True)
-    (review_dir / "report.md").write_text("# Review Report\n")
+    (review_dir / "report.md").write_text("# Review Report\n", encoding="utf-8")
 
     return plan_path
 
@@ -189,7 +189,7 @@ class TestLoadJsonFile:
         """Load a valid JSON file and return parsed data."""
         data = {"key": "value", "number": 42}
         json_file = tmp_path / "test.json"
-        json_file.write_text(json.dumps(data))
+        json_file.write_text(json.dumps(data), encoding="utf-8")
         result = load_json_file(str(json_file))
         assert result == data
 
@@ -197,7 +197,7 @@ class TestLoadJsonFile:
         """Load a valid JSON file containing an array."""
         data = [{"id": 1}, {"id": 2}]
         json_file = tmp_path / "test.json"
-        json_file.write_text(json.dumps(data))
+        json_file.write_text(json.dumps(data), encoding="utf-8")
         result = load_json_file(str(json_file))
         assert result == data
 
@@ -209,14 +209,14 @@ class TestLoadJsonFile:
     def test_invalid_json(self, tmp_path):
         """Return None and print error when JSON is invalid."""
         json_file = tmp_path / "bad.json"
-        json_file.write_text("{invalid json content")
+        json_file.write_text("{invalid json content", encoding="utf-8")
         result = load_json_file(str(json_file))
         assert result is None
 
     def test_empty_file(self, tmp_path):
         """Return None for an empty file (invalid JSON)."""
         json_file = tmp_path / "empty.json"
-        json_file.write_text("")
+        json_file.write_text("", encoding="utf-8")
         result = load_json_file(str(json_file))
         assert result is None
 
@@ -381,22 +381,27 @@ class TestDerivePrefix:
 
 
 class TestFindOutputDir:
-    """Tests for output_handler.find_output_dir."""
+    """Tests for output_handler.find_output_dir.
+
+    find_output_dir composes paths with os.path.join, so the separator is
+    OS-native (backslash on Windows). Compare through Path() so the
+    assertions describe the path, not one platform's spelling of it.
+    """
 
     def test_standard_path(self):
         """Find output dir from a standard plan file path."""
         result = find_output_dir("/path/to/my-plan.md")
-        assert result == "/path/to/my-plan"
+        assert Path(result) == Path("/path/to/my-plan")
 
     def test_guard_against_double_nesting(self):
         """When parent directory already matches prefix, avoid double nesting."""
         result = find_output_dir("/path/to/my-plan/my-plan.md")
-        assert result == "/path/to/my-plan"
+        assert Path(result) == Path("/path/to/my-plan")
 
     def test_current_dir_fallback(self):
         """Plan file in current directory uses '.' as base."""
         result = find_output_dir("plan.md")
-        assert result == "./plan"
+        assert Path(result) == Path("./plan")
 
 
 class TestApplyOutputHelpers:
@@ -434,7 +439,7 @@ class TestApplyOutputHelpers:
         result_path = write_and_emit_output(output, phase_dir)
 
         assert result_path.exists()
-        with open(result_path) as f:
+        with open(result_path, encoding="utf-8") as f:
             assert json.load(f) == output
 
         captured = capsys.readouterr()
@@ -1315,7 +1320,8 @@ class TestHtmlValidationOverrideKeyNormalization:
                     "edited_descriptions": {},
                     "validation_overrides": overrides,
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         return str(review_dir)
 
@@ -2049,7 +2055,7 @@ class TestMachineParseableMarkers:
         """M4: Single-batch revalidation emits [REVALIDATION_PENDING] to stdout."""
         plan_path = _setup_plan_with_output(tmp_path)
         # Create plan content for revalidation context
-        plan_path.write_text("# Test Plan for revalidation\n")
+        plan_path.write_text("# Test Plan for revalidation\n", encoding="utf-8")
         args = _make_args(plan_file=str(plan_path), revalidate=True)
 
         OrchClass = self._make_revalidating_orchestrator()
@@ -2095,7 +2101,7 @@ class TestMachineParseableMarkers:
     def test_m4_revalidation_pending_includes_path(self, tmp_path, capsys):
         """M4: [REVALIDATION_PENDING] marker includes the task file path."""
         plan_path = _setup_plan_with_output(tmp_path)
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
         args = _make_args(plan_file=str(plan_path), revalidate=True)
 
         OrchClass = self._make_revalidating_orchestrator()
@@ -2137,7 +2143,7 @@ class TestMachineParseableMarkers:
     def test_m5_revalidation_batches_pending_marker_stdout(self, tmp_path, capsys):
         """M5: Multi-batch revalidation emits [REVALIDATION_BATCHES_PENDING] to stdout."""
         plan_path = _setup_plan_with_output(tmp_path)
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
         args = _make_args(plan_file=str(plan_path), revalidate=True)
 
         OrchClass = self._make_revalidating_orchestrator()
@@ -2446,7 +2452,7 @@ class TestMachineParseableMarkers:
     def test_m12_revalidation_mode_header_on_stderr(self, tmp_path, capsys):
         """M12: --revalidate emits '--- REVALIDATION MODE ---' to stderr."""
         plan_path = _setup_plan_with_output(tmp_path)
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
         args = _make_args(plan_file=str(plan_path), revalidate=True, dry_run=True)
 
         OrchClass = self._make_revalidating_orchestrator()
@@ -2659,14 +2665,14 @@ class TestStateTransitionParity:
     def _setup_plan_for_config(tmp_path, config):
         """Create plan file and output directory matching a config's review_subdir."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
 
         out_dir = tmp_path / "test-plan"
         out_dir.mkdir(exist_ok=True)
 
         review_dir = out_dir / config["review_subdir"]
         review_dir.mkdir(exist_ok=True)
-        (review_dir / "report.md").write_text("# Review Report\n")
+        (review_dir / "report.md").write_text("# Review Report\n", encoding="utf-8")
 
         return plan_path
 
@@ -3122,7 +3128,7 @@ class TestStateTransitionParity:
         state_file = orch.state.state_file
         assert state_file.exists(), "State file should exist on disk"
 
-        with open(state_file) as f:
+        with open(state_file, encoding="utf-8") as f:
             saved_state = json.load(f)
 
         assert "phases_completed" in saved_state
@@ -3796,14 +3802,14 @@ class TestExitCodeAndPromptParity:
     def _setup_plan_for_config(tmp_path, config):
         """Create plan file and output directory matching a config's review_subdir."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
 
         out_dir = tmp_path / "test-plan"
         out_dir.mkdir(exist_ok=True)
 
         review_dir = out_dir / config["review_subdir"]
         review_dir.mkdir(exist_ok=True)
-        (review_dir / "report.md").write_text("# Review Report\n")
+        (review_dir / "report.md").write_text("# Review Report\n", encoding="utf-8")
 
         return plan_path
 
@@ -4098,7 +4104,7 @@ class TestExitCodeAndPromptParity:
         config = self.ORCHESTRATOR_CONFIGS[config_name]
         # Create plan file but NOT the output directory
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n")
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
         # Do NOT create tmp_path / "test-plan" directory
 
         OrchClass = self._make_orchestrator_class(config)
@@ -4720,7 +4726,7 @@ class TestExitCodeAndPromptParity:
                 args = _make_args(plan_file=str(sub / "missing.md"))
             elif fixture_id == "output_dir_missing":
                 plan_path = sub / "test-plan.md"
-                plan_path.write_text("# Test Plan\n")
+                plan_path.write_text("# Test Plan\n", encoding="utf-8")
                 OrchClass = self._make_orchestrator_class(config)
                 args = _make_args(plan_file=str(plan_path))
             elif fixture_id == "approve_all_no_guard":

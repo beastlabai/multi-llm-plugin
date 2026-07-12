@@ -250,29 +250,41 @@ def get_plan_hash() -> str:
 
 
 def setup_test_fixtures(force: bool = False) -> None:
-    """Create or refresh test fixtures."""
+    """Create or refresh test fixtures.
+
+    With ``force=True`` the whole ``plans/test-plan/`` tree is removed first, so
+    the fixtures never inherit state from an earlier test or an earlier run
+    (e.g. a leftover ``review-plan/report.md``, which the orchestrator would
+    read as "user preferences" and which would silently change behaviour).
+    """
     if TEST_PLAN_DIR.exists() and not force:
         return
+
+    # Start from a clean tree: only ever touches this test's own fixture paths.
+    if TEST_PLAN_DIR.exists():
+        shutil.rmtree(TEST_PLAN_DIR)
 
     # Create directories
     review_plan_dir = TEST_PLAN_DIR / "review-plan"
     review_plan_dir.mkdir(parents=True, exist_ok=True)
 
     # Write plan file
-    TEST_PLAN_FILE.write_text(TestFixtures.PLAN_CONTENT)
+    TEST_PLAN_FILE.write_text(TestFixtures.PLAN_CONTENT, encoding="utf-8")
 
     # Write grouped suggestions
     (review_plan_dir / "grouped.json").write_text(
-        json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2)
+        json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2), encoding="utf-8"
     )
 
     # Write validation results
     (review_plan_dir / "validation.json").write_text(
-        json.dumps(TestFixtures.VALIDATION_RESULTS, indent=2)
+        json.dumps(TestFixtures.VALIDATION_RESULTS, indent=2), encoding="utf-8"
     )
 
     # Write backup
-    (review_plan_dir / "backup.md").write_text(TestFixtures.PLAN_CONTENT)
+    (review_plan_dir / "backup.md").write_text(
+        TestFixtures.PLAN_CONTENT, encoding="utf-8"
+    )
 
     # Write state file with correct plan hash
     plan_hash = get_plan_hash()
@@ -309,33 +321,54 @@ def setup_test_fixtures(force: bool = False) -> None:
             "started_at": "2025-01-30T10:00:00"
         }
     }
-    (TEST_PLAN_DIR / "state.json").write_text(json.dumps(state, indent=2))
+    (TEST_PLAN_DIR / "state.json").write_text(
+        json.dumps(state, indent=2), encoding="utf-8"
+    )
 
 
-def run_orchestrator(*args) -> subprocess.CompletedProcess:
-    """Run the orchestrator with given arguments."""
+def run_orchestrator(*args, no_confirm: bool = True) -> subprocess.CompletedProcess:
+    """Run the orchestrator with given arguments.
+
+    ``no_confirm`` defaults to True: without it the orchestrator hits its
+    "no user selections found" confirmation gate (no user_selections.json, no
+    consolidated_user_selections.json, no edits in report.md) and short-circuits
+    to a ``status: confirmation_needed`` payload instead of producing its real
+    output. These tests exercise the real output path, so they opt out of the
+    gate explicitly rather than depending on a stray report.md being left behind
+    by an earlier test or an earlier run. Pass ``no_confirm=False`` to
+    deliberately exercise the gate. (``--no-confirm`` only bypasses that prompt;
+    it has no other effect on filtering, batching or output.)
+
+    ``encoding="utf-8"`` is explicit because the orchestrator emits UTF-8 and
+    the Windows default (cp1252) cannot decode it.
+    """
     cmd = [
         "uv", "run", "--",
         "python", "apply_suggestions_orchestrator.py",
         "--plan-file", str(TEST_PLAN_FILE),
         "--output-format", "json",
+        *(["--no-confirm"] if no_confirm else []),
         *args
     ]
     return subprocess.run(
         cmd,
         cwd=str(SKILL_DIR),
         capture_output=True,
-        text=True
+        text=True,
+        encoding="utf-8",
     )
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(autouse=True)
 def setup_fixtures():
-    """Ensure test fixtures exist before running tests."""
+    """Give every test a clean, complete set of fixtures.
+
+    Function-scoped (not module-scoped) so no test can observe files written by
+    a previous test or by a previous run of the suite: tests pass from a clean
+    tree, in any order, and when run twice in a row.
+    """
     setup_test_fixtures(force=True)
     yield
-    # Optionally clean up after tests
-    # shutil.rmtree(TEST_PLAN_DIR)
 
 
 class TestDryRunApproveAllLow:
@@ -507,9 +540,8 @@ class TestFreshStart:
         fresh = run_orchestrator("--fresh", "--dry-run")
         assert fresh.returncode == 0
         assert "Fresh start requested" in fresh.stderr
-
-        # Restore fixtures for other tests
-        setup_test_fixtures(force=True)
+        # No restore needed: the autouse setup_fixtures fixture rebuilds the
+        # fixture tree from scratch before every test.
 
 
 class TestOutputFormat:
@@ -681,7 +713,9 @@ class TestEdgeCases:
             "python", "apply_suggestions_orchestrator.py",
             "--plan-file", "nonexistent.md"
         ]
-        result = subprocess.run(cmd, cwd=str(SKILL_DIR), capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, cwd=str(SKILL_DIR), capture_output=True, text=True, encoding="utf-8"
+        )
 
         assert result.returncode != 0
         assert "not found" in result.stderr.lower()
@@ -690,31 +724,25 @@ class TestEdgeCases:
         """Verify error when review-plan directory is missing."""
         # Create a plan file without review-plan directory
         plan_file = tmp_path / "test.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         cmd = [
             "uv", "run", "--",
             "python", "apply_suggestions_orchestrator.py",
             "--plan-file", str(plan_file)
         ]
-        result = subprocess.run(cmd, cwd=str(SKILL_DIR), capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, cwd=str(SKILL_DIR), capture_output=True, text=True, encoding="utf-8"
+        )
 
         assert result.returncode != 0
         assert "not found" in result.stderr.lower() or "Run --review-plan first" in result.stderr
 
 
-@pytest.fixture
-def restore_fixtures():
-    """Fixture to restore test fixtures after tests that modify them."""
-    yield
-    # Restore fixtures after test completes
-    setup_test_fixtures(force=True)
-
-
 class TestUserSkipFunctionality:
     """Test user skip checkbox functionality in report.md."""
 
-    def test_user_skip_filters_suggestions(self, restore_fixtures):
+    def test_user_skip_filters_suggestions(self):
         """Verify user-marked [x] Skip suggestions are filtered out."""
         # Create a report.md with skip markers
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
@@ -748,7 +776,9 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
@@ -757,7 +787,7 @@ Description.
         assert "User skipped" in result.stderr
         assert "S002" in result.stderr or "S003" in result.stderr
 
-    def test_user_skip_with_dry_run(self, restore_fixtures):
+    def test_user_skip_with_dry_run(self):
         """Verify dry-run shows user skip filtering."""
         # Create a report.md with skip markers
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
@@ -773,14 +803,16 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--dry-run")
 
         assert result.returncode == 0
         assert "User skipped" in result.stderr
 
-    def test_no_report_file_works_normally(self, restore_fixtures):
+    def test_no_report_file_works_normally(self):
         """Verify orchestrator works when report.md doesn't exist."""
         # Remove report.md if it exists
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
@@ -793,7 +825,7 @@ Description.
         # Should still work without report.md
         assert result.returncode == 0
 
-    def test_empty_skip_checkboxes_filters_nothing(self, restore_fixtures):
+    def test_empty_skip_checkboxes_filters_nothing(self):
         """Verify no filtering when all checkboxes are unchecked."""
         # Create a report.md without skip markers
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
@@ -817,7 +849,9 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
@@ -829,7 +863,7 @@ Description.
 class TestGroupBasedSkipping:
     """Test group-based skip functionality (G{n} groups and G{n}S{m} suggestions)."""
 
-    def test_skip_entire_group_removes_all_suggestions(self, restore_fixtures):
+    def test_skip_entire_group_removes_all_suggestions(self):
         """Marking group as skipped removes all its suggestions."""
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
         report_content = '''# Review Report
@@ -864,14 +898,16 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
         assert result.returncode == 0
         assert "User skipped 1 groups" in result.stderr
 
-    def test_skip_individual_suggestion_keeps_others(self, restore_fixtures):
+    def test_skip_individual_suggestion_keeps_others(self):
         """Skipping an individual suggestion via bracket-notation hash."""
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
         # Use v2 bracket-notation with the actual suggestion hash for
@@ -901,7 +937,9 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
@@ -909,7 +947,7 @@ Description.
         assert "User skipped 1 individual suggestions" in result.stderr
         assert "364825472afa4119" in result.stderr
 
-    def test_mixed_group_and_individual_skips(self, restore_fixtures):
+    def test_mixed_group_and_individual_skips(self):
         """Skip G1 entirely, skip G2S1 individually using bracket-notation hashes."""
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
         # Use v2 bracket-notation with actual hashes from the test fixture.
@@ -935,7 +973,9 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
@@ -944,7 +984,7 @@ Description.
         assert "User skipped 1 individual suggestions" in result.stderr
         assert "364825472afa4119" in result.stderr
 
-    def test_backward_compatibility_old_format(self, restore_fixtures):
+    def test_backward_compatibility_old_format(self):
         """Old S001 format still works."""
         review_plan_dir = TEST_PLAN_DIR / "review-plan"
         # Use old format with S### IDs
@@ -968,7 +1008,9 @@ Description.
 
 ---
 '''
-        (review_plan_dir / "report.md").write_text(report_content)
+        # encoding is explicit: the fixture contains non-ASCII (e.g. '✓'), which
+        # the Windows default codec (cp1252) cannot encode.
+        (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator("--output-format", "json")
 
@@ -981,24 +1023,33 @@ class TestReportFormat:
     """Test the new report format with skip checkboxes and explicit validation."""
 
     def test_report_contains_skip_checkbox_placeholder(self):
-        """Verify generated report contains - [ ] Skip lines."""
-        # This tests that the report.md generated by review_plan has the new format
-        # We can check by reading the report.md created by test fixtures or previous runs
-        review_plan_dir = TEST_PLAN_DIR / "review-plan"
-        report_path = review_plan_dir / "report.md"
+        """Verify a generated report carries skip checkboxes and a validation line.
 
-        if report_path.exists():
-            content = report_path.read_text()
-            # New format should have "- [ ] Skip" or "- [x] Skip" lines
-            # Old format would have badges like [✓] in the title
-            # Check for the new validation format
-            if "### S" in content:  # Only check if there are suggestions
-                # Either it has the new format or it's the old format
-                has_new_format = "- [ ] Skip" in content or "- [x] Skip" in content
-                has_validation_line = "**Validation:**" in content
-                # If suggestions exist and we have the new format, validation line should be there
-                if has_new_format:
-                    assert has_validation_line, "New format should have **Validation:** line"
+        The report is generated here from the production formatter over this
+        module's fixture groups, rather than read from whatever report.md a
+        previous test happened to leave in plans/test-plan/ — that made the
+        assertions silently vanish on a clean tree.
+        """
+        from utils.review_orchestrator_base import format_group
+
+        lines: list = []
+        for idx, group in enumerate(TestFixtures.GROUPED_SUGGESTIONS, 1):
+            lines.extend(format_group(copy.deepcopy(group), idx))
+        content = "\n".join(lines)
+
+        # Round-trip through disk with an explicit encoding: the report contains
+        # non-ASCII and must survive a write/read on any platform.
+        report_path = TEST_PLAN_DIR / "review-plan" / "report.md"
+        report_path.write_text(content, encoding="utf-8")
+        content = report_path.read_text(encoding="utf-8")
+
+        # New format: per-group and per-suggestion skip checkboxes, plus an
+        # explicit validation line (old format put badges in the title instead).
+        assert "- [ ] Skip this group" in content
+        assert "- [ ] Skip" in content
+        assert "**Validation:**" in content
+        # Suggestions are addressed as G{n}S{m}, not the legacy S### ids.
+        assert "### G1S1:" in content
 
 
 class TestPerSuggestionOverrides:
@@ -1252,7 +1303,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         # Serialize to disk and read back to assert the on-disk shape.
         out_path = tmp_path / "orchestrator_output.json"
         out_path.write_text(json.dumps(output), encoding="utf-8")
-        on_disk = json.loads(out_path.read_text())
+        on_disk = json.loads(out_path.read_text(encoding="utf-8"))
 
         nhr = on_disk["needs_human_review"]
         # Every human-review item carries group_id == source group_hash.

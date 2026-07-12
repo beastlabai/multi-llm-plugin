@@ -85,7 +85,7 @@ This is a sample plan for testing code fix application.
 Fix authentication issues.
 """
     plan_path = temp_dir / "test-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -268,22 +268,27 @@ class TestDerivePrefix:
 # --- TestFindOutputDir ---
 
 class TestFindOutputDir:
-    """Tests for find_output_dir function."""
+    """Tests for find_output_dir function.
+
+    find_output_dir composes paths with os.path.join, so the separator is
+    OS-native (backslash on Windows). Compare through Path() so the
+    assertions describe the path, not one platform's spelling of it.
+    """
 
     def test_returns_plan_dir_with_prefix(self):
         """Returns plan directory with prefix subdirectory."""
         out_dir = find_output_dir("plans/my-feature.md")
-        assert out_dir == "plans/my-feature"
+        assert Path(out_dir) == Path("plans/my-feature")
 
     def test_handles_current_dir_plan(self):
         """Handles plan in current directory."""
         out_dir = find_output_dir("plan.md")
-        assert out_dir == "./plan"
+        assert Path(out_dir) == Path("./plan")
 
     def test_avoids_double_nesting(self):
         """Avoids double nesting if already in prefix directory."""
         out_dir = find_output_dir("plans/my-feature/my-feature.md")
-        assert out_dir == "plans/my-feature"
+        assert Path(out_dir) == Path("plans/my-feature")
 
 
 # --- TestLoadJsonFile ---
@@ -295,7 +300,7 @@ class TestLoadJsonFile:
         """Loads valid JSON file."""
         json_path = temp_dir / "test.json"
         data = {"key": "value", "number": 42}
-        json_path.write_text(json.dumps(data))
+        json_path.write_text(json.dumps(data), encoding="utf-8")
 
         result = load_json_file(str(json_path))
 
@@ -305,7 +310,7 @@ class TestLoadJsonFile:
         """Loads JSON array."""
         json_path = temp_dir / "array.json"
         data = [1, 2, 3, {"nested": True}]
-        json_path.write_text(json.dumps(data))
+        json_path.write_text(json.dumps(data), encoding="utf-8")
 
         result = load_json_file(str(json_path))
 
@@ -319,7 +324,7 @@ class TestLoadJsonFile:
     def test_returns_none_for_invalid_json(self, temp_dir):
         """Returns None for invalid JSON."""
         json_path = temp_dir / "invalid.json"
-        json_path.write_text("not valid json {{{")
+        json_path.write_text("not valid json {{{", encoding="utf-8")
 
         result = load_json_file(str(json_path))
 
@@ -337,8 +342,8 @@ class TestLoadCodeReviewData:
         grouped_data = [{"theme": "Test"}]
         validation_data = [{"group_index": 0, "status": "valid"}]
 
-        (code_review_dir / "grouped.json").write_text(json.dumps(grouped_data))
-        (code_review_dir / "validation.json").write_text(json.dumps(validation_data))
+        (code_review_dir / "grouped.json").write_text(json.dumps(grouped_data), encoding="utf-8")
+        (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         grouped, validation = load_code_review_data(str(sample_output_dir), "test-plan")
 
@@ -359,7 +364,7 @@ class TestLoadCodeReviewData:
     def test_returns_none_for_missing_validation(self, sample_output_dir):
         """Returns None for missing validation.json."""
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text('[{"theme": "Test"}]')
+        (code_review_dir / "grouped.json").write_text('[{"theme": "Test"}]', encoding="utf-8")
 
         grouped, validation = load_code_review_data(str(sample_output_dir), "test-plan")
 
@@ -872,8 +877,8 @@ class TestStateTransitions:
         """Resume mode filters out already-processed items."""
         # Setup: Create code review data
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
-        (code_review_dir / "validation.json").write_text(json.dumps(sample_validation_results))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
+        (code_review_dir / "validation.json").write_text(json.dumps(sample_validation_results), encoding="utf-8")
 
         # Create state with processed items
         state_data = {
@@ -889,7 +894,7 @@ class TestStateTransitions:
                 }
             }
         }
-        (sample_output_dir / "state.json").write_text(json.dumps(state_data))
+        (sample_output_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
         # The orchestrator should filter processed items when --resume is used
         # This is tested implicitly via the main function
@@ -900,8 +905,8 @@ class TestStateTransitions:
         """Fresh mode clears previous progress."""
         # Setup: Create code review data
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
-        (code_review_dir / "validation.json").write_text(json.dumps(sample_validation_results))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
+        (code_review_dir / "validation.json").write_text(json.dumps(sample_validation_results), encoding="utf-8")
 
         # Create state with processed items
         state_data = {
@@ -917,7 +922,7 @@ class TestStateTransitions:
                 }
             }
         }
-        (sample_output_dir / "state.json").write_text(json.dumps(state_data))
+        (sample_output_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
         # The --fresh flag should clear these
 
@@ -1076,12 +1081,12 @@ class TestOutputGeneration:
         """Dry run outputs what would be applied."""
         # Setup
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
         validation_data = {
             "groups": sample_validation_results,
             "metadata": {"schema_version": "2.0", "model": "test"}
         }
-        (code_review_dir / "validation.json").write_text(json.dumps(validation_data))
+        (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         # The dry run should print what would be applied without actually applying
 
@@ -1150,12 +1155,12 @@ class TestMainFunction:
     ):
         """--approve-all requires --yes or --force flag."""
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
         validation_data = {
             "groups": sample_validation_results,
             "metadata": {"schema_version": "2.0", "model": "test"}
         }
-        (code_review_dir / "validation.json").write_text(json.dumps(validation_data))
+        (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         with patch("sys.argv", ["prog", "--plan-file", str(sample_plan_file), "--approve-all"]):
             with pytest.raises(SystemExit) as exc_info:
@@ -1167,12 +1172,12 @@ class TestMainFunction:
     ):
         """--approve-all works with --yes flag."""
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
         validation_data = {
             "groups": sample_validation_results,
             "metadata": {"schema_version": "2.0", "model": "test"}
         }
-        (code_review_dir / "validation.json").write_text(json.dumps(validation_data))
+        (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         # Capture stdout
         captured_output = []
@@ -1213,12 +1218,12 @@ class TestDeprecationWarnings:
     ):
         """--skip-human-review shows deprecation warning."""
         code_review_dir = sample_output_dir / "code-review"
-        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues))
+        (code_review_dir / "grouped.json").write_text(json.dumps(sample_grouped_issues), encoding="utf-8")
         validation_data = {
             "groups": sample_validation_results,
             "metadata": {"schema_version": "2.0", "model": "test"}
         }
-        (code_review_dir / "validation.json").write_text(json.dumps(validation_data))
+        (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         with patch("sys.argv", ["prog", "--plan-file", str(sample_plan_file), "--skip-human-review"]):
             try:
@@ -1338,7 +1343,7 @@ Description.
 ---
 '''
         report_path = temp_dir / "report.md"
-        report_path.write_text(report_content)
+        report_path.write_text(report_content, encoding="utf-8")
 
         skipped = parse_skipped_issues(str(report_path))
 
@@ -2401,7 +2406,7 @@ class TestBuildIssueToGroupMap:
             {"title": "Fix null check", "source_model": "cursor"},
         ]
         issues_path = Path(temp_dir) / "issues.json"
-        issues_path.write_text(json.dumps(issues))
+        issues_path.write_text(json.dumps(issues), encoding="utf-8")
 
         result = build_issue_to_group_map(str(issues_path), grouped)
         assert result == {
@@ -2474,7 +2479,8 @@ class TestFindEditedIssueDescriptionsWithMap:
         report_path.write_text(
             "# Code Review Report\n\n"
             "### 3. Fix null check\n\n"
-            "Edited desc from user\n\n"
+            "Edited desc from user\n\n",
+            encoding="utf-8",
         )
 
         result = find_edited_issue_descriptions(str(report_path), groups, issue_to_group_map=issue_map)
@@ -2493,7 +2499,8 @@ class TestFindEditedIssueDescriptionsWithMap:
         report_path.write_text(
             "# Code Review Report\n\n"
             "### 1. Fix bug\n\n"
-            "Same description\n\n"
+            "Same description\n\n",
+            encoding="utf-8",
         )
 
         result = find_edited_issue_descriptions(str(report_path), groups, issue_to_group_map=issue_map)
@@ -2845,7 +2852,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         # Serialize to disk and read back to assert the on-disk shape.
         out_path = temp_dir / "orchestrator_output.json"
         out_path.write_text(json.dumps(output), encoding="utf-8")
-        on_disk = json.loads(out_path.read_text())
+        on_disk = json.loads(out_path.read_text(encoding="utf-8"))
 
         nhr = on_disk["needs_human_review"]
         # Every human-review item carries group_id == source group_hash.

@@ -38,7 +38,7 @@ Create the basic directory structure.
 - Depends on: none
 """
     plan_path = temp_dir / "test-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -57,7 +57,7 @@ def plan_with_review_results(temp_dir):
 Test plan with review results.
 """
     plan_path = temp_dir / "plan-with-review.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create output directory structure
     output_dir = temp_dir / "plan-with-review"
@@ -70,7 +70,7 @@ Test plan with review results.
         "group_def456": {"status": "valid", "importance": "MEDIUM"},
         "group_ghi789": {"status": "invalid", "importance": "LOW"},
     }
-    (review_dir / "validation.json").write_text(json.dumps(validation))
+    (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
 
     return plan_path
 
@@ -84,7 +84,7 @@ def plan_with_tasks(temp_dir):
 Test plan with tasks.
 """
     plan_path = temp_dir / "plan-with-tasks.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create tasks directory and file
     output_dir = temp_dir / "plan-with-tasks"
@@ -96,7 +96,7 @@ Test plan with tasks.
 ## Task 1: Setup
 Description here.
 """
-    (tasks_dir / "tasks.md").write_text(tasks_content)
+    (tasks_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
 
     # Mark generate-tasks as completed in state
     from utils.state_manager import StateManager
@@ -222,6 +222,7 @@ class TestCheckWorkflowPrerequisites:
             [sys.executable, str(script_path), "--plan-file", str(plan_path), "--mode", mode],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         return json.loads(result.stdout)
@@ -315,6 +316,7 @@ class TestCheckWorkflowPrerequisites:
              "--phase", "review-plan"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         output = json.loads(result.stdout)
@@ -333,7 +335,7 @@ class TestCheckWorkflowPrerequisitesNoValidSuggestions:
         """Create a plan with review results where all suggestions are invalid."""
         plan_content = "# Test Plan\n"
         plan_path = temp_dir / "plan-all-invalid.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         output_dir = temp_dir / "plan-all-invalid"
         review_dir = output_dir / "review-plan"
@@ -343,7 +345,7 @@ class TestCheckWorkflowPrerequisitesNoValidSuggestions:
             "group_abc123": {"status": "invalid", "importance": "HIGH"},
             "group_def456": {"status": "invalid", "importance": "MEDIUM"},
         }
-        (review_dir / "validation.json").write_text(json.dumps(validation))
+        (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
 
         return plan_path
 
@@ -354,6 +356,7 @@ class TestCheckWorkflowPrerequisitesNoValidSuggestions:
             [sys.executable, str(script_path), "--plan-file", str(plan_path), "--mode", mode],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         return json.loads(result.stdout)
@@ -378,6 +381,7 @@ class TestApplySuggestionsSkipFlag:
             [sys.executable, str(script_path), "--plan-file", str(plan_with_review_results), "--skip"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -398,6 +402,7 @@ class TestApplySuggestionsSkipFlag:
             [sys.executable, str(script_path), "--plan-file", str(sample_plan_file), "--skip"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -419,6 +424,7 @@ class TestReviewTasksPrerequisites:
             [sys.executable, str(script_path), "--plan-file", str(plan_path), "--mode", mode],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         return json.loads(result.stdout)
@@ -456,6 +462,7 @@ class TestReviewTasksPrerequisites:
              "--mode", "review-tasks"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         # Should not error on invalid choice
@@ -477,6 +484,7 @@ class TestSkipReasonFlags:
              "--mode", "review-tasks", "--skip", "--reason", "Not needed for this plan"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -499,6 +507,7 @@ class TestSkipReasonFlags:
              "--mode", "review-tasks", "--skip"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -514,6 +523,7 @@ class TestSkipReasonFlags:
                  "--mode", phase, "--skip", "--reason", f"Skipping {phase}"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 cwd=str(script_path.parent)
             )
 
@@ -530,6 +540,7 @@ class TestSkipReasonFlags:
              "--mode", "apply-suggestions", "--skip", "--reason", "Test reason"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -547,6 +558,7 @@ class TestSkipReasonFlags:
              "--skip", "--reason", "Some reason"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
 
@@ -565,6 +577,7 @@ class TestStatusMode:
             [sys.executable, str(script_path), "--plan-file", str(plan_path), "--status"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(script_path.parent)
         )
         return json.loads(result.stdout)
@@ -626,11 +639,19 @@ class TestStatusMode:
         assert output["suggested_next"] == "implement"
 
     def test_status_includes_plan_path(self, sample_plan_file):
-        """--status includes the plan path in output."""
+        """--status includes the plan path in output.
+
+        check_workflow_prerequisites emits ``str(Path(plan_file).resolve())``,
+        so the reported path is normalized and OS-native: on Windows it uses
+        backslashes and expands any 8.3 short components in the temp dir
+        (GitHub's runners hand out ``C:\\Users\\RUNNER~1\\...``). A substring
+        check against the raw fixture path therefore cannot hold. Compare
+        resolved Path objects, which normalizes both sides on every platform.
+        """
         output = self.run_status_check(sample_plan_file)
 
         assert "plan" in output
-        assert str(sample_plan_file) in output["plan"]
+        assert Path(output["plan"]) == Path(sample_plan_file).resolve()
 
     def test_status_review_tasks_marked_optional(self, sample_plan_file):
         """--status marks review-tasks as optional."""

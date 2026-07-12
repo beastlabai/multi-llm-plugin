@@ -646,7 +646,15 @@ Second step details.
         assert "</body>" in html
 
     def test_contains_plan_path(self, sample_groups, sample_plan, tmp_path):
-        """HTML contains the plan path."""
+        """HTML contains the plan path in the embedded reportData JSON.
+
+        The path is embedded as a JSON string value, so it appears
+        JSON-encoded rather than raw.  On Windows the path contains
+        backslashes (``C:\\Users\\...``), which ``json.dumps`` escapes to
+        ``\\\\`` — the raw ``str(path)`` therefore never appears verbatim.
+        Assert against the JSON-encoded form, which is what actually lands
+        in the HTML (and what the template decodes back via ``JSON.parse``).
+        """
         phase_dir = tmp_path / "review-plan"
         phase_dir.mkdir()
 
@@ -658,7 +666,11 @@ Second step details.
             models=["claude-3-opus"],
         )
 
-        assert str(sample_plan) in html
+        # json.dumps() yields the quoted, escaped literal exactly as the
+        # generator emits it, e.g. "C:\\Users\\...\\test-plan.md" on Windows
+        # and "/tmp/.../test-plan.md" on POSIX.
+        encoded_plan_path = json.dumps(str(sample_plan))
+        assert f'"planPath": {encoded_plan_path}' in html
 
     def test_contains_model_metadata(self, sample_groups, sample_plan, tmp_path):
         """HTML contains model metadata with separate provider and model colors."""
