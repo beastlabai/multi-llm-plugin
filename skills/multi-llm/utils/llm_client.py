@@ -30,19 +30,45 @@ ERROR_BINARY_NOT_FOUND = "BINARY_NOT_FOUND"
 ERROR_SUBPROCESS_FAILED = "SUBPROCESS_FAILED"
 ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 ERROR_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
+ERROR_PROMPT_UNSAFE = "PROMPT_UNSAFE"
 
 # Windows-only concern: POSIX exec passes argv verbatim (no reparsing) and
 # has generous per-arg limits, so prompt length is never enforced there.
 _IS_WINDOWS = os.name == "nt"
 
-# Safe prompt budgets for prompt-on-argv transport on Windows, with headroom
-# for the flags around the prompt: cmd.exe — which executes .cmd/.bat npm
-# shims — caps the whole command line at 8,191 chars; native CreateProcess
-# caps at 32,767.
-MAX_ARGV_PROMPT_CHARS_BATCH = 8000
-MAX_ARGV_PROMPT_CHARS_NATIVE = 32000
+# Hard Windows command-line caps, measured against the FULL rendered command
+# line (subprocess renders list argv via ``list2cmdline`` before
+# ``CreateProcessW``) in UTF-16 code units — the unit Windows uses, so astral
+# characters count twice. cmd.exe — which executes .cmd/.bat npm shims — caps
+# the whole command line at 8,191; native CreateProcess caps at 32,767
+# (including the terminating NUL).
+CMDLINE_CAP_UTF16_BATCH = 8191
+CMDLINE_CAP_UTF16_NATIVE = 32767
+
+# Headroom reserved below the caps for overhead that cannot be measured from
+# argv alone: the terminating NUL, the implicit `%COMSPEC% /c` wrapper that
+# launches batch shims, and expansion the shim itself performs ("%_prog%"
+# prefixes, %* re-substitution).
+CMDLINE_UTF16_HEADROOM = 256
 
 _BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
+
+# Characters cmd.exe treats specially when it reparses a batch-shim command
+# line. Deliberately conservative (interim guard until the explicit `cmd /c`
+# escaping path lands — launch-strategy step (c)): `"` breaks argument
+# quoting (CreateProcess-style `\"` escapes are NOT honored by cmd.exe),
+# `%`/`!` trigger variable expansion even inside quotes, CR/LF split
+# commands, and `^&|<>()` become live once quoting is broken or the argument
+# is unquoted.
+_CMD_UNSAFE_CHARS = frozenset('"%!^&|<>()\r\n')
+
+# npm cmd-shims dispatch to `node <target.js>` via a `%dp0%`-relative (or,
+# in older shims, `%~dp0`-relative) quoted path; extract that target so the
+# shim can be bypassed entirely.
+_NODE_SHIM_TARGET_RE = re.compile(
+    r'"%(?:~dp0|dp0%)[\\/]?(?P<rel>[^"%\r\n]+?\.(?:js|cjs|mjs))"',
+    re.IGNORECASE,
+)
 
 
 def check_cursor_agent_available() -> bool:
@@ -50,39 +76,102 @@ def check_cursor_agent_available() -> bool:
     return shutil.which("cursor-agent") is not None
 
 
-def _resolve_executable(name: str) -> Tuple[str, bool]:
-    """Resolve a command name to an absolute path via shutil.which.
+def _resolve_node_shim_target(shim_path: Path) -> Optional[List[str]]:
+    """Extract the ``node <cli.js>`` launch an npm batch shim dispatches to.
 
-    Returns ``(path_or_name, is_batch_shim)``. When ``shutil.which`` finds
-    nothing, the bare name is returned unchanged so downstream error text
-    stays meaningful. Resolution makes Windows ``CreateProcess`` find
-    npm-installed provider CLIs; on POSIX the resolved path is exactly what
-    PATH lookup would have executed anyway.
+    npm-installed CLIs on Windows are ``.cmd`` shims whose payload line runs
+    ``node`` on a ``%dp0%``-relative script (e.g.
+    ``"%_prog%" "%dp0%\\node_modules\\pkg\\bin\\cli.js" %*``). Parsing that
+    target lets us launch node directly and skip cmd.exe entirely.
+
+    Returns the ``[node, script]`` argv prefix, or None when the shim does
+    not parse as a node dispatcher (missing/unreadable target, or no node
+    binary available) — the caller then falls back to the flagged shim.
+    """
+    try:
+        content = shim_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    match = _NODE_SHIM_TARGET_RE.search(content)
+    if match is None:
+        return None
+
+    # Rebuild the %dp0%-relative path with host separators so the parse also
+    # behaves identically under test on POSIX.
+    parts = [p for p in re.split(r"[\\/]+", match.group("rel")) if p and p != "."]
+    if not parts:
+        return None
+    script = shim_path.parent.joinpath(*parts)
+    try:
+        if not script.is_file():
+            return None
+    except OSError:
+        return None
+
+    # Mirror the shim's own dispatch: prefer a node.exe next to the shim
+    # (%dp0%\node.exe), else fall back to node from PATH.
+    node = shim_path.parent / "node.exe"
+    try:
+        if node.is_file():
+            return [str(node), str(script)]
+    except OSError:
+        pass
+    node_on_path = shutil.which("node")
+    if node_on_path is None:
+        return None
+    return [node_on_path, str(script)]
+
+
+def _resolve_executable(name: str) -> Tuple[List[str], bool]:
+    """Resolve a command name to an argv launch prefix via shutil.which.
+
+    Returns ``(launcher_argv, is_batch_shim)`` where ``launcher_argv``
+    replaces ``cmd[0]`` (usually one element; two for ``node <cli.js>``).
+    When ``shutil.which`` finds nothing, the bare name is returned unchanged
+    so downstream error text stays meaningful. Resolution makes Windows
+    ``CreateProcess`` find npm-installed provider CLIs; on POSIX the
+    resolved path is exactly what PATH lookup would have executed anyway.
 
     Batch-shim hazard: npm installs CLIs on Windows as ``.cmd``/``.bat``
     shims, which are executed by cmd.exe. cmd.exe REPARSES the command line
     (metacharacters/newlines in argv corrupt the prompt or can escape into
     executed commands — the BatBadBut / CVE-2024-24576 class) and caps it at
-    8,191 chars. To avoid the shim entirely, prefer a sibling ``.exe`` with
-    the same stem when one exists; otherwise return the shim path with
-    ``is_batch_shim=True`` so the caller enforces the stricter prompt budget.
+    8,191 chars. To avoid the shim entirely, prefer (a1) a sibling ``.exe``
+    with the same stem, then (a2) the ``node <cli.js>`` target the npm shim
+    dispatches to; only when neither exists is the shim path returned with
+    ``is_batch_shim=True`` so the caller enforces the stricter prompt budget
+    and the cmd.exe metacharacter guard.
     """
     resolved = shutil.which(name)
     if resolved is None:
-        return name, False
+        return [name], False
     path = Path(resolved)
     if path.suffix.lower() in _BATCH_SUFFIXES:
         sibling_exe = path.with_suffix(".exe")
         try:
             if sibling_exe.is_file():
-                return str(sibling_exe), False
+                return [str(sibling_exe)], False
         except OSError:
             pass
-        return resolved, True
-    return resolved, False
+        node_target = _resolve_node_shim_target(path)
+        if node_target is not None:
+            return node_target, False
+        return [resolved], True
+    return [resolved], False
+
+
+def _utf16_code_units(s: str) -> int:
+    """Length of ``s`` in UTF-16 code units (astral characters count as 2).
+
+    Windows command-line caps are defined over the UTF-16 command line handed
+    to ``CreateProcessW``, not over Python code points.
+    """
+    return len(s.encode("utf-16-le")) // 2
 
 
 def _prompt_length_error(
+    cmd: List[str],
     prompt: str,
     provider_name: str,
     model: str,
@@ -94,30 +183,86 @@ def _prompt_length_error(
     ``LLMProvider.prompt_transport``): exceeding the cmd.exe/CreateProcess
     command-line caps would otherwise fail with a cryptic
     ``[WinError 206]``/cmd.exe error. Callers gate on ``_IS_WINDOWS``.
+
+    The check measures what Windows actually limits: the FULL command line
+    that ``subprocess`` renders from ``cmd`` via ``list2cmdline`` (executable
+    path, provider flags, quoting expansion, and the prompt), counted in
+    UTF-16 code units, with headroom below the hard cap for overhead that
+    cannot be measured from argv alone. Checking ``len(prompt)`` in isolation
+    would pass prompts that still blow the cap once argv overhead, quote
+    escaping, and astral characters are accounted for.
     """
-    limit = MAX_ARGV_PROMPT_CHARS_BATCH if is_batch_shim else MAX_ARGV_PROMPT_CHARS_NATIVE
-    if len(prompt) <= limit:
+    cap = CMDLINE_CAP_UTF16_BATCH if is_batch_shim else CMDLINE_CAP_UTF16_NATIVE
+    limit = cap - CMDLINE_UTF16_HEADROOM
+    cmdline_units = _utf16_code_units(subprocess.list2cmdline(cmd))
+    if cmdline_units <= limit:
         return None
+    prompt_units = _utf16_code_units(prompt)
     launcher = (
-        "a .cmd/.bat shim run via cmd.exe (8,191-char command-line cap)"
+        "a .cmd/.bat shim run via cmd.exe (8,191-unit command-line cap)"
         if is_batch_shim
-        else "a native executable (32,767-char CreateProcess cap)"
+        else "a native executable (32,767-unit CreateProcess cap)"
     )
     return {
         "success": False,
         "error": (
-            f"Prompt is {len(prompt)} chars, but {provider_name} receives the "
-            f"prompt on the command line and resolves to {launcher} on "
-            f"Windows; the safe limit is {limit} chars. Shorten the prompt — "
-            f"e.g. reference large files by path instead of embedding their "
-            f"contents inline."
+            f"The fully rendered {provider_name} command line is "
+            f"{cmdline_units} UTF-16 code units ({prompt_units} from the "
+            f"prompt), but {provider_name} receives the prompt on the "
+            f"command line and resolves to {launcher} on Windows; the safe "
+            f"limit is {limit} units. Shorten the prompt — e.g. reference "
+            f"large files by path instead of embedding their contents "
+            f"inline."
         ),
         "error_code": ERROR_PROMPT_TOO_LONG,
         "details": {
             "provider": provider_name,
             "model": model,
             "prompt_chars": len(prompt),
-            "prompt_chars_limit": limit,
+            "prompt_utf16_units": prompt_units,
+            "cmdline_utf16_units": cmdline_units,
+            "cmdline_utf16_limit": limit,
+        }
+    }
+
+
+def _batch_shim_metachar_error(
+    prompt: str,
+    provider_name: str,
+    model: str,
+    shim_path: str
+) -> Optional[Dict[str, Any]]:
+    """Return a structured PROMPT_UNSAFE error dict, or None if the prompt is safe.
+
+    Interim safeguard for launch-strategy step (c): when a provider still
+    resolves to a ``.cmd``/``.bat`` shim (no sibling ``.exe``, no parseable
+    node target), cmd.exe reparses the command line on launch, so a prompt
+    carrying cmd.exe metacharacters can be silently corrupted or escape into
+    executed commands (BatBadBut / CVE-2024-24576 class). Until the explicit
+    ``cmd /c`` escaping path lands, reject such prompts with a structured
+    error rather than launching. Callers gate on ``_IS_WINDOWS``.
+    """
+    unsafe = sorted(set(prompt) & _CMD_UNSAFE_CHARS)
+    if not unsafe:
+        return None
+    chars = ", ".join(repr(ch) for ch in unsafe)
+    return {
+        "success": False,
+        "error": (
+            f"{provider_name} resolves to a cmd.exe batch shim ({shim_path}) "
+            f"and the prompt contains cmd.exe metacharacters ({chars}). "
+            f"cmd.exe reparses the shim's command line, so these characters "
+            f"could corrupt the prompt or escape into executed commands "
+            f"(BatBadBut / CVE-2024-24576 class); refusing to launch via the "
+            f"shim. Fix: install a native {provider_name} executable, or "
+            f"remove these characters from the prompt."
+        ),
+        "error_code": ERROR_PROMPT_UNSAFE,
+        "details": {
+            "provider": provider_name,
+            "model": model,
+            "executable": shim_path,
+            "unsafe_characters": unsafe,
         }
     }
 
@@ -239,7 +384,10 @@ def invoke_with_provider(
         TIMEOUT: Command timed out
         SUBPROCESS_FAILED: Command exited with non-zero code (or failed to launch)
         PARSE_ERROR: Failed to parse output
-        PROMPT_TOO_LONG: Prompt exceeds the Windows argv length budget
+        PROMPT_TOO_LONG: The fully rendered command line (executable path,
+            flags, and prompt) exceeds the Windows command-line length budget
+        PROMPT_UNSAFE: Prompt carries cmd.exe metacharacters and the provider
+            only resolves to a Windows .cmd/.bat shim
     """
     provider_name, model = parse_model_spec(model_spec)
     provider = get_provider(provider_name)
@@ -270,16 +418,30 @@ def invoke_with_provider(
     effective_timeout = timeout or get_provider_timeout(provider_name)
 
     # Build command using provider, resolving cmd[0] to an absolute path
-    # (and past any Windows .cmd/.bat npm shim — see _resolve_executable).
+    # (and past any Windows .cmd/.bat npm shim, to a sibling .exe or the
+    # shim's `node <cli.js>` target — see _resolve_executable).
     cmd = provider.build_command(prompt, model)
-    executable, is_batch_shim = _resolve_executable(cmd[0])
-    cmd = [executable, *cmd[1:]]
+    launcher, is_batch_shim = _resolve_executable(cmd[0])
+    cmd = [*launcher, *cmd[1:]]
 
-    # Prompt-on-argv transport hits hard command-line length caps on Windows;
-    # fail fast with an actionable error instead of a cryptic
-    # CreateProcess/cmd.exe failure. Never enforced on POSIX.
     if _IS_WINDOWS and provider.prompt_transport == "argv":
-        length_error = _prompt_length_error(prompt, provider_name, model, is_batch_shim)
+        # Interim safeguard until the explicit `cmd /c` escaping path lands
+        # (launch-strategy step (c)): a batch shim means cmd.exe reparses
+        # the command line, so refuse metacharacter-bearing prompts rather
+        # than risk silent corruption or injection. Never enforced on POSIX.
+        if is_batch_shim:
+            metachar_error = _batch_shim_metachar_error(
+                prompt, provider_name, model, cmd[0]
+            )
+            if metachar_error is not None:
+                return metachar_error
+
+        # Prompt-on-argv transport hits hard command-line length caps on
+        # Windows; fail fast with an actionable error instead of a cryptic
+        # CreateProcess/cmd.exe failure. Measured over the full rendered
+        # command line (executable path, flags, quoting expansion), not just
+        # the prompt. Never enforced on POSIX.
+        length_error = _prompt_length_error(cmd, prompt, provider_name, model, is_batch_shim)
         if length_error is not None:
             return length_error
 
@@ -546,7 +708,13 @@ def invoke_with_file_output(
     # Check for hard failures that mean the command didn't run properly
     # (as opposed to parse errors which may still have written to file)
     error_code = result.get("error_code", "")
-    is_hard_failure = error_code in (ERROR_BINARY_NOT_FOUND, ERROR_TIMEOUT, ERROR_SUBPROCESS_FAILED)
+    is_hard_failure = error_code in (
+        ERROR_BINARY_NOT_FOUND,
+        ERROR_TIMEOUT,
+        ERROR_SUBPROCESS_FAILED,
+        ERROR_PROMPT_TOO_LONG,
+        ERROR_PROMPT_UNSAFE,
+    )
 
     if not result.get("success") and is_hard_failure:
         return {

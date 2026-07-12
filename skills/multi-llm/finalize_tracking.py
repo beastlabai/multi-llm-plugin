@@ -2,7 +2,7 @@
 """Finalize file tracking after implementation completes.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/finalize_tracking.py --state-file <path_to_state.json>
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/finalize_tracking.py" --state-file <path_to_state.json>
 
 This script:
 1. Gets all currently modified files (using shared git utils)

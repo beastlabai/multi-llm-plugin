@@ -148,9 +148,13 @@ Task tool call:
          - general-purpose: All implementation tasks (default)
          - human: Manual steps requiring user action
     4. Write the tasks JSON to a temporary file using the Write tool (NOT Bash):
-       - Resolve the project root first: PROJECT_ROOT=$(git rev-parse --show-toplevel)
+       - Resolve the project root first by running: git rev-parse --show-toplevel
          (if this fails or prints nothing, STOP: multi-llm requires running inside
-         a git repository — never fall back to a relative path or $PWD)
+         a git repository — never fall back to a relative path or $PWD).
+         The printed path is {PROJECT_ROOT} below. Shell variables do NOT survive
+         between Bash calls — substitute the concrete absolute path literally in
+         the Write tool's file_path, and re-resolve the root inside any later
+         Bash command that needs it (as step 5 does).
        - file_path: {PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json
          (absolute path; the Write tool creates parent directories automatically —
          no mkdir step. Use plan stem in filename to avoid conflicts if multiple
@@ -174,10 +178,18 @@ Task tool call:
          }
        - If {PROJECT_ROOT}/.multi-llm/tmp/.gitignore does not exist yet, also
          Write it with content `*` so the temp dir ignores itself
-    5. Run the update script:
+    5. Run the update script. Root resolution and the update run in ONE single
+       Bash invocation — the git rev-parse from step 4 ran in a different
+       process, so its result must be recomputed here, not referenced.
+       Recompute it as an inline command substitution inside the --tasks-file
+       argument (not as a PROJECT_ROOT=... assignment prefix, which the
+       permission allowlist does not cover):
        uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" \
          --plan-file "{PLAN_PATH_ABSOLUTE}" \
-         --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
+         --tasks-file "$(git rev-parse --show-toplevel)/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
+       (Step 4 already hard-stopped outside a git repository, so the
+       substitution cannot come back empty here — never retry with a guessed
+       path.)
     6. Report: number of tasks generated, task IDs with titles, and the tasks file path.
 
     ## Constraints

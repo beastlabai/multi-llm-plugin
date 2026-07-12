@@ -6,11 +6,11 @@ Reads orchestrator_output.json and shows which items will be applied, skipped,
 need human review, etc., with their titles.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/display_decisions.py \
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" \
         --output-file plans/my-feature/apply-suggestions/orchestrator_output.json
 
     # Or auto-detect from plan path + phase:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/display_decisions.py \
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" \
         --plan-file plans/my-feature.md --phase apply-suggestions
 """
 

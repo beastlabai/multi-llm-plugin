@@ -12,6 +12,13 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from .stream_bootstrap import bootstrap_streams
+except ImportError:
+    # Direct script invocation (`python utils/prior_changes.py`): sys.path[0]
+    # is the utils/ directory, so import the sibling module directly.
+    from stream_bootstrap import bootstrap_streams
+
 FILENAME = "prior_changes.jsonl"
 DEFAULT_TAIL = 15
 MAX_CHARS = 2000
@@ -101,6 +108,7 @@ def cmd_clear(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    bootstrap_streams()
     parser = argparse.ArgumentParser(description="Manage prior batch changes")
     sub = parser.add_subparsers(dest="command", required=True)
 

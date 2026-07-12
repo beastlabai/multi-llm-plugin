@@ -7,10 +7,11 @@ into dependency-respecting batches, and outputs JSON for Claude Code to execute
 using its native Task tool.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/implement_orchestrator.py --plan-file plans/my-plan.md [--output tasks.json]
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-plan.md [--output tasks.json]
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -92,8 +93,10 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help='Output path for tasks JSON (default: '
-             '<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json, '
-             'resolved from the plan file after argument parsing)'
+             '<git-root>/.multi-llm/tmp/'
+             'implementation_tasks_{plan_stem}_{hash8}.json, where {hash8} '
+             'is a stable hash of the repo-relative plan path; resolved '
+             'from the plan file after argument parsing)'
     )
 
     parser.add_argument(
@@ -117,21 +120,47 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _plan_path_hash(plan_path: Path, project_root: str) -> str:
+    """Stable 8-hex-char hash of the repo-relative plan path.
+
+    Hashes the POSIX form of the plan path relative to ``project_root`` so
+    the value is identical on every OS regardless of separator style. Falls
+    back to the absolute POSIX path when the plan does not sit under the
+    detected root (e.g. symlinked layouts) — still deterministic per plan
+    location, which is all the filename needs.
+    """
+    try:
+        key = plan_path.resolve().relative_to(
+            Path(project_root).resolve()
+        ).as_posix()
+    except ValueError:
+        key = plan_path.resolve().as_posix()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+
+
 def resolve_default_output(plan_path: Path) -> str:
     """Resolve the default --output path anchored at the git project root.
 
     The default lives inside the repo workspace
-    (``<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json``) so
-    the Bash side and harness Read/Write tools resolve the same file on every
-    OS. This must stay byte-identical to the path documented in
-    ``instructions/implement.md``. Never fall back to the system temp dir
-    (``tempfile.gettempdir()``): on Git for Windows the MSYS ``/tmp`` and the
-    native temp dir are different directories, which is exactly the boundary
-    hazard this default avoids.
+    (``<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json``)
+    so the Bash side and harness Read/Write tools resolve the same file on
+    every OS. ``{hash8}`` is :func:`_plan_path_hash` of the repo-relative
+    plan path: the stem alone is not unique (``plans/api/index.md`` and
+    ``plans/ui/index.md`` share ``index``), and without the hash concurrent
+    runs on same-stem plans would clobber each other's task JSON. The
+    orchestrator is the single source of truth for this name — it prints the
+    resolved path on its ``Output file:`` summary line, and
+    ``instructions/implement.md`` directs Claude to read that printed path
+    rather than reconstructing it (a Bash-side reimplementation of the hash
+    would be a byte-identical dual-computation hazard). Never fall back to
+    the system temp dir (``tempfile.gettempdir()``): on Git for Windows the
+    MSYS ``/tmp`` and the native temp dir are different directories, which is
+    exactly the boundary hazard this default avoids.
 
     Args:
-        plan_path: Resolved path to the plan file (used both for git-root
-            detection and for the ``{plan_stem}`` filename suffix).
+        plan_path: Resolved path to the plan file (used for git-root
+            detection, the ``{plan_stem}`` filename part, and the
+            ``{hash8}`` disambiguator).
 
     Returns:
         Absolute output path as a string.
@@ -145,9 +174,10 @@ def resolve_default_output(plan_path: Path) -> str:
         print("       (the default --output path is anchored at the git root; "
               "run from within a repository or pass --output explicitly)")
         sys.exit(1)
+    file_hash = _plan_path_hash(plan_path, project_root)
     return str(
         Path(project_root) / ".multi-llm" / "tmp"
-        / f"implementation_tasks_{plan_path.stem}.json"
+        / f"implementation_tasks_{plan_path.stem}_{file_hash}.json"
     )
 
 

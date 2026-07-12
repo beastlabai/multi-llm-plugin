@@ -12,13 +12,13 @@ registry. Models can be specified as 'provider:model' or bare 'model' names
 
 Usage:
     # Use YAML defaults (no prompting if defaults.models is set)
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file plans/my-plan.md
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md
 
     # Override defaults with specific models
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
     # Force interactive selection even if defaults exist
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/code_review_orchestrator.py --plan-file plans/my-plan.md --interactive
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md --interactive
 """
 
 import argparse
@@ -130,13 +130,13 @@ Model selection priority:
 
 Examples:
   # Use YAML defaults (no prompting)
-  uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py --plan-file plans/my-plan.md
+  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md
 
   # Specify models explicitly
-  uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
   # Force interactive selection
-  uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py --plan-file plans/my-plan.md --interactive
+  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md --interactive
         """
     )
 
@@ -1562,7 +1562,7 @@ async def main():
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
                 print("\nAfter validation completes, run:")
                 reaggregate_cmd = (
-                    f'uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py '
+                    f'uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" '
                     f'--plan-file "{plan_path}" --reaggregate'
                 )
                 print(f"  {reaggregate_cmd}")
@@ -1639,7 +1639,7 @@ async def main():
 
         # Print the reaggregate command for Claude Code to use after salvage
         print("")
-        print(f"[REAGGREGATE_AFTER_SALVAGE] uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py --plan-file \"{plan_path}\" --reaggregate")
+        print(f"[REAGGREGATE_AFTER_SALVAGE] uv run --project \"${{CLAUDE_SKILL_DIR}}\" -- python \"${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py\" --plan-file \"{plan_path}\" --reaggregate")
         print("")
         print("Claude Code: After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
 

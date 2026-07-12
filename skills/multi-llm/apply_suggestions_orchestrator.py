@@ -7,7 +7,7 @@ the list of suggestions that should be applied. The actual application
 is handled by Claude Code using Task subagents sequentially.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md [options]
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md [options]
 """
 
 import json
@@ -82,20 +82,20 @@ This orchestrator outputs a JSON list of suggestions to apply.
 The actual application is handled by Claude Code using Task subagents.
 
 Example:
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md
 
 Bulk Approval Examples:
   # Auto-approve all LOW importance items
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md --approve-all-low
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --approve-all-low
 
   # Auto-approve items with validation failures (parsing errors, timeouts)
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md --approve-validation-failed
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --approve-validation-failed
 
   # Skip all items requiring human review
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md --skip-all-human
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --skip-all-human
 
   # Re-run validation on failed items with a different model
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py --plan-file plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
         """,
             include_revalidation=True,
             include_output_format=True,

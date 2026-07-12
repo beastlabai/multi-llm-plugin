@@ -182,9 +182,9 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
    If the command fails or `$PROJECT_ROOT` is empty, STOP with the error: "multi-llm requires running inside a git repository." Never fall back to a relative path or `$PWD`.
 
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH" --output "$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_{plan_stem}.json" [--resume]
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH" [--resume]
    ```
-   Where `{plan_stem}` is the plan filename without extension (deterministic per plan, so concurrent runs on different plans cannot clobber each other, and a re-run for the same plan simply overwrites the previous artifact — there is no cleanup step; the orchestrator writes `.multi-llm/tmp/.gitignore` containing `*` so the directory ignores itself, and the user may delete `.multi-llm/tmp/` at any time — the next run recreates it).
+   Do NOT pass `--output` — the orchestrator computes the workspace default itself: `$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`, where `{plan_stem}` is the plan filename without extension and `{hash8}` is the first 8 hex characters of the SHA-256 of the repo-relative plan path. The hash makes the name deterministic AND unique per plan *path* (same-stem plans such as `plans/api/index.md` and `plans/ui/index.md` get distinct artifacts, so concurrent runs cannot clobber each other), while a re-run for the same plan simply overwrites the previous artifact — there is no cleanup step; the orchestrator writes `.multi-llm/tmp/.gitignore` containing `*` so the directory ignores itself, and the user may delete `.multi-llm/tmp/` at any time — the next run recreates it. The orchestrator prints the exact absolute path on its `Output file:` summary line — note that path for step 4; never reconstruct the filename or compute the hash yourself.
 
    **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
@@ -194,9 +194,9 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 4. **Read the task JSON file:**
    ```
-   Use the Read tool to load {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_{plan_stem}.json
+   Use the Read tool to load the absolute path printed on the orchestrator's `Output file:` line in step 2
    ```
-   The Read tool requires an **absolute** path: join the resolved project root (from step 2) with the relative part `.multi-llm/tmp/implementation_tasks_{plan_stem}.json` — the same file the Bash `--output` above wrote.
+   The Read tool requires an **absolute** path: use the `Output file:` path exactly as the orchestrator printed it (it is already absolute and OS-native, e.g. `{PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`). Do NOT rebuild the path yourself — the filename embeds a hash of the repo-relative plan path that only the orchestrator computes.
 
 #### 4a. Human Task Strategy (if applicable)
 
@@ -434,10 +434,10 @@ This ensures `--resume` can recover the strategy without re-prompting.
    sys.path.insert(0, sys.argv[1])
    from utils import insert_implementation_summary_reference
    plan_path = Path(sys.argv[2])  # absolute plan_file from orchestrator JSON
-   content = plan_path.read_text()
+   content = plan_path.read_text(encoding='utf-8')
    summary_file = sys.argv[3]  # summary_file_relative from JSON
    updated = insert_implementation_summary_reference(content, summary_file)
-   plan_path.write_text(updated)
+   plan_path.write_text(updated, encoding='utf-8')
    print(f'Updated {plan_path} with reference to {summary_file}')
    " "${CLAUDE_SKILL_DIR}" "$PLAN_FILE" "$SUMMARY_FILE_RELATIVE"
    ```
@@ -460,15 +460,15 @@ This ensures `--resume` can recover the strategy without re-prompting.
 User: /multi-llm:multi-llm --implement plans/my-feature.md
 
 Claude:
-1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-   then: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-feature.md --output "$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_my-feature.json"
+1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)" (prerequisite check)
+   then: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-feature.md
 2. Orchestrator outputs:
-   - $PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_my-feature.json (5 tasks in 3 batches)
+   - Output file: {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_my-feature_1a2b3c4d.json (5 tasks in 3 batches; the _1a2b3c4d suffix is the orchestrator-computed hash of the repo-relative plan path)
    - State file: ${CLAUDE_SKILL_DIR}/state/abc123.json
    - Summary file path: plans/my-feature/my-feature_implementation_summary.md
    - Tasks file path: plans/my-feature/my-feature_tasks.md
    - Summary file relative: my-feature/my-feature_implementation_summary.md
-3. Claude reads {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_my-feature.json (Read tool, absolute path)
+3. Claude reads the `Output file:` path exactly as printed in step 2 (Read tool, absolute path)
 4. For each batch, Claude spawns Task subagents:
    - Batch 0 (1 task): Task(subagent_type="general-purpose", prompt="Create database schema...")
    - Batch 1 (2 tasks, parallel):

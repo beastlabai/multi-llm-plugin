@@ -352,24 +352,38 @@ class TestSubprocessDecoding:
         assert captured["encoding"] == "utf-8"
         assert captured["errors"] == "replace"
 
-    def test_gum_choose_decodes_invalid_utf8_with_replacement(
-        self, tmp_path, monkeypatch
-    ):
-        """A real gum shim emitting invalid UTF-8 decodes with U+FFFD.
+    def test_gum_choose_decodes_invalid_utf8_with_replacement(self, monkeypatch):
+        """A real gum stand-in emitting invalid UTF-8 decodes with U+FFFD.
 
-        Exercises the actual decode path: no UnicodeDecodeError, replacement
-        characters in the selection result.
+        Cross-platform (no shebang/chmod/PATH tricks, so it also runs on
+        Windows): swaps the gum argv for a Python byte emitter while passing
+        _try_gum_choose's own kwargs through to the real subprocess.run, so
+        the actual decode path is exercised: no UnicodeDecodeError,
+        replacement characters in the selection result.
         """
-        import os
+        import subprocess
 
-        fake_gum = tmp_path / "gum"
-        # \351 (0xE9) is cp1252 'e-acute'; invalid as a standalone UTF-8 byte.
-        fake_gum.write_bytes(b"#!/bin/sh\nprintf 'caf\\351-model\\n'\n")
-        fake_gum.chmod(0o755)
-        monkeypatch.setenv(
-            "PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"
+        monkeypatch.setattr(
+            'utils.interactive.shutil.which', lambda name: '/usr/bin/gum'
+        )
+        real_run = subprocess.run
+        captured_kwargs = {}
+        # \xe9 (0xE9) is cp1252 'e-acute'; invalid as a standalone UTF-8 byte.
+        emitter = "import sys; sys.stdout.buffer.write(b'caf\\xe9-model\\n')"
+
+        def run_python_emitter(cmd, **kwargs):
+            assert cmd[0] == "gum"
+            captured_kwargs.update(kwargs)
+            return real_run([sys.executable, "-c", emitter], **kwargs)
+
+        monkeypatch.setattr(
+            'utils.interactive.subprocess.run', run_python_emitter
         )
 
         result = _try_gum_choose(["caf\xe9-model"], "prompt")
 
         assert result == ["caf�-model"]
+        # The lossless decode must come from _try_gum_choose's own kwargs,
+        # not the locale default.
+        assert captured_kwargs["encoding"] == "utf-8"
+        assert captured_kwargs["errors"] == "replace"

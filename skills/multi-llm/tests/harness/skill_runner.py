@@ -82,6 +82,8 @@ class SkillRunner:
     - PATH prepended to use mock binaries
     - MULTI_LLM_TEST_MODE=1 to enable test mode
     - MOCK_LLM_CALL_LOG set to a unique file for call logging
+    - MULTI_LLM_PROVIDERS_CONFIG pinned to the skill's base providers.yaml so a
+      host repo's .multi-llm/providers.yaml cannot reroute mock model specs
 
     Usage:
         runner = SkillRunner(tmp_path)
@@ -209,6 +211,18 @@ class SkillRunner:
         # Set scenario path if provided
         if self.scenario_path:
             env["MOCK_LLM_SCENARIO"] = str(self.scenario_path)
+
+        # Isolate config discovery from the host machine. Orchestrators run with
+        # cwd=skill_dir, so when the skill lives inside a repo with a
+        # `.multi-llm/providers.yaml` (e.g. a dogfooding checkout), the
+        # project-local layer would deep-merge over base and reroute mock model
+        # specs to unmocked CLIs. The env override layer merges LAST, so pointing
+        # it at the skill's own base providers.yaml re-asserts every base-defined
+        # key (default_provider, defaults.models, provider blocks, ...) over any
+        # project-local override, restoring built-in behavior. Set before
+        # extra_env so a test supplying its own override still wins.
+        env["MULTI_LLM_PROVIDERS_CONFIG"] = str(self.skill_dir / "providers.yaml")
+        env.pop("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", None)
 
         # Add any extra environment variables
         env.update(self.extra_env)

@@ -237,11 +237,11 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
    ```bash
    TASKS_PATH="<tasks_file from orchestrator_output.json>"
    PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-   BATCH_SNAPSHOT="$PROJECT_ROOT/.multi-llm/tmp/batch_snapshot_{plan_stem}.md"
+   BATCH_SNAPSHOT="$PROJECT_ROOT/.multi-llm/tmp/batch_snapshot_tasks_{plan_stem}.md"
    ```
    Where `{plan_stem}` is the plan filename without extension.
 
-   Capture the snapshot with harness tools, not Bash: **Read** `$TASKS_PATH` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
+   Capture the snapshot with harness tools, not Bash: **Read** `$TASKS_PATH` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_tasks_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
 
    This batch only ever touches the single `tasks.md` file, so one snapshot covers it. Keep `$BATCH_SNAPSHOT` for step 6.
 

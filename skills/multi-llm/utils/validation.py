@@ -953,7 +953,7 @@ def prepare_batched_validation_tasks(
 
     # Build reaggregate command hint
     reaggregate_command = (
-        f'uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/{orchestrator} '
+        f'uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/{orchestrator}" '
         f'--plan-file "{plan_file}" --reaggregate'
     )
 

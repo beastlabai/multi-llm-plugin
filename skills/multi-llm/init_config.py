@@ -21,7 +21,7 @@ auto-discovered from the git root at run time.
 
 Usage (the way the skill invokes it):
 
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/init_config.py \\
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/init_config.py" \\
         [--dir PATH] [--force] [--gitignore] [--template-only]
 
 By default the file is left *trackable* (commit it for a team-wide, repo-standard

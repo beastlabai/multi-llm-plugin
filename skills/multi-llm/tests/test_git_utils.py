@@ -1663,30 +1663,39 @@ class TestIntentToAddUntracked:
 class TestRunGitDecoding:
     """Tests for UTF-8 + errors='replace' decoding of git output (task 2)."""
 
-    def test_run_git_decodes_invalid_utf8_with_replacement(
-        self, tmp_path, monkeypatch
-    ):
+    def test_run_git_decodes_invalid_utf8_with_replacement(self, monkeypatch):
         """Real subprocess emitting invalid UTF-8 bytes decodes with U+FFFD.
 
-        Uses a fake `git` executable on PATH that writes raw cp1252/invalid
-        bytes to stdout, so the actual decode path in _run_git is exercised
-        (no UnicodeDecodeError, replacement characters in the result).
+        Cross-platform (no shebang/chmod/PATH tricks, so it also runs on
+        Windows): swaps the git argv for a Python byte emitter while passing
+        _run_git's own kwargs through to the real subprocess.run, so the
+        actual decode path is exercised (no UnicodeDecodeError, replacement
+        characters in the result).
         """
-        fake_git = tmp_path / "git"
-        # \351 (0xE9) is cp1252 'e-acute'; \377 (0xFF) is invalid UTF-8
-        # in any position.
-        fake_git.write_bytes(
-            b"#!/bin/sh\nprintf 'caf\\351 \\377 done\\n'\n"
+        real_run = subprocess.run
+        captured_kwargs = {}
+        # \xe9 (0xE9) is cp1252 'e-acute'; \xff (0xFF) is invalid UTF-8 in
+        # any position.
+        emitter = (
+            "import sys; "
+            "sys.stdout.buffer.write(b'caf\\xe9 \\xff done\\n')"
         )
-        fake_git.chmod(0o755)
-        monkeypatch.setenv(
-            "PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"
-        )
+
+        def run_python_emitter(cmd, **kwargs):
+            assert cmd[0] == "git"
+            captured_kwargs.update(kwargs)
+            return real_run([sys.executable, "-c", emitter], **kwargs)
+
+        monkeypatch.setattr("utils.git_utils.subprocess.run", run_python_emitter)
 
         stdout, stderr, code = _run_git("anything", check=False)
 
         assert code == 0
         assert "caf� � done" in stdout
+        # The lossless decode must come from _run_git's own kwargs, not the
+        # locale default.
+        assert captured_kwargs["encoding"] == "utf-8"
+        assert captured_kwargs["errors"] == "replace"
 
     @patch("utils.git_utils.subprocess.run")
     def test_run_git_passes_utf8_replace_kwargs(self, mock_run):

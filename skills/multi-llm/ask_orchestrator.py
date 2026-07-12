@@ -554,11 +554,11 @@ Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
 
 Examples:
-  uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py \\
+  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py" \\
     --plan-file plans/my-plan.md --question "Is the rollback strategy sufficient?"
 
   # Question passed via a temp file (no question bytes transit the shell):
-  uv run --project ${{CLAUDE_SKILL_DIR}} -- python ${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py \\
+  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py" \\
     --plan-file plans/my-plan.md --question-file /tmp/q.txt --quick
         """,
     )

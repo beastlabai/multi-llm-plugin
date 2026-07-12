@@ -33,7 +33,7 @@ def _matches(pattern):
     """Return (file, line_no, line) for every regex match across the docs."""
     hits = []
     for path in _scanned_files():
-        for i, line in enumerate(path.read_text().splitlines(), start=1):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if re.search(pattern, line):
                 hits.append((path.name, i, line.strip()))
     return hits
@@ -69,7 +69,7 @@ class TestAllowedToolsGlobSyntax:
         rules, not regexes: a rule like ``Bash(grep:.*)`` is inert (it matches
         the literal prefix ``grep:.``) and silently reintroduces permission
         prompts. Only ``:*`` glob prefixes or exact strings are valid."""
-        skill_md = (SKILL_ROOT / "SKILL.md").read_text()
+        skill_md = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         offending = [
             line.strip()
             for line in skill_md.splitlines()

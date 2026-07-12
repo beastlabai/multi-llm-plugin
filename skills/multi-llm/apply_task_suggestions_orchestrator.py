@@ -7,7 +7,7 @@ the list of suggestions that should be applied. The actual application
 is handled by Claude Code using Task subagents sequentially.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file plans/my-plan.md [options]
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file plans/my-plan.md [options]
 """
 
 import os
@@ -83,14 +83,14 @@ This orchestrator outputs a JSON list of task suggestions to apply.
 The actual application is handled by Claude Code using Task subagents.
 
 Example:
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file plans/my-plan.md
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file plans/my-plan.md
 
 Bulk Approval Examples:
   # Auto-approve all LOW importance items
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file plans/my-plan.md --approve-all-low
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file plans/my-plan.md --approve-all-low
 
   # Skip all items requiring human review
-  uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py --plan-file plans/my-plan.md --skip-all-human
+  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file plans/my-plan.md --skip-all-human
         """,
             include_skip=True,
             include_output_format=True,

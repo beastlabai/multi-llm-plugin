@@ -226,17 +226,21 @@ class TestParseArgs:
 class TestDefaultOutputResolution:
     """Tests for the git-root-anchored default --output path (Phase 3).
 
-    The default must stay byte-identical to the path documented in
-    instructions/implement.md
-    (<git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}.json) and must
-    never fall back to the system temp dir.
+    The default is
+    <git-root>/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json,
+    where {hash8} is a stable hash of the repo-relative plan path (so
+    same-stem plans map to distinct artifacts). instructions/implement.md
+    consumes the path from the orchestrator's `Output file:` line rather than
+    recomputing it. The default must never fall back to the system temp dir.
     """
 
-    def test_default_output_uses_git_root_and_plan_stem(self):
+    def test_default_output_uses_git_root_plan_stem_and_path_hash(self):
         """Expected path is computed with the same primitives the code uses
-        (get_project_root() + plan stem + Path joining) — never a hardcoded
-        POSIX-separator literal, which would pass on Linux while silently
-        diverging on Windows."""
+        (get_project_root() + plan stem + repo-relative path hash + Path
+        joining) — never a hardcoded POSIX-separator literal, which would
+        pass on Linux while silently diverging on Windows."""
+        import hashlib
+
         from implement_orchestrator import resolve_default_output
         from utils.git_utils import get_project_root
 
@@ -245,10 +249,48 @@ class TestDefaultOutputResolution:
         project_root = get_project_root(str(plan_path))
         assert project_root, "test suite must run from inside the git repo"
 
+        rel = plan_path.relative_to(Path(project_root).resolve()).as_posix()
+        hash8 = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:8]
         expected = Path(project_root) / ".multi-llm" / "tmp" / (
-            f"implementation_tasks_{plan_path.stem}.json"
+            f"implementation_tasks_{plan_path.stem}_{hash8}.json"
         )
         assert resolve_default_output(plan_path) == str(expected)
+
+    def test_same_stem_plans_get_distinct_default_outputs(self):
+        """Regression: plans/api/index.md and plans/ui/index.md share a stem;
+        without the repo-relative path hash they would map to the same
+        workspace artifact and concurrent runs would clobber each other's
+        task JSON."""
+        from implement_orchestrator import resolve_default_output
+        from utils.git_utils import get_project_root
+
+        anchor = (Path(__file__).parent / "anchor.md").resolve()
+        project_root = get_project_root(str(anchor))
+        assert project_root, "test suite must run from inside the git repo"
+
+        root = Path(project_root)
+        api_plan = (root / "plans" / "api" / "index.md").resolve()
+        ui_plan = (root / "plans" / "ui" / "index.md").resolve()
+
+        with patch(
+            'implement_orchestrator.get_project_root',
+            return_value=project_root,
+        ):
+            api_output = resolve_default_output(api_plan)
+            ui_output = resolve_default_output(ui_plan)
+
+        assert api_output != ui_output
+        # Both still carry the shared stem for human readability.
+        assert "implementation_tasks_index_" in Path(api_output).name
+        assert "implementation_tasks_index_" in Path(ui_output).name
+
+    def test_default_output_hash_is_stable_across_calls(self):
+        """The hash is content-derived (SHA-256 of the repo-relative POSIX
+        path), not random — resuming a run must resolve the same file."""
+        from implement_orchestrator import resolve_default_output
+
+        plan_path = (Path(__file__).parent / "my-sample-plan.md").resolve()
+        assert resolve_default_output(plan_path) == resolve_default_output(plan_path)
 
     def test_default_output_fails_fast_outside_git_repo(self, temp_dir):
         """Outside a git work tree the resolution exits with an error instead

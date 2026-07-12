@@ -235,14 +235,17 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
    The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository":
    ```bash
-   PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-   BATCH_SNAPSHOT="$PROJECT_ROOT/.multi-llm/tmp/batch_snapshot_{plan_stem}.md"
+   git rev-parse --show-toplevel
    ```
-   Where `{plan_stem}` is the plan filename without extension.
+   The snapshot path is `{project_root}/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`, where `{project_root}` is the output of the command above and `{plan_stem}` is the plan filename without extension.
 
-   Capture the snapshot with harness tools, not Bash: **Read** `$PLAN_PATH` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
+   Also resolve the **plan file's absolute path** now — call it `{plan_abs}`. The plan argument is commonly relative (e.g. `plans/my-feature.md`), but harness Read/Write tools require OS-native absolute paths, so a relative path cannot be handed to them directly. If the plan path is already absolute, use it as-is; otherwise join `{project_root}` with the relative plan path (e.g. `{project_root}/plans/my-feature.md`).
 
-   Keep `$BATCH_SNAPSHOT` for step 6.
+   **Shell variables do NOT survive between Bash calls** — each Bash invocation is a fresh process, so do not stash these values in variables like `PROJECT_ROOT` or `BATCH_SNAPSHOT` for later steps. Note the concrete absolute snapshot path and `{plan_abs}` now and substitute them literally wherever later steps reference them.
+
+   Capture the snapshot with harness tools, not Bash: **Read** `{plan_abs}` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{project_root}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
+
+   Keep the concrete absolute snapshot path and `{plan_abs}` for step 6.
 
 4. **Spawn a Task subagent** using the substituted prompt
    - Use `general-purpose` subagent type
@@ -253,7 +256,11 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
    **Do NOT use `git diff` / `git diff --stat` to detect whether the plan changed.** Plan files are frequently untracked (freshly created), and every `git diff` variant silently ignores fully-untracked files — it will report "no changes" even when the subagent edited the plan, producing a false clean-failure. Detect changes by diffing against the step-3 snapshot instead:
    ```bash
-   diff -u "$BATCH_SNAPSHOT" "$PLAN_PATH"   # empty output = byte-identical (unchanged); non-empty = file changed
+   diff -u "{snapshot_path}" "{plan_path}"   # empty output = byte-identical (unchanged); non-empty = file changed
+   ```
+   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 3 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-3 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
+   ```bash
+   diff -u "$(git rev-parse --show-toplevel)/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md" "{plan_path}"
    ```
    Classify the result:
    - **Success**: The snapshot diff is non-empty AND the expected changes are present (spot-check by `grep`-ing the plan for distinctive text from this batch's suggestions).
@@ -262,7 +269,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
    The snapshot diff is the authoritative, fully git-independent check — no git intent-to-add step is needed here (flows that genuinely need untracked files visible to git diffs, like code review, handle that inside their Python orchestrator via `utils/git_utils.intent_to_add_untracked`).
 
-   There is **no snapshot cleanup step**: the snapshot lives in the self-gitignored workspace temp dir and is simply overwritten by the next batch. On **partial application** the loop stops (below), so `$BATCH_SNAPSHOT` still holds the pre-batch content for the human reviewer to inspect.
+   There is **no snapshot cleanup step**: the snapshot lives in the self-gitignored workspace temp dir and is simply overwritten by the next batch. On **partial application** the loop stops (below), so the snapshot file still holds the pre-batch content for the human reviewer to inspect.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 

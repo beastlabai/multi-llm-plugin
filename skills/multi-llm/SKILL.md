@@ -8,9 +8,10 @@ allowed-tools:
   - Bash(ls:*)
   - Bash(grep:*)
   - Bash(diff:*)
-  - Bash(realpath:*)
+  - Bash(tail:*)
+  - Bash(dirname:*)
+  - Bash(test -x:*)
   - Bash(git rev-parse:*)
-  - Bash(mkdir:*)
   - Read
   - Edit
   - Write

@@ -10,20 +10,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        # windows-latest is gated on the Phase 4 portability items (the
-        # os.geteuid collection-crash fix, the skill_runner .cmd-shim /
-        # os.pathsep harness rework, and the runtime symlink-capability
-        # guard). Once those are verified on a real Windows runner, add:
-        #   os: [ubuntu-latest, macos-latest, windows-latest]
-        # When first enabling windows-latest, exclude the ~216 e2e tests
-        # that hang off the skill_runner fixture (e.g. via a Windows-only
-        # matrix `include` entry deselecting them with --ignore/-m) until
-        # the .cmd-shim harness is confirmed green there, then drop the
-        # exclusion.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # The Phase 4 windows-latest prerequisites (os.geteuid
+          # collection-crash fix, skill_runner .cmd-shim / os.pathsep
+          # harness rework, runtime symlink-capability guard) have landed,
+          # but the .cmd-shim harness is not yet verified on a real Windows
+          # runner. Until it is confirmed green there, windows-latest
+          # deselects the 293 e2e tests that hang off the skill_runner
+          # fixture (plus the harness's own tests); drop this exclusion
+          # once the harness is verified.
+          - os: windows-latest
+            pytest_args: --ignore-glob=*test_e2e_* --ignore=skills/multi-llm/tests/test_harness.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Run tests
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live"
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live" ${{ matrix.pytest_args }}

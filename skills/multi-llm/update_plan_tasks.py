@@ -2,7 +2,7 @@
 """Update plan file with generated tasks.
 
 Usage:
-    uv run --project ${CLAUDE_SKILL_DIR} -- python ${CLAUDE_SKILL_DIR}/update_plan_tasks.py --plan-file <plan_path> --tasks-file <tasks_json_path>
+    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" --plan-file <plan_path> --tasks-file <tasks_json_path>
 
 This script:
 1. Reads the tasks JSON file

@@ -74,12 +74,21 @@ two layers cannot diverge.
    project root first and treat failure as a hard prerequisite failure:
 
    ```bash
-   PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+   git rev-parse --show-toplevel
    ```
 
-   If the command fails or `$PROJECT_ROOT` is empty, STOP with the error:
+   If the command fails or prints nothing, STOP with the error:
    "multi-llm requires running inside a git repository." Never fall back to a
-   relative path or `$PWD`.
+   relative path or `$PWD`. Note the printed path — it is `{PROJECT_ROOT}` in
+   the steps below. **Shell variables do NOT survive between Bash calls** —
+   each Bash invocation is a fresh process, so a `PROJECT_ROOT=...` assignment
+   made here is empty in any later Bash call. Substitute the concrete absolute
+   path literally in harness-tool steps, and re-resolve the root inside any
+   Bash command that needs it via an **inline `$(git rev-parse --show-toplevel)`
+   command substitution** embedded in an allowlisted command (as the launch
+   block below does) — never via a leading `PROJECT_ROOT=...` assignment
+   segment, which the permission allowlist does not cover and which would
+   raise a permission prompt.
 
    Then write the **verbatim question text** (no trailing newline) with the
    **Write tool** (NOT Bash) — no question bytes ever transit the shell command
@@ -95,28 +104,47 @@ two layers cannot diverge.
      no cleanup step, and the user may delete `.multi-llm/tmp/` at any time
      (the next run recreates it).
 
-   Then launch the orchestrator, passing the same path in Bash:
+   Then launch the orchestrator, passing the same path. Root resolution and
+   launch happen in **one single Bash invocation** — the earlier
+   `git rev-parse` call ran in a different process, so its result must be
+   recomputed here, not referenced. Recompute it as an **inline command
+   substitution inside the `--question-file` argument** (not as a
+   `PROJECT_ROOT=...` assignment prefix — see step 2):
 
    ```bash
-   QUESTION_FILE="$PROJECT_ROOT/.multi-llm/tmp/ask_question_{plan_stem}.txt"
    PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- \
      python "${CLAUDE_SKILL_DIR}/ask_orchestrator.py" \
-     --plan-file "$PLAN_PATH" --question-file "$QUESTION_FILE" [--models ...] \
+     --plan-file "$PLAN_PATH" \
+     --question-file "$(git rev-parse --show-toplevel)/.multi-llm/tmp/ask_question_{plan_stem}.txt" \
+     [--models ...] \
      > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
    ```
 
+   (The prerequisite check at the top of step 2 already hard-stopped outside a
+   git repository, so the substitution cannot come back empty here; if it ever
+   did, the orchestrator would fail fast on a missing question file — surface
+   the git-repository error above instead of retrying with a guessed path.)
+
    (Launch DETACHED — see step 3. The `<question-slug>-<hash8>` log dir matches the
    orchestrator's output dir; if you don't know it yet, redirect to the workspace
-   temp log instead — a Bash redirect does not create directories, so include the
-   `mkdir -p` in the same command block:
+   temp log instead — a Bash redirect does not create directories, and `mkdir` is
+   deliberately not allowlisted, so ensure the temp dir exists via the **Write
+   tool** (which creates parent directories automatically) before launching. The
+   preferred question-file mechanism in step 2 already guarantees this; if you
+   used the env-var mechanism instead, first Write
+   `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` with content `*` — that single
+   Write both creates the directory and makes it ignore itself. The redirect
+   resolves the root with the same inline substitution, inside the **same**
+   launch invocation (a variable set in any other Bash call would be empty
+   here):
 
    ```bash
-   mkdir -p "$PROJECT_ROOT/.multi-llm/tmp"
-   ... > "$PROJECT_ROOT/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log" 2>&1
+   ... > "$(git rev-parse --show-toplevel)/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log" 2>&1
    ```
 
-   then read markers/paths from that log with the Read tool, using the absolute
-   path built from the resolved project root.)
+   then read markers/paths from that log with the Read tool, using the
+   concrete absolute path — `{PROJECT_ROOT}/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log`
+   with the resolved root substituted literally, never a shell variable.)
 
    **Alternatively — pass the question via a strictly-quoted environment
    variable** the orchestrator reads:
