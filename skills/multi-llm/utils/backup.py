@@ -9,6 +9,13 @@ import sys
 from datetime import datetime
 from typing import Optional
 
+try:
+    from .stream_bootstrap import bootstrap_streams
+except ImportError:
+    # Direct script invocation (`python utils/backup.py`): sys.path[0]
+    # is the utils/ directory, so import the sibling module directly.
+    from stream_bootstrap import bootstrap_streams
+
 
 def generate_backup_path(file_path: str) -> str:
     """Generate backup path with timestamp.
@@ -35,7 +42,8 @@ def backup_before_write(file_path: str) -> Optional[str]:
 
 
 # CLI entry point for subagents
-if __name__ == "__main__":
+def main() -> None:
+    bootstrap_streams()
     if len(sys.argv) != 2:
         print("Usage: python -m utils.backup <file_path>", file=sys.stderr)
         sys.exit(1)
@@ -45,3 +53,7 @@ if __name__ == "__main__":
         print(f"Backed up to: {result}")
     else:
         print("No backup needed (file does not exist)")
+
+
+if __name__ == "__main__":
+    main()

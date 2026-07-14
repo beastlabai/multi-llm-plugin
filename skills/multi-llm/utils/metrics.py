@@ -13,6 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+try:
+    from .stream_bootstrap import bootstrap_streams
+except ImportError:
+    # Direct script invocation (`python utils/metrics.py`): sys.path[0]
+    # is the utils/ directory, so import the sibling module directly.
+    from stream_bootstrap import bootstrap_streams
+
 
 def _read_state(state_path: Path) -> dict:
     """Read and parse the state JSON file."""
@@ -508,7 +515,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
+def main() -> None:
+    bootstrap_streams()
     parser = _build_parser()
     args = parser.parse_args()
 
@@ -553,3 +561,7 @@ if __name__ == "__main__":
             output = generate_phase_report(state_file, args.phase)
         if output:
             print(output)
+
+
+if __name__ == "__main__":
+    main()

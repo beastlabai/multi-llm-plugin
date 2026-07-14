@@ -14,6 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+try:
+    from .stream_bootstrap import bootstrap_streams
+except ImportError:
+    # Direct script invocation (`python utils/html_report_generator.py`):
+    # sys.path[0] is the utils/ directory, so import the sibling module directly.
+    from stream_bootstrap import bootstrap_streams
+
 logger = logging.getLogger(__name__)
 
 
@@ -1962,6 +1969,7 @@ def _read_human_decisions_from_state(
 
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI: overlay recorded human decisions onto an existing review report."""
+    bootstrap_streams()
     import argparse
 
     parser = argparse.ArgumentParser(
