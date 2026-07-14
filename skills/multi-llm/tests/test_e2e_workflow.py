@@ -95,7 +95,7 @@ class TestReviewPlanCreatesOutputs:
         cursor_json_path = review_plan_dir / "cursor-agent.json"
         cursor_json_content = ""
         if cursor_json_path.exists():
-            cursor_json_content = cursor_json_path.read_text()[:200]
+            cursor_json_content = cursor_json_path.read_text(encoding="utf-8")[:200]
 
         assert grouped_path.exists(), (
             f"grouped.json not found at {grouped_path}\n"
@@ -106,7 +106,7 @@ class TestReviewPlanCreatesOutputs:
         )
 
         # Verify grouped.json is valid JSON (v1 bare list or v2 envelope)
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             grouped_data = json.load(f)
         if isinstance(grouped_data, dict) and "groups" in grouped_data:
             groups = grouped_data["groups"]  # v2 envelope
@@ -145,7 +145,7 @@ class TestReviewPlanCreatesOutputs:
         assert report_path.exists(), f"report.md not found at {report_path}"
 
         # Verify report has content
-        content = report_path.read_text()
+        content = report_path.read_text(encoding="utf-8")
         assert len(content) > 0, "report.md is empty"
         assert "# Plan Review Report" in content or "Report" in content
 
@@ -177,7 +177,7 @@ class TestReviewPlanCreatesOutputs:
         assert backup_path.exists(), f"backup.md not found"
 
         # Verify backup has original content
-        backup_content = backup_path.read_text()
+        backup_content = backup_path.read_text(encoding="utf-8")
         assert backup_content == original_content, "backup.md content doesn't match original"
 
 
@@ -219,7 +219,7 @@ class TestReviewPlanMultipleModels:
         grouped_path = review_plan_dir / "grouped.json"
         assert grouped_path.exists()
 
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             grouped_data = json.load(f)
 
         # Handle v1 (bare list) or v2 (envelope) format
@@ -446,7 +446,7 @@ Description of second task.
         # Even if it fails for missing state, we're testing the basic flow
         if result.success and output_path.exists():
             # Verify output is valid JSON
-            with open(output_path) as f:
+            with open(output_path, encoding="utf-8") as f:
                 tasks = json.load(f)
             assert isinstance(tasks, (dict, list)), "Task output should be JSON object or array"
 
@@ -526,7 +526,7 @@ class TestFullWorkflowHappyPath:
         state_path = plan.output_dir / "state.json"
         assert state_path.exists(), f"state.json not found at {state_path}"
 
-        with open(state_path) as f:
+        with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
 
         # Check for expected state fields

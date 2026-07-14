@@ -58,7 +58,7 @@ class TestGetOutputPaths:
     def test_creates_subfolder(self, tmp_path):
         """Test that get_output_paths creates the plan subfolder and phase subfolder."""
         plan_file = tmp_path / "test-plan.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         output_path = get_output_paths(plan_file, "reviews")
 
@@ -79,7 +79,7 @@ class TestGetOutputPaths:
     def test_output_path_format(self, tmp_path):
         """Test that output paths have correct format with simplified names."""
         plan_file = tmp_path / "my-feature.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         # Test various output types - now uses simplified filenames
         assert get_output_paths(plan_file, "reviews").name == "report.md"
@@ -96,7 +96,7 @@ class TestGetOutputPaths:
     def test_existing_subfolder_no_error(self, tmp_path):
         """Test that existing subfolder doesn't cause errors."""
         plan_file = tmp_path / "test-plan.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         # Pre-create the plan subfolder and phase subfolder
         plan_subfolder = tmp_path / "test-plan"
@@ -111,7 +111,7 @@ class TestGetOutputPaths:
     def test_special_chars_sanitized_in_folder_name(self, tmp_path):
         """Test that special chars in plan name are sanitized for folder."""
         plan_file = tmp_path / "My Feature Plan.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         output_path = get_output_paths(plan_file, "reviews")
 
@@ -127,7 +127,7 @@ class TestGetOutputPaths:
     def test_original_plan_location_unchanged(self, tmp_path):
         """Test that original plan file stays in place."""
         plan_file = tmp_path / "test-plan.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         get_output_paths(plan_file, "reviews")
 
@@ -138,7 +138,7 @@ class TestGetOutputPaths:
     def test_code_review_output_types(self, tmp_path):
         """Test code review specific output types."""
         plan_file = tmp_path / "test-plan.md"
-        plan_file.write_text("# Test Plan")
+        plan_file.write_text("# Test Plan", encoding="utf-8")
 
         assert get_output_paths(plan_file, "code_review").suffix == ".md"
         assert get_output_paths(plan_file, "code_review_issues").suffix == ".json"

@@ -254,11 +254,11 @@ class TestUpdatePlanTasksScript:
         """Test that the script creates the tasks file."""
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n")
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}))
+        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -267,7 +267,8 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"Script failed: {result.stderr}"
@@ -277,7 +278,7 @@ class TestUpdatePlanTasksScript:
         assert tasks_file.exists(), f"Tasks file not created at {tasks_file}"
 
         # Check content
-        tasks_content = tasks_file.read_text()
+        tasks_content = tasks_file.read_text(encoding="utf-8")
         assert "### Task T001" in tasks_content
         assert "### Task T002" in tasks_content
 
@@ -285,11 +286,11 @@ class TestUpdatePlanTasksScript:
         """Test that the script updates the plan with tasks reference."""
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n")
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}))
+        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -298,13 +299,14 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"Script failed: {result.stderr}"
 
         # Check plan was updated
-        plan_content = plan_path.read_text()
+        plan_content = plan_path.read_text(encoding="utf-8")
         assert "<!-- TASKS_FILE:" in plan_content
         assert "## Implementation Tasks" in plan_content
 
@@ -313,11 +315,11 @@ class TestUpdatePlanTasksScript:
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
         original_content = "# My Plan\n\nSome content here.\n"
-        plan_path.write_text(original_content)
+        plan_path.write_text(original_content, encoding="utf-8")
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}))
+        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
 
         # Run script with --dry-run
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -327,14 +329,15 @@ class TestUpdatePlanTasksScript:
              "--tasks-file", str(tasks_json_path),
              "--dry-run"],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0
         assert "Dry run" in result.stdout
 
         # Check nothing was modified
-        assert plan_path.read_text() == original_content
+        assert plan_path.read_text(encoding="utf-8") == original_content
         tasks_file = temp_dir / "my-plan" / "tasks" / "tasks.md"
         assert not tasks_file.exists()
 
@@ -342,7 +345,7 @@ class TestUpdatePlanTasksScript:
         """Test error handling when plan file doesn't exist."""
         plan_path = temp_dir / "nonexistent.md"
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}))
+        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -350,7 +353,8 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -359,7 +363,7 @@ class TestUpdatePlanTasksScript:
     def test_script_missing_tasks_file(self, temp_dir):
         """Test error handling when tasks file doesn't exist."""
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# Plan\n")
+        plan_path.write_text("# Plan\n", encoding="utf-8")
         tasks_json_path = temp_dir / "nonexistent.json"
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -368,7 +372,8 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -377,9 +382,9 @@ class TestUpdatePlanTasksScript:
     def test_script_invalid_json(self, temp_dir):
         """Test error handling with invalid JSON."""
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# Plan\n")
+        plan_path.write_text("# Plan\n", encoding="utf-8")
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text("not valid json {")
+        tasks_json_path.write_text("not valid json {", encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -387,7 +392,8 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -396,9 +402,9 @@ class TestUpdatePlanTasksScript:
     def test_script_invalid_tasks_structure(self, temp_dir):
         """Test error handling with invalid tasks structure."""
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# Plan\n")
+        plan_path.write_text("# Plan\n", encoding="utf-8")
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": []}))
+        tasks_json_path.write_text(json.dumps({"tasks": []}), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -406,7 +412,8 @@ class TestUpdatePlanTasksScript:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -420,7 +427,7 @@ class TestPreambleStorage:
         """Test that the script stores plan_preamble in state.json."""
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n")
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON with preamble
         tasks_data = {
@@ -428,7 +435,7 @@ class TestPreambleStorage:
             "tasks": sample_tasks_json
         }
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps(tasks_data))
+        tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -437,7 +444,8 @@ class TestPreambleStorage:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"Script failed: {result.stderr}"
@@ -447,7 +455,7 @@ class TestPreambleStorage:
         state_path = temp_dir / "my-plan" / "state.json"
         assert state_path.exists(), f"State file not created at {state_path}"
 
-        state_data = json.loads(state_path.read_text())
+        state_data = json.loads(state_path.read_text(encoding="utf-8"))
         assert "plan_preamble" in state_data
         assert state_data["plan_preamble"] == "This is a test preamble describing the plan goals and architecture."
 
@@ -455,12 +463,12 @@ class TestPreambleStorage:
         """Test that the script works when plan_preamble is missing from JSON."""
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n")
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON without preamble (legacy format)
         tasks_data = {"tasks": sample_tasks_json}
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps(tasks_data))
+        tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -469,7 +477,8 @@ class TestPreambleStorage:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"Script failed: {result.stderr}"
@@ -480,7 +489,7 @@ class TestPreambleStorage:
         """Test that the script handles empty preamble string."""
         # Create plan file
         plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n")
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON with empty preamble
         tasks_data = {
@@ -488,7 +497,7 @@ class TestPreambleStorage:
             "tasks": sample_tasks_json
         }
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps(tasks_data))
+        tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -497,7 +506,8 @@ class TestPreambleStorage:
              "--plan-file", str(plan_path),
              "--tasks-file", str(tasks_json_path)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"Script failed: {result.stderr}"

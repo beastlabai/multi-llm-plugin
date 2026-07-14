@@ -232,7 +232,7 @@ class TestSaveValidationResults:
             ]
             save_validation_results(validation_results, output_path, model="test-model")
 
-            with open(output_path, 'r') as f:
+            with open(output_path, 'r', encoding="utf-8") as f:
                 data = json.load(f)
 
             assert data["metadata"]["schema_version"] == "2.1"
@@ -246,7 +246,7 @@ class TestSaveValidationResults:
             ]
             save_validation_results(validation_results, output_path, model="my-model")
 
-            with open(output_path, 'r') as f:
+            with open(output_path, 'r', encoding="utf-8") as f:
                 data = json.load(f)
 
             assert "metadata" in data
@@ -270,7 +270,7 @@ class TestSaveValidationResults:
             ]
             save_validation_results(validation_results, output_path, model="test-model")
 
-            with open(output_path, 'r') as f:
+            with open(output_path, 'r', encoding="utf-8") as f:
                 data = json.load(f)
 
             group = data["groups"][0]
@@ -308,7 +308,7 @@ class TestLoadValidationResults:
                     "schema_version": "2.0",
                 }
             }
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v2_data, f)
 
             results = load_validation_results(output_path)
@@ -332,7 +332,7 @@ class TestLoadValidationResults:
                     "confidence": 0.9,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -355,7 +355,7 @@ class TestLoadValidationResults:
                     "confidence": 0.0,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -375,7 +375,7 @@ class TestLoadValidationResults:
                     "confidence": 0.0,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -395,7 +395,7 @@ class TestLoadValidationResults:
                     "confidence": 0.0,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -415,7 +415,7 @@ class TestLoadValidationResults:
                     "confidence": 0.9,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -434,7 +434,7 @@ class TestLoadValidationResults:
                     "confidence": 0.5,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)
@@ -454,7 +454,7 @@ class TestLoadValidationResults:
                     "confidence": 0.5,
                 }
             ]
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding="utf-8") as f:
                 json.dump(v1_data, f)
 
             results = load_validation_results(output_path)

@@ -85,7 +85,7 @@ def write_batch_results(
             "schema_version": schema_version
         }
     }
-    with open(batch_path, 'w') as f:
+    with open(batch_path, 'w', encoding="utf-8") as f:
         json.dump(batch_data, f)
 
 
@@ -844,7 +844,7 @@ Testing confidence value handling in validation.
             }
             for i in range(6)
         ]
-        (review_dir / "grouped.json").write_text(json.dumps(grouped))
+        (review_dir / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
 
         # Create validation.json with edge confidence values
         validation = [
@@ -855,7 +855,7 @@ Testing confidence value handling in validation.
             {"group_index": 4, "status": "needs-human-decision", "reason": "Low confidence", "confidence": 0.3},
             {"group_index": 5, "status": "invalid", "reason": "High confidence invalid", "confidence": 0.95},
         ]
-        (review_dir / "validation.json").write_text(json.dumps(validation))
+        (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
 
         # Create state file marking review-plan as completed
         fixture_manager.create_state_file(plan, phases_completed=["review-plan"])

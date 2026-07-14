@@ -160,7 +160,7 @@ def _create_plan(
     Returns the plan file path.
     """
     plan_path = temp_dir / f"{plan_name}.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     prefix = sanitize_prefix(plan_name)
     output_dir = temp_dir / prefix
@@ -169,7 +169,7 @@ def _create_plan(
     if create_tasks:
         tasks_dir = output_dir / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text(tasks_content)
+        (tasks_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
 
     # Create review-tasks directory with grouped.json and validation.json
     review_tasks_dir = output_dir / "review-tasks"
@@ -180,13 +180,15 @@ def _create_plan(
         groups_copy = copy.deepcopy(groups)
         stamp_stable_ids(groups_copy)
         (review_tasks_dir / "grouped.json").write_text(
-            json.dumps({"format_version": 2, "groups": groups_copy}, indent=2)
+            json.dumps({"format_version": 2, "groups": groups_copy}, indent=2),
+            encoding="utf-8",
         )
 
     if create_validation_json:
         val = validation if validation is not None else SAMPLE_VALIDATION_FOR_FINDINGS
         (review_tasks_dir / "validation.json").write_text(
-            json.dumps(val, indent=2)
+            json.dumps(val, indent=2),
+            encoding="utf-8",
         )
 
     # Set up state
@@ -216,6 +218,7 @@ def run_prereq_check(plan_path: Path, mode: str) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -235,6 +238,7 @@ def run_prereq_skip(plan_path: Path, mode: str, reason: str) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -252,6 +256,7 @@ def run_status_check(plan_path: Path) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -270,6 +275,7 @@ def run_orchestrator(plan_path: Path, *extra_args, timeout: int = 30) -> subproc
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -287,6 +293,7 @@ def run_implement_orchestrator(plan_path: Path, *extra_args, timeout: int = 30) 
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -576,7 +583,7 @@ class TestPhase3cHasFindings:
         output_file = temp_dir / prefix / "apply-task-suggestions" / "orchestrator_output.json"
         assert output_file.exists(), f"Output file not created: {output_file}"
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         assert "to_apply" in output

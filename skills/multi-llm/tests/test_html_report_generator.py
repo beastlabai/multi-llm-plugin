@@ -481,7 +481,7 @@ class TestEmbedLogSnippets:
     def test_returns_log_content(self, tmp_path):
         """Returns correct log content for existing log files."""
         log_content = "Line 1\nLine 2\nLine 3\n"
-        (tmp_path / "log_claude-3-opus.txt").write_text(log_content)
+        (tmp_path / "log_claude-3-opus.txt").write_text(log_content, encoding="utf-8")
 
         result = embed_log_snippets(tmp_path, ["claude-3-opus"])
 
@@ -507,7 +507,7 @@ class TestEmbedLogSnippets:
         # Create log with 10 lines (no trailing newline to avoid empty split element)
         lines = [f"Line {i}" for i in range(1, 11)]
         log_content = "\n".join(lines)
-        (tmp_path / "log_test-model.txt").write_text(log_content)
+        (tmp_path / "log_test-model.txt").write_text(log_content, encoding="utf-8")
 
         result = embed_log_snippets(tmp_path, ["test-model"], max_lines=5)
 
@@ -526,7 +526,7 @@ class TestEmbedLogSnippets:
         """Returns all lines when log is shorter than max_lines."""
         lines = ["Line 1", "Line 2", "Line 3"]
         log_content = "\n".join(lines)
-        (tmp_path / "log_test-model.txt").write_text(log_content)
+        (tmp_path / "log_test-model.txt").write_text(log_content, encoding="utf-8")
 
         result = embed_log_snippets(tmp_path, ["test-model"], max_lines=50)
 
@@ -539,7 +539,7 @@ class TestEmbedLogSnippets:
         """Sanitizes model names with special characters."""
         log_content = "Log for model with colons"
         # File uses sanitized name
-        (tmp_path / "log_provider_model.txt").write_text(log_content)
+        (tmp_path / "log_provider_model.txt").write_text(log_content, encoding="utf-8")
 
         result = embed_log_snippets(tmp_path, ["provider:model"])
 
@@ -548,8 +548,8 @@ class TestEmbedLogSnippets:
 
     def test_multiple_models(self, tmp_path):
         """Handles multiple models."""
-        (tmp_path / "log_model-a.txt").write_text("Log A")
-        (tmp_path / "log_model-b.txt").write_text("Log B")
+        (tmp_path / "log_model-a.txt").write_text("Log A", encoding="utf-8")
+        (tmp_path / "log_model-b.txt").write_text("Log B", encoding="utf-8")
 
         result = embed_log_snippets(tmp_path, ["model-a", "model-b"])
 
@@ -624,7 +624,7 @@ First step details.
 
 ### Step 2
 Second step details.
-""")
+""", encoding="utf-8")
         return plan_path
 
     def test_returns_valid_html(self, sample_groups, sample_plan, tmp_path):
@@ -735,7 +735,7 @@ Second step details.
 
         # Create a fake module path that doesn't have the template
         fake_path = tmp_path / "fake_module.py"
-        fake_path.write_text("")
+        fake_path.write_text("", encoding="utf-8")
 
         # We can test the error path by checking the function behavior
         # when the template path doesn't exist
@@ -892,7 +892,7 @@ class TestLoadHtmlSelections:
             "edited_descriptions": {"G1S2": "Updated description"},
         }
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -903,7 +903,7 @@ class TestLoadHtmlSelections:
     def test_returns_none_for_invalid_json(self, tmp_path):
         """Returns None for invalid JSON content."""
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text("not valid json {{{")
+        selections_path.write_text("not valid json {{{", encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -912,7 +912,7 @@ class TestLoadHtmlSelections:
     def test_returns_none_for_empty_file(self, tmp_path):
         """Returns None for empty file."""
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text("")
+        selections_path.write_text("", encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -922,7 +922,7 @@ class TestLoadHtmlSelections:
         """Loads JSON with only required fields."""
         selections = {"skipped_groups": [], "skipped_suggestions": []}
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -949,7 +949,7 @@ class TestLoadHtmlSelections:
             "skipped_groups": [1],
             "skipped_suggestions": [],
         }
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path, plan_path="/home/user/plans/my-plan.md")
 
@@ -963,7 +963,7 @@ class TestLoadHtmlSelections:
             "skipped_groups": [1],
             "skipped_suggestions": [],
         }
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         with pytest.raises(ValueError, match="Plan path mismatch"):
             load_html_selections(tmp_path, plan_path="/home/user/plans/plan-b.md")
@@ -975,7 +975,7 @@ class TestLoadHtmlSelections:
             "skipped_groups": [],
             "skipped_suggestions": [],
         }
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path, plan_path="/home/user/plans/my-plan.md")
 
@@ -984,7 +984,7 @@ class TestLoadHtmlSelections:
     def test_missing_plan_path_in_json_warns(self, tmp_path, capsys):
         """When JSON lacks plan_path, prints warning but returns data."""
         selections = {"skipped_groups": [1], "skipped_suggestions": []}
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path, plan_path="/home/user/plans/my-plan.md")
 
@@ -1000,7 +1000,7 @@ class TestLoadHtmlSelections:
             "skipped_groups": [1],
             "skipped_suggestions": [],
         }
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -1009,7 +1009,7 @@ class TestLoadHtmlSelections:
     def test_error_message_includes_both_paths(self, tmp_path):
         """ValueError message includes both the JSON and current paths."""
         selections = {"plan_path": "/plans/alpha.md", "skipped_groups": []}
-        (tmp_path / "user_selections.json").write_text(json.dumps(selections))
+        (tmp_path / "user_selections.json").write_text(json.dumps(selections), encoding="utf-8")
 
         with pytest.raises(ValueError) as exc_info:
             load_html_selections(tmp_path, plan_path="/plans/beta.md")
@@ -1740,7 +1740,7 @@ class TestFallbackChain:
     def sample_plan(self, tmp_path):
         """Create a minimal plan file."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n### Step 1\nContent.\n")
+        plan_path.write_text("# Test Plan\n\n### Step 1\nContent.\n", encoding="utf-8")
         return plan_path
 
     @pytest.fixture

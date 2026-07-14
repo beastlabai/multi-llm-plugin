@@ -30,7 +30,7 @@ def _create_state(tmp_path, extra=None):
     if extra:
         state.update(extra)
     state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps(state, indent=2))
+    state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state_file
 
 
@@ -48,7 +48,7 @@ class TestRecordMetric:
             token_count=1000,
         )
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert "metrics" in state
         assert "implement" in state["metrics"]
         assert len(state["metrics"]["implement"]) == 1
@@ -63,7 +63,7 @@ class TestRecordMetric:
         record_metric(state_path=state_file, phase="implement", label="Task 2")
         record_metric(state_path=state_file, phase="implement", label="Task 3")
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         entries = state["metrics"]["implement"]
         assert len(entries) == 3
         assert entries[0]["label"] == "Task 1"
@@ -81,7 +81,7 @@ class TestRecordMetric:
             # All optional args left as None
         )
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         entry = state["metrics"]["review-plan"][0]
 
         # Required fields present
@@ -102,7 +102,7 @@ class TestRecordMetric:
         record_metric(state_path=state_file, phase="code-review", label="Review task")
         record_metric(state_path=state_file, phase="apply-fixes", label="Fix task")
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert len(state["metrics"]) == 3
         assert len(state["metrics"]["implement"]) == 1
         assert len(state["metrics"]["code-review"]) == 1
@@ -129,7 +129,7 @@ class TestRecordMetric:
             token_count=500,
         )
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
 
         # Original fields preserved
         assert state["schema_version"] == "1.0"
@@ -151,7 +151,7 @@ class TestRecordMetric:
         record_metric(state_path=state_file, phase="implement", label="Task 1")
         after = datetime.now()
 
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         entry = state["metrics"]["implement"][0]
         assert "timestamp" in entry
 
@@ -386,12 +386,13 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
         # Verify state file was updated
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert "metrics" in state
         assert "implement" in state["metrics"]
         assert len(state["metrics"]["implement"]) == 1
@@ -424,6 +425,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -447,6 +449,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # argparse exits with 2 for missing required args
@@ -463,6 +466,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result2.returncode != 0
@@ -478,6 +482,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result3.returncode != 0
@@ -494,6 +499,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -510,6 +516,7 @@ class TestMetricsCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -770,7 +777,7 @@ class TestEta:
         assert elapsed is not None
         assert elapsed >= 2500
         # progress entry should be removed
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert "implement" not in state.get("metrics_progress", {})
 
     def test_start_replaces_existing_progress(self, tmp_path, monkeypatch):
@@ -779,13 +786,13 @@ class TestEta:
         clock = _ClockController(monkeypatch, datetime(2026, 1, 1, 12, 0, 0))
 
         start_phase(state_file, phase="implement", total_batches=4)
-        first_state = json.loads(state_file.read_text())
+        first_state = json.loads(state_file.read_text(encoding="utf-8"))
         first_started = first_state["metrics_progress"]["implement"]["started_at"]
         assert first_state["metrics_progress"]["implement"]["total_batches"] == 4
 
         clock.advance(60)
         start_phase(state_file, phase="implement", total_batches=8)
-        second_state = json.loads(state_file.read_text())
+        second_state = json.loads(state_file.read_text(encoding="utf-8"))
         second_started = second_state["metrics_progress"]["implement"]["started_at"]
         assert second_state["metrics_progress"]["implement"]["total_batches"] == 8
         assert second_started != first_started
@@ -959,9 +966,10 @@ class TestEta:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert state["metrics_progress"]["implement"]["total_batches"] == 3
 
         # record with ETA flags
@@ -978,6 +986,7 @@ class TestEta:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         # ETA line should land on stderr
@@ -998,6 +1007,7 @@ class TestEta:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert "[ETA]" not in result.stderr
@@ -1012,7 +1022,8 @@ class TestEta:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        state = json.loads(state_file.read_text())
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         assert "implement" not in state.get("metrics_progress", {})

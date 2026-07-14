@@ -1464,7 +1464,7 @@ class TestInitConfigScaffolder:
         # And it parses as YAML to a real stub, not garbage: the active
         # `defaults:` key means the template must parse to a mapping (a
         # fully-commented or corrupt template would not).
-        assert isinstance(yaml.safe_load(template.read_text()), dict)
+        assert isinstance(yaml.safe_load(template.read_text(encoding="utf-8")), dict)
 
     def test_writes_file_and_creates_dir(self, tmp_path):
         rc = self._run_init(tmp_path)
@@ -1473,22 +1473,22 @@ class TestInitConfigScaffolder:
         assert out.exists()
         # Content is the template.
         import init_config
-        assert out.read_text() == init_config.TEMPLATE_PATH.read_text()
+        assert out.read_text(encoding="utf-8") == init_config.TEMPLATE_PATH.read_text(encoding="utf-8")
 
     def test_refuses_overwrite_without_force(self, tmp_path):
         assert self._run_init(tmp_path) == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        out.write_text("custom: content\n")
+        out.write_text("custom: content\n", encoding="utf-8")
         assert self._run_init(tmp_path) == 1
-        assert out.read_text() == "custom: content\n"  # untouched
+        assert out.read_text(encoding="utf-8") == "custom: content\n"  # untouched
 
     def test_overwrites_with_force(self, tmp_path):
         assert self._run_init(tmp_path) == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        out.write_text("custom: content\n")
+        out.write_text("custom: content\n", encoding="utf-8")
         assert self._run_init(tmp_path, "--force") == 0
         import init_config
-        assert out.read_text() == init_config.TEMPLATE_PATH.read_text()
+        assert out.read_text(encoding="utf-8") == init_config.TEMPLATE_PATH.read_text(encoding="utf-8")
 
     def test_default_leaves_gitignore_untouched(self, tmp_path):
         assert self._run_init(tmp_path) == 0
@@ -1498,12 +1498,12 @@ class TestInitConfigScaffolder:
         assert self._run_init(tmp_path, "--gitignore") == 0
         gi = tmp_path / ".gitignore"
         assert gi.exists()
-        assert ".multi-llm/" in gi.read_text()
-        first = gi.read_text()
+        assert ".multi-llm/" in gi.read_text(encoding="utf-8")
+        first = gi.read_text(encoding="utf-8")
         # Re-run: no duplicate entry.
         assert self._run_init(tmp_path, "--force", "--gitignore") == 0
-        assert gi.read_text() == first
-        assert gi.read_text().count(".multi-llm/") == 1
+        assert gi.read_text(encoding="utf-8") == first
+        assert gi.read_text(encoding="utf-8").count(".multi-llm/") == 1
 
 
 class TestTemplateBaseParity:

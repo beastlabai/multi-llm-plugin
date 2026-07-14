@@ -37,7 +37,7 @@ def temp_plan():
     with tempfile.TemporaryDirectory() as tmpdir:
         plan_dir = Path(tmpdir)
         plan_path = plan_dir / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n\n## Tasks\n1. Task A\n")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n\n## Tasks\n1. Task A\n", encoding="utf-8")
 
         # Create output directory
         output_dir = plan_dir / "test-plan"
@@ -78,14 +78,14 @@ def temp_plan_with_model_results(temp_plan):
     model_a_results = [
         {"title": "Add error handling", "desc": "Try-catch needed", "importance": "HIGH", "type": "addition"}
     ]
-    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_a_results))
+    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_a_results), encoding="utf-8")
 
     # Write another model's results
     model_b_results = [
         {"title": "Add caching", "desc": "Cache results", "importance": "MEDIUM", "type": "addition"},
         {"title": "Fix typo", "desc": "Typo in docs", "importance": "LOW", "type": "modification"}
     ]
-    (phase_dir / f"{sanitize_model_name('test:model-b')}.json").write_text(json.dumps(model_b_results))
+    (phase_dir / f"{sanitize_model_name('test:model-b')}.json").write_text(json.dumps(model_b_results), encoding="utf-8")
 
     return temp_plan
 
@@ -100,7 +100,7 @@ def temp_plan_with_code_review_results(temp_plan):
         {"title": "Missing null check", "desc": "Add null check", "importance": "HIGH",
          "type": "bug", "file": "src/main.py", "line_range": [10, 15]}
     ]
-    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_results))
+    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_results), encoding="utf-8")
 
     return temp_plan
 
@@ -113,10 +113,10 @@ def temp_plan_with_corrupt_result(temp_plan):
 
     # Valid result for model-a
     model_a_results = [{"title": "Good result", "desc": "OK", "importance": "LOW", "type": "addition"}]
-    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_a_results))
+    (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps(model_a_results), encoding="utf-8")
 
     # Corrupt result for model-b
-    (phase_dir / f"{sanitize_model_name('test:model-b')}.json").write_text("{invalid json!!! [")
+    (phase_dir / f"{sanitize_model_name('test:model-b')}.json").write_text("{invalid json!!! [", encoding="utf-8")
 
     return temp_plan
 
@@ -132,7 +132,8 @@ class TestForceFlag:
         """--force and --rerun-all flags appear in review_plan_orchestrator help."""
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "review_plan_orchestrator.py"), "--help"],
-            capture_output=True, text=True, cwd=str(SKILL_DIR)
+            capture_output=True, text=True, cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert "--force" in result.stdout
         # --force now resumes/bypasses guards rather than re-running everything.
@@ -143,7 +144,8 @@ class TestForceFlag:
         """--force and --rerun-all flags appear in code_review_orchestrator help."""
         result = subprocess.run(
             [sys.executable, str(SKILL_DIR / "code_review_orchestrator.py"), "--help"],
-            capture_output=True, text=True, cwd=str(SKILL_DIR)
+            capture_output=True, text=True, cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert "--force" in result.stdout
         # --force now resumes/bypasses guards rather than re-running everything.
@@ -194,7 +196,8 @@ class TestPhaseCompletionGuard:
                 "--plan-file", str(temp_plan_completed_review),
                 "--models", "test:model"
             ],
-            capture_output=True, text=True, cwd=str(SKILL_DIR)
+            capture_output=True, text=True, cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 2
         assert "already been completed" in result.stdout
@@ -208,7 +211,8 @@ class TestPhaseCompletionGuard:
                 "--plan-file", str(temp_plan_completed_code_review),
                 "--models", "test:model"
             ],
-            capture_output=True, text=True, cwd=str(SKILL_DIR)
+            capture_output=True, text=True, cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 2
         assert "already been completed" in result.stdout
@@ -226,7 +230,8 @@ class TestPhaseCompletionGuard:
                 "--force"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         # Should NOT exit with code 2 (it will fail later due to no LLM, but that's OK)
         assert result.returncode != 2
@@ -242,7 +247,8 @@ class TestPhaseCompletionGuard:
                 "--force"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         assert result.returncode != 2
         assert "Cleared previous phase completion" in result.stdout
@@ -256,7 +262,8 @@ class TestPhaseCompletionGuard:
                 "--models", "test:model"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         # Should NOT mention "already been completed"
         assert "already been completed" not in result.stdout
@@ -274,7 +281,8 @@ class TestPhaseCompletionGuard:
                 "--reaggregate"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         # Should not exit with code 2 - reaggregate runs before the guard
         assert result.returncode != 2
@@ -408,7 +416,7 @@ class TestModelLevelSkipReviewPlan:
 
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("")  # Empty file
+        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("", encoding="utf-8")  # Empty file
 
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
@@ -440,7 +448,7 @@ class TestModelLevelSkipReviewPlan:
 
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps({"error": "not a list"}))
+        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps({"error": "not a list"}), encoding="utf-8")
 
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
@@ -566,7 +574,7 @@ class TestModelLevelSkipCodeReview:
 
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("not valid json {{{")
+        (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("not valid json {{{", encoding="utf-8")
 
         out_dir = temp_plan.parent / temp_plan.stem
 
@@ -600,7 +608,7 @@ class TestPartialCompletionGuard:
         """Exit code 3 when validation_tasks.json exists but no batch files."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}))
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -609,7 +617,8 @@ class TestPartialCompletionGuard:
                 "--models", "test:model"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         assert result.returncode == 3
         assert "Partial completion detected" in result.stdout
@@ -618,7 +627,7 @@ class TestPartialCompletionGuard:
         """Exit code 3 when grouped.json exists but no validation_tasks.json."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "grouped.json").write_text(json.dumps([{"id": "g1"}]))
+        (phase_dir / "grouped.json").write_text(json.dumps([{"id": "g1"}]), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -627,7 +636,8 @@ class TestPartialCompletionGuard:
                 "--models", "test:model"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         assert result.returncode == 3
         assert "Partial completion detected" in result.stdout
@@ -636,7 +646,7 @@ class TestPartialCompletionGuard:
         """Exit code 3 when per-model results exist but no grouped.json."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "test_model-a.json").write_text(json.dumps([{"title": "Issue"}]))
+        (phase_dir / "test_model-a.json").write_text(json.dumps([{"title": "Issue"}]), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -645,7 +655,8 @@ class TestPartialCompletionGuard:
                 "--models", "test:model"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         assert result.returncode == 3
         assert "Partial completion detected" in result.stdout
@@ -654,7 +665,7 @@ class TestPartialCompletionGuard:
         """--force bypasses the secondary partial-completion guard."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}))
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -664,7 +675,8 @@ class TestPartialCompletionGuard:
                 "--force"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         # Should NOT exit with code 3 (--force bypasses partial guard)
         assert result.returncode != 3
@@ -674,9 +686,9 @@ class TestPartialCompletionGuard:
         """Auto-heals legacy state when report + validation exist but phase not marked."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}))
-        (phase_dir / "validation.json").write_text(json.dumps({"groups": []}))
-        (phase_dir / "report.md").write_text("# Report\n\nNo issues found.")
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
+        (phase_dir / "validation.json").write_text(json.dumps({"groups": []}), encoding="utf-8")
+        (phase_dir / "report.md").write_text("# Report\n\nNo issues found.", encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -685,7 +697,8 @@ class TestPartialCompletionGuard:
                 "--models", "test:model"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=15
+            timeout=15,
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "Auto-healed" in result.stdout
@@ -712,7 +725,7 @@ class TestReaggregateMarksPhaseComplete:
             {"title": "Test issue", "desc": "Test", "importance": "LOW",
              "type": "bug", "file": "test.py", "line_range": [1, 5]}
         ]
-        (phase_dir / "test_model-a.json").write_text(json.dumps(model_results))
+        (phase_dir / "test_model-a.json").write_text(json.dumps(model_results), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -721,7 +734,8 @@ class TestReaggregateMarksPhaseComplete:
                 "--reaggregate", "--skip-validation"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=30
+            timeout=30,
+            encoding="utf-8",
         )
         # Reaggregate should succeed (exit 0)
         assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
@@ -742,7 +756,7 @@ class TestReaggregateMarksPhaseComplete:
             {"title": "Add tests", "desc": "Test coverage needed",
              "importance": "MEDIUM", "type": "addition"}
         ]
-        (phase_dir / "test_model-a.json").write_text(json.dumps(model_results))
+        (phase_dir / "test_model-a.json").write_text(json.dumps(model_results), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -751,7 +765,8 @@ class TestReaggregateMarksPhaseComplete:
                 "--reaggregate", "--skip-validation"
             ],
             capture_output=True, text=True, cwd=str(SKILL_DIR),
-            timeout=30
+            timeout=30,
+            encoding="utf-8",
         )
         assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
         assert "Reaggregation complete" in result.stdout

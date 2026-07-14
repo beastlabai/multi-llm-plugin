@@ -59,7 +59,7 @@ def plan_with_tasks(temp_dir):
     """Create a plan file with a corresponding tasks file in default location."""
     plan_content = "# My Feature Plan\n\n## Overview\nBuild a widget.\n"
     plan_path = temp_dir / "my-feature.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create the default tasks file location
     prefix = sanitize_prefix("my-feature.md")
@@ -73,7 +73,7 @@ def plan_with_tasks(temp_dir):
         "Add REST endpoints for CRUD operations.\n"
     )
     tasks_path = tasks_dir / "tasks.md"
-    tasks_path.write_text(tasks_content)
+    tasks_path.write_text(tasks_content, encoding="utf-8")
 
     return plan_path, tasks_path
 
@@ -85,7 +85,8 @@ def plan_with_comment_path(temp_dir):
     custom_tasks_dir.mkdir(parents=True, exist_ok=True)
     custom_tasks_path = custom_tasks_dir / "my-tasks.md"
     custom_tasks_path.write_text(
-        "# Tasks\n\n## T001: Setup\nInitialize the project.\n"
+        "# Tasks\n\n## T001: Setup\nInitialize the project.\n",
+        encoding="utf-8",
     )
 
     plan_content = (
@@ -94,7 +95,7 @@ def plan_with_comment_path(temp_dir):
         "## Overview\nDo the thing.\n"
     )
     plan_path = temp_dir / "feature.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     return plan_path, custom_tasks_path
 
@@ -245,19 +246,21 @@ class TestFindTasksFile:
         default_dir = temp_dir / prefix / "tasks"
         default_dir.mkdir(parents=True, exist_ok=True)
         (default_dir / "tasks.md").write_text(
-            "# Default\n\n## T001: Default task\nDefault.\n"
+            "# Default\n\n## T001: Default task\nDefault.\n",
+            encoding="utf-8",
         )
 
         # Create custom tasks file
         custom_dir = temp_dir / "alt"
         custom_dir.mkdir(parents=True, exist_ok=True)
         custom_path = custom_dir / "custom-tasks.md"
-        custom_path.write_text("# Custom\n\n## T001: Custom task\nCustom.\n")
+        custom_path.write_text("# Custom\n\n## T001: Custom task\nCustom.\n", encoding="utf-8")
 
         # Plan with TASKS_FILE comment
         plan = temp_dir / "dual.md"
         plan.write_text(
-            "# Plan\n\n<!-- TASKS_FILE: alt/custom-tasks.md -->\n\n## Overview\nStuff.\n"
+            "# Plan\n\n<!-- TASKS_FILE: alt/custom-tasks.md -->\n\n## Overview\nStuff.\n",
+            encoding="utf-8",
         )
 
         result = find_tasks_file(str(plan))
@@ -266,7 +269,7 @@ class TestFindTasksFile:
     def test_find_tasks_file_not_found_raises_error(self, temp_dir):
         """Raises FileNotFoundError when no tasks file exists."""
         plan_path = temp_dir / "lonely-plan.md"
-        plan_path.write_text("# Plan\n\n## Overview\nNo tasks generated.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nNo tasks generated.\n", encoding="utf-8")
 
         with pytest.raises(FileNotFoundError, match="No tasks file found"):
             find_tasks_file(str(plan_path))
@@ -275,7 +278,8 @@ class TestFindTasksFile:
         """Raises FileNotFoundError when TASKS_FILE comment path doesn't exist."""
         plan_path = temp_dir / "bad-ref.md"
         plan_path.write_text(
-            "# Plan\n\n<!-- TASKS_FILE: missing/tasks.md -->\n\n## Overview\n"
+            "# Plan\n\n<!-- TASKS_FILE: missing/tasks.md -->\n\n## Overview\n",
+            encoding="utf-8",
         )
 
         with pytest.raises(FileNotFoundError, match="Tasks file referenced in plan not found"):
@@ -284,12 +288,12 @@ class TestFindTasksFile:
     def test_find_tasks_file_malformed_raises_error(self, temp_dir):
         """Raises ValueError when tasks file is empty."""
         plan_path = temp_dir / "empty-tasks.md"
-        plan_path.write_text("# Plan\n\n## Overview\nSomething.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nSomething.\n", encoding="utf-8")
 
         prefix = sanitize_prefix("empty-tasks.md")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text("")
+        (tasks_dir / "tasks.md").write_text("", encoding="utf-8")
 
         with pytest.raises(ValueError, match="Tasks file is empty"):
             find_tasks_file(str(plan_path))
@@ -297,14 +301,15 @@ class TestFindTasksFile:
     def test_find_tasks_file_malformed_markdown(self, temp_dir):
         """Raises ValueError when tasks file has content but no task headers."""
         plan_path = temp_dir / "garbled.md"
-        plan_path.write_text("# Plan\n\n## Overview\nBuild it.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nBuild it.\n", encoding="utf-8")
 
         prefix = sanitize_prefix("garbled.md")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
         (tasks_dir / "tasks.md").write_text(
             "This is some random text without any task headers.\n"
-            "Just paragraphs and nothing structured.\n"
+            "Just paragraphs and nothing structured.\n",
+            encoding="utf-8",
         )
 
         with pytest.raises(ValueError, match="no task headers"):
@@ -313,7 +318,7 @@ class TestFindTasksFile:
     def test_find_tasks_file_missing_required_sections(self, temp_dir):
         """Raises ValueError when tasks file has markdown but no T-numbered headings."""
         plan_path = temp_dir / "no-t-sections.md"
-        plan_path.write_text("# Plan\n\n## Overview\nRedesign.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nRedesign.\n", encoding="utf-8")
 
         prefix = sanitize_prefix("no-t-sections.md")
         tasks_dir = temp_dir / prefix / "tasks"
@@ -323,7 +328,8 @@ class TestFindTasksFile:
             "# Implementation Tasks\n\n"
             "## Overview\nThese are tasks.\n\n"
             "## Step One\nDo something.\n\n"
-            "## Step Two\nDo something else.\n"
+            "## Step Two\nDo something else.\n",
+            encoding="utf-8",
         )
 
         with pytest.raises(ValueError, match="no task headers.*Re-run"):
@@ -340,7 +346,8 @@ class TestFindTasksFile:
         """Absolute path in TASKS_FILE comment triggers sys.exit(1)."""
         plan_path = temp_dir / "abs-path.md"
         plan_path.write_text(
-            "# Plan\n\n<!-- TASKS_FILE: /etc/passwd -->\n\n## Overview\n"
+            "# Plan\n\n<!-- TASKS_FILE: /etc/passwd -->\n\n## Overview\n",
+            encoding="utf-8",
         )
 
         with pytest.raises(SystemExit) as exc_info:
@@ -351,7 +358,8 @@ class TestFindTasksFile:
         """Path traversal (..) in TASKS_FILE comment triggers sys.exit(1)."""
         plan_path = temp_dir / "traversal.md"
         plan_path.write_text(
-            "# Plan\n\n<!-- TASKS_FILE: ../../../etc/passwd -->\n\n## Overview\n"
+            "# Plan\n\n<!-- TASKS_FILE: ../../../etc/passwd -->\n\n## Overview\n",
+            encoding="utf-8",
         )
 
         with pytest.raises(SystemExit) as exc_info:
@@ -368,14 +376,16 @@ class TestFindTasksFile:
 
         # Write tasks first, then plan (so plan is newer)
         tasks_path.write_text(
-            "# Tasks\n\n## T001: Init\nSetup initial config.\n"
+            "# Tasks\n\n## T001: Init\nSetup initial config.\n",
+            encoding="utf-8",
         )
 
         # Ensure plan has a strictly newer mtime
         import time
         time.sleep(0.05)
         plan_path.write_text(
-            "# Plan\n\n## Overview\nUpdated plan content.\n"
+            "# Plan\n\n## Overview\nUpdated plan content.\n",
+            encoding="utf-8",
         )
 
         find_tasks_file(str(plan_path))
@@ -385,12 +395,12 @@ class TestFindTasksFile:
     def test_find_tasks_file_whitespace_only(self, temp_dir):
         """Raises ValueError when tasks file contains only whitespace."""
         plan_path = temp_dir / "ws-only.md"
-        plan_path.write_text("# Plan\n\n## Overview\nEmpty tasks.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nEmpty tasks.\n", encoding="utf-8")
 
         prefix = sanitize_prefix("ws-only.md")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text("   \n\t\n   ")
+        (tasks_dir / "tasks.md").write_text("   \n\t\n   ", encoding="utf-8")
 
         with pytest.raises(ValueError, match="Tasks file is empty"):
             find_tasks_file(str(plan_path))
@@ -545,7 +555,7 @@ class TestSaveModelResult:
         result_path = os.path.join(phase_dir, f"{sanitized}.json")
         assert os.path.isfile(result_path)
 
-        with open(result_path, 'r') as f:
+        with open(result_path, 'r', encoding="utf-8") as f:
             saved = json.load(f)
         assert len(saved) == 3
         # Importance should be uppercased
@@ -569,7 +579,7 @@ class TestSaveModelResult:
         sanitized = sanitize_model_name("cursor-agent:auto")
         error_path = os.path.join(phase_dir, f"error_{sanitized}.log")
         assert os.path.isfile(error_path)
-        content = Path(error_path).read_text()
+        content = Path(error_path).read_text(encoding="utf-8")
         assert "Timeout exceeded" in content
 
     def test_save_model_result_invalid_json_creates_salvage(self, phase_dir, temp_dir):
@@ -591,7 +601,7 @@ class TestSaveModelResult:
         salvage_path = os.path.join(phase_dir, f"salvage_{sanitized}.json")
         assert os.path.isfile(salvage_path)
 
-        with open(salvage_path, 'r') as f:
+        with open(salvage_path, 'r', encoding="utf-8") as f:
             salvage = json.load(f)
         assert salvage["model"] == "opencode:gpt-4"
         assert salvage["phase"] == "review_tasks"
@@ -622,7 +632,7 @@ class TestSaveModelResult:
         from utils.json_extractor import sanitize_model_name
         sanitized = sanitize_model_name("test-model")
         result_path = os.path.join(phase_dir, f"{sanitized}.json")
-        with open(result_path, 'r') as f:
+        with open(result_path, 'r', encoding="utf-8") as f:
             saved = json.load(f)
         assert saved[0]["importance"] == "MEDIUM"
         assert saved[0]["type"] == "modification"
@@ -661,7 +671,7 @@ class TestSaveModelResult:
         from utils.json_extractor import sanitize_model_name
         sanitized = sanitize_model_name("filter-test")
         result_path = os.path.join(phase_dir, f"{sanitized}.json")
-        with open(result_path, 'r') as f:
+        with open(result_path, 'r', encoding="utf-8") as f:
             saved = json.load(f)
         assert len(saved) == 1
         assert saved[0]["title"] == "Valid finding"
@@ -685,7 +695,7 @@ class TestSaveModelResult:
         from utils.json_extractor import sanitize_model_name
         sanitized = sanitize_model_name("clean-model")
         result_path = os.path.join(phase_dir, f"{sanitized}.json")
-        with open(result_path, 'r') as f:
+        with open(result_path, 'r', encoding="utf-8") as f:
             saved = json.load(f)
         assert saved == []
 
@@ -709,7 +719,7 @@ class TestSaveModelResult:
         from utils.json_extractor import sanitize_model_name
         sanitized = sanitize_model_name("code-block-model")
         result_path = os.path.join(phase_dir, f"{sanitized}.json")
-        with open(result_path, 'r') as f:
+        with open(result_path, 'r', encoding="utf-8") as f:
             saved = json.load(f)
         assert len(saved) == 1
 
@@ -726,7 +736,7 @@ class TestAggregateResults:
         from utils.json_extractor import sanitize_model_name
         sanitized = sanitize_model_name(model_name)
         path = os.path.join(phase_dir, f"{sanitized}.json")
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding="utf-8") as f:
             json.dump(suggestions, f)
         return path
 
@@ -757,7 +767,7 @@ class TestAggregateResults:
 
         # Create a minimal plan file for HTML report generation
         plan_path = temp_dir / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -770,7 +780,7 @@ class TestAggregateResults:
         )
 
         assert os.path.isfile(report_path)
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
         assert "test-plan" in report_content
 
         # HTML report should also exist
@@ -780,7 +790,7 @@ class TestAggregateResults:
     def test_aggregate_results_with_failed_models(self, phase_dir, temp_dir):
         """Report includes a 'Models Failed' section when models fail."""
         plan_path = temp_dir / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -792,7 +802,7 @@ class TestAggregateResults:
             plan_path=str(plan_path),
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
         assert "Models Failed" in report_content
         assert "model-b" in report_content
         assert "Rate limit" in report_content
@@ -800,7 +810,7 @@ class TestAggregateResults:
     def test_aggregate_results_no_suggestions(self, phase_dir, temp_dir):
         """Aggregation handles zero suggestions gracefully."""
         plan_path = temp_dir / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -812,13 +822,13 @@ class TestAggregateResults:
             plan_path=str(plan_path),
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
         assert "No suggestions found" in report_content
 
     def test_aggregate_results_with_validated_groups(self, phase_dir, temp_dir):
         """Aggregation accepts pre-computed validated groups."""
         plan_path = temp_dir / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
         validated_groups = [
             {
@@ -852,7 +862,7 @@ class TestAggregateResults:
             plan_path=str(plan_path),
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
         assert "Missing Auth Coverage" in report_content
         assert "1 HIGH" in report_content
 
@@ -869,14 +879,15 @@ class TestEdgeCases:
         just headers with no content -- still parseable and find_tasks_file
         succeeds."""
         plan_path = temp_dir / "minimal.md"
-        plan_path.write_text("# Plan\n\n## Overview\nMinimal.\n")
+        plan_path.write_text("# Plan\n\n## Overview\nMinimal.\n", encoding="utf-8")
 
         prefix = sanitize_prefix("minimal.md")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
         # Tasks with just headers (bare minimum that satisfies the header pattern)
         (tasks_dir / "tasks.md").write_text(
-            "# Tasks\n\n## T001: Placeholder\n\n## T002: Another Placeholder\n"
+            "# Tasks\n\n## T001: Placeholder\n\n## T002: Another Placeholder\n",
+            encoding="utf-8",
         )
 
         # Should succeed -- the file is valid
@@ -893,7 +904,8 @@ class TestEdgeCases:
         plan_path = temp_dir / "xref.md"
         plan_path.write_text(
             "# Plan\n\n## Authentication\nBuild OAuth2 login flow.\n"
-            "## Database\nCreate PostgreSQL schema.\n"
+            "## Database\nCreate PostgreSQL schema.\n",
+            encoding="utf-8",
         )
 
         prefix = sanitize_prefix("xref.md")
@@ -905,7 +917,8 @@ class TestEdgeCases:
             "## T001: Configure CI pipeline\n"
             "Set up GitHub Actions for the project.\n\n"
             "## T002: Write changelog\n"
-            "Document changes for the release.\n"
+            "Document changes for the release.\n",
+            encoding="utf-8",
         )
 
         # find_tasks_file only validates structure, not semantic alignment

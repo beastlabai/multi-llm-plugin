@@ -1507,7 +1507,8 @@ class TestCaptureDiffHunksEdgeCases:
 def _run(cmd, cwd, check=True):
     """Run a shell command in the given directory; return completed process."""
     return subprocess.run(
-        cmd, cwd=str(cwd), capture_output=True, text=True, check=check
+        cmd, cwd=str(cwd), capture_output=True, text=True, check=check,
+        encoding="utf-8",
     )
 
 
@@ -1535,7 +1536,7 @@ def temp_git_repo(tmp_path, monkeypatch):
     _run(["git", "config", "user.email", "test@example.com"], repo)
     _run(["git", "config", "user.name", "Test"], repo)
     _run(["git", "config", "commit.gpgsign", "false"], repo)
-    (repo / "seed.txt").write_text("seed\n")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
     _run(["git", "add", "seed.txt"], repo)
     _run(["git", "commit", "--quiet", "-m", "init"], repo)
     monkeypatch.chdir(repo)
@@ -1548,7 +1549,7 @@ class TestIntentToAddUntracked:
     def test_marks_and_cleans(self, temp_git_repo):
         """Untracked file becomes visible to git diff inside the with block
         and returns to untracked on exit."""
-        (temp_git_repo / "new.py").write_text("print('hello')\n")
+        (temp_git_repo / "new.py").write_text("print('hello')\n", encoding="utf-8")
 
         # Baseline: file is untracked
         assert _porcelain_status(temp_git_repo, "new.py") == "??"
@@ -1573,7 +1574,7 @@ class TestIntentToAddUntracked:
     def test_skips_already_staged(self, temp_git_repo):
         """Files already staged (with content) should not be touched; they
         remain staged after the context exits."""
-        (temp_git_repo / "staged.py").write_text("x = 1\n")
+        (temp_git_repo / "staged.py").write_text("x = 1\n", encoding="utf-8")
         _run(["git", "add", "staged.py"], temp_git_repo)
         assert _porcelain_status(temp_git_repo, "staged.py") == "A "
 
@@ -1590,7 +1591,7 @@ class TestIntentToAddUntracked:
 
     def test_skips_already_intent_to_add(self, temp_git_repo):
         """A file already marked -N by the user should not be reset on exit."""
-        (temp_git_repo / "pre.py").write_text("y = 2\n")
+        (temp_git_repo / "pre.py").write_text("y = 2\n", encoding="utf-8")
         _run(["git", "add", "-N", "pre.py"], temp_git_repo)
         assert _porcelain_status(temp_git_repo, "pre.py") == " A"
 
@@ -1609,7 +1610,7 @@ class TestIntentToAddUntracked:
 
     def test_cleanup_on_exception(self, temp_git_repo):
         """Exception inside the with block still resets the file."""
-        (temp_git_repo / "boom.py").write_text("raise\n")
+        (temp_git_repo / "boom.py").write_text("raise\n", encoding="utf-8")
         assert _porcelain_status(temp_git_repo, "boom.py") == "??"
 
         with pytest.raises(RuntimeError):
@@ -1629,15 +1630,15 @@ class TestIntentToAddUntracked:
         """Mix of untracked, staged, and modified-tracked files: only the
         untracked ones are marked and reset."""
         # Staged new file
-        (temp_git_repo / "staged.py").write_text("s = 1\n")
+        (temp_git_repo / "staged.py").write_text("s = 1\n", encoding="utf-8")
         _run(["git", "add", "staged.py"], temp_git_repo)
 
         # Modified tracked file (modify seed.txt)
-        (temp_git_repo / "seed.txt").write_text("seed modified\n")
+        (temp_git_repo / "seed.txt").write_text("seed modified\n", encoding="utf-8")
 
         # Two untracked files
-        (temp_git_repo / "new_a.py").write_text("a = 1\n")
-        (temp_git_repo / "new_b.py").write_text("b = 2\n")
+        (temp_git_repo / "new_a.py").write_text("a = 1\n", encoding="utf-8")
+        (temp_git_repo / "new_b.py").write_text("b = 2\n", encoding="utf-8")
 
         files = ["staged.py", "seed.txt", "new_a.py", "new_b.py"]
 

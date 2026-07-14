@@ -154,7 +154,7 @@ class TestBackupBeforeWrite:
         # Create a test file
         test_file = tmp_path / "test.txt"
         original_content = "original content\nline 2\n"
-        test_file.write_text(original_content)
+        test_file.write_text(original_content, encoding="utf-8")
 
         # Create backup
         backup_path = backup_before_write(str(test_file))
@@ -164,7 +164,7 @@ class TestBackupBeforeWrite:
         assert os.path.exists(backup_path)
 
         # Backup should have same content
-        backup_content = Path(backup_path).read_text()
+        backup_content = Path(backup_path).read_text(encoding="utf-8")
         assert backup_content == original_content
 
         # Backup should follow naming convention
@@ -190,7 +190,7 @@ class TestBackupBeforeWrite:
         nested_dir.mkdir(parents=True)
 
         test_file = nested_dir / "output.json"
-        test_file.write_text('{"key": "value"}')
+        test_file.write_text('{"key": "value"}', encoding="utf-8")
 
         # Create backup
         backup_path = backup_before_write(str(test_file))
@@ -218,13 +218,13 @@ class TestBackupBeforeWrite:
     "nested": true
   }
 }"""
-        test_file.write_text(original_content)
+        test_file.write_text(original_content, encoding="utf-8")
 
         # Create backup
         backup_path = backup_before_write(str(test_file))
 
         # Content should be identical
-        backup_content = Path(backup_path).read_text()
+        backup_content = Path(backup_path).read_text(encoding="utf-8")
         assert backup_content == original_content
         assert len(backup_content) == len(original_content)
 
@@ -245,7 +245,7 @@ class TestBackupBeforeWrite:
     def test_handles_empty_file(self, tmp_path):
         """Test that empty files are backed up correctly."""
         test_file = tmp_path / "empty.txt"
-        test_file.write_text("")
+        test_file.write_text("", encoding="utf-8")
 
         # Create backup
         backup_path = backup_before_write(str(test_file))
@@ -253,7 +253,7 @@ class TestBackupBeforeWrite:
         # Backup should exist and be empty
         assert backup_path is not None
         assert os.path.exists(backup_path)
-        assert Path(backup_path).read_text() == ""
+        assert Path(backup_path).read_text(encoding="utf-8") == ""
 
     def test_handles_large_file(self, tmp_path):
         """Test that large files (1MB+) are backed up correctly."""
@@ -261,7 +261,7 @@ class TestBackupBeforeWrite:
 
         # Create a 1MB+ file
         large_content = "x" * (1024 * 1024 + 100)  # 1MB + 100 bytes
-        test_file.write_text(large_content)
+        test_file.write_text(large_content, encoding="utf-8")
 
         # Create backup
         backup_path = backup_before_write(str(test_file))
@@ -276,7 +276,7 @@ class TestBackupBeforeWrite:
     def test_multiple_backups_have_different_timestamps(self, tmp_path):
         """Test that multiple backups of same file have unique timestamps."""
         test_file = tmp_path / "file.txt"
-        test_file.write_text("content")
+        test_file.write_text("content", encoding="utf-8")
 
         # Create first backup
         backup1 = backup_before_write(str(test_file))
@@ -286,7 +286,7 @@ class TestBackupBeforeWrite:
         time.sleep(1.1)
 
         # Modify file and create second backup
-        test_file.write_text("updated content")
+        test_file.write_text("updated content", encoding="utf-8")
         backup2 = backup_before_write(str(test_file))
         assert backup2 is not None
 
@@ -306,7 +306,7 @@ class TestBackupBeforeWrite:
         """Test that backup operation doesn't modify the original file."""
         test_file = tmp_path / "original.txt"
         original_content = "important data\n"
-        test_file.write_text(original_content)
+        test_file.write_text(original_content, encoding="utf-8")
 
         # Record original modification time
         original_mtime = os.path.getmtime(str(test_file))
@@ -316,7 +316,7 @@ class TestBackupBeforeWrite:
 
         # Original file should still exist with same content
         assert os.path.exists(str(test_file))
-        current_content = test_file.read_text()
+        current_content = test_file.read_text(encoding="utf-8")
         assert current_content == original_content
 
         # Backup should be different file
@@ -325,7 +325,7 @@ class TestBackupBeforeWrite:
     def test_preserves_file_permissions(self, tmp_path):
         """Test that backup preserves file metadata (permissions, timestamps)."""
         test_file = tmp_path / "perms.txt"
-        test_file.write_text("content")
+        test_file.write_text("content", encoding="utf-8")
 
         # Set specific permissions
         os.chmod(str(test_file), 0o644)
@@ -349,7 +349,7 @@ class TestBackupCLI:
     def test_cli_with_existing_file(self, tmp_path):
         """Test CLI with an existing file reports backup path."""
         test_file = tmp_path / "test.json"
-        test_file.write_text('{"data": "test"}')
+        test_file.write_text('{"data": "test"}', encoding="utf-8")
 
         # Run backup as CLI
         result = subprocess.run(
@@ -357,6 +357,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should succeed
@@ -382,6 +383,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should succeed
@@ -399,6 +401,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should fail
@@ -417,6 +420,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should fail
@@ -429,7 +433,7 @@ class TestBackupCLI:
         """Test that CLI actually creates the backup file."""
         test_file = tmp_path / "important.txt"
         test_content = "important data"
-        test_file.write_text(test_content)
+        test_file.write_text(test_content, encoding="utf-8")
 
         # Run backup as CLI
         result = subprocess.run(
@@ -437,6 +441,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should succeed
@@ -447,7 +452,7 @@ class TestBackupCLI:
 
         # Verify backup was created and has correct content
         assert os.path.exists(backup_path)
-        backup_content = Path(backup_path).read_text()
+        backup_content = Path(backup_path).read_text(encoding="utf-8")
         assert backup_content == test_content
 
     def test_cli_with_directory_path(self, tmp_path):
@@ -456,7 +461,7 @@ class TestBackupCLI:
         nested_dir.mkdir(parents=True)
 
         test_file = nested_dir / "output.json"
-        test_file.write_text('{"key": "value"}')
+        test_file.write_text('{"key": "value"}', encoding="utf-8")
 
         # Run backup as CLI
         result = subprocess.run(
@@ -464,6 +469,7 @@ class TestBackupCLI:
             cwd=Path(__file__).parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         # Should succeed
@@ -511,13 +517,13 @@ class TestBackupEdgeCases:
     def test_backup_filename_uniqueness(self, tmp_path):
         """Test that backup filenames are unique even for rapid calls."""
         test_file = tmp_path / "rapid.txt"
-        test_file.write_text("initial")
+        test_file.write_text("initial", encoding="utf-8")
 
         backup_paths = []
 
         # Create multiple backups rapidly
         for i in range(3):
-            test_file.write_text(f"version {i}")
+            test_file.write_text(f"version {i}", encoding="utf-8")
             backup_path = backup_before_write(str(test_file))
             backup_paths.append(backup_path)
             # Small delay to ensure different timestamps
@@ -533,7 +539,7 @@ class TestBackupEdgeCases:
     def test_backup_path_return_value_is_absolute(self, tmp_path):
         """Test that backup_before_write returns absolute path."""
         test_file = tmp_path / "file.txt"
-        test_file.write_text("content")
+        test_file.write_text("content", encoding="utf-8")
 
         backup_path = backup_before_write(str(test_file))
 

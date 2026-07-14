@@ -268,7 +268,7 @@ Testing salvage file creation.
         # If salvage file exists, verify its structure
         if salvage_files:
             salvage_path = salvage_files[0]
-            with open(salvage_path) as f:
+            with open(salvage_path, encoding="utf-8") as f:
                 salvage_data = json.load(f)
 
             # The salvage file may use raw_output or raw_response
@@ -458,7 +458,7 @@ class TestProviderNotFound:
 Test provider not found.
 """
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         # Create a runner without mock binaries in PATH
         # by using an empty bin directory
@@ -494,6 +494,7 @@ Test provider not found.
             timeout=30,
             env=env,
             cwd=str(skill_dir),
+            encoding="utf-8",
         )
 
         # Should fail
@@ -562,6 +563,7 @@ Testing missing provider error.
             timeout=30,
             env=env,
             cwd=str(skill_dir),
+            encoding="utf-8",
         )
 
         # The orchestrator should handle this failure
@@ -634,7 +636,7 @@ provider_overrides:
     wire_format: "cursor-agent"
   gemini:
     wire_format: "gemini"
-""")
+""", encoding="utf-8")
 
         # Point to fixtures directory for responses
         responses_dir = Path(__file__).parent / "fixtures" / "e2e" / "responses"

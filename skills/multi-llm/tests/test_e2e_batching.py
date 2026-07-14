@@ -64,11 +64,11 @@ def _create_code_review_phase(
 
     # Write grouped.json
     grouped_path = code_review_dir / "grouped.json"
-    grouped_path.write_text(json.dumps(grouped_data, indent=2))
+    grouped_path.write_text(json.dumps(grouped_data, indent=2), encoding="utf-8")
 
     # Write validation.json
     validation_path = code_review_dir / "validation.json"
-    validation_path.write_text(json.dumps(validation_data, indent=2))
+    validation_path.write_text(json.dumps(validation_data, indent=2), encoding="utf-8")
 
     return code_review_dir
 

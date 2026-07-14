@@ -41,7 +41,7 @@ Create the basic directory structure.
 - Depends on: none
 """
     plan_path = temp_dir / "test-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 

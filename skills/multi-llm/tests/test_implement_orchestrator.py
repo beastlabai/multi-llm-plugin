@@ -51,7 +51,7 @@ Write unit tests for the core module.
 - Files to create: tests/test_main.py
 """
     plan_path = temp_dir / "sample-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -67,7 +67,7 @@ This is a sample plan without implementation tasks.
 Just a description, no tasks.
 """
     plan_path = temp_dir / "no-tasks-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -82,7 +82,7 @@ def sample_plan_with_tasks_reference(temp_dir):
 This is a sample plan with an external tasks file reference.
 """
     plan_path = temp_dir / "ref-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     # Create the tasks file
     tasks_dir = temp_dir / "tasks"
@@ -93,7 +93,7 @@ This is a sample plan with an external tasks file reference.
 Task from external file.
 - Depends on: none
 """
-    (tasks_dir / "tasks.md").write_text(tasks_content)
+    (tasks_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
     return plan_path
 
 
@@ -894,7 +894,7 @@ class TestTaskProcessing:
 
         # Check output file was written
         assert output_path.exists()
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         assert data["total_tasks"] == 1
         assert len(data["batches"]) == 1
         assert data["batches"][0]["tasks"][0]["id"] == "T001"
@@ -927,7 +927,7 @@ class TestTaskProcessing:
 
         # Task JSON landed in the freshly-created nested directory
         assert output_path.exists()
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         assert data["total_tasks"] == 3
 
         # The temp dir ignores itself so run artifacts never hit git status
@@ -1027,7 +1027,7 @@ class TestStateManagement:
             main()
 
         # Output should only contain pending tasks (T003)
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         all_task_ids = []
         for batch in data["batches"]:
             for task in batch["tasks"]:
@@ -1200,7 +1200,7 @@ class TestImplementationSummary:
 
             main()
 
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         assert "summary_file" in data
         assert "summary_file_relative" in data
 
@@ -1258,7 +1258,7 @@ class TestExternalTasksFile:
 
             main()
 
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         # Should have loaded the external task
         assert data["total_tasks"] >= 1
 
@@ -1289,7 +1289,7 @@ class TestOutputFormat:
 
             main()
 
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
 
         # Check required fields
         assert "plan_file" in data
@@ -1323,7 +1323,7 @@ class TestOutputFormat:
 
             main()
 
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         task = data["batches"][0]["tasks"][0]
 
         # Check required task fields
@@ -1358,7 +1358,7 @@ class TestOutputFormat:
 
             main()
 
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
 
         # Should not raise
         datetime.fromisoformat(data["generated_at"])

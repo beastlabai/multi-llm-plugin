@@ -87,7 +87,7 @@ class TestMainWrapsPipelineWithIntentToAdd:
 
     def test_main_calls_intent_to_add_with_changed_files(self, tmp_path):
         plan_path = tmp_path / "plan.md"
-        plan_path.write_text("# plan\n")
+        plan_path.write_text("# plan\n", encoding="utf-8")
 
         # Fake tracked_files from the implementation phase
         tracked_files = [
@@ -159,7 +159,7 @@ class TestReaggregateWrapsPipelineWithIntentToAdd:
 
     def test_reaggregate_calls_intent_to_add_with_changed_files(self, tmp_path):
         plan_path = tmp_path / "plan.md"
-        plan_path.write_text("# plan\n")
+        plan_path.write_text("# plan\n", encoding="utf-8")
 
         out_dir = tmp_path / "out"
         out_dir.mkdir()
@@ -169,7 +169,8 @@ class TestReaggregateWrapsPipelineWithIntentToAdd:
         # Create a fake model result file that the function will pick up
         (phase_dir / "cursor-agent_auto.json").write_text(
             '[{"title": "x", "desc": "y", "importance": "low", '
-            '"file": "src/a.py", "type": "style"}]'
+            '"file": "src/a.py", "type": "style"}]',
+            encoding="utf-8",
         )
 
         tracked_files = [

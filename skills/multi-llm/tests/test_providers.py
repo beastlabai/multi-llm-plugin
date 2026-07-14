@@ -2078,7 +2078,7 @@ class TestAiderProvider:
     def test_aider_build_command_read_flags_for_existing_paths(self, provider, tmp_path):
         """Existing absolute file paths in the prompt are passed via --read."""
         plan = tmp_path / "my-plan.md"
-        plan.write_text("# Plan")
+        plan.write_text("# Plan", encoding="utf-8")
         missing = tmp_path / "review-plan" / "aider_model.json"  # not yet written
         prompt = (
             f"## Plan File\n{plan}\n\nRead this file.\n"
@@ -2274,7 +2274,7 @@ class TestAiderProvider:
     def test_aider_extract_read_files_posix_unchanged(self, provider, tmp_path):
         """Existing POSIX extraction behavior is unchanged by the Windows branch."""
         plan = tmp_path / "plan.md"
-        plan.write_text("# Plan")
+        plan.write_text("# Plan", encoding="utf-8")
 
         found = provider._extract_read_files(
             f"Read {plan} and the missing /nonexistent/file.md"

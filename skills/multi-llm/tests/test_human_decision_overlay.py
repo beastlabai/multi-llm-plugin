@@ -144,14 +144,14 @@ class TestReadHumanDecisionsFromState:
             sf.write_text(json.dumps({
                 "human_decisions_apply-suggestions": {"aaa": APPROVE_REC},
                 "human_decisions_apply-code-fixes": {"zzz": SKIP_REC},
-            }))
+            }), encoding="utf-8")
             got = _read_human_decisions_from_state(sf, "apply-suggestions")
             assert list(got.keys()) == ["aaa"]
 
     def test_missing_key_returns_empty(self):
         with tempfile.TemporaryDirectory() as d:
             sf = Path(d) / "state.json"
-            sf.write_text(json.dumps({}))
+            sf.write_text(json.dumps({}), encoding="utf-8")
             assert _read_human_decisions_from_state(sf, "apply-suggestions") == {}
 
 
@@ -169,7 +169,7 @@ class TestRegenerateReport:
                 }
             ],
         }
-        (phase_dir / "report_data.json").write_text(json.dumps(report_data))
+        (phase_dir / "report_data.json").write_text(json.dumps(report_data), encoding="utf-8")
 
     def test_regenerates_html_with_decision_embedded(self):
         with tempfile.TemporaryDirectory() as d:
@@ -179,12 +179,12 @@ class TestRegenerateReport:
                 phase_dir, {"aaa": SALVAGE_REC}
             )
             assert out is not None and out.exists()
-            html = out.read_text()
+            html = out.read_text(encoding="utf-8")
             # The overlaid decision data is embedded in reportData JSON.
             assert "salvaged" in html
             assert "Add null-check before user.profile" in html
             # The sidecar is updated in place so re-runs overlay cleanly.
-            rd = json.loads((phase_dir / "report_data.json").read_text())
+            rd = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
             assert rd["groups"][0]["humanDecision"]["outcome"] == "salvaged"
             assert rd["humanDecisionsSummary"]["salvaged"] == 1
 
@@ -198,7 +198,7 @@ class TestRegenerateReport:
     def test_cli_graceful_skip_when_no_sidecar(self, capsys):
         with tempfile.TemporaryDirectory() as d:
             sf = Path(d) / "state.json"
-            sf.write_text(json.dumps({"human_decisions_apply-suggestions": {}}))
+            sf.write_text(json.dumps({"human_decisions_apply-suggestions": {}}), encoding="utf-8")
             rc = html_report_main([
                 "regenerate-decisions",
                 "--phase-dir", str(Path(d) / "noreport"),
@@ -216,7 +216,7 @@ class TestRegenerateReport:
             sf = Path(d) / "state.json"
             sf.write_text(json.dumps({
                 "human_decisions_apply-suggestions": {"aaa": APPROVE_REC},
-            }))
+            }), encoding="utf-8")
             rc = html_report_main([
                 "regenerate-decisions",
                 "--phase-dir", str(phase_dir),
@@ -224,5 +224,5 @@ class TestRegenerateReport:
                 "--apply-phase", "apply-suggestions",
             ])
             assert rc == 0
-            html = (phase_dir / "report.html").read_text()
+            html = (phase_dir / "report.html").read_text(encoding="utf-8")
             assert "approved" in html

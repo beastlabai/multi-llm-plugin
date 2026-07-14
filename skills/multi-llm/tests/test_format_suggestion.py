@@ -556,7 +556,7 @@ class TestAggregateResultsGrouped:
         ]
 
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(groups))
+        grouped_path.write_text(json.dumps(groups), encoding="utf-8")
 
         # Call aggregate_results
         report_path = aggregate_results(
@@ -568,7 +568,7 @@ class TestAggregateResultsGrouped:
             validated_groups=None,  # Should load from grouped.json
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         # Find positions of each group in the report
         high_pos = report_content.find("High priority group")
@@ -589,7 +589,7 @@ class TestAggregateResultsGrouped:
         ]
 
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(groups))
+        grouped_path.write_text(json.dumps(groups), encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -599,7 +599,7 @@ class TestAggregateResultsGrouped:
             failed_models={},
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         assert "**Groups:** 2" in report_content
 
@@ -642,7 +642,7 @@ class TestAggregateResultsGrouped:
         ]
 
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(groups))
+        grouped_path.write_text(json.dumps(groups), encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -652,7 +652,7 @@ class TestAggregateResultsGrouped:
             failed_models={},
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         assert "2 HIGH" in report_content
         assert "1 MEDIUM" in report_content
@@ -669,7 +669,7 @@ class TestAggregateResultsGrouped:
             {"theme": "File group", "category": "addition", "suggestions": [{"title": "From file", "desc": "D1", "importance": "LOW", "type": "addition", "reference": "R1", "source_model": "m1"}], "models": ["m1"], "priority_score": 1},
         ]
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(file_groups))
+        grouped_path.write_text(json.dumps(file_groups), encoding="utf-8")
 
         # Provide validated_groups parameter
         validated_groups = [
@@ -685,7 +685,7 @@ class TestAggregateResultsGrouped:
             validated_groups=validated_groups,
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         # Should use validated_groups, not file
         assert "Validated group" in report_content
@@ -713,7 +713,7 @@ class TestAggregateResultsGrouped:
             validated_groups=validated_groups,
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         assert "**Validation:** 1 valid, 1 invalid, 1 needs human review" in report_content
 
@@ -732,7 +732,7 @@ class TestAggregateResultsGrouped:
             failed_models={},
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         assert "_No suggestions found._" in report_content
         assert "**Groups:** 0" in report_content
@@ -747,7 +747,7 @@ class TestAggregateResultsGrouped:
         ]
 
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(groups))
+        grouped_path.write_text(json.dumps(groups), encoding="utf-8")
 
         report_path = aggregate_results(
             prefix="test-plan",
@@ -757,7 +757,7 @@ class TestAggregateResultsGrouped:
             failed_models={"m2": "Timeout after 300s", "m3": "Rate limited"},
         )
 
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
 
         assert "## Models Failed" in report_content
         assert "**m2**: Timeout after 300s" in report_content

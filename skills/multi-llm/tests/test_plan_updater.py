@@ -89,7 +89,7 @@ class TestPlanUpdater:
         updater.save()
 
         # Read back and verify
-        content = sample_plan.read_text()
+        content = sample_plan.read_text(encoding="utf-8")
         assert "TASK_STATUS:T001:completed" in content
 
     def test_get_task_status(self, sample_plan):
@@ -134,7 +134,7 @@ class TestExtractTaskList:
 
     def test_extract_tasks(self, sample_plan):
         """Test extracting task list from plan."""
-        content = sample_plan.read_text()
+        content = sample_plan.read_text(encoding="utf-8")
         tasks = extract_task_list(content)
 
         assert len(tasks) == 4
@@ -147,7 +147,7 @@ class TestExtractTaskList:
         updater.apply_updates()
         updater.save()
 
-        content = sample_plan.read_text()
+        content = sample_plan.read_text(encoding="utf-8")
         tasks = extract_task_list(content)
 
         t001 = next(t for t in tasks if t["id"] == "T001")

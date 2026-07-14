@@ -499,7 +499,7 @@ def compute_suggestion_hashes(groups):
 def setup_apply_suggestions_fixtures(tmp_dir):
     """Set up fixtures for apply_suggestions_orchestrator."""
     plan_file = tmp_dir / "golden-plan.md"
-    plan_file.write_text(PLAN_CONTENT)
+    plan_file.write_text(PLAN_CONTENT, encoding="utf-8")
 
     prefix = sanitize_prefix("golden-plan")
     output_dir = tmp_dir / prefix
@@ -512,21 +512,23 @@ def setup_apply_suggestions_fixtures(tmp_dir):
 
     # Save grouped.json
     (review_plan_dir / "grouped.json").write_text(
-        json.dumps({"format_version": 2, "groups": groups}, indent=2)
+        json.dumps({"format_version": 2, "groups": groups}, indent=2),
+        encoding="utf-8",
     )
 
     # Save validation.json
     (review_plan_dir / "validation.json").write_text(
-        json.dumps(SUGGESTIONS_VALIDATION, indent=2)
+        json.dumps(SUGGESTIONS_VALIDATION, indent=2),
+        encoding="utf-8",
     )
 
     # Save backup.md
-    (review_plan_dir / "backup.md").write_text(PLAN_CONTENT)
+    (review_plan_dir / "backup.md").write_text(PLAN_CONTENT, encoding="utf-8")
 
     # Compute hashes for report template
     hashes = compute_suggestion_hashes(SUGGESTIONS_GROUPS)
     report_content = REPORT_MD_SUGGESTIONS.format(**hashes)
-    (review_plan_dir / "report.md").write_text(report_content)
+    (review_plan_dir / "report.md").write_text(report_content, encoding="utf-8")
 
     # Create state
     state = StateManager(plan_file)
@@ -538,7 +540,7 @@ def setup_apply_suggestions_fixtures(tmp_dir):
 def setup_apply_code_fixes_fixtures(tmp_dir):
     """Set up fixtures for apply_code_fixes_orchestrator."""
     plan_file = tmp_dir / "golden-plan.md"
-    plan_file.write_text(PLAN_CONTENT)
+    plan_file.write_text(PLAN_CONTENT, encoding="utf-8")
 
     prefix = sanitize_prefix("golden-plan")
     output_dir = tmp_dir / prefix
@@ -551,18 +553,20 @@ def setup_apply_code_fixes_fixtures(tmp_dir):
 
     # Save grouped.json (code review uses flat list format)
     (code_review_dir / "grouped.json").write_text(
-        json.dumps(groups, indent=2)
+        json.dumps(groups, indent=2),
+        encoding="utf-8",
     )
 
     # Save validation.json
     (code_review_dir / "validation.json").write_text(
-        json.dumps(CODE_FIXES_VALIDATION, indent=2)
+        json.dumps(CODE_FIXES_VALIDATION, indent=2),
+        encoding="utf-8",
     )
 
     # Compute hashes for report template
     hashes = compute_suggestion_hashes(CODE_FIXES_GROUPS)
     report_content = REPORT_MD_CODE_FIXES.format(**hashes)
-    (code_review_dir / "report.md").write_text(report_content)
+    (code_review_dir / "report.md").write_text(report_content, encoding="utf-8")
 
     # Create state with code-review phase completed
     state = StateManager(plan_file)
@@ -575,7 +579,7 @@ def setup_apply_code_fixes_fixtures(tmp_dir):
 def setup_apply_task_suggestions_fixtures(tmp_dir):
     """Set up fixtures for apply_task_suggestions_orchestrator."""
     plan_file = tmp_dir / "golden-plan.md"
-    plan_file.write_text(PLAN_CONTENT)
+    plan_file.write_text(PLAN_CONTENT, encoding="utf-8")
 
     prefix = sanitize_prefix("golden-plan")
     output_dir = tmp_dir / prefix
@@ -583,7 +587,7 @@ def setup_apply_task_suggestions_fixtures(tmp_dir):
     # Create tasks directory
     tasks_dir = output_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "tasks.md").write_text(TASKS_CONTENT)
+    (tasks_dir / "tasks.md").write_text(TASKS_CONTENT, encoding="utf-8")
 
     # Create review-tasks directory
     review_tasks_dir = output_dir / "review-tasks"
@@ -594,17 +598,19 @@ def setup_apply_task_suggestions_fixtures(tmp_dir):
     stamp_stable_ids(groups)
 
     (review_tasks_dir / "grouped.json").write_text(
-        json.dumps({"format_version": 2, "groups": groups}, indent=2)
+        json.dumps({"format_version": 2, "groups": groups}, indent=2),
+        encoding="utf-8",
     )
 
     (review_tasks_dir / "validation.json").write_text(
-        json.dumps(TASK_SUGGESTIONS_VALIDATION, indent=2)
+        json.dumps(TASK_SUGGESTIONS_VALIDATION, indent=2),
+        encoding="utf-8",
     )
 
     # Compute hashes for report template
     hashes = compute_suggestion_hashes(TASK_SUGGESTIONS_GROUPS)
     report_content = REPORT_MD_TASK_SUGGESTIONS.format(**hashes)
-    (review_tasks_dir / "report.md").write_text(report_content)
+    (review_tasks_dir / "report.md").write_text(report_content, encoding="utf-8")
 
     # Create state with prerequisite phases completed
     state = StateManager(plan_file)
@@ -631,6 +637,7 @@ def run_orchestrator(script_name, plan_file, *extra_args, timeout=30):
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -645,7 +652,7 @@ def save_golden(name, content, is_json=False):
                 content = json.dumps(parsed, indent=2, sort_keys=False)
             except json.JSONDecodeError:
                 pass  # Keep raw content if not valid JSON
-    filepath.write_text(content)
+    filepath.write_text(content, encoding="utf-8")
     print(f"  Saved: {filepath.name}")
 
 
@@ -736,7 +743,8 @@ def main():
 
     commit_hash = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        capture_output=True, text=True, cwd=str(SKILL_DIR)
+        capture_output=True, text=True, cwd=str(SKILL_DIR),
+        encoding="utf-8",
     ).stdout.strip()
 
     capture_date = datetime.now().isoformat()
@@ -773,7 +781,7 @@ def main():
         output_file = tmp_dir / prefix / "apply-suggestions" / "orchestrator_output.json"
         if output_file.exists():
             save_golden("apply_suggestions_orchestrator_output.json",
-                       output_file.read_text(), is_json=True)
+                       output_file.read_text(encoding="utf-8"), is_json=True)
         else:
             print(f"  WARNING: {output_file} not found")
 
@@ -819,7 +827,7 @@ def main():
         output_file = tmp_dir / prefix / "apply-fixes" / "orchestrator_output.json"
         if output_file.exists():
             save_golden("apply_code_fixes_orchestrator_output.json",
-                       output_file.read_text(), is_json=True)
+                       output_file.read_text(encoding="utf-8"), is_json=True)
         else:
             print(f"  WARNING: {output_file} not found")
 
@@ -865,7 +873,7 @@ def main():
         output_file = tmp_dir / prefix / "apply-task-suggestions" / "orchestrator_output.json"
         if output_file.exists():
             save_golden("apply_task_suggestions_orchestrator_output.json",
-                       output_file.read_text(), is_json=True)
+                       output_file.read_text(encoding="utf-8"), is_json=True)
         else:
             print(f"  WARNING: {output_file} not found")
 

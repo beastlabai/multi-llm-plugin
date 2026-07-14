@@ -80,7 +80,7 @@ class TestHtmlReportGeneration:
         assert md_report_path.exists(), f"report.md not found at {md_report_path}"
 
         # Verify HTML content structure
-        html = html_report_path.read_text()
+        html = html_report_path.read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in html, "HTML should start with DOCTYPE"
         assert "reportData" in html, "HTML should contain reportData JavaScript object"
         assert "</html>" in html, "HTML should have closing tag"
@@ -107,7 +107,7 @@ class TestHtmlReportGeneration:
         assert result.success, f"review_plan failed: {result.stderr}"
 
         review_plan_dir = plan.output_dir / "review-plan"
-        html = (review_plan_dir / "report.html").read_text()
+        html = (review_plan_dir / "report.html").read_text(encoding="utf-8")
 
         # The happy_path scenario returns suggestions that should appear in HTML
         # Check for common elements that should be in the embedded data
@@ -143,7 +143,7 @@ class TestMarkdownHtmlNotice:
         assert result.success, f"review_plan failed: {result.stderr}"
 
         review_plan_dir = plan.output_dir / "review-plan"
-        md_content = (review_plan_dir / "report.md").read_text()
+        md_content = (review_plan_dir / "report.md").read_text(encoding="utf-8")
 
         # Verify the notice about HTML report is present
         assert "report.html" in md_content, "Markdown should mention report.html"
@@ -188,7 +188,7 @@ class TestCodeReviewHtmlGeneration:
         assert md_report_path.exists(), f"report.md not found at {md_report_path}"
 
         # Verify HTML content
-        html = html_report_path.read_text()
+        html = html_report_path.read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in html
         assert "reportData" in html
         assert '"phase": "code-review"' in html, "HTML should indicate code-review phase"
@@ -231,7 +231,7 @@ class TestHtmlSelectionRoundTrip:
             "edited_descriptions": {},
         }
         selections_path = plan.output_dir / "review-plan" / "user_selections.json"
-        selections_path.write_text(json.dumps(user_selections))
+        selections_path.write_text(json.dumps(user_selections), encoding="utf-8")
 
         # Run apply_suggestions with --dry-run
         result = skill_runner.run_orchestrator(
@@ -288,7 +288,7 @@ class TestSelectionPrecedence:
 ## Group 2: Specify password complexity requirements
 - [x] Keep: Define minimum password requirements
 """
-        (review_plan_dir / "report.md").write_text(md_report)
+        (review_plan_dir / "report.md").write_text(md_report, encoding="utf-8")
 
         # Create user_selections.json that skips group 2 (not group 1)
         # HTML should take precedence
@@ -300,7 +300,7 @@ class TestSelectionPrecedence:
             "skipped_suggestions": [],
             "edited_descriptions": {},
         }
-        (review_plan_dir / "user_selections.json").write_text(json.dumps(user_selections))
+        (review_plan_dir / "user_selections.json").write_text(json.dumps(user_selections), encoding="utf-8")
 
         # Run apply_suggestions with --dry-run
         result = skill_runner.run_orchestrator(
@@ -358,7 +358,7 @@ class TestEditedDescriptions:
             },
         }
         review_plan_dir = plan.output_dir / "review-plan"
-        (review_plan_dir / "user_selections.json").write_text(json.dumps(user_selections))
+        (review_plan_dir / "user_selections.json").write_text(json.dumps(user_selections), encoding="utf-8")
 
         # Run apply_suggestions with --dry-run
         result = skill_runner.run_orchestrator(
@@ -457,7 +457,7 @@ class TestHtmlReportContents:
         assert result.success, f"review_plan failed: {result.stderr}"
 
         review_plan_dir = plan.output_dir / "review-plan"
-        html = (review_plan_dir / "report.html").read_text()
+        html = (review_plan_dir / "report.html").read_text(encoding="utf-8")
 
         # HTML should contain model metadata section with colors
         assert "models" in html, "HTML should contain models section"
@@ -487,7 +487,7 @@ class TestHtmlReportContents:
         assert result.success, f"review_plan failed: {result.stderr}"
 
         review_plan_dir = plan.output_dir / "review-plan"
-        html = (review_plan_dir / "report.html").read_text()
+        html = (review_plan_dir / "report.html").read_text(encoding="utf-8")
 
         # HTML should contain reference to the plan path
         assert "planPath" in html or "plan_path" in html, "HTML should contain plan path reference"

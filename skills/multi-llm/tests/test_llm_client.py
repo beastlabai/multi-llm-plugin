@@ -111,7 +111,7 @@ class TestSaveLog:
         assert result is True
         assert log_file.exists()
 
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "CURSOR-AGENT LOG" in content
         assert "cursor-agent:gpt-4" in content
         assert "Test prompt content" in content
@@ -138,7 +138,7 @@ class TestSaveLog:
         )
 
         assert result is True
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "Success: False" in content
         assert "Return Code: 1" in content
         assert "Error: Provider timed out" in content
@@ -178,7 +178,7 @@ class TestSaveLog:
         )
 
         assert result is True
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         # Should be truncated with "..."
         assert "..." in content
         # Should not contain the full 10000 chars
@@ -226,7 +226,7 @@ class TestSaveLog:
         )
 
         assert result is True
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         # Empty values should be replaced with "(empty)"
         assert "(empty)" in content
 
@@ -458,7 +458,7 @@ class TestInvokeWithProvider:
         )
 
         assert log_file.exists()
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "Test prompt" in content
 
     def test_log_file_saved_on_failure(self, mock_subprocess, mock_provider_available, tmp_path):
@@ -477,7 +477,7 @@ class TestInvokeWithProvider:
         )
 
         assert log_file.exists()
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "Success: False" in content
 
     def test_log_file_saved_on_timeout(self, mock_subprocess, mock_provider_available, tmp_path):
@@ -495,7 +495,7 @@ class TestInvokeWithProvider:
         )
 
         assert log_file.exists()
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "timed out" in content.lower()
 
     def test_duration_tracking(self, mock_subprocess, mock_provider_available):
@@ -1272,9 +1272,9 @@ class TestResolveExecutable:
     def test_cmd_shim_prefers_sibling_exe(self, tmp_path):
         """A .cmd shim with a same-stem sibling .exe resolves to the .exe."""
         shim = tmp_path / "codex.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
         exe = tmp_path / "codex.exe"
-        exe.write_text("")
+        exe.write_text("", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)):
             launcher, is_batch_shim = _resolve_executable("codex")
@@ -1285,7 +1285,7 @@ class TestResolveExecutable:
     def test_cmd_shim_without_sibling_exe_is_flagged(self, tmp_path):
         """A .cmd shim with no .exe and no node target is kept but flagged."""
         shim = tmp_path / "codex.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)):
             launcher, is_batch_shim = _resolve_executable("codex")
@@ -1296,7 +1296,7 @@ class TestResolveExecutable:
     def test_bat_shim_suffix_case_insensitive(self, tmp_path):
         """.BAT (any case) is treated as a batch shim too."""
         shim = tmp_path / "codex.BAT"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)):
             launcher, is_batch_shim = _resolve_executable("codex")
@@ -1309,7 +1309,7 @@ class TestResolveExecutable:
         """Write an npm cmd-shim and its dispatched-to cli.js; return both."""
         script = tmp_path.joinpath(*rel.replace("\\", "/").split("/"))
         script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text("#!/usr/bin/env node\n")
+        script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
         shim = tmp_path / f"{name}.cmd"
         shim.write_text(
             "@ECHO off\r\n"
@@ -1319,7 +1319,8 @@ class TestResolveExecutable:
             ") ELSE (\r\n"
             '  SET "_prog=node"\r\n'
             ")\r\n"
-            f'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\{rel}" %*\r\n'
+            f'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\{rel}" %*\r\n',
+            encoding="utf-8",
         )
         return shim, script
 
@@ -1327,7 +1328,7 @@ class TestResolveExecutable:
         """An npm shim resolves to `node.exe <cli.js>` when node.exe is adjacent."""
         shim, script = self._write_npm_shim(tmp_path)
         node_exe = tmp_path / "node.exe"
-        node_exe.write_text("")
+        node_exe.write_text("", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)):
             launcher, is_batch_shim = _resolve_executable("codex")
@@ -1379,7 +1380,7 @@ class TestResolveExecutable:
         """Step (a1) sibling .exe is preferred over the (a2) node target."""
         shim, script = self._write_npm_shim(tmp_path)
         exe = tmp_path / "codex.exe"
-        exe.write_text("")
+        exe.write_text("", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)):
             launcher, is_batch_shim = _resolve_executable("codex")
@@ -1486,7 +1487,7 @@ class TestLaunchFailureStructuredErrors:
         )
 
         assert log_file.exists()
-        content = log_file.read_text()
+        content = log_file.read_text(encoding="utf-8")
         assert "Success: False" in content
         assert "not found" in content
 
@@ -1509,7 +1510,8 @@ class TestPromptArgvIntegrity:
         child.write_text(
             "#!/usr/bin/env python3\n"
             "import json, sys\n"
-            'print(json.dumps({"type": "result", "result": json.dumps(sys.argv[1:])}))\n'
+            'print(json.dumps({"type": "result", "result": json.dumps(sys.argv[1:])}))\n',
+            encoding="utf-8",
         )
         child.chmod(0o755)
         prompt = (
@@ -1725,7 +1727,7 @@ class TestPromptLengthGuard:
     def test_enforced_on_windows_before_launch(self, tmp_path):
         """On Windows, an over-budget prompt fails fast without launching."""
         shim = tmp_path / "cursor-agent.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
         prompt = "x" * (CMDLINE_CAP_UTF16_BATCH + 100)
 
         with patch("shutil.which", return_value=str(shim)), \
@@ -1756,7 +1758,7 @@ class TestPromptLengthGuard:
     def test_not_enforced_on_posix(self, tmp_path):
         """On POSIX, prompt length is never enforced — even via a .cmd path."""
         shim = tmp_path / "cursor-agent.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
         prompt = "x" * (CMDLINE_CAP_UTF16_NATIVE + 100)
         mock_result = MagicMock()
         mock_result.returncode = 0
@@ -1819,7 +1821,7 @@ class TestBatchShimMetacharGuard:
     def test_enforced_on_windows_before_launch(self, tmp_path):
         """On Windows, a shim launch with a metachar prompt never reaches run()."""
         shim = tmp_path / "cursor-agent.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)), \
              patch("utils.llm_client._IS_WINDOWS", True), \
@@ -1848,7 +1850,7 @@ class TestBatchShimMetacharGuard:
     def test_not_enforced_on_posix(self, tmp_path):
         """On POSIX, argv is passed verbatim — no guard even via a .cmd path."""
         shim = tmp_path / "cursor-agent.cmd"
-        shim.write_text("@echo off")
+        shim.write_text("@echo off", encoding="utf-8")
 
         with patch("shutil.which", return_value=str(shim)), \
              patch("utils.llm_client._IS_WINDOWS", False), \

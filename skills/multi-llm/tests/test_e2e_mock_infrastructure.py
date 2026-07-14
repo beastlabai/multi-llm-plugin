@@ -72,6 +72,7 @@ def run_mock_llm(
         text=True,
         env=env,
         timeout=5,
+        encoding="utf-8",
     )
 
 
@@ -197,7 +198,7 @@ class TestMockLLMProviderDetection:
 
         # Check call log for provider detection
         assert call_log.exists()
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert entry["provider"] == provider
@@ -218,11 +219,12 @@ class TestMockLLMProviderDetection:
             text=True,
             env=env,
             timeout=5,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert entry["provider"] == "gemini"
@@ -238,6 +240,7 @@ class TestMockLLMProviderDetection:
             text=True,
             env=env,
             timeout=5,
+            encoding="utf-8",
         )
 
         # Should still succeed with default/unknown provider
@@ -252,7 +255,7 @@ class TestMockLLMPatternMatching:
         # Create a fixture file
         fixture_content = [{"id": "test-1", "message": "Hello from fixture"}]
         fixture_path = tmp_path / "test_fixture.json"
-        fixture_path.write_text(json.dumps(fixture_content))
+        fixture_path.write_text(json.dumps(fixture_content), encoding="utf-8")
 
         # Create a scenario file
         scenario = {
@@ -265,7 +268,7 @@ class TestMockLLMPatternMatching:
         scenario_path = tmp_path / "scenario.yaml"
 
         import yaml
-        with open(scenario_path, "w") as f:
+        with open(scenario_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(scenario, f)
 
         result = run_mock_llm(
@@ -285,7 +288,7 @@ class TestMockLLMPatternMatching:
         """Test that pattern matching is case-insensitive."""
         fixture_content = {"matched": True}
         fixture_path = tmp_path / "matched.json"
-        fixture_path.write_text(json.dumps(fixture_content))
+        fixture_path.write_text(json.dumps(fixture_content), encoding="utf-8")
 
         scenario = {
             "name": "case_test",
@@ -296,7 +299,7 @@ class TestMockLLMPatternMatching:
         scenario_path = tmp_path / "scenario.yaml"
 
         import yaml
-        with open(scenario_path, "w") as f:
+        with open(scenario_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(scenario, f)
 
         # Use lowercase in prompt
@@ -323,7 +326,7 @@ class TestMockLLMPatternMatching:
         scenario_path = tmp_path / "scenario.yaml"
 
         import yaml
-        with open(scenario_path, "w") as f:
+        with open(scenario_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(scenario, f)
 
         result = run_mock_llm(
@@ -342,11 +345,11 @@ class TestMockLLMPatternMatching:
         """Test that first matching pattern takes precedence."""
         first_fixture = {"order": "first"}
         first_path = tmp_path / "first.json"
-        first_path.write_text(json.dumps(first_fixture))
+        first_path.write_text(json.dumps(first_fixture), encoding="utf-8")
 
         second_fixture = {"order": "second"}
         second_path = tmp_path / "second.json"
-        second_path.write_text(json.dumps(second_fixture))
+        second_path.write_text(json.dumps(second_fixture), encoding="utf-8")
 
         scenario = {
             "name": "order_test",
@@ -358,7 +361,7 @@ class TestMockLLMPatternMatching:
         scenario_path = tmp_path / "scenario.yaml"
 
         import yaml
-        with open(scenario_path, "w") as f:
+        with open(scenario_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(scenario, f)
 
         result = run_mock_llm(
@@ -526,7 +529,7 @@ class TestMockLLMCallLogging:
             tmp_dir=tmp_path,
         )
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert "timestamp" in entry
@@ -544,7 +547,7 @@ class TestMockLLMCallLogging:
             tmp_dir=tmp_path,
         )
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert entry["provider"] == "gemini"
@@ -560,7 +563,7 @@ class TestMockLLMCallLogging:
             tmp_dir=tmp_path,
         )
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert "argv" in entry
@@ -578,7 +581,7 @@ class TestMockLLMCallLogging:
             tmp_dir=tmp_path,
         )
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert entry["prompt"] == "my specific test prompt"
@@ -597,7 +600,7 @@ class TestMockLLMCallLogging:
             tmp_dir=tmp_path,
         )
 
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
 
         assert "env" in entry
@@ -618,7 +621,7 @@ class TestMockLLMCallLogging:
             )
 
         # Read all entries
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             lines = f.readlines()
 
         assert len(lines) == 3
@@ -692,7 +695,7 @@ class TestMockLLMErrorInjection:
 
         # Call should still be logged even though it failed
         assert call_log.exists()
-        with open(call_log) as f:
+        with open(call_log, encoding="utf-8") as f:
             entry = json.loads(f.read().strip())
         assert entry["prompt"] == "test prompt"
 
@@ -729,6 +732,7 @@ class TestMockLLMErrorInjection:
             text=True,
             env=env,
             timeout=5,
+            encoding="utf-8",
         )
 
         assert result.returncode != 0
@@ -743,7 +747,7 @@ class TestMockLLMLegacyMode:
         # Create a fixture file
         fixture_content = {"legacy": True, "message": "from fixture file"}
         fixture_path = tmp_path / "legacy_fixture.json"
-        fixture_path.write_text(json.dumps(fixture_content))
+        fixture_path.write_text(json.dumps(fixture_content), encoding="utf-8")
 
         result = run_mock_llm(
             "cursor-agent",
@@ -763,12 +767,12 @@ class TestMockLLMLegacyMode:
         # Create fixture
         fixture_content = {"source": "legacy_fixture"}
         fixture_path = tmp_path / "legacy.json"
-        fixture_path.write_text(json.dumps(fixture_content))
+        fixture_path.write_text(json.dumps(fixture_content), encoding="utf-8")
 
         # Create scenario that would match
         scenario_fixture = {"source": "scenario_fixture"}
         scenario_fixture_path = tmp_path / "scenario_response.json"
-        scenario_fixture_path.write_text(json.dumps(scenario_fixture))
+        scenario_fixture_path.write_text(json.dumps(scenario_fixture), encoding="utf-8")
 
         scenario = {
             "name": "test",
@@ -777,7 +781,7 @@ class TestMockLLMLegacyMode:
         scenario_path = tmp_path / "scenario.yaml"
 
         import yaml
-        with open(scenario_path, "w") as f:
+        with open(scenario_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(scenario, f)
 
         # Run with both set - legacy should win
@@ -811,7 +815,7 @@ class TestMockLLMLegacyMode:
         assert output_file.exists()
 
         # File should contain the response content
-        content = output_file.read_text()
+        content = output_file.read_text(encoding="utf-8")
         # Should be valid JSON
         json.loads(content)
 

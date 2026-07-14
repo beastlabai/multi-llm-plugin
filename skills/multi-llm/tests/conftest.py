@@ -101,7 +101,7 @@ Update README and docs.
 - Depends on: T002, T003
 """
     plan_path = temp_dir / "sample-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -203,7 +203,7 @@ def sample_state(temp_dir, sample_plan):
         "task_status": {}
     }
     state_path = temp_dir / "sample-plan_state.json"
-    state_path.write_text(json.dumps(state))
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     return state_path
 
 
@@ -266,8 +266,8 @@ class MockGitRepo:
 
         # Create basic git repo structure
         (tmp_path / ".git").mkdir()
-        (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-        (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+        (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
 
         # Set default git responses
         self._update_git_responses()

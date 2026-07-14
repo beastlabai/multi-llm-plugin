@@ -144,7 +144,7 @@ class TestReviewPlanOrchestratorIntegration:
         plan_dir = tmp_path / "plans"
         plan_dir.mkdir()
         plan_file = plan_dir / "test-feature.md"
-        plan_file.write_text("# Test Feature Plan\n\n## Overview\nA test plan.\n")
+        plan_file.write_text("# Test Feature Plan\n\n## Overview\nA test plan.\n", encoding="utf-8")
 
         # Create output directories
         output_dir = plan_dir / "test-feature"
@@ -154,11 +154,11 @@ class TestReviewPlanOrchestratorIntegration:
 
         # Write grouped.json
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2))
+        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2), encoding="utf-8")
 
         # Write validation.json
         validation_path = phase_dir / "validation.json"
-        validation_path.write_text(json.dumps(TestFixtures.VALIDATION_RESULTS, indent=2))
+        validation_path.write_text(json.dumps(TestFixtures.VALIDATION_RESULTS, indent=2), encoding="utf-8")
 
         return {
             "plan_file": plan_file,
@@ -202,7 +202,7 @@ class TestReviewPlanOrchestratorIntegration:
             validated_groups=TestFixtures.GROUPED_SUGGESTIONS,
         )
 
-        content = Path(report_path).read_text()
+        content = Path(report_path).read_text(encoding="utf-8")
         assert "report.html" in content
         assert "user_selections.json" in content
 
@@ -220,7 +220,7 @@ class TestReviewPlanOrchestratorIntegration:
         )
 
         html_path = setup["phase_dir"] / "report.html"
-        html_content = html_path.read_text()
+        html_content = html_path.read_text(encoding="utf-8")
 
         # Check that group themes are in the HTML
         assert "Add input validation for email" in html_content
@@ -269,7 +269,7 @@ class TestCodeReviewOrchestratorIntegration:
         plan_dir = tmp_path / "plans"
         plan_dir.mkdir()
         plan_file = plan_dir / "test-feature.md"
-        plan_file.write_text("# Test Feature Plan\n\n## Overview\nA test plan.\n")
+        plan_file.write_text("# Test Feature Plan\n\n## Overview\nA test plan.\n", encoding="utf-8")
 
         # Create output directories
         output_dir = plan_dir / "test-feature"
@@ -279,7 +279,7 @@ class TestCodeReviewOrchestratorIntegration:
 
         # Write grouped.json
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(TestFixtures.CODE_REVIEW_ISSUES, indent=2))
+        grouped_path.write_text(json.dumps(TestFixtures.CODE_REVIEW_ISSUES, indent=2), encoding="utf-8")
 
         return {
             "plan_file": plan_file,
@@ -401,7 +401,7 @@ class TestApplySuggestionsSelectionLoading:
 
         # Write grouped.json
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2))
+        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2), encoding="utf-8")
 
         return phase_dir
 
@@ -419,7 +419,7 @@ class TestApplySuggestionsSelectionLoading:
             "edited_descriptions": {"G2S1": "Edited description text"}
         }
         selections_path = phase_dir / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         # Load and verify
         loaded = load_html_selections(phase_dir)
@@ -444,7 +444,7 @@ class TestApplySuggestionsSelectionLoading:
 
         # Create invalid JSON file
         selections_path = phase_dir / "user_selections.json"
-        selections_path.write_text("{ invalid json")
+        selections_path.write_text("{ invalid json", encoding="utf-8")
 
         loaded = load_html_selections(phase_dir)
 
@@ -516,7 +516,7 @@ class TestApplyCodeFixesSelectionLoading:
 
         # Write grouped.json
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(TestFixtures.CODE_REVIEW_ISSUES, indent=2))
+        grouped_path.write_text(json.dumps(TestFixtures.CODE_REVIEW_ISSUES, indent=2), encoding="utf-8")
 
         return phase_dir
 
@@ -534,7 +534,7 @@ class TestApplyCodeFixesSelectionLoading:
             "edited_descriptions": {}
         }
         selections_path = phase_dir / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         # Load and verify
         loaded = load_html_selections(phase_dir)
@@ -577,7 +577,7 @@ class TestHtmlReportGeneratorDirect:
     def setup_report_dir(self, tmp_path):
         """Create a directory for report generation."""
         plan_file = tmp_path / "test-plan.md"
-        plan_file.write_text("# Test Plan\n\n## Step 1\nDo something.\n")
+        plan_file.write_text("# Test Plan\n\n## Step 1\nDo something.\n", encoding="utf-8")
 
         phase_dir = tmp_path / "review-plan"
         phase_dir.mkdir()
@@ -650,7 +650,7 @@ class TestHtmlReportGeneratorDirect:
 
         assert report_path.exists()
         assert report_path.name == "report.html"
-        assert report_path.read_text() == html_content
+        assert report_path.read_text(encoding="utf-8") == html_content
 
     def test_generate_html_report_with_empty_groups(self, setup_report_dir):
         """Verify HTML generation handles empty groups list."""
@@ -698,7 +698,7 @@ class TestReportParserIntegration:
 
         # Write grouped.json
         grouped_path = phase_dir / "grouped.json"
-        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2))
+        grouped_path.write_text(json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2), encoding="utf-8")
 
         # Write user_selections.json
         selections = {
@@ -710,7 +710,7 @@ class TestReportParserIntegration:
             "edited_descriptions": {"G3S1": "User edited description"}
         }
         selections_path = phase_dir / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         return phase_dir
 
@@ -868,7 +868,7 @@ class TestStableIDCompatibility:
     @pytest.fixture
     def plan_file(self, tmp_path):
         plan = tmp_path / "test-plan.md"
-        plan.write_text("# Test Plan\n\n### Step 1: Auth\nAuth details.\n\n### Step 2: API\nAPI details.\n")
+        plan.write_text("# Test Plan\n\n### Step 1: Auth\nAuth details.\n\n### Step 2: API\nAPI details.\n", encoding="utf-8")
         return plan
 
     def test_ids_identical_across_pr_and_flat(self, groups_with_files_and_sections, plan_file, tmp_path):
@@ -1006,7 +1006,7 @@ class TestSelectionExportParity:
     @pytest.fixture
     def plan_file(self, tmp_path):
         plan = tmp_path / "test.md"
-        plan.write_text("# Test\n")
+        plan.write_text("# Test\n", encoding="utf-8")
         return plan
 
     def test_selection_structure_interchangeable(self, standard_groups, plan_file, tmp_path):
@@ -1073,7 +1073,7 @@ class TestGlobalCoverageGapRouting:
     @pytest.fixture
     def plan_file(self, tmp_path):
         plan = tmp_path / "test.md"
-        plan.write_text("# Test\n\n### Step 1\nContent.\n")
+        plan.write_text("# Test\n\n### Step 1\nContent.\n", encoding="utf-8")
         return plan
 
     def test_unanchored_code_review_routes_to_global(self, plan_file, tmp_path):
@@ -1260,7 +1260,7 @@ class TestTemplateSelection:
     @pytest.fixture
     def plan_file(self, tmp_path):
         plan = tmp_path / "test.md"
-        plan.write_text("# Test\n")
+        plan.write_text("# Test\n", encoding="utf-8")
         return plan
 
     def test_pr_style_loads_pr_template(self, basic_groups, plan_file, tmp_path):

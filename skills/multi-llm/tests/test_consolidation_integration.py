@@ -231,7 +231,7 @@ class TestFullPipeline:
             consolidated_groups, metadata, phase_dir
         )
         assert Path(json_path).exists()
-        json_data = json.loads(Path(json_path).read_text())
+        json_data = json.loads(Path(json_path).read_text(encoding="utf-8"))
         assert "consolidated_groups" in json_data
         assert "metadata" in json_data
 
@@ -240,13 +240,13 @@ class TestFullPipeline:
             consolidated_groups, groups, phase_dir, "my-feature"
         )
         assert Path(report_path).exists()
-        report_content = Path(report_path).read_text()
+        report_content = Path(report_path).read_text(encoding="utf-8")
         assert "# Consolidated Plan Review Report" in report_content
         assert "- [ ] Skip this group" in report_content
 
         # Step 7: generate_consolidated_html
         plan_file = tmp_path / "plan.md"
-        plan_file.write_text("# My Feature Plan\n\nSome plan content.")
+        plan_file.write_text("# My Feature Plan\n\nSome plan content.", encoding="utf-8")
         html_path = generate_consolidated_html(
             consolidated_groups,
             groups,
@@ -255,7 +255,7 @@ class TestFullPipeline:
             ["model-a"],
         )
         assert Path(html_path).exists()
-        html_content = Path(html_path).read_text()
+        html_content = Path(html_path).read_text(encoding="utf-8")
         assert "reportData" in html_content
 
 
@@ -959,7 +959,7 @@ class TestConsolidatedClaudeDecide:
         path = generate_consolidated_report(
             [cg], groups, str(tmp_path), "feat", validation=validation
         )
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "- [ ] Let Claude decide" in content
 
     def test_omit_checkbox_for_valid(self, tmp_path):
@@ -970,7 +970,7 @@ class TestConsolidatedClaudeDecide:
         path = generate_consolidated_report(
             [cg], groups, str(tmp_path), "feat", validation=validation
         )
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "- [ ] Let Claude decide" not in content
         # The existing checkboxes are still present.
         assert "- [ ] Mark valid" in content

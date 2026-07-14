@@ -67,7 +67,7 @@ def main() -> int:
     # Get response content
     fixture_path = os.environ.get("MOCK_LLM_FIXTURE")
     if fixture_path and Path(fixture_path).exists():
-        with open(fixture_path, "r") as f:
+        with open(fixture_path, "r", encoding="utf-8") as f:
             response_content = f.read()
     else:
         # Default response
@@ -84,7 +84,7 @@ def main() -> int:
     # Write to output file if specified
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(response_content)
 
     # Output in cursor-agent format

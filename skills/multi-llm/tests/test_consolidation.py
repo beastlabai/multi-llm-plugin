@@ -393,7 +393,7 @@ class TestPrepareConsolidationTasks:
         )
         tasks_path = tmp_path / "consolidation_tasks.json"
         assert tasks_path.exists()
-        data = json.loads(tasks_path.read_text())
+        data = json.loads(tasks_path.read_text(encoding="utf-8"))
         assert "batches" in data
         assert "singleton_sections" in data
 
@@ -413,7 +413,7 @@ class TestMergeConsolidationResults:
             group_ids = [generate_group_id(groups[idx]) for idx in batch_indices]
             batch_file = tmp_path / f"consolidation_batch_{i}.json"
             if batch_content is not None:
-                batch_file.write_text(json.dumps(batch_content))
+                batch_file.write_text(json.dumps(batch_content), encoding="utf-8")
             batches.append(
                 {
                     "batch_index": i,
@@ -476,7 +476,7 @@ class TestMergeConsolidationResults:
         groups = [_make_group(theme="T0", reference="Task 1")]
         g_ids = [generate_group_id(g) for g in groups]
         batch_file = tmp_path / "consolidation_batch_0.json"
-        batch_file.write_text("NOT VALID JSON {{{")
+        batch_file.write_text("NOT VALID JSON {{{", encoding="utf-8")
         tasks_metadata = {
             "batches": [
                 {
@@ -607,7 +607,7 @@ class TestMergeConsolidationResults:
         for i, (indices, content) in enumerate([([0, 1], batch0), ([2, 3], batch1)]):
             batch_gids = [g_ids[idx] for idx in indices]
             batch_file = tmp_path / f"consolidation_batch_{i}.json"
-            batch_file.write_text(json.dumps(content))
+            batch_file.write_text(json.dumps(content), encoding="utf-8")
             batches_meta.append(
                 {
                     "batch_index": i,
@@ -729,7 +729,7 @@ class TestGenerateConsolidatedReport:
         cg = self._make_consolidated_group()
         groups = [_make_group()]
         path = generate_consolidated_report([cg], groups, str(tmp_path), "my-feature")
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "## CG1 [abc123def456]: Test Group" in content
 
     def test_includes_skip_checkbox(self, tmp_path):
@@ -737,7 +737,7 @@ class TestGenerateConsolidatedReport:
         cg = self._make_consolidated_group()
         groups = [_make_group()]
         path = generate_consolidated_report([cg], groups, str(tmp_path), "prefix")
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "- [ ] Skip this group" in content
 
     def test_includes_3_state_validation_checkboxes(self, tmp_path):
@@ -745,7 +745,7 @@ class TestGenerateConsolidatedReport:
         cg = self._make_consolidated_group()
         groups = [_make_group()]
         path = generate_consolidated_report([cg], groups, str(tmp_path), "prefix")
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "- [ ] Mark valid" in content
         assert "- [ ] Mark invalid" in content
         assert "- [ ] Needs human attention" in content
@@ -755,7 +755,7 @@ class TestGenerateConsolidatedReport:
         cg = self._make_consolidated_group(underlying_indices=[0])
         groups = [_make_group(theme="Original Theme")]
         path = generate_consolidated_report([cg], groups, str(tmp_path), "prefix")
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "<details>" in content
         assert "Original Theme" in content
         assert "</details>" in content
@@ -765,7 +765,7 @@ class TestGenerateConsolidatedReport:
         cg = self._make_consolidated_group()
         groups = [_make_group()]
         path = generate_consolidated_report([cg], groups, str(tmp_path), "my-feature")
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "# Consolidated Plan Review Report: my-feature" in content
         assert "Consolidation:" in content
 
@@ -803,15 +803,15 @@ class TestGenerateConsolidatedJson:
         )
         path = generate_consolidated_json([cg], metadata, str(tmp_path))
         assert Path(path).exists()
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert "consolidated_groups" in data
         assert "metadata" in data
 
     def test_less_than_10pct_reduction_sets_skipped_report(self, tmp_path):
         """<10% reduction sets skipped_report=True and removes old reports."""
         # Create stale report files
-        (tmp_path / "consolidated-report.md").write_text("old report")
-        (tmp_path / "consolidated-report.html").write_text("old html")
+        (tmp_path / "consolidated-report.md").write_text("old report", encoding="utf-8")
+        (tmp_path / "consolidated-report.html").write_text("old html", encoding="utf-8")
 
         cg = self._make_valid_cg()
         metadata = _build_valid_metadata(
@@ -820,7 +820,7 @@ class TestGenerateConsolidatedJson:
             skipped_report=False,
         )
         path = generate_consolidated_json([cg], metadata, str(tmp_path))
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert data["metadata"]["skipped_report"] is True
         assert not (tmp_path / "consolidated-report.md").exists()
         assert not (tmp_path / "consolidated-report.html").exists()
@@ -834,7 +834,7 @@ class TestGenerateConsolidatedJson:
             skipped_report=False,
         )
         path = generate_consolidated_json([cg], metadata, str(tmp_path))
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert data["metadata"]["skipped_report"] is False
 
     def test_above_10pct_reduction_no_skip(self, tmp_path):
@@ -846,7 +846,7 @@ class TestGenerateConsolidatedJson:
             skipped_report=False,
         )
         path = generate_consolidated_json([cg], metadata, str(tmp_path))
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert data["metadata"]["skipped_report"] is False
 
 
@@ -888,12 +888,12 @@ class TestLoadMergedSuggestions:
 
         # Compute actual hashes
         plan_file = phase_path / "plan.md"
-        plan_file.write_text("# Plan")
+        plan_file.write_text("# Plan", encoding="utf-8")
         plan_hash = hashlib.sha256("# Plan".encode()).hexdigest()
 
         grouped_json = phase_path / "grouped.json"
         grouped_content = json.dumps(groups)
-        grouped_json.write_text(grouped_content)
+        grouped_json.write_text(grouped_content, encoding="utf-8")
         grouped_hash = hashlib.sha256(grouped_content.encode()).hexdigest()
 
         metadata = {
@@ -917,7 +917,7 @@ class TestLoadMergedSuggestions:
             "consolidated_groups": consolidated_groups,
             "metadata": metadata,
         }
-        (phase_path / "consolidated.json").write_text(json.dumps(payload))
+        (phase_path / "consolidated.json").write_text(json.dumps(payload), encoding="utf-8")
         return str(plan_file), g_ids
 
     def test_returns_empty_when_no_consolidated_json(self, tmp_path):
@@ -1081,7 +1081,7 @@ class TestLoadMergedSuggestions:
 
         # Inject a CG with an unresolvable underlying group_id
         consolidated_path = tmp_path / "consolidated.json"
-        data = json.loads(consolidated_path.read_text())
+        data = json.loads(consolidated_path.read_text(encoding="utf-8"))
         data["consolidated_groups"].append({
             "consolidated_id": "fake_cid_12ab",
             "display_index": 2,
@@ -1097,7 +1097,7 @@ class TestLoadMergedSuggestions:
             "is_singleton": True,
             "reasoning": "",
         })
-        consolidated_path.write_text(json.dumps(data))
+        consolidated_path.write_text(json.dumps(data), encoding="utf-8")
 
         mock_skipped.return_value = {"fake_cid_12ab"}
         mock_overrides.return_value = {}

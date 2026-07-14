@@ -106,7 +106,7 @@ class TestHtmlReportStructure:
     def sample_plan(self, tmp_path):
         """Create a sample plan file."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\n## Overview\nTest content.")
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest content.", encoding="utf-8")
         return plan_path
 
     def test_html_has_proper_doctype(self, basic_groups, sample_plan, tmp_path):
@@ -324,7 +324,7 @@ More information about step 2.
 
 ### Step 3
 Third step content.
-""")
+""", encoding="utf-8")
         return plan_path
 
     def test_groups_have_correct_indices(self, multi_group_data, multi_section_plan, tmp_path):
@@ -397,7 +397,7 @@ Third step content.
         phase_dir.mkdir()
 
         # Create a log file
-        (phase_dir / "log_claude-3-opus.txt").write_text("Test log line 1\nTest log line 2\n")
+        (phase_dir / "log_claude-3-opus.txt").write_text("Test log line 1\nTest log line 2\n", encoding="utf-8")
 
         html = generate_html_report(
             groups=multi_group_data,
@@ -489,7 +489,7 @@ class TestEdgeCases:
     def sample_plan(self, tmp_path):
         """Create a sample plan file."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\nContent here.")
+        plan_path.write_text("# Test Plan\n\nContent here.", encoding="utf-8")
         return plan_path
 
     def test_groups_with_missing_validation_status(self, sample_plan, tmp_path):
@@ -760,7 +760,7 @@ Content for step 1.2.
 
 ### Step 2.1
 Content for step 2.1.
-""")
+""", encoding="utf-8")
 
         phase_dir = tmp_path / "review-plan"
         phase_dir.mkdir()
@@ -893,7 +893,7 @@ class TestSelectionFiles:
             },
         }
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -911,7 +911,7 @@ class TestSelectionFiles:
             # edited_descriptions missing
         }
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -928,7 +928,7 @@ class TestSelectionFiles:
             "edited_descriptions": {},
         }
         selections_path = tmp_path / "user_selections.json"
-        selections_path.write_text(json.dumps(selections))
+        selections_path.write_text(json.dumps(selections), encoding="utf-8")
 
         result = load_html_selections(tmp_path)
 
@@ -1023,7 +1023,7 @@ class TestTemplateLoading:
     def sample_plan(self, tmp_path):
         """Create a sample plan file."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan")
+        plan_path.write_text("# Test Plan", encoding="utf-8")
         return plan_path
 
     def test_template_loads_from_correct_path(self, basic_groups, sample_plan, tmp_path):
@@ -1051,7 +1051,7 @@ class TestTemplateLoading:
 
         # Point module to fake location without template
         fake_path = tmp_path / "fake_module.py"
-        fake_path.write_text("")
+        fake_path.write_text("", encoding="utf-8")
 
         import utils.html_report_generator as module
         original_file = module.__file__
@@ -1201,7 +1201,7 @@ class TestSummaryStatistics:
     def sample_plan(self, tmp_path):
         """Create a sample plan file."""
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Test Plan")
+        plan_path.write_text("# Test Plan", encoding="utf-8")
         return plan_path
 
     def test_summary_counts_validation_statuses(self, sample_plan, tmp_path):
@@ -1298,7 +1298,7 @@ class TestZeroSuggestions:
     @pytest.fixture
     def sample_plan(self, tmp_path):
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Empty Plan\n")
+        plan_path.write_text("# Empty Plan\n", encoding="utf-8")
         return plan_path
 
     def test_zero_suggestions_pr_template(self, sample_plan, tmp_path):
@@ -1389,7 +1389,7 @@ class TestSuggestionsLackingReferences:
     @pytest.fixture
     def sample_plan(self, tmp_path):
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Plan\n\n### Step 1\nContent.\n")
+        plan_path.write_text("# Plan\n\n### Step 1\nContent.\n", encoding="utf-8")
         return plan_path
 
     def test_no_file_no_section_routes_to_global_file_view(self, sample_plan, tmp_path):
@@ -1502,7 +1502,7 @@ class TestMalformedBaseRef:
     @pytest.fixture
     def sample_plan(self, tmp_path):
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Plan\n")
+        plan_path.write_text("# Plan\n", encoding="utf-8")
         return plan_path
 
     @pytest.fixture
@@ -1654,7 +1654,7 @@ class TestAllFallbackLevelsFail:
     @pytest.fixture
     def sample_plan(self, tmp_path):
         plan_path = tmp_path / "test-plan.md"
-        plan_path.write_text("# Plan\n")
+        plan_path.write_text("# Plan\n", encoding="utf-8")
         return plan_path
 
     def test_file_context_unavailable_when_no_diff_no_file_no_anchor(self, sample_plan, tmp_path):

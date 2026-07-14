@@ -31,7 +31,7 @@ def sample_plan(temp_dir):
 This is a test plan for state tracking tests.
 """
     plan_path = temp_dir / "test-plan.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
     return plan_path
 
 
@@ -75,7 +75,7 @@ class TestUpdatePlanTasksStateTracking:
             ]
         }
         tasks_path = temp_dir / "tasks.json"
-        tasks_path.write_text(json.dumps(tasks_json))
+        tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -84,7 +84,8 @@ class TestUpdatePlanTasksStateTracking:
              "--tasks-file", str(tasks_path)],
             capture_output=True,
             text=True,
-            cwd=str(script_path.parent)
+            cwd=str(script_path.parent),
+            encoding="utf-8",
         )
 
         assert result.returncode == 0
@@ -101,7 +102,7 @@ class TestUpdatePlanTasksStateTracking:
             ]
         }
         tasks_path = temp_dir / "tasks.json"
-        tasks_path.write_text(json.dumps(tasks_json))
+        tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         subprocess.run(
@@ -110,7 +111,8 @@ class TestUpdatePlanTasksStateTracking:
              "--tasks-file", str(tasks_path)],
             capture_output=True,
             text=True,
-            cwd=str(script_path.parent)
+            cwd=str(script_path.parent),
+            encoding="utf-8",
         )
 
         # Check that tasks.md was created in the plan output directory
@@ -125,7 +127,7 @@ class TestUpdatePlanTasksStateTracking:
             ]
         }
         tasks_path = temp_dir / "tasks.json"
-        tasks_path.write_text(json.dumps(tasks_json))
+        tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -135,7 +137,8 @@ class TestUpdatePlanTasksStateTracking:
              "--dry-run"],
             capture_output=True,
             text=True,
-            cwd=str(script_path.parent)
+            cwd=str(script_path.parent),
+            encoding="utf-8",
         )
 
         assert result.returncode == 0

@@ -308,7 +308,7 @@ class TestSaveValidationWithGroupId:
         )
 
         # Load and verify group_ids were saved
-        with open(output_path, 'r') as f:
+        with open(output_path, 'r', encoding="utf-8") as f:
             saved_data = json.load(f)
 
         saved_groups = saved_data["groups"]
@@ -345,7 +345,7 @@ class TestSaveValidationWithGroupId:
         )
 
         # Load and verify existing group_id was preserved
-        with open(output_path, 'r') as f:
+        with open(output_path, 'r', encoding="utf-8") as f:
             saved_data = json.load(f)
 
         assert saved_data["groups"][0]["group_id"] == existing_gid
@@ -420,7 +420,7 @@ class TestMergeBatchedWithGroupId:
             ],
             "metadata": {"model": "test", "schema_version": "2.1"}
         }
-        with open(batch["output_path"], 'w') as f:
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
             json.dump(batch_results, f)
 
         # Merge results
@@ -628,7 +628,7 @@ class TestValidationGroupIdIntegration:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"}
             }
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
         # Merge batch results

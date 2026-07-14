@@ -83,7 +83,7 @@ class TestNoDirectoryInSourceFiles:
 
     def test_no_directory_in_instructions(self):
         for md_file in self._get_files("instructions/*.md"):
-            content = md_file.read_text()
+            content = md_file.read_text(encoding="utf-8")
             matches = [
                 (i + 1, line)
                 for i, line in enumerate(content.splitlines())
@@ -96,7 +96,7 @@ class TestNoDirectoryInSourceFiles:
 
     def test_no_directory_in_orchestrators(self):
         for py_file in self._get_files("*_orchestrator.py"):
-            content = py_file.read_text()
+            content = py_file.read_text(encoding="utf-8")
             matches = [
                 (i + 1, line)
                 for i, line in enumerate(content.splitlines())
@@ -109,7 +109,7 @@ class TestNoDirectoryInSourceFiles:
 
     def test_no_directory_in_validation(self):
         val_file = self.SKILL_ROOT / "utils" / "validation.py"
-        content = val_file.read_text()
+        content = val_file.read_text(encoding="utf-8")
         matches = [
             (i + 1, line)
             for i, line in enumerate(content.splitlines())
@@ -124,7 +124,7 @@ class TestNoDirectoryInSourceFiles:
         for py_file in list(self._get_files("*.py")) + list(
             self._get_files("utils/*.py")
         ):
-            content = py_file.read_text()
+            content = py_file.read_text(encoding="utf-8")
             if DOUBLED_PATH in content:
                 lines = [
                     (i + 1, line)

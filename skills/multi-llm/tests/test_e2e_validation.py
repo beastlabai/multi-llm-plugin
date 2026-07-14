@@ -124,7 +124,7 @@ Do something else.
                 ]
             }
         ]
-        (review_dir / "grouped.json").write_text(json.dumps(grouped))
+        (review_dir / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
 
         # Create validation.json with valid suggestions
         # Note: The implement_orchestrator has a bug where it calls validation.values()
@@ -139,7 +139,7 @@ Do something else.
                 "confidence": 0.9
             }
         }
-        (review_dir / "validation.json").write_text(json.dumps(validation))
+        (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
 
         # Do NOT mark apply-suggestions as completed in state
         # (No state file exists yet, or it doesn't have apply-suggestions completed)
@@ -211,7 +211,7 @@ Create something.
         }
         state_path = plan.get_state_path()
         plan.output_dir.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8")
 
         # Run implement orchestrator with --resume to trigger hash check
         result = skill_runner.run_orchestrator(
@@ -270,7 +270,7 @@ Implement a feature.
         plan.output_dir.mkdir(parents=True, exist_ok=True)
         state_path = plan.get_state_path()
         corrupt_content = '{"schema_version": "1.0", "plan_path": "/some/path", "incomplete'
-        state_path.write_text(corrupt_content)
+        state_path.write_text(corrupt_content, encoding="utf-8")
 
         # Run implement orchestrator
         result = skill_runner.run_orchestrator(
@@ -284,7 +284,7 @@ Implement a feature.
         # Verify state.json is now valid JSON
         assert state_path.exists(), "state.json should exist after recovery"
         try:
-            state = json.loads(state_path.read_text())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             pytest.fail("state.json should be valid JSON after recovery")
 
@@ -316,7 +316,7 @@ Do something.
         plan.output_dir.mkdir(parents=True, exist_ok=True)
         state_path = plan.get_state_path()
         truncated_content = '{"schema_version": "1.0", "phases_completed": {"review-plan":'
-        state_path.write_text(truncated_content)
+        state_path.write_text(truncated_content, encoding="utf-8")
 
         # Run implement orchestrator
         result = skill_runner.run_orchestrator(
@@ -328,7 +328,7 @@ Do something.
         assertions.assert_exit_code(result, 0)
 
         # Verify state is now valid
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state.get("schema_version") in ("1.0", "2.0")
 
     def test_corrupt_state_empty_file(
@@ -352,7 +352,7 @@ Do something.
         # Create empty state.json
         plan.output_dir.mkdir(parents=True, exist_ok=True)
         state_path = plan.get_state_path()
-        state_path.write_text("")
+        state_path.write_text("", encoding="utf-8")
 
         # Run implement orchestrator
         result = skill_runner.run_orchestrator(
@@ -364,7 +364,7 @@ Do something.
         assertions.assert_exit_code(result, 0)
 
         # Verify state is now valid
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state.get("schema_version") in ("1.0", "2.0")
 
 
@@ -439,7 +439,7 @@ A plan for authentication.
                 ]
             }
         ]
-        (review_dir / "grouped.json").write_text(json.dumps(grouped))
+        (review_dir / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
 
         # Create validation.json with ALL suggestions marked as invalid
         validation = [
@@ -454,7 +454,7 @@ A plan for authentication.
                 "reason": "Out of scope for this plan"
             }
         ]
-        (review_dir / "validation.json").write_text(json.dumps(validation))
+        (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
 
         # Run apply_suggestions orchestrator
         result = skill_runner.run_orchestrator(

@@ -150,7 +150,7 @@ def _create_plan_with_tasks(
     Returns the plan file path.
     """
     plan_path = temp_dir / f"{plan_name}.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     prefix = sanitize_prefix(plan_name)
     output_dir = temp_dir / prefix
@@ -158,7 +158,7 @@ def _create_plan_with_tasks(
     tasks_dir.mkdir(parents=True, exist_ok=True)
 
     if tasks_content is not None:
-        (tasks_dir / "tasks.md").write_text(tasks_content)
+        (tasks_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
 
     # Set up state
     state = StateManager(plan_path)
@@ -206,6 +206,7 @@ def run_orchestrator(plan_path: Path, *extra_args, timeout: int = 30) -> subproc
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -222,6 +223,7 @@ def run_prereq_check(plan_path: Path, mode: str) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -239,6 +241,7 @@ def run_status_check(plan_path: Path) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -297,7 +300,8 @@ class TestFullReviewTasksFlow:
             },
         ]
         (review_tasks_dir / "cursor-agent_auto.json").write_text(
-            json.dumps(model_result, indent=2)
+            json.dumps(model_result, indent=2),
+            encoding="utf-8",
         )
 
         result = run_orchestrator(
@@ -325,7 +329,7 @@ class TestFullReviewTasksFlow:
         assert report_html.exists(), f"report.html not found in {review_tasks_dir}"
 
         # Verify grouped.json is valid JSON (v1 bare list or v2 envelope)
-        with open(grouped, 'r') as f:
+        with open(grouped, 'r', encoding="utf-8") as f:
             grouped_raw = json.load(f)
         if isinstance(grouped_raw, dict) and "groups" in grouped_raw:
             grouped_data = grouped_raw["groups"]  # v2 envelope
@@ -366,7 +370,8 @@ class TestReaggregateFromExisting:
             }
         ]
         (review_tasks_dir / "cursor-agent_auto.json").write_text(
-            json.dumps(model_result, indent=2)
+            json.dumps(model_result, indent=2),
+            encoding="utf-8",
         )
 
         # Run reaggregate with --skip-validation so it completes fully
@@ -419,7 +424,8 @@ class TestPhaseCompletionMarking:
                 "importance": "MEDIUM",
                 "reference": "T001",
                 "type": "modification",
-            }], indent=2)
+            }], indent=2),
+            encoding="utf-8",
         )
 
         # Use --skip-validation so reaggregate completes fully (without
@@ -726,7 +732,7 @@ Configure eslint with standard rules.
         assert os.path.isfile(tasks_path), f"Tasks file not found at: {tasks_path}"
 
         # Read back the content to verify it's our unrelated tasks
-        with open(tasks_path, 'r') as f:
+        with open(tasks_path, 'r', encoding="utf-8") as f:
             content = f.read()
         assert "CI pipeline" in content, "Should have loaded our unrelated tasks file"
         assert "Configure eslint" in content
@@ -767,7 +773,8 @@ Set up continuous integration pipeline.
             }
         ]
         (review_tasks_dir / "cursor-agent_auto.json").write_text(
-            json.dumps(model_result, indent=2)
+            json.dumps(model_result, indent=2),
+            encoding="utf-8",
         )
 
         result = run_orchestrator(plan_path, "--reaggregate", "--skip-validation")
@@ -824,7 +831,8 @@ class TestForceRerun:
                 "importance": "MEDIUM",
                 "reference": "T001",
                 "type": "modification",
-            }], indent=2)
+            }], indent=2),
+            encoding="utf-8",
         )
 
         # First, complete the phase via reaggregate
@@ -902,13 +910,13 @@ class TestFindTasksFile:
         # Create plan with TASKS_FILE comment pointing to a custom location
         plan_content = SAMPLE_PLAN_CONTENT + "\n<!-- TASKS_FILE: custom/my-tasks.md -->\n"
         plan_path = temp_dir / "comment-test.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         # Create the custom tasks file
         prefix = sanitize_prefix("comment-test")
         custom_dir = temp_dir / "custom"
         custom_dir.mkdir(parents=True, exist_ok=True)
-        (custom_dir / "my-tasks.md").write_text(VALID_TASKS_CONTENT)
+        (custom_dir / "my-tasks.md").write_text(VALID_TASKS_CONTENT, encoding="utf-8")
 
         tasks_path = find_tasks_file(str(plan_path))
         assert "my-tasks.md" in tasks_path
@@ -918,7 +926,7 @@ class TestFindTasksFile:
         from review_tasks_orchestrator import find_tasks_file
 
         plan_path = temp_dir / "no-tasks.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         with pytest.raises(FileNotFoundError, match="generate-tasks"):
             find_tasks_file(str(plan_path))
@@ -928,12 +936,12 @@ class TestFindTasksFile:
         from review_tasks_orchestrator import find_tasks_file
 
         plan_path = temp_dir / "empty-tasks-test.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         prefix = sanitize_prefix("empty-tasks-test")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text("")
+        (tasks_dir / "tasks.md").write_text("", encoding="utf-8")
 
         with pytest.raises(ValueError, match="[Ee]mpty"):
             find_tasks_file(str(plan_path))
@@ -943,12 +951,12 @@ class TestFindTasksFile:
         from review_tasks_orchestrator import find_tasks_file
 
         plan_path = temp_dir / "malformed-test.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         prefix = sanitize_prefix("malformed-test")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text(MALFORMED_TASKS_CONTENT)
+        (tasks_dir / "tasks.md").write_text(MALFORMED_TASKS_CONTENT, encoding="utf-8")
 
         with pytest.raises(ValueError, match="[Mm]alformed"):
             find_tasks_file(str(plan_path))
@@ -959,7 +967,7 @@ class TestFindTasksFile:
 
         plan_content = SAMPLE_PLAN_CONTENT + "\n<!-- TASKS_FILE: /etc/passwd -->\n"
         plan_path = temp_dir / "abs-path.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         with pytest.raises(SystemExit):
             find_tasks_file(str(plan_path))
@@ -970,7 +978,7 @@ class TestFindTasksFile:
 
         plan_content = SAMPLE_PLAN_CONTENT + "\n<!-- TASKS_FILE: ../../etc/passwd -->\n"
         plan_path = temp_dir / "traversal.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         with pytest.raises(SystemExit):
             find_tasks_file(str(plan_path))

@@ -83,7 +83,7 @@ def load_scenario(scenario_path: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        with open(scenario_path, "r") as f:
+        with open(scenario_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
     except (OSError, yaml.YAMLError):
         return None
@@ -131,7 +131,7 @@ def get_response_content(prompt: str) -> str:
     # Legacy: MOCK_LLM_FIXTURE takes highest precedence
     fixture_path = os.environ.get("MOCK_LLM_FIXTURE")
     if fixture_path and Path(fixture_path).exists():
-        with open(fixture_path, "r") as f:
+        with open(fixture_path, "r", encoding="utf-8") as f:
             return f.read()
 
     # New: MOCK_LLM_SCENARIO for pattern-based responses
@@ -145,7 +145,7 @@ def get_response_content(prompt: str) -> str:
                 scenario_dir = Path(scenario_path).parent
                 fixture_full = scenario_dir / fixture_rel
                 if fixture_full.exists():
-                    with open(fixture_full, "r") as f:
+                    with open(fixture_full, "r", encoding="utf-8") as f:
                         return f.read()
 
     # New: MOCK_LLM_CONFIG for dynamic configuration
@@ -195,7 +195,7 @@ def write_output_file(prompt: str, content: str) -> None:
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
 
 
@@ -226,7 +226,7 @@ def log_call(provider: str, args: List[str], prompt: str) -> None:
     log_file = Path(log_path)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(log_file, "a") as f:
+    with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
 

@@ -59,16 +59,16 @@ def _create_code_review_phase(
 
     # Write grouped.json
     grouped_path = code_review_dir / "grouped.json"
-    grouped_path.write_text(json.dumps(grouped_data, indent=2))
+    grouped_path.write_text(json.dumps(grouped_data, indent=2), encoding="utf-8")
 
     # Write validation.json
     validation_path = code_review_dir / "validation.json"
-    validation_path.write_text(json.dumps(validation_data, indent=2))
+    validation_path.write_text(json.dumps(validation_data, indent=2), encoding="utf-8")
 
     # Write report.md if provided
     if report_content:
         report_path = code_review_dir / "report.md"
-        report_path.write_text(report_content)
+        report_path.write_text(report_content, encoding="utf-8")
 
     return code_review_dir
 
@@ -102,17 +102,17 @@ Security improvements for the authentication system.
 
         # Load grouped issues fixture
         grouped_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/grouped_with_issues.json"
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             grouped_data = json.load(f)
 
         # Load validation fixture
         validation_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/validation_mixed.json"
-        with open(validation_path) as f:
+        with open(validation_path, encoding="utf-8") as f:
             validation_data = json.load(f)
 
         # Load report with skip markers
         report_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/with_user_skips.md"
-        report_content = report_path.read_text()
+        report_content = report_path.read_text(encoding="utf-8")
 
         # Create code-review phase outputs
         _create_code_review_phase(plan, grouped_data, validation_data, report_content)
@@ -184,7 +184,7 @@ Security improvements for the authentication system.
 
         # Load grouped issues
         grouped_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/grouped_with_issues.json"
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             grouped_data = json.load(f)[:3]  # Just first 3
 
         # Simple validation - all valid
@@ -259,17 +259,17 @@ class TestApplyFixesEditedDescriptions:
 
         # Load grouped issues
         grouped_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/grouped_with_issues.json"
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             grouped_data = json.load(f)
 
         # Load validation
         validation_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/validation_mixed.json"
-        with open(validation_path) as f:
+        with open(validation_path, encoding="utf-8") as f:
             validation_data = json.load(f)
 
         # Load report with edited descriptions
         report_path = Path(__file__).parent / "fixtures/e2e/responses/apply_fixes/with_edited_descriptions.md"
-        report_content = report_path.read_text()
+        report_content = report_path.read_text(encoding="utf-8")
 
         _create_code_review_phase(plan, grouped_data, validation_data, report_content)
         fixture_manager.create_state_file(plan, phases_completed=["code-review"])

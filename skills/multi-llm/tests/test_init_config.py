@@ -199,12 +199,12 @@ def _real_init(detected_list):
     """
     base = init_config.load_base_config()
     order = list(base["providers"])
-    body = init_config._extract_managed_body(init_config.TEMPLATE_PATH.read_text())
+    body = init_config._extract_managed_body(init_config.TEMPLATE_PATH.read_text(encoding="utf-8"))
     toggled, m, q = init_config._toggle_template(body, set(detected_list), order)
     toggled, expected, notices = init_config._apply_d2a_guard(
         toggled, detected_list, m, q, base
     )
-    text = init_config.splice_managed_block(init_config.TEMPLATE_PATH.read_text(), toggled)
+    text = init_config.splice_managed_block(init_config.TEMPLATE_PATH.read_text(encoding="utf-8"), toggled)
     return yaml.safe_load(text), expected, notices
 
 
@@ -321,7 +321,7 @@ class TestEndToEndInit:
         out = tmp_path / ".multi-llm" / "providers.yaml"
         assert out.exists()
 
-        written = yaml.safe_load(out.read_text())
+        written = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert written["default_provider"] == "claude-code"
         # Detected providers' full blocks are present and live in the written file.
         assert "claude-code" in written["providers"]
@@ -376,7 +376,7 @@ class TestEndToEndInit:
         )
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
-        written = yaml.safe_load((tmp_path / ".multi-llm" / "providers.yaml").read_text())
+        written = yaml.safe_load((tmp_path / ".multi-llm" / "providers.yaml").read_text(encoding="utf-8"))
         # defaults.modes is never materialized by init.
         assert "modes" not in written["defaults"]
 
@@ -393,13 +393,13 @@ class TestReinitForce:
         monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["cursor-agent"])
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
-        first = yaml.safe_load(out.read_text())
+        first = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert first["default_provider"] == "cursor-agent"
         assert "claude-code" not in first["providers"]
 
         # Hand-add an OUTSIDE-marker comment.
         sentinel = "# HAND-EDITED-OUTSIDE-MARKER do not clobber\n"
-        out.write_text(out.read_text() + sentinel)
+        out.write_text(out.read_text(encoding="utf-8") + sentinel, encoding="utf-8")
 
         # Detection changes: claude-code now installed too. Re-init --force.
         monkeypatch.setattr(
@@ -408,7 +408,7 @@ class TestReinitForce:
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path), "--force"]) == 0
 
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         second = yaml.safe_load(text)
         # Regenerated region reflects the NEW detection.
         assert second["default_provider"] == "claude-code"
@@ -439,7 +439,7 @@ class TestBackupOnOverwrite:
         monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["cursor-agent"])
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
-        original = out.read_text()
+        original = out.read_text(encoding="utf-8")
         capsys.readouterr()
 
         # Detection changes → the regenerated file differs → backup fires.
@@ -451,8 +451,8 @@ class TestBackupOnOverwrite:
         backups = self._backups(out)
         assert len(backups) == 1
         # The backup preserves the pre-overwrite content verbatim...
-        assert backups[0].read_text() == original
-        assert out.read_text() != original
+        assert backups[0].read_text(encoding="utf-8") == original
+        assert out.read_text(encoding="utf-8") != original
         # ...and the user is told where it went.
         stdout = capsys.readouterr().out
         assert "Backed up the previous config to" in stdout
@@ -476,20 +476,20 @@ class TestBackupOnOverwrite:
     def test_template_only_force_backs_up_custom_content(self, tmp_path, capsys):
         assert init_config.main(["--dir", str(tmp_path), "--template-only"]) == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        out.write_text("custom: content\n")
+        out.write_text("custom: content\n", encoding="utf-8")
         capsys.readouterr()
         assert init_config.main(["--dir", str(tmp_path), "--template-only", "--force"]) == 0
         backups = self._backups(out)
         assert len(backups) == 1
-        assert backups[0].read_text() == "custom: content\n"
-        assert out.read_text() == init_config.TEMPLATE_PATH.read_text()
+        assert backups[0].read_text(encoding="utf-8") == "custom: content\n"
+        assert out.read_text(encoding="utf-8") == init_config.TEMPLATE_PATH.read_text(encoding="utf-8")
         assert "Backed up the previous config to" in capsys.readouterr().out
 
     def test_same_second_collision_gets_counter_suffix(self, tmp_path, monkeypatch):
         _git_init(tmp_path)
         out = tmp_path / ".multi-llm" / "providers.yaml"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("v1\n")
+        out.write_text("v1\n", encoding="utf-8")
         fixed = datetime(2026, 7, 10, 12, 0, 0)
 
         class _FixedDatetime:
@@ -499,13 +499,13 @@ class TestBackupOnOverwrite:
 
         monkeypatch.setattr(init_config, "datetime", _FixedDatetime)
         first = init_config._backup_existing_config(out, "new1\n")
-        out.write_text("v2\n")
+        out.write_text("v2\n", encoding="utf-8")
         second = init_config._backup_existing_config(out, "new2\n")
         assert first is not None and second is not None
         assert first != second
         assert second.name.endswith("-1")
-        assert first.read_text() == "v1\n"
-        assert second.read_text() == "v2\n"
+        assert first.read_text(encoding="utf-8") == "v1\n"
+        assert second.read_text(encoding="utf-8") == "v2\n"
 
 
 @pytest.mark.config_override
@@ -513,7 +513,7 @@ class TestTemplateOnlyAndNothingDetected:
     def test_template_only_byte_identical(self, tmp_path):
         assert init_config.main(["--dir", str(tmp_path), "--template-only"]) == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        assert out.read_text() == init_config.TEMPLATE_PATH.read_text()
+        assert out.read_text(encoding="utf-8") == init_config.TEMPLATE_PATH.read_text(encoding="utf-8")
 
     def test_nothing_detected_writes_inert_and_exits_0(self, tmp_path, monkeypatch, capsys):
         _git_init(tmp_path)
@@ -522,7 +522,7 @@ class TestTemplateOnlyAndNothingDetected:
         rc = init_config.main(["--dir", str(tmp_path)])
         assert rc == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        parsed = yaml.safe_load(out.read_text())
+        parsed = yaml.safe_load(out.read_text(encoding="utf-8"))
         # Inert: no live providers / default_provider; defaults inherit base.
         assert set(parsed.keys()) == {"defaults"}
         assert parsed["defaults"] == {"models": None, "quick_models": None}
@@ -532,9 +532,9 @@ class TestTemplateOnlyAndNothingDetected:
     def test_refuses_overwrite_without_force(self, tmp_path):
         assert init_config.main(["--dir", str(tmp_path), "--template-only"]) == 0
         out = tmp_path / ".multi-llm" / "providers.yaml"
-        out.write_text("custom: content\n")
+        out.write_text("custom: content\n", encoding="utf-8")
         assert init_config.main(["--dir", str(tmp_path), "--template-only"]) == 1
-        assert out.read_text() == "custom: content\n"
+        assert out.read_text(encoding="utf-8") == "custom: content\n"
 
 
 class TestValidation:

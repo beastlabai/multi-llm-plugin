@@ -42,7 +42,7 @@ This is a test plan for validating subagent support.
 3. Task C
 """
         plan_path = plan_dir / "test-plan.md"
-        plan_path.write_text(plan_content)
+        plan_path.write_text(plan_content, encoding="utf-8")
 
         # Create output directory structure
         output_dir = plan_dir / "test-plan"
@@ -79,7 +79,7 @@ def temp_plan_with_review_results(temp_plan_dir):
             ]
         }
     ]
-    (review_dir / "grouped.json").write_text(json.dumps(grouped, indent=2))
+    (review_dir / "grouped.json").write_text(json.dumps(grouped, indent=2), encoding="utf-8")
 
     # Create validation.json with some validation_failed items
     validation = {
@@ -89,7 +89,7 @@ def temp_plan_with_review_results(temp_plan_dir):
         ],
         "metadata": {"model": "test", "timestamp": "2025-01-01T00:00:00", "schema_version": "2.0"}
     }
-    (review_dir / "validation.json").write_text(json.dumps(validation, indent=2))
+    (review_dir / "validation.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
 
     return plan_path
 
@@ -122,7 +122,7 @@ def temp_plan_with_code_review_results(temp_plan_dir):
             ]
         }
     ]
-    (code_review_dir / "grouped.json").write_text(json.dumps(grouped, indent=2))
+    (code_review_dir / "grouped.json").write_text(json.dumps(grouped, indent=2), encoding="utf-8")
 
     # Create validation.json with some validation_failed items
     validation = {
@@ -132,14 +132,14 @@ def temp_plan_with_code_review_results(temp_plan_dir):
         ],
         "metadata": {"model": "test", "timestamp": "2025-01-01T00:00:00", "schema_version": "2.0"}
     }
-    (code_review_dir / "validation.json").write_text(json.dumps(validation, indent=2))
+    (code_review_dir / "validation.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
 
     # Create state.json with head_at_start
     state = {
         "schema_version": "1.0",
         "head_at_start": "abc123",
     }
-    (output_dir / "state.json").write_text(json.dumps(state, indent=2))
+    (output_dir / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     return plan_path
 
@@ -165,7 +165,8 @@ class TestReviewPlanOrchestratorCLI:
             ],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         # --help should show the flag
         assert "--internal-validation" in result.stdout
@@ -176,7 +177,8 @@ class TestReviewPlanOrchestratorCLI:
             [sys.executable, str(SKILL_DIR / "review_plan_orchestrator.py"), "--help"],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--internal-validation" in result.stdout
@@ -225,7 +227,8 @@ class TestApplySuggestionsOrchestratorCLI:
             [sys.executable, str(SKILL_DIR / "apply_suggestions_orchestrator.py"), "--help"],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--internal-revalidation" in result.stdout
@@ -236,7 +239,8 @@ class TestApplySuggestionsOrchestratorCLI:
             [sys.executable, str(SKILL_DIR / "apply_suggestions_orchestrator.py"), "--help"],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--internal-revalidation" in result.stdout
@@ -286,7 +290,8 @@ class TestApplySuggestionsOrchestratorRevalidation:
             ],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         # Should show dry-run output without error
         assert "dry-run" in result.stderr.lower() or "Would revalidate" in result.stderr
@@ -305,7 +310,8 @@ class TestApplyCodeFixesOrchestratorCLI:
             [sys.executable, str(SKILL_DIR / "apply_code_fixes_orchestrator.py"), "--help"],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--internal-revalidation" in result.stdout
@@ -316,7 +322,8 @@ class TestApplyCodeFixesOrchestratorCLI:
             [sys.executable, str(SKILL_DIR / "apply_code_fixes_orchestrator.py"), "--help"],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         assert result.returncode == 0
         assert "--internal-revalidation" in result.stdout
@@ -337,7 +344,8 @@ class TestApplyCodeFixesOrchestratorRevalidation:
             ],
             capture_output=True,
             text=True,
-            cwd=str(SKILL_DIR)
+            cwd=str(SKILL_DIR),
+            encoding="utf-8",
         )
         # Should show dry-run output without error
         assert "dry-run" in result.stderr.lower() or "Would revalidate" in result.stderr
@@ -394,7 +402,7 @@ class TestImports:
         """review_plan_orchestrator imports prepare_validation_task."""
         # Read the file and check for import
         orchestrator_path = SKILL_DIR / "review_plan_orchestrator.py"
-        content = orchestrator_path.read_text()
+        content = orchestrator_path.read_text(encoding="utf-8")
         assert "prepare_validation_task" in content
 
     def test_base_class_handles_revalidation_for_apply_suggestions(self):

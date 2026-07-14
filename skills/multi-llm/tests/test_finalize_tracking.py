@@ -33,7 +33,7 @@ def valid_state(temp_dir):
         "plan_path": "/path/to/plan.md"
     }
     state_path = temp_dir / "state.json"
-    state_path.write_text(json.dumps(state, indent=2))
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state_path
 
 
@@ -45,7 +45,7 @@ def empty_pre_existing_state(temp_dir):
         "created_at": "2025-01-01T00:00:00"
     }
     state_path = temp_dir / "state.json"
-    state_path.write_text(json.dumps(state, indent=2))
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state_path
 
 
@@ -56,7 +56,7 @@ def state_without_pre_existing(temp_dir):
         "created_at": "2025-01-01T00:00:00"
     }
     state_path = temp_dir / "state.json"
-    state_path.write_text(json.dumps(state, indent=2))
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state_path
 
 
@@ -64,7 +64,7 @@ def state_without_pre_existing(temp_dir):
 def invalid_json_state(temp_dir):
     """Create a state file with invalid JSON."""
     state_path = temp_dir / "state.json"
-    state_path.write_text("{ invalid json content")
+    state_path.write_text("{ invalid json content", encoding="utf-8")
     return state_path
 
 
@@ -72,7 +72,7 @@ def invalid_json_state(temp_dir):
 def non_object_state(temp_dir):
     """Create a state file that is not a JSON object."""
     state_path = temp_dir / "state.json"
-    state_path.write_text('["array", "not", "object"]')
+    state_path.write_text('["array", "not", "object"]', encoding="utf-8")
     return state_path
 
 
@@ -84,7 +84,7 @@ def invalid_pre_existing_type_state(temp_dir):
         "created_at": "2025-01-01T00:00:00"
     }
     state_path = temp_dir / "state.json"
-    state_path.write_text(json.dumps(state, indent=2))
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state_path
 
 
@@ -204,14 +204,14 @@ class TestMainEntryPoint:
         mock_get_files.return_value = {"new_file.py", "another.py"}
 
         # Get original content
-        original_content = valid_state.read_text()
+        original_content = valid_state.read_text(encoding="utf-8")
 
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state), "--dry-run"]):
             result = main()
 
         assert result == 0
         # State file should not be modified
-        assert valid_state.read_text() == original_content
+        assert valid_state.read_text(encoding="utf-8") == original_content
 
     @patch("finalize_tracking.get_all_modified_files")
     def test_dry_run_returns_zero(self, mock_get_files, valid_state):
@@ -237,7 +237,7 @@ class TestStateFileUpdates:
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
             main()
 
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         tracked_files = state["tracked_files"]
 
         # Should only include new files, not pre-existing ones
@@ -255,7 +255,7 @@ class TestStateFileUpdates:
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
             main()
 
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         tracked_files = state["tracked_files"]
 
         assert len(tracked_files) == 1
@@ -272,7 +272,7 @@ class TestStateFileUpdates:
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
             main()
 
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
 
         assert "updated_at" in state
         # Should be a valid ISO format datetime
@@ -286,7 +286,7 @@ class TestStateFileUpdates:
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
             main()
 
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
 
         # Original fields should still be present
         assert state["created_at"] == "2025-01-01T00:00:00"
@@ -302,7 +302,7 @@ class TestStateFileUpdates:
             result = main()
 
         assert result == 0
-        state = json.loads(state_without_pre_existing.read_text())
+        state = json.loads(state_without_pre_existing.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "new_file.py" in tracked_paths
 
@@ -315,7 +315,7 @@ class TestStateFileUpdates:
             result = main()
 
         assert result == 0
-        state = json.loads(empty_pre_existing_state.read_text())
+        state = json.loads(empty_pre_existing_state.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "file1.py" in tracked_paths
         assert "file2.py" in tracked_paths
@@ -344,7 +344,7 @@ class TestStateFileUpdates:
             result = main()
 
         assert result == 0
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert state["tracked_files"] == []
 
     @patch("finalize_tracking.get_all_modified_files")
@@ -355,7 +355,7 @@ class TestStateFileUpdates:
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
             main()
 
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in state["tracked_files"]]
 
         assert tracked_paths == ["alpha.py", "middle.py", "zebra.py"]
@@ -461,7 +461,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert state["tracked_files"] == []
 
     @patch("finalize_tracking.get_all_modified_files")
@@ -473,7 +473,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "path/to/file with spaces.py" in tracked_paths
         assert "file-with-dashes.py" in tracked_paths
@@ -487,7 +487,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "a/b/c/d/e/f/deep_file.py" in tracked_paths
 
@@ -502,7 +502,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        state = json.loads(valid_state.read_text())
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert len(state["tracked_files"]) == 100
 
     @patch("finalize_tracking.get_all_modified_files")
@@ -513,7 +513,7 @@ class TestEdgeCases:
             "created_at": "2025-01-01T00:00:00"
         }
         state_path = temp_dir / "state.json"
-        state_path.write_text(json.dumps(state, indent=2))
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
         mock_get_files.return_value = {"file1.py", "file2.py", "file3.py"}
 
@@ -521,7 +521,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        updated_state = json.loads(state_path.read_text())
+        updated_state = json.loads(state_path.read_text(encoding="utf-8"))
         assert updated_state["tracked_files"] == []
 
     @patch("finalize_tracking.get_all_modified_files")
@@ -533,7 +533,7 @@ class TestEdgeCases:
             "created_at": "2025-01-01T00:00:00"
         }
         state_path = temp_dir / "state.json"
-        state_path.write_text(json.dumps(state, indent=2))
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
         mock_get_files.return_value = {"new.py"}
 
@@ -541,7 +541,7 @@ class TestEdgeCases:
             result = main()
 
         assert result == 0
-        updated_state = json.loads(state_path.read_text())
+        updated_state = json.loads(state_path.read_text(encoding="utf-8"))
         tracked_paths = [f["path"] for f in updated_state["tracked_files"]]
         assert tracked_paths == ["new.py"]
         assert "old.py" not in tracked_paths

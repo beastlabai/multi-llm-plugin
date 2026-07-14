@@ -288,9 +288,9 @@ class TestFindByContent:
     def test_plain_text_search(self, tmp_path):
         """Test plain text content search."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "file1.py").write_text("def hello_world():\n    pass")
-        (tmp_path / "file2.py").write_text("def goodbye():\n    pass")
-        (tmp_path / "file3.py").write_text("# hello world comment")
+        (tmp_path / "file1.py").write_text("def hello_world():\n    pass", encoding="utf-8")
+        (tmp_path / "file2.py").write_text("def goodbye():\n    pass", encoding="utf-8")
+        (tmp_path / "file3.py").write_text("# hello world comment", encoding="utf-8")
 
         results = discovery.find_by_content("hello")
 
@@ -301,9 +301,9 @@ class TestFindByContent:
     def test_regex_search(self, tmp_path):
         """Test regex content search."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "file1.py").write_text("def process_data():\n    pass")
-        (tmp_path / "file2.py").write_text("def process_items():\n    pass")
-        (tmp_path / "file3.py").write_text("def handle_data():\n    pass")
+        (tmp_path / "file1.py").write_text("def process_data():\n    pass", encoding="utf-8")
+        (tmp_path / "file2.py").write_text("def process_items():\n    pass", encoding="utf-8")
+        (tmp_path / "file3.py").write_text("def handle_data():\n    pass", encoding="utf-8")
 
         results = discovery.find_by_content(r"def process_\w+\(\)", regex=True)
 
@@ -314,9 +314,9 @@ class TestFindByContent:
     def test_limits_to_extensions(self, tmp_path):
         """Test that search is limited to specified extensions."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "code.py").write_text("hello world")
-        (tmp_path / "doc.md").write_text("hello world")
-        (tmp_path / "config.yaml").write_text("hello: world")
+        (tmp_path / "code.py").write_text("hello world", encoding="utf-8")
+        (tmp_path / "doc.md").write_text("hello world", encoding="utf-8")
+        (tmp_path / "config.yaml").write_text("hello: world", encoding="utf-8")
 
         results = discovery.find_by_content("hello", extensions=[".py"])
 
@@ -327,7 +327,7 @@ class TestFindByContent:
         """Test that matching line numbers are returned."""
         discovery = FileDiscovery(tmp_path)
         content = "line 1\nfind me\nline 3\nfind me again\nline 5"
-        (tmp_path / "file.txt").write_text(content)
+        (tmp_path / "file.txt").write_text(content, encoding="utf-8")
 
         results = discovery.find_by_content("find me")
 
@@ -340,7 +340,7 @@ class TestFindByContent:
         discovery = FileDiscovery(tmp_path)
         binary_content = bytes([0x00, 0x01, 0x02, 0xFF, 0xFE])
         (tmp_path / "binary.dat").write_bytes(binary_content)
-        (tmp_path / "text.txt").write_text("searchable text")
+        (tmp_path / "text.txt").write_text("searchable text", encoding="utf-8")
 
         # Should not raise exception
         results = discovery.find_by_content("searchable")
@@ -351,9 +351,9 @@ class TestFindByContent:
     def test_case_sensitive_search(self, tmp_path):
         """Test that search is case-sensitive by default."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "file1.py").write_text("HELLO")
-        (tmp_path / "file2.py").write_text("hello")
-        (tmp_path / "file3.py").write_text("Hello")
+        (tmp_path / "file1.py").write_text("HELLO", encoding="utf-8")
+        (tmp_path / "file2.py").write_text("hello", encoding="utf-8")
+        (tmp_path / "file3.py").write_text("Hello", encoding="utf-8")
 
         results = discovery.find_by_content("hello")
 
@@ -363,8 +363,8 @@ class TestFindByContent:
     def test_regex_case_insensitive(self, tmp_path):
         """Test case-insensitive regex search."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "file1.py").write_text("HELLO")
-        (tmp_path / "file2.py").write_text("hello")
+        (tmp_path / "file1.py").write_text("HELLO", encoding="utf-8")
+        (tmp_path / "file2.py").write_text("hello", encoding="utf-8")
 
         results = discovery.find_by_content(r"(?i)hello", regex=True)
 
@@ -433,7 +433,7 @@ class TestFindRelatedFiles:
     def test_finds_test_files(self, tmp_path):
         """Test finding test files for a source file."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "utils.py").write_text("def helper(): pass")
+        (tmp_path / "utils.py").write_text("def helper(): pass", encoding="utf-8")
         (tmp_path / "test_utils.py").touch()
         (tmp_path / "tests").mkdir()
         (tmp_path / "tests" / "test_utils.py").touch()
@@ -448,9 +448,9 @@ class TestFindRelatedFiles:
         """Test finding files in the same directory."""
         discovery = FileDiscovery(tmp_path)
         (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "main.py").write_text("import utils")
-        (tmp_path / "src" / "utils.py").write_text("def helper(): pass")
-        (tmp_path / "src" / "config.py").write_text("CONFIG = {}")
+        (tmp_path / "src" / "main.py").write_text("import utils", encoding="utf-8")
+        (tmp_path / "src" / "utils.py").write_text("def helper(): pass", encoding="utf-8")
+        (tmp_path / "src" / "config.py").write_text("CONFIG = {}", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "src" / "main.py")
 
@@ -473,9 +473,9 @@ class TestFindRelatedFiles:
     def test_finds_files_that_import_target(self, tmp_path):
         """Test finding files that import the target file."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "utils.py").write_text("def helper(): pass")
-        (tmp_path / "main.py").write_text("from utils import helper\nhelper()")
-        (tmp_path / "other.py").write_text("import utils\nutils.helper()")
+        (tmp_path / "utils.py").write_text("def helper(): pass", encoding="utf-8")
+        (tmp_path / "main.py").write_text("from utils import helper\nhelper()", encoding="utf-8")
+        (tmp_path / "other.py").write_text("import utils\nutils.helper()", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "utils.py")
 
@@ -484,8 +484,8 @@ class TestFindRelatedFiles:
     def test_finds_imported_modules(self, tmp_path):
         """Test finding modules imported by the target file."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "helpers.py").write_text("def helper(): pass")
-        (tmp_path / "main.py").write_text("import helpers\nfrom helpers import helper")
+        (tmp_path / "helpers.py").write_text("def helper(): pass", encoding="utf-8")
+        (tmp_path / "main.py").write_text("import helpers\nfrom helpers import helper", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "main.py")
 
@@ -496,7 +496,7 @@ class TestFindRelatedFiles:
     def test_skips_tests_for_test_files(self, tmp_path):
         """Test that test files don't search for their own tests."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "test_utils.py").write_text("def test_something(): pass")
+        (tmp_path / "test_utils.py").write_text("def test_something(): pass", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "test_utils.py")
 
@@ -506,7 +506,7 @@ class TestFindRelatedFiles:
     def test_respects_include_tests_flag(self, tmp_path):
         """Test that include_tests=False skips test discovery."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "utils.py").write_text("def helper(): pass")
+        (tmp_path / "utils.py").write_text("def helper(): pass", encoding="utf-8")
         (tmp_path / "test_utils.py").touch()
 
         results = discovery.find_related_files(tmp_path / "utils.py", include_tests=False)
@@ -516,8 +516,8 @@ class TestFindRelatedFiles:
     def test_respects_include_imports_flag(self, tmp_path):
         """Test that include_imports=False skips import discovery."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "helpers.py").write_text("def helper(): pass")
-        (tmp_path / "main.py").write_text("import helpers")
+        (tmp_path / "helpers.py").write_text("def helper(): pass", encoding="utf-8")
+        (tmp_path / "main.py").write_text("import helpers", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "main.py", include_imports=False)
 
@@ -527,10 +527,10 @@ class TestFindRelatedFiles:
     def test_only_includes_same_extension_siblings(self, tmp_path):
         """Test that only same extension files are in same_directory."""
         discovery = FileDiscovery(tmp_path)
-        (tmp_path / "main.py").write_text("pass")
-        (tmp_path / "config.py").write_text("pass")
-        (tmp_path / "readme.md").write_text("# Readme")
-        (tmp_path / "data.json").write_text("{}")
+        (tmp_path / "main.py").write_text("pass", encoding="utf-8")
+        (tmp_path / "config.py").write_text("pass", encoding="utf-8")
+        (tmp_path / "readme.md").write_text("# Readme", encoding="utf-8")
+        (tmp_path / "data.json").write_text("{}", encoding="utf-8")
 
         results = discovery.find_related_files(tmp_path / "main.py")
 
@@ -640,7 +640,7 @@ class TestDiscoverImplementationContext:
 
     def test_extracts_file_names_from_task_description(self, tmp_path):
         """Test extracting file names from task description."""
-        (tmp_path / "config.yaml").write_text("key: value")
+        (tmp_path / "config.yaml").write_text("key: value", encoding="utf-8")
         (tmp_path / "settings.yaml").touch()
 
         results = discover_implementation_context(
@@ -653,8 +653,8 @@ class TestDiscoverImplementationContext:
 
     def test_extracts_module_names_from_description(self, tmp_path):
         """Test extracting module/class names from task description."""
-        (tmp_path / "user_service.py").write_text("class UserService: pass")
-        (tmp_path / "other.py").write_text("# unrelated")
+        (tmp_path / "user_service.py").write_text("class UserService: pass", encoding="utf-8")
+        (tmp_path / "other.py").write_text("# unrelated", encoding="utf-8")
 
         results = discover_implementation_context(
             tmp_path,
@@ -683,7 +683,7 @@ class TestDiscoverImplementationContext:
 
     def test_deduplicates_results(self, tmp_path):
         """Test that results are deduplicated."""
-        (tmp_path / "config.yaml").write_text("config: true")
+        (tmp_path / "config.yaml").write_text("config: true", encoding="utf-8")
 
         results = discover_implementation_context(
             tmp_path,
@@ -709,8 +709,8 @@ class TestDiscoverImplementationContext:
     def test_handles_backtick_and_quote_patterns(self, tmp_path):
         """Test extraction from both backticks and quotes."""
         # The files must contain the search term since find_by_content is used
-        (tmp_path / "module_a.py").write_text("module_a implementation")
-        (tmp_path / "module_b.py").write_text("module_b implementation")
+        (tmp_path / "module_a.py").write_text("module_a implementation", encoding="utf-8")
+        (tmp_path / "module_b.py").write_text("module_b implementation", encoding="utf-8")
 
         results = discover_implementation_context(
             tmp_path,

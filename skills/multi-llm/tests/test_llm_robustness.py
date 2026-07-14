@@ -336,7 +336,7 @@ class TestEmptyResponses:
     def test_empty_file_read(self, tmp_path):
         """Handle reading from empty file."""
         empty_file = tmp_path / "empty.json"
-        empty_file.write_text("")
+        empty_file.write_text("", encoding="utf-8")
 
         result = read_json_from_file(empty_file)
 
@@ -346,7 +346,7 @@ class TestEmptyResponses:
     def test_whitespace_only_file(self, tmp_path):
         """Handle reading from whitespace-only file."""
         ws_file = tmp_path / "whitespace.json"
-        ws_file.write_text("   \n\t\n   ")
+        ws_file.write_text("   \n\t\n   ", encoding="utf-8")
 
         result = read_json_from_file(ws_file)
 
@@ -751,7 +751,7 @@ class TestFileOutputFailures:
     def test_file_with_html_instead_of_json(self, tmp_path):
         """Handle file containing HTML instead of JSON."""
         html_file = tmp_path / "output.json"
-        html_file.write_text("<html><body>Error page</body></html>")
+        html_file.write_text("<html><body>Error page</body></html>", encoding="utf-8")
 
         result = read_json_from_file(html_file)
 
@@ -761,7 +761,7 @@ class TestFileOutputFailures:
     def test_file_with_plain_text(self, tmp_path):
         """Handle file containing plain text instead of JSON."""
         text_file = tmp_path / "output.json"
-        text_file.write_text("This is just plain text with no JSON structure")
+        text_file.write_text("This is just plain text with no JSON structure", encoding="utf-8")
 
         result = read_json_from_file(text_file)
 
@@ -770,7 +770,7 @@ class TestFileOutputFailures:
     def test_file_with_error_message(self, tmp_path):
         """Handle file containing error message instead of JSON."""
         error_file = tmp_path / "output.json"
-        error_file.write_text("Error: Authentication failed. Please check your API key.")
+        error_file.write_text("Error: Authentication failed. Please check your API key.", encoding="utf-8")
 
         result = read_json_from_file(error_file)
 

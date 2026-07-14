@@ -529,7 +529,7 @@ class TestMergeBatchedValidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             # Merge results
@@ -562,7 +562,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(first_batch["output_path"], 'w') as f:
+            with open(first_batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             # Merge results
@@ -633,7 +633,7 @@ class TestMergeBatchedValidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -663,7 +663,7 @@ class TestMergeBatchedValidationResults:
                 {"group_index": i, "status": "valid", "reason": "OK", "confidence": 0.9}
                 for i in range(batch["groups_count"])
             ]
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -688,7 +688,7 @@ class TestMergeBatchedValidationResults:
 
             # Write invalid JSON
             batch = batch_metadata["batches"][0]
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 f.write("{ invalid json }")
 
             merged = merge_batched_validation_results(
@@ -721,7 +721,7 @@ class TestMergeBatchedValidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -764,7 +764,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch0["output_path"], 'w') as f:
+            with open(batch0["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch0_results, f)
 
             # Write batch 1 with GLOBAL indices
@@ -776,7 +776,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch1["output_path"], 'w') as f:
+            with open(batch1["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch1_results, f)
 
             merged = merge_batched_validation_results(
@@ -832,7 +832,7 @@ class TestMergeBatchedValidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -881,7 +881,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch0["output_path"], 'w') as f:
+            with open(batch0["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch0_results, f)
 
             # Batch 1 uses GLOBAL indices (4, 5, 6, 7)
@@ -892,7 +892,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch1["output_path"], 'w') as f:
+            with open(batch1["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch1_results, f)
 
             merged = merge_batched_validation_results(
@@ -935,7 +935,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -968,7 +968,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch0["output_path"], 'w') as f:
+            with open(batch0["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch0_results, f)
 
             # Don't write batch1 at all
@@ -1017,7 +1017,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1062,7 +1062,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1110,7 +1110,7 @@ class TestMergeBatchedValidationResults:
                     {"group_index": 4, "status": "valid", "reason": "Real", "confidence": 0.7},
                 ],
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             # Reaggregation produced only 4 groups, but batch references index 4
@@ -1158,7 +1158,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1200,7 +1200,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1239,7 +1239,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1278,7 +1278,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1330,7 +1330,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1374,7 +1374,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.1"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1420,7 +1420,7 @@ class TestMergeBatchedValidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"},
             }
-            with open(batch_metadata["batches"][0]["output_path"], "w") as f:
+            with open(batch_metadata["batches"][0]["output_path"], "w", encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -1608,7 +1608,7 @@ class TestMergeBatchedRevalidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_revalidation_results(
@@ -1650,7 +1650,7 @@ class TestMergeBatchedRevalidationResults:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(first_batch["output_path"], 'w') as f:
+            with open(first_batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_revalidation_results(
@@ -1690,7 +1690,7 @@ class TestMergeBatchedRevalidationResults:
                     ],
                     "metadata": {"model": "test", "schema_version": "2.0"}
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_revalidation_results(
@@ -1757,7 +1757,7 @@ class TestBatchFileIO:
                 "groups": expected_results,
                 "metadata": {"model": "test", "timestamp": "2025-01-01T00:00:00", "schema_version": "2.0"}
             }
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_data, f)
 
             # Read via merge
@@ -1786,12 +1786,12 @@ class TestBatchFileIO:
 
             # Write initial results
             initial = {"groups": [{"group_index": 0, "status": "valid", "reason": "First", "confidence": 0.9}]}
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(initial, f)
 
             # Overwrite
             updated = {"groups": [{"group_index": 0, "status": "invalid", "reason": "Second", "confidence": 0.1}]}
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(updated, f)
 
             merged = merge_batched_validation_results(
@@ -2028,7 +2028,7 @@ class TestRealWorldScenarios:
                         "schema_version": "2.0"
                     }
                 }
-                with open(batch["output_path"], 'w') as f:
+                with open(batch["output_path"], 'w', encoding="utf-8") as f:
                     json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -2081,7 +2081,7 @@ class TestRealWorldScenarios:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch["output_path"], 'w') as f:
+            with open(batch["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch_results, f)
 
             merged = merge_batched_validation_results(
@@ -2121,7 +2121,7 @@ class TestRealWorldScenarios:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch0["output_path"], 'w') as f:
+            with open(batch0["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch0_results, f)
 
             # Batch 1: complete (using global indices)
@@ -2133,7 +2133,7 @@ class TestRealWorldScenarios:
                 ],
                 "metadata": {"model": "test", "schema_version": "2.0"}
             }
-            with open(batch1["output_path"], 'w') as f:
+            with open(batch1["output_path"], 'w', encoding="utf-8") as f:
                 json.dump(batch1_results, f)
 
             merged = merge_batched_validation_results(

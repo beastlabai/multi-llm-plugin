@@ -131,7 +131,7 @@ class TestHtmlReportSorting:
     def plan_path(self, tmp_path):
         """Create a minimal plan file."""
         p = tmp_path / "test-plan.md"
-        p.write_text("# Test Plan\n\nSome content here.\n")
+        p.write_text("# Test Plan\n\nSome content here.\n", encoding="utf-8")
         return p
 
     @pytest.fixture
@@ -248,7 +248,7 @@ class TestMarkdownReportOrdering:
         phase_dir.mkdir(parents=True)
 
         plan_path = tmp_path / "plans" / "test-plan.md"
-        plan_path.write_text("# Test Plan\n\nContent.\n")
+        plan_path.write_text("# Test Plan\n\nContent.\n", encoding="utf-8")
 
         return {
             "out_dir": str(out_dir),
@@ -304,7 +304,7 @@ class TestSortConfigParity:
     @pytest.fixture
     def plan_path(self, tmp_path):
         p = tmp_path / "parity-plan.md"
-        p.write_text("# Parity Plan\n\nContent.\n")
+        p.write_text("# Parity Plan\n\nContent.\n", encoding="utf-8")
         return p
 
     @pytest.fixture
@@ -386,7 +386,7 @@ class TestOriginalIndexPipelineStability:
     @pytest.fixture
     def plan_path(self, tmp_path):
         p = tmp_path / "stability-plan.md"
-        p.write_text("# Stability Plan\n\nContent.\n")
+        p.write_text("# Stability Plan\n\nContent.\n", encoding="utf-8")
         return p
 
     @pytest.fixture

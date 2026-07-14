@@ -231,7 +231,7 @@ def _create_plan_with_review_tasks(
     Returns the plan file path.
     """
     plan_path = temp_dir / f"{plan_name}.md"
-    plan_path.write_text(plan_content)
+    plan_path.write_text(plan_content, encoding="utf-8")
 
     prefix = sanitize_prefix(plan_name)
     output_dir = temp_dir / prefix
@@ -239,7 +239,7 @@ def _create_plan_with_review_tasks(
     # Create tasks directory and file
     tasks_dir = output_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "tasks.md").write_text(tasks_content)
+    (tasks_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
 
     # Create review-tasks directory with grouped.json and validation.json
     review_tasks_dir = output_dir / "review-tasks"
@@ -252,11 +252,13 @@ def _create_plan_with_review_tasks(
     stamp_stable_ids(groups_copy)
 
     (review_tasks_dir / "grouped.json").write_text(
-        json.dumps({"format_version": 2, "groups": groups_copy}, indent=2)
+        json.dumps({"format_version": 2, "groups": groups_copy}, indent=2),
+        encoding="utf-8",
     )
     val = validation if validation is not None else SAMPLE_VALIDATION_RESULTS
     (review_tasks_dir / "validation.json").write_text(
-        json.dumps(val, indent=2)
+        json.dumps(val, indent=2),
+        encoding="utf-8",
     )
 
     # Set up state
@@ -306,6 +308,7 @@ def run_orchestrator(plan_path: Path, *extra_args, timeout: int = 30) -> subproc
         capture_output=True,
         text=True,
         timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -322,6 +325,7 @@ def run_prereq_check(plan_path: Path, mode: str) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -339,6 +343,7 @@ def run_status_check(plan_path: Path) -> dict:
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 
@@ -356,6 +361,7 @@ def run_display_decisions(output_file: Path, phase: str = "apply-task-suggestion
         cwd=str(SKILL_DIR),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
 
@@ -526,7 +532,7 @@ class TestOutputSchema:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         required_fields = [
@@ -545,7 +551,7 @@ class TestOutputSchema:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         summary = output["summary"]
@@ -565,7 +571,7 @@ class TestOutputSchema:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         assert len(output["to_apply"]) > 0, "Should have at least one item to apply"
@@ -588,7 +594,7 @@ class TestOutputSchema:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         assert output["format_version"] == CURRENT_FORMAT_VERSION
@@ -599,7 +605,7 @@ class TestOutputSchema:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         assert "tasks_file" in output
@@ -679,7 +685,7 @@ class TestBatching:
 
         prefix = sanitize_prefix("batch-test")
         output_file = plan_path.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         # With batching enabled, T003-targeted suggestions should be in the same batch
@@ -708,7 +714,7 @@ class TestBatching:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         assert output["batching_stats"]["batching_enabled"] is False
@@ -721,7 +727,7 @@ class TestBatching:
 
         prefix = sanitize_prefix("test-plan")
         output_file = plan_ready_for_apply.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output = json.load(f)
 
         stats = output["batching_stats"]
@@ -739,7 +745,7 @@ class TestBatching:
 
         prefix = sanitize_prefix("ordering-test")
         output_file = plan_path.parent / prefix / "apply-task-suggestions" / "orchestrator_output.json"
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output1 = json.load(f)
 
         # Reset phase completion to allow re-run
@@ -751,7 +757,7 @@ class TestBatching:
         result2 = run_orchestrator(plan_path, "--no-confirm")
         assert result2.returncode == 0
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             output2 = json.load(f)
 
         # Compare to_apply order by title
@@ -803,7 +809,7 @@ class TestSelectionMerge:
 
 ---
 """
-        (review_tasks_dir / "report.md").write_text(report_content)
+        (review_tasks_dir / "report.md").write_text(report_content, encoding="utf-8")
 
         result = run_orchestrator(plan_path)
         combined = result.stdout + result.stderr
@@ -835,7 +841,8 @@ class TestSelectionMerge:
             "edited_descriptions": {},
         }
         (review_tasks_dir / "user_selections.json").write_text(
-            json.dumps(selections, indent=2)
+            json.dumps(selections, indent=2),
+            encoding="utf-8",
         )
 
         result = run_orchestrator(plan_path)
@@ -896,7 +903,7 @@ class TestStatusPhaseListing:
     def test_status_includes_apply_task_suggestions(self, temp_dir):
         """--status output lists apply-task-suggestions as a phase."""
         plan_path = temp_dir / "status-test.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         output = run_status_check(plan_path)
 
@@ -909,7 +916,7 @@ class TestStatusPhaseListing:
     def test_status_shows_apply_task_suggestions_as_optional(self, temp_dir):
         """--status marks apply-task-suggestions as optional."""
         plan_path = temp_dir / "optional-test.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         output = run_status_check(plan_path)
 
@@ -984,13 +991,13 @@ class TestImplementDetectsUnappliedTaskSuggestions:
         import copy as _copy
 
         plan_path = temp_dir / f"{plan_name}.md"
-        plan_path.write_text(SAMPLE_PLAN_CONTENT)
+        plan_path.write_text(SAMPLE_PLAN_CONTENT, encoding="utf-8")
 
         prefix = sanitize_prefix(plan_name)
         output_dir = temp_dir / prefix
         tasks_dir = output_dir / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        (tasks_dir / "tasks.md").write_text(VALID_TASKS_CONTENT)
+        (tasks_dir / "tasks.md").write_text(VALID_TASKS_CONTENT, encoding="utf-8")
 
         review_tasks_dir = output_dir / "review-tasks"
         review_tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -998,7 +1005,8 @@ class TestImplementDetectsUnappliedTaskSuggestions:
         groups = _copy.deepcopy(SAMPLE_GROUPED_SUGGESTIONS)
         stamp_stable_ids(groups)
         (review_tasks_dir / "grouped.json").write_text(
-            json.dumps({"format_version": 2, "groups": groups}, indent=2)
+            json.dumps({"format_version": 2, "groups": groups}, indent=2),
+            encoding="utf-8",
         )
         # Intentionally omit validation.json so the prereq checker
         # falls back to counting total suggestions from grouped.json.

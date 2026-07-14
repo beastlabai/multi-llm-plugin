@@ -19,7 +19,7 @@ class TestTaskDecomposer:
     def test_parse_plan_extracts_tasks(self, sample_plan):
         """Test that parse_plan extracts tasks from plan content."""
         decomposer = TaskDecomposer()
-        plan_content = sample_plan.read_text()
+        plan_content = sample_plan.read_text(encoding="utf-8")
         tasks = decomposer.parse_plan(plan_content)
 
         assert len(tasks) == 4
@@ -29,7 +29,7 @@ class TestTaskDecomposer:
     def test_parse_plan_extracts_dependencies(self, sample_plan):
         """Test that dependencies are extracted correctly."""
         decomposer = TaskDecomposer()
-        plan_content = sample_plan.read_text()
+        plan_content = sample_plan.read_text(encoding="utf-8")
         decomposer.parse_plan(plan_content)
 
         t002 = decomposer.get_task("T002")

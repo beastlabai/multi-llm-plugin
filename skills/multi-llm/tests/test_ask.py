@@ -56,7 +56,7 @@ def fast_backoff(monkeypatch):
 def plan(tmp_path):
     """A small plan file in an isolated temp dir."""
     p = tmp_path / "my-feature.md"
-    p.write_text("# My Feature\n\n## Overview\nBuild a widget with rollback.\n")
+    p.write_text("# My Feature\n\n## Overview\nBuild a widget with rollback.\n", encoding="utf-8")
     return p
 
 
@@ -182,7 +182,7 @@ class TestResolveQuestionDir:
     def test_same_question_resumes(self, tmp_path):
         base = tmp_path / "slug-abc"
         base.mkdir()
-        (base / ".status.json").write_text(json.dumps({"question": "Q"}))
+        (base / ".status.json").write_text(json.dumps({"question": "Q"}), encoding="utf-8")
         d, is_resume = resolve_question_dir(str(tmp_path), "slug-abc", "Q")
         assert d == str(base)
         assert is_resume is True
@@ -190,7 +190,7 @@ class TestResolveQuestionDir:
     def test_different_question_gets_sibling(self, tmp_path):
         base = tmp_path / "slug-abc"
         base.mkdir()
-        (base / ".status.json").write_text(json.dumps({"question": "Q-original"}))
+        (base / ".status.json").write_text(json.dumps({"question": "Q-original"}), encoding="utf-8")
         d, is_resume = resolve_question_dir(str(tmp_path), "slug-abc", "Q-different")
         assert d == str(tmp_path / "slug-abc-2")
         assert is_resume is False
@@ -257,7 +257,7 @@ class TestAnswerCapture:
                  "--models", "claude-code:sonnet"], inv)
         d = qdir(plan, "Q")
         sanitized = sanitize_model_name("claude-code:sonnet")
-        assert (d / f"answer_{sanitized}.md").read_text() == "FILE ANSWER"
+        assert (d / f"answer_{sanitized}.md").read_text(encoding="utf-8") == "FILE ANSWER"
         assert "FILE ANSWER" in read_answers(d)
 
     def test_string_data_fallback(self, plan):
@@ -342,7 +342,7 @@ class TestAnswerCapture:
                  "--models", "claude-code:sonnet"], inv)
         d = qdir(plan, "Q")
         sanitized = sanitize_model_name("claude-code:sonnet")
-        assert (d / f"answer_{sanitized}.md").read_text() == "RECOVERED"
+        assert (d / f"answer_{sanitized}.md").read_text(encoding="utf-8") == "RECOVERED"
 
         # Second run: model should be SKIPPED (file persisted from fallback).
         inv2 = FakeInvoker()
@@ -350,7 +350,7 @@ class TestAnswerCapture:
         run_ask(["--plan-file", str(plan), "--question", "Q",
                  "--models", "claude-code:sonnet"], inv2)
         assert inv2.calls == []  # skipped on resume
-        assert (d / f"answer_{sanitized}.md").read_text() == "RECOVERED"
+        assert (d / f"answer_{sanitized}.md").read_text(encoding="utf-8") == "RECOVERED"
 
 
 # ---------------------------------------------------------------------------
@@ -419,12 +419,12 @@ class TestAggregation:
         d.mkdir(parents=True)
         for spec, content in [("claude-code:sonnet", "A"), ("cursor-agent:auto", "B"),
                               ("gemini:gemini-3-pro", "C")]:
-            (d / f"answer_{sanitize_model_name(spec)}.md").write_text(content)
+            (d / f"answer_{sanitize_model_name(spec)}.md").write_text(content, encoding="utf-8")
         specs = ["gemini:gemini-3-pro", "claude-code:sonnet", "cursor-agent:auto"]
         path1, completed1 = write_answers_md(str(d), "Q", str(plan), specs, {}, "TS")
-        text1 = Path(path1).read_text()
+        text1 = Path(path1).read_text(encoding="utf-8")
         path2, completed2 = write_answers_md(str(d), "Q", str(plan), specs, {}, "TS")
-        text2 = Path(path2).read_text()
+        text2 = Path(path2).read_text(encoding="utf-8")
         assert text1 == text2
         assert completed1 == completed2 == specs  # in models_requested order
         # Section order follows models_requested, not filesystem/dict order.
@@ -502,9 +502,9 @@ class TestResumeBehavior:
         d = qdir(plan, "Q")
         d.mkdir(parents=True)
         sanitized = sanitize_model_name("claude-code:sonnet")
-        (d / f"answer_{sanitized}.md").write_text("prior answer")
+        (d / f"answer_{sanitized}.md").write_text("prior answer", encoding="utf-8")
         # Seed a status so resolve_question_dir resumes into the dir.
-        (d / ".status.json").write_text(json.dumps({"question": "Q"}))
+        (d / ".status.json").write_text(json.dumps({"question": "Q"}), encoding="utf-8")
         inv = FakeInvoker()
         inv.configure("claude-code:sonnet", write_file=True, content="SHOULD NOT RUN")
         run_ask(["--plan-file", str(plan), "--question", "Q",
@@ -516,8 +516,8 @@ class TestResumeBehavior:
         d = qdir(plan, "Q")
         d.mkdir(parents=True)
         sanitized = sanitize_model_name("claude-code:sonnet")
-        (d / f"answer_{sanitized}.md").write_text("   \n  ")  # whitespace-only
-        (d / ".status.json").write_text(json.dumps({"question": "Q"}))
+        (d / f"answer_{sanitized}.md").write_text("   \n  ", encoding="utf-8")  # whitespace-only
+        (d / ".status.json").write_text(json.dumps({"question": "Q"}), encoding="utf-8")
         inv = FakeInvoker()
         inv.configure("claude-code:sonnet", write_file=True, content="fresh answer")
         run_ask(["--plan-file", str(plan), "--question", "Q",
@@ -539,7 +539,7 @@ class TestPlanFreshness:
         run_ask(["--plan-file", str(plan), "--question", "Q",
                  "--models", "claude-code:sonnet"], inv)
         # Change the plan, then resume.
-        plan.write_text("# My Feature\n\nCompletely different content now.\n")
+        plan.write_text("# My Feature\n\nCompletely different content now.\n", encoding="utf-8")
         inv2 = FakeInvoker()
         inv2.configure("claude-code:sonnet", write_file=True, content="ans")
         run_ask(["--plan-file", str(plan), "--question", "Q",
@@ -846,7 +846,7 @@ class TestRunModelsConcurrent:
 
 class TestRoutingAndDocs:
     def test_instruction_file_exists_with_usage_and_invocation(self):
-        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
+        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
         assert "/multi-llm:multi-llm --ask" in ask_md
         # Foreground --project orchestrator invocation — the skill-dir expansion
         # must be double-quoted (Windows install paths may contain spaces).
@@ -865,7 +865,7 @@ class TestRoutingAndDocs:
         assert "empty/whitespace-only question is an error" in ask_md or "empty question" in ask_md.lower()
 
     def test_skill_md_lists_ask_mode(self):
-        skill = (SKILL_DIR / "SKILL.md").read_text()
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         # argument-hint, mode list, quick start, mode detection.
         assert "--ask" in skill
         assert "11. **Ask**" in skill or "**Ask** (`--ask`)" in skill
@@ -878,8 +878,8 @@ class TestRoutingAndDocs:
         assert "single (quoted) argument" in skill
 
     def test_skill_and_instructions_agree_on_error_rule(self):
-        skill = (SKILL_DIR / "SKILL.md").read_text()
-        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
         for doc in (skill, ask_md):
             assert "unquoted" in doc.lower()
             assert "usage hint" in doc.lower()
@@ -913,7 +913,7 @@ class TestRoutingAndDocs:
         docs += sorted((SKILL_DIR / "instructions").glob("*.md"))
         for doc in docs:
             over_cap = [
-                t for t in documented_timeouts_ms(doc.read_text())
+                t for t in documented_timeouts_ms(doc.read_text(encoding="utf-8"))
                 if t > BASH_TIMEOUT_CAP_MS
             ]
             assert not over_cap, (
@@ -924,12 +924,12 @@ class TestRoutingAndDocs:
         # The fan-out review/ask modes must run detached with stdout captured to
         # a log file, so markers and the final answers.md path survive past the
         # cap (backgrounding without redirection would lose them).
-        skill = (SKILL_DIR / "SKILL.md").read_text()
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         assert "run_in_background" in skill
         assert "PYTHONUNBUFFERED" in skill
         assert "orchestrator-run.log" in skill
 
-        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text()
+        ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
         assert "run_in_background" in ask_md
         assert "PYTHONUNBUFFERED" in ask_md
         assert ".log" in ask_md

@@ -64,7 +64,7 @@ class TestSkillRunner:
     def test_scenario_path_in_environment(self, tmp_path):
         """Test that scenario path is included in environment."""
         scenario_path = tmp_path / "test_scenario.yaml"
-        scenario_path.write_text("name: test")
+        scenario_path.write_text("name: test", encoding="utf-8")
 
         runner = SkillRunner(tmp_path, scenario_path=scenario_path)
         env = runner._build_env()
@@ -129,7 +129,7 @@ class TestFixtureManager:
         plan = manager.create_plan("test-plan", "# Test Plan\n\nContent here.")
 
         assert plan.plan_path.exists()
-        assert plan.plan_path.read_text() == "# Test Plan\n\nContent here."
+        assert plan.plan_path.read_text(encoding="utf-8") == "# Test Plan\n\nContent here."
         assert plan.name == "test-plan"
         assert plan.output_dir.exists()
 
@@ -174,7 +174,7 @@ class TestFixtureManager:
         )
 
         assert state_path.exists()
-        with open(state_path) as f:
+        with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
 
         assert "review-plan" in state["phases_completed"]
@@ -237,7 +237,7 @@ class TestFixtureManager:
         grouped_path = plan.output_dir / "review-plan" / "grouped.json"
         assert grouped_path.exists()
 
-        with open(grouped_path) as f:
+        with open(grouped_path, encoding="utf-8") as f:
             data = json.load(f)
         assert data[0]["theme"] == "Test theme"
 
@@ -265,7 +265,7 @@ class TestMockProvider:
         else:
             # Create a temporary scenario
             temp_scenario = tmp_path / "test.yaml"
-            temp_scenario.write_text("name: test")
+            temp_scenario.write_text("name: test", encoding="utf-8")
             mock.set_scenario_path(temp_scenario)
             env = mock.get_env()
             assert env.get("MOCK_LLM_SCENARIO") == str(temp_scenario)
@@ -337,7 +337,7 @@ class TestMockProvider:
             "prompt": "test prompt",
             "env": {"MULTI_LLM_TEST_MODE": "1"},
         }
-        with open(mock.call_log_path, "w") as f:
+        with open(mock.call_log_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(call_entry) + "\n")
 
         calls = mock.get_calls()
@@ -353,7 +353,7 @@ class TestMockProvider:
         assert mock.was_invoked() is False
 
         # Create a call log
-        with open(mock.call_log_path, "w") as f:
+        with open(mock.call_log_path, "w", encoding="utf-8") as f:
             f.write(json.dumps({"provider": "test"}) + "\n")
 
         assert mock.was_invoked() is True
@@ -378,7 +378,7 @@ class TestMockProvider:
         fixture_path = mock.create_response_fixture(data, "test_response")
 
         assert fixture_path.exists()
-        with open(fixture_path) as f:
+        with open(fixture_path, encoding="utf-8") as f:
             loaded = json.load(f)
         assert loaded == data
 
@@ -439,8 +439,8 @@ class TestAssertionHelpers:
         helpers = AssertionHelpers()
 
         # Create expected structure
-        (tmp_path / "file1.json").write_text("{}")
-        (tmp_path / "file2.md").write_text("# Title")
+        (tmp_path / "file1.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "file2.md").write_text("# Title", encoding="utf-8")
         (tmp_path / "subdir").mkdir()
 
         # Should pass
@@ -463,7 +463,7 @@ class TestAssertionHelpers:
 
         # Create valid JSON
         json_file = tmp_path / "test.json"
-        json_file.write_text('{"key": "value"}')
+        json_file.write_text('{"key": "value"}', encoding="utf-8")
 
         # Should pass
         data = helpers.assert_json_file_valid(
@@ -475,7 +475,7 @@ class TestAssertionHelpers:
 
         # Should fail with invalid JSON
         invalid_file = tmp_path / "invalid.json"
-        invalid_file.write_text("not json")
+        invalid_file.write_text("not json", encoding="utf-8")
 
         with pytest.raises(AssertionError, match="Invalid JSON"):
             helpers.assert_json_file_valid(invalid_file)
@@ -523,13 +523,13 @@ class TestAssertionHelpers:
 
         plan_path = tmp_path / "plan.md"
         original_content = "# Original content"
-        plan_path.write_text(original_content)
+        plan_path.write_text(original_content, encoding="utf-8")
 
         # Should pass
         helpers.assert_plan_unchanged(plan_path, original_content)
 
         # Modify the file
-        plan_path.write_text("# Modified content")
+        plan_path.write_text("# Modified content", encoding="utf-8")
 
         # Should fail
         with pytest.raises(AssertionError, match="was modified"):
@@ -541,14 +541,14 @@ class TestAssertionHelpers:
 
         plan_path = tmp_path / "plan.md"
         original_content = "# Original content"
-        plan_path.write_text(original_content)
+        plan_path.write_text(original_content, encoding="utf-8")
 
         # Should fail when unchanged
         with pytest.raises(AssertionError, match="was not modified"):
             helpers.assert_plan_modified(plan_path, original_content)
 
         # Modify the file
-        plan_path.write_text("# Modified content")
+        plan_path.write_text("# Modified content", encoding="utf-8")
 
         # Should pass
         helpers.assert_plan_modified(plan_path, original_content)
@@ -563,7 +563,7 @@ class TestSkillResult:
         output_dir = tmp_path / "plan"
         output_dir.mkdir()
         state_file = output_dir / "state.json"
-        state_file.write_text('{"phases_completed": {"review-plan": "2025-01-01"}}')
+        state_file.write_text('{"phases_completed": {"review-plan": "2025-01-01"}}', encoding="utf-8")
 
         result = SkillResult(
             success=True,
@@ -582,7 +582,8 @@ class TestSkillResult:
         call_log = tmp_path / "calls.jsonl"
         call_log.write_text(
             '{"provider": "cursor-agent", "prompt": "test1"}\n'
-            '{"provider": "gemini", "prompt": "test2"}\n'
+            '{"provider": "gemini", "prompt": "test2"}\n',
+            encoding="utf-8",
         )
 
         result = SkillResult(
@@ -613,5 +614,5 @@ class TestSkillResult:
         assert result.mock_was_invoked() is False
 
         # With call log
-        call_log.write_text('{"provider": "test"}\n')
+        call_log.write_text('{"provider": "test"}\n', encoding="utf-8")
         assert result.mock_was_invoked() is True
