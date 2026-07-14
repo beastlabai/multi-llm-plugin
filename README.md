@@ -147,10 +147,10 @@ flowchart TD
     classDef full fill:#dcfce7,stroke:#22c55e,color:#14532d;
 ```
 
-🔵 **Review** steps query multiple models in parallel · 
-🟠 **Apply** steps let Claude Code write changes and pause for `needs-human-decision` items ·
-🟣 **Generate & implement** steps produce tasks and write code · 
-🟢 **`--full`** runs the entire flow with one command.
+- 🔵 **Review** steps query multiple models in parallel 
+- 🟠 **Apply** steps let Claude Code write changes and pause for `needs-human-decision` items
+- 🟣 **Generate & implement** steps produce tasks and write code
+- 🟢 **`--full`** runs the entire flow with one command
 
 
 You don't have to run the whole chain: **every step is also a standalone entry point** that reads/writes the shared `{plan}/state.json`, so you can start, stop, and resume at any phase. A few modes sit outside the pipeline - **`--ask`** (read-only Q&A about a plan), **`--status`** (show progress and the suggested next step), and **`--init`** (write a per-project config) - while **`--full`** simply runs the entire flow above end to end.
