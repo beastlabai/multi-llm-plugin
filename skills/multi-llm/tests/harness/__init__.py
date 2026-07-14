@@ -10,7 +10,7 @@ Main components:
 - AssertionHelpers: Custom assertion methods for test verification
 """
 
-from .skill_runner import SkillRunner, SkillResult
+from .skill_runner import SkillRunner, SkillResult, PERF_SCALE
 from .fixture_manager import FixtureManager, FixturePlan
 from .mock_provider import MockProvider, MockLLMCall
 from .assertion_helpers import AssertionHelpers
@@ -22,6 +22,7 @@ TestPlanFixture = FixturePlan
 __all__ = [
     "SkillRunner",
     "SkillResult",
+    "PERF_SCALE",
     "FixtureManager",
     "FixturePlan",
     "PlanFixture",  # backward compat alias

@@ -9,6 +9,7 @@ import os
 import sys
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
 # Add tests directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,6 +28,7 @@ from harness import (
 class TestSkillRunner:
     """Tests for SkillRunner class."""
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher layout")
     def test_creates_mock_symlinks(self, tmp_path):
         """Test that SkillRunner creates provider symlinks in bin directory."""
         runner = SkillRunner(tmp_path)
@@ -39,9 +41,47 @@ class TestSkillRunner:
         for provider in SkillRunner.PROVIDERS:
             symlink = runner.bin_dir / provider
             assert symlink.exists(), f"Missing symlink for {provider}"
-            assert symlink.is_symlink(), f"{provider} is not a symlink"
-            # Symlink should point to mock_llm.py
-            assert symlink.resolve() == runner.mock_llm_path.resolve()
+            # A privilege-restricted sandbox falls back to copying the mock.
+            if symlink.is_symlink():
+                assert symlink.resolve() == runner.mock_llm_path.resolve()
+            else:
+                assert (
+                    symlink.read_text(encoding="utf-8")
+                    == runner.mock_llm_path.read_text(encoding="utf-8")
+                )
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows launcher layout")
+    def test_creates_windows_launchers(self, tmp_path):
+        """Windows launchers must be npm-style cmd-shims dispatching to node.
+
+        Production (utils/llm_client) resolves a provider that lands on a bare
+        .cmd/.bat shim as a batch shim and then REFUSES to launch it with a
+        prompt carrying cmd.exe metacharacters. The shim must therefore parse as
+        an npm `node <cli.js>` dispatcher so production bypasses cmd.exe.
+        """
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from utils.llm_client import _resolve_executable
+
+        runner = SkillRunner(tmp_path)
+
+        env_path = runner._build_env()["PATH"]
+        with patch.dict(os.environ, {"PATH": env_path}):
+            for provider in SkillRunner.PROVIDERS:
+                shim = runner.bin_dir / f"{provider}.cmd"
+                trampoline = (
+                    runner.bin_dir / SkillRunner.MOCK_JS_SUBDIR / f"{provider}.js"
+                )
+                assert shim.exists(), f"Missing .cmd shim for {provider}"
+                assert trampoline.exists(), f"Missing node trampoline for {provider}"
+
+                launcher, is_batch_shim = _resolve_executable(provider)
+                assert not is_batch_shim, (
+                    f"{provider} resolves to a raw batch shim; production would "
+                    f"reject every prompt containing cmd.exe metacharacters"
+                )
+                assert len(launcher) == 2, launcher
+                assert Path(launcher[0]).stem.lower() == "node"
+                assert Path(launcher[1]) == trampoline
 
     def test_builds_correct_environment(self, tmp_path):
         """Test that SkillRunner builds correct environment variables."""

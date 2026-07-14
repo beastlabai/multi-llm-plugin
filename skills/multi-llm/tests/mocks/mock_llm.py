@@ -41,24 +41,51 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-def get_provider_name() -> str:
-    """Detect provider name from sys.argv[0] (symlink name).
+def bootstrap_streams() -> None:
+    """Force UTF-8 stdout/stderr, mirroring utils.stream_bootstrap.
 
-    When this script is symlinked as 'cursor-agent', 'gemini', etc.,
-    sys.argv[0] will contain that name (or path ending with that name).
+    The orchestrator captures this process's output with ``encoding="utf-8"``.
+    On Windows a piped stdout otherwise defaults to the locale codec (cp1252),
+    so a fixture/response containing an em dash or any non-cp1252 character
+    would either raise UnicodeEncodeError here or arrive as mojibake there.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def get_provider_name() -> str:
+    """Detect provider name from sys.argv[0], falling back to MOCK_LLM_PROVIDER.
+
+    POSIX launchers are symlinks/copies named exactly 'cursor-agent',
+    'gemini', ... so sys.argv[0] carries the provider name. Windows cannot
+    execute an extensionless shebang script, so its launchers either run a
+    '<provider>.py' copy (argv[0] still carries the name — hence the suffix is
+    stripped before matching) or run mock_llm.py directly and pass the identity
+    in MOCK_LLM_PROVIDER (python always sets sys.argv[0] to the script path, so
+    there is no argv[0] to key on in that case).
 
     Returns:
         The provider name (cursor-agent, gemini, opencode, codex, kilocode)
         or 'unknown' if not detected.
     """
-    invoked_name = Path(sys.argv[0]).name
+    invoked = Path(sys.argv[0])
+    # Match the bare launcher name and the suffix-stripped name, so both
+    # `cursor-agent` (POSIX symlink) and `cursor-agent.py` (Windows copy) work.
+    invoked_names = (invoked.name, invoked.stem)
 
     # Handle both direct name and any suffix/prefix variations
     known_providers = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
 
     for provider in known_providers:
-        if invoked_name == provider or invoked_name.endswith(provider):
-            return provider
+        for invoked_name in invoked_names:
+            if invoked_name == provider or invoked_name.endswith(provider):
+                return provider
 
     # Fallback: if invoked directly as mock_llm.py, check for provider env var
     if os.environ.get("MOCK_LLM_PROVIDER"):
@@ -419,6 +446,8 @@ def main() -> int:
     Returns:
         Exit code (0 for success, non-zero for error).
     """
+    bootstrap_streams()
+
     # Safety check: only run in test mode
     if os.environ.get("MULTI_LLM_TEST_MODE") != "1":
         print(

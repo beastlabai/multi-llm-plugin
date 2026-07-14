@@ -541,10 +541,14 @@ Testing missing provider error.
         skill_dir = Path(__file__).parent.parent
         orchestrator_path = skill_dir / "review_plan_orchestrator.py"
 
-        # Use a clean PATH that won't have the provider
+        # Use a clean PATH that won't have the provider. An empty directory is
+        # the only portable way to say "no LLM providers on PATH": hardcoding
+        # /usr/bin:/bin is meaningless on Windows.
+        clean_bin = tmp_path / "clean_bin"
+        clean_bin.mkdir()
+
         env = os.environ.copy()
-        # Set PATH to only have standard system dirs (no LLM providers)
-        env["PATH"] = "/usr/bin:/bin"
+        env["PATH"] = str(clean_bin)
         env["MULTI_LLM_TEST_MODE"] = "1"
         env["MULTI_LLM_TEST_FAST_BACKOFF"] = "1"
 

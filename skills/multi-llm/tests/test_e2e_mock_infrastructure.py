@@ -12,6 +12,7 @@ used reliably for end-to-end integration tests. Tests cover:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,39 @@ MOCK_LLM_PATH = Path(__file__).parent / "mocks" / "mock_llm.py"
 # All supported providers
 PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
 
+IS_WINDOWS = os.name == "nt"
+
+
+def install_provider_launcher(provider: str, tmp_dir: Path) -> List[str]:
+    """Install a mock_llm launcher named after ``provider``; return its argv prefix.
+
+    The point of these tests is that the mock detects which provider it is
+    emulating from ``sys.argv[0]``, so the launcher's *name* must carry the
+    provider name.
+
+    POSIX: a symlink named ``<provider>``, executed directly via mock_llm.py's
+    shebang (falling back to a copy where symlink creation is not permitted).
+
+    Windows: an extensionless script is neither executable nor discoverable
+    (CreateProcess only runs real images / PATHEXT suffixes), so copy the mock
+    to ``<provider>.py`` and run it on the current interpreter — argv[0] is then
+    the copy's path, which mock_llm.py matches after stripping the suffix.
+    """
+    if IS_WINDOWS:
+        launcher_path = tmp_dir / f"{provider}.py"
+        shutil.copyfile(MOCK_LLM_PATH, launcher_path)
+        return [sys.executable, str(launcher_path)]
+
+    launcher_path = tmp_dir / provider
+    if launcher_path.exists() or launcher_path.is_symlink():
+        launcher_path.unlink()
+    try:
+        launcher_path.symlink_to(MOCK_LLM_PATH)
+    except (OSError, NotImplementedError):
+        shutil.copyfile(MOCK_LLM_PATH, launcher_path)
+        launcher_path.chmod(0o755)
+    return [str(launcher_path)]
+
 
 def run_mock_llm(
     provider: str,
@@ -38,10 +72,10 @@ def run_mock_llm(
     """Run mock_llm.py simulating a specific provider.
 
     Args:
-        provider: Provider name to simulate via symlink or env var
+        provider: Provider name to simulate via a named launcher or env var
         args: Command-line arguments to pass
         env_vars: Additional environment variables to set
-        tmp_dir: Temporary directory for creating symlinks
+        tmp_dir: Temporary directory for creating the named launcher
 
     Returns:
         CompletedProcess with stdout, stderr, and returncode
@@ -53,14 +87,8 @@ def run_mock_llm(
         env.update(env_vars)
 
     if tmp_dir:
-        # Create a symlink with the provider name
-        symlink_path = tmp_dir / provider
-        if symlink_path.exists() or symlink_path.is_symlink():
-            symlink_path.unlink()
-        symlink_path.symlink_to(MOCK_LLM_PATH)
-
-        # Run via symlink
-        cmd = [str(symlink_path)] + args
+        # Provider identity carried by the launcher name (argv[0])
+        cmd = install_provider_launcher(provider, tmp_dir) + args
     else:
         # Run directly with MOCK_LLM_PROVIDER env var
         env["MOCK_LLM_PROVIDER"] = provider
@@ -71,7 +99,7 @@ def run_mock_llm(
         capture_output=True,
         text=True,
         env=env,
-        timeout=5,
+        timeout=15,
         encoding="utf-8",
     )
 
@@ -718,20 +746,20 @@ class TestMockLLMErrorInjection:
 
     def test_test_mode_required(self, tmp_path):
         """Test that mock_llm.py requires MULTI_LLM_TEST_MODE=1."""
-        # Create symlink
-        symlink_path = tmp_path / "cursor-agent"
-        symlink_path.symlink_to(MOCK_LLM_PATH)
+        # Install a launcher named for the provider (symlink on POSIX,
+        # interpreter + <provider>.py copy on Windows)
+        cmd = install_provider_launcher("cursor-agent", tmp_path)
 
         # Run WITHOUT MULTI_LLM_TEST_MODE
         env = os.environ.copy()
         env.pop("MULTI_LLM_TEST_MODE", None)
 
         result = subprocess.run(
-            [str(symlink_path), "test prompt"],
+            cmd + ["test prompt"],
             capture_output=True,
             text=True,
             env=env,
-            timeout=5,
+            timeout=15,
             encoding="utf-8",
         )
 

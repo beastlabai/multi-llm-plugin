@@ -11,20 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          # The Phase 4 windows-latest prerequisites (os.geteuid
-          # collection-crash fix, skill_runner .cmd-shim / os.pathsep
-          # harness rework, runtime symlink-capability guard) have landed,
-          # but the .cmd-shim harness is not yet verified on a real Windows
-          # runner. Until it is confirmed green there, windows-latest
-          # deselects the 293 e2e tests that hang off the skill_runner
-          # fixture (plus the harness's own tests); drop this exclusion
-          # once the harness is verified.
-          - os: windows-latest
-            pytest_args: --ignore-glob=*test_e2e_* --ignore=skills/multi-llm/tests/test_harness.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Run tests
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live" ${{ matrix.pytest_args }}
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live"

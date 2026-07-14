@@ -29,6 +29,7 @@ from harness import (
     FixtureManager,
     MockProvider,
     AssertionHelpers,
+    PERF_SCALE,
 )
 
 
@@ -520,7 +521,7 @@ class TestCodeReviewStateManagement:
 class TestCodeReviewPerformance:
     """Performance tests for code review orchestrator."""
 
-    @pytest.mark.timeout(45)
+    @pytest.mark.timeout(45 * PERF_SCALE)
     def test_code_review_completes_under_timeout(
         self,
         skill_runner: SkillRunner,
@@ -553,7 +554,9 @@ class TestCodeReviewPerformance:
         )
 
         # Verify it completed within budget (pytest.mark.timeout would fail otherwise)
-        assert result.duration_seconds < 45, f"Took {result.duration_seconds:.1f}s, expected < 45s"
+        assert result.duration_seconds < 45 * PERF_SCALE, (
+            f"Took {result.duration_seconds:.1f}s, expected < {45 * PERF_SCALE}s"
+        )
 
 
 class TestCodeReviewHeadBeforeImplement:

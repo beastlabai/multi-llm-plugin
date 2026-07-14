@@ -30,6 +30,7 @@ from harness import (
     FixtureManager,
     MockProvider,
     AssertionHelpers,
+    PERF_SCALE,
 )
 
 
@@ -1163,7 +1164,7 @@ This exact content must be preserved.
 class TestWorkflowPerformance:
     """Performance tests for the full workflow chain."""
 
-    @pytest.mark.timeout(120)
+    @pytest.mark.timeout(120 * PERF_SCALE)
     def test_workflow_chain_completes_under_timeout(
         self,
         skill_runner: SkillRunner,
@@ -1186,7 +1187,9 @@ class TestWorkflowPerformance:
         )
 
         assert result1.success, f"review_plan failed: {result1.stderr}"
-        assert result1.duration_seconds < 30, f"review_plan took {result1.duration_seconds:.1f}s"
+        assert result1.duration_seconds < 30 * PERF_SCALE, (
+            f"review_plan took {result1.duration_seconds:.1f}s"
+        )
 
         # Pre-populate for apply-suggestions
         review_dir = plan.output_dir / "review-plan"
@@ -1208,8 +1211,12 @@ class TestWorkflowPerformance:
         )
 
         assert result2.success, f"apply_suggestions failed: {result2.stderr}"
-        assert result2.duration_seconds < 30, f"apply_suggestions took {result2.duration_seconds:.1f}s"
+        assert result2.duration_seconds < 30 * PERF_SCALE, (
+            f"apply_suggestions took {result2.duration_seconds:.1f}s"
+        )
 
         # Total should be well under budget
         total_time = result1.duration_seconds + result2.duration_seconds
-        assert total_time < 60, f"Total workflow took {total_time:.1f}s, expected < 60s"
+        assert total_time < 60 * PERF_SCALE, (
+            f"Total workflow took {total_time:.1f}s, expected < {60 * PERF_SCALE}s"
+        )

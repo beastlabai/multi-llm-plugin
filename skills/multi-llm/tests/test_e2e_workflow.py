@@ -32,6 +32,7 @@ from harness import (
     FixtureManager,
     MockProvider,
     AssertionHelpers,
+    PERF_SCALE,
 )
 
 
@@ -704,7 +705,7 @@ class TestNoRealLLMCalls:
 class TestPerformance:
     """Tests to verify performance requirements."""
 
-    @pytest.mark.timeout(30)
+    @pytest.mark.timeout(30 * PERF_SCALE)
     def test_review_plan_completes_under_30_seconds(
         self,
         skill_runner: SkillRunner,
@@ -728,9 +729,11 @@ class TestPerformance:
         )
 
         # Verify it completed (timeout would cause failure)
-        assert result.duration_seconds < 30, f"Took {result.duration_seconds:.1f}s, expected < 30s"
+        assert result.duration_seconds < 30 * PERF_SCALE, (
+            f"Took {result.duration_seconds:.1f}s, expected < {30 * PERF_SCALE}s"
+        )
 
-    @pytest.mark.timeout(30)
+    @pytest.mark.timeout(30 * PERF_SCALE)
     def test_apply_suggestions_completes_under_30_seconds(
         self,
         skill_runner: SkillRunner,
@@ -761,4 +764,6 @@ class TestPerformance:
             timeout=30,
         )
 
-        assert result.duration_seconds < 30, f"Took {result.duration_seconds:.1f}s, expected < 30s"
+        assert result.duration_seconds < 30 * PERF_SCALE, (
+            f"Took {result.duration_seconds:.1f}s, expected < {30 * PERF_SCALE}s"
+        )

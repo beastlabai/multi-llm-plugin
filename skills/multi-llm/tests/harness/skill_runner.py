@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+# Wall-clock budgets in the e2e tests (and the subprocess timeouts below) are
+# multiplied by this factor. Windows creates processes several times more
+# slowly than POSIX (CreateProcess + Defender scanning of every image), and
+# each mock provider call there costs an extra node+python launch on top of the
+# orchestrator's, so a budget that is generous on Linux is marginal on
+# windows-latest. Scaling keeps the POSIX budgets exactly as tight as they were.
+PERF_SCALE = 3 if os.name == "nt" else 1
+
+
 @dataclass
 class SkillResult:
     """Result from running a skill orchestrator.
@@ -78,7 +87,8 @@ class SkillRunner:
 
     Creates an isolated environment for each run with:
     - Mock LLM binaries in tmp_path/bin/ (symlinks to mock_llm.py on POSIX,
-      per-provider .cmd launcher scripts on Windows)
+      npm-style ``.cmd`` + ``node`` trampoline pairs on Windows — see
+      :meth:`_setup_windows_launchers`)
     - PATH prepended to use mock binaries
     - MULTI_LLM_TEST_MODE=1 to enable test mode
     - MOCK_LLM_CALL_LOG set to a unique file for call logging
@@ -94,6 +104,12 @@ class SkillRunner:
 
     # Default providers to create mock launchers for
     PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
+
+    # Windows only: subdirectory of bin/ holding the node trampolines the
+    # provider .cmd shims dispatch to (kept out of bin/ itself so that a
+    # PATHEXT containing .JS can never resolve `cursor-agent` to the
+    # trampoline instead of the shim).
+    MOCK_JS_SUBDIR = "mocks"
 
     # Orchestrator command mappings
     ORCHESTRATORS = {
@@ -152,11 +168,11 @@ class SkillRunner:
     def _setup_mock_binaries(self) -> None:
         """Create the bin directory with per-provider launchers for mock_llm.py.
 
-        On POSIX each provider name is a symlink to mock_llm.py, executed via
-        its shebang. On Windows symlink creation requires privilege and
-        shebangs are not honored, so per-provider ``.cmd`` launcher scripts
-        are written instead, invoking the current Python interpreter on
-        mock_llm.py.
+        POSIX: each provider name is a symlink to mock_llm.py, executed via its
+        shebang (a copy is used when the host cannot create symlinks).
+
+        Windows: see :meth:`_setup_windows_launchers` — the launcher must look
+        to production exactly like a real npm-installed provider CLI does.
         """
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,28 +184,140 @@ class SkillRunner:
             )
 
         if os.name == "nt":
-            # Windows: write .cmd launcher scripts (resolved via PATHEXT)
-            for provider in self.PROVIDERS:
-                launcher_path = self.bin_dir / f"{provider}.cmd"
-                launcher_path.write_text(
-                    "@echo off\n"
-                    f'"{sys.executable}" "{self.mock_llm_path}" %*\n',
-                    encoding="utf-8",
-                )
+            self._setup_windows_launchers()
         else:
-            # POSIX: make mock_llm.py executable if it isn't already
-            current_mode = self.mock_llm_path.stat().st_mode
-            if not (current_mode & stat.S_IXUSR):
-                self.mock_llm_path.chmod(
-                    current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            self._setup_posix_launchers()
+
+    def _setup_posix_launchers(self) -> None:
+        """Symlink (or copy) mock_llm.py under each provider name in bin/.
+
+        The launcher name IS the provider name: mock_llm.py detects which
+        provider it is emulating from ``sys.argv[0]``.
+        """
+        # Make mock_llm.py executable if it isn't already (it is committed 0755,
+        # but a checkout with a restrictive umask/filemode=false can drop that).
+        current_mode = self.mock_llm_path.stat().st_mode
+        if not (current_mode & stat.S_IXUSR):
+            self.mock_llm_path.chmod(
+                current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            )
+
+        for provider in self.PROVIDERS:
+            launcher_path = self.bin_dir / provider
+            if launcher_path.exists() or launcher_path.is_symlink():
+                launcher_path.unlink()
+            try:
+                launcher_path.symlink_to(self.mock_llm_path)
+            except (OSError, NotImplementedError):
+                # Privilege-restricted sandbox: a copy preserves both the
+                # shebang launch and the argv[0]-based provider detection.
+                shutil.copyfile(self.mock_llm_path, launcher_path)
+                launcher_path.chmod(
+                    launcher_path.stat().st_mode
+                    | stat.S_IXUSR
+                    | stat.S_IXGRP
+                    | stat.S_IXOTH
                 )
 
-            # Create symlinks for each provider
-            for provider in self.PROVIDERS:
-                symlink_path = self.bin_dir / provider
-                if symlink_path.exists() or symlink_path.is_symlink():
-                    symlink_path.unlink()
-                symlink_path.symlink_to(self.mock_llm_path)
+    def _setup_windows_launchers(self) -> None:
+        """Install each mock provider the way an npm-installed CLI looks on Windows.
+
+        Windows constrains this far more than POSIX does:
+
+        * An extensionless shebang script is neither executable nor
+          discoverable (``CreateProcess``/PATHEXT only honor .exe/.cmd/.bat/...),
+          so the POSIX symlink trick cannot work.
+        * A *bare* ``.cmd`` shim (``python mock_llm.py %*``) is worse than
+          useless: production (``utils/llm_client._resolve_executable`` /
+          ``_batch_shim_metachar_error``) deliberately REFUSES to launch a
+          provider that only resolves to a .cmd/.bat shim when the prompt
+          carries cmd.exe metacharacters — and every orchestrator prompt
+          contains newlines, quotes and parentheses. Every e2e test would fail
+          with ERROR_PROMPT_UNSAFE without ever reaching the mock.
+
+        So the mock is installed exactly as npm installs a real provider CLI:
+        a ``<provider>.cmd`` shim that dispatches to ``node <cli.js>``.
+        Production parses that shim (``_resolve_node_shim_target``), bypasses
+        cmd.exe entirely, and launches ``node mocks/<provider>.js`` natively —
+        the same launch path a real cursor-agent/gemini/opencode install takes
+        on Windows. The trampoline then re-launches mock_llm.py on the current
+        interpreter, passing argv through verbatim and propagating the exit
+        code.
+
+        Provider identity cannot ride on argv[0] here (python sets
+        ``sys.argv[0]`` to the script, i.e. always ``mock_llm.py``), so the
+        trampoline passes it via ``MOCK_LLM_PROVIDER`` instead.
+        """
+        if shutil.which("node") is None:
+            raise RuntimeError(
+                "The Windows e2e harness requires Node.js on PATH. Production "
+                "refuses to launch a provider that resolves to a bare .cmd/.bat "
+                "shim when the prompt contains cmd.exe metacharacters, so the "
+                "mock providers are installed as npm-style shims that dispatch "
+                "to `node <cli.js>` (the launch path a real npm-installed "
+                "provider CLI takes on Windows). Install Node.js to run the e2e "
+                "suite on Windows."
+            )
+
+        js_dir = self.bin_dir / self.MOCK_JS_SUBDIR
+        js_dir.mkdir(parents=True, exist_ok=True)
+
+        for provider in self.PROVIDERS:
+            js_path = js_dir / f"{provider}.js"
+            with open(js_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(self._node_trampoline_source(provider))
+
+            cmd_path = self.bin_dir / f"{provider}.cmd"
+            with open(cmd_path, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(self._cmd_shim_source(provider))
+
+    def _cmd_shim_source(self, provider: str) -> str:
+        """Render an npm-style cmd-shim that dispatches to the node trampoline.
+
+        Deliberately shaped like the shims ``npm`` writes, because production's
+        ``_NODE_SHIM_TARGET_RE`` parses exactly that shape (a quoted,
+        ``%~dp0``-relative ``.js`` target) to bypass cmd.exe. The shim is also
+        correct if actually executed by cmd.exe: ``%*`` forwards argv and
+        ``EXIT /b %ERRORLEVEL%`` propagates the child's exit code (a batch file
+        does not do that on its own).
+        """
+        return (
+            "@ECHO off\n"
+            "SETLOCAL\n"
+            'SET "NODE_EXE=%~dp0node.exe"\n'
+            'IF NOT EXIST "%NODE_EXE%" SET "NODE_EXE=node"\n'
+            f'"%NODE_EXE%" "%~dp0\\{self.MOCK_JS_SUBDIR}\\{provider}.js" %*\n'
+            "ENDLOCAL & EXIT /b %ERRORLEVEL%\n"
+        )
+
+    def _node_trampoline_source(self, provider: str) -> str:
+        """Render the node trampoline that re-launches mock_llm.py.
+
+        Paths are embedded as JSON literals so Windows backslashes and any
+        spaces in the interpreter/mock path survive. ``spawnSync`` with an argv
+        list means no shell and no re-parsing: the prompt reaches mock_llm.py
+        byte-for-byte, quotes/newlines/percent signs included.
+        """
+        return (
+            '"use strict";\n'
+            "// Windows mock provider trampoline. Production resolves the sibling\n"
+            "// <provider>.cmd npm shim to `node <this file>` and launches it\n"
+            "// natively, so cmd.exe never sees (or mangles) the prompt.\n"
+            'const { spawnSync } = require("child_process");\n'
+            f"const PYTHON = {json.dumps(sys.executable)};\n"
+            f"const MOCK_LLM = {json.dumps(str(self.mock_llm_path))};\n"
+            f"const PROVIDER = {json.dumps(provider)};\n"
+            "const res = spawnSync(PYTHON, [MOCK_LLM].concat(process.argv.slice(2)), {\n"
+            '  stdio: "inherit",\n'
+            "  env: Object.assign({}, process.env, { MOCK_LLM_PROVIDER: PROVIDER }),\n"
+            "});\n"
+            "if (res.error) {\n"
+            '  process.stderr.write("mock trampoline failed to launch " + PYTHON'
+            ' + ": " + res.error.message + "\\n");\n'
+            "  process.exit(127);\n"
+            "}\n"
+            "process.exit(res.status === null ? 1 : res.status);\n"
+        )
 
     def _build_env(self) -> Dict[str, str]:
         """Build environment variables for subprocess execution."""
@@ -198,6 +326,12 @@ class SkillRunner:
         # Prepend our bin directory to PATH
         original_path = env.get("PATH", "")
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{original_path}"
+
+        # Windows resolves argv[0] through PATHEXT (shutil.which does the same).
+        # It is always set in a normal Windows environment, but a stripped-down
+        # env would make `cursor-agent` unresolvable to `cursor-agent.cmd`.
+        if os.name == "nt" and not env.get("PATHEXT"):
+            env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
 
         # Enable test mode
         env["MULTI_LLM_TEST_MODE"] = "1"
@@ -315,7 +449,10 @@ class SkillRunner:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                # Same budget on POSIX; headroom on Windows, where every
+                # process launch (orchestrator, node shim, mock) is far more
+                # expensive. See PERF_SCALE.
+                timeout=timeout * PERF_SCALE,
                 env=env,
                 cwd=str(self.skill_dir),
             )
