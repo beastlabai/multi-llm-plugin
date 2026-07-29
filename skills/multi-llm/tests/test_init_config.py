@@ -330,7 +330,7 @@ class TestEndToEndInit:
         # Only detected providers' defaults specs are uncommented.
         assert written["defaults"]["models"] == [
             "cursor-agent:composer-2.5",
-            "cursor-agent:gemini-3.1-pro",
+            "cursor-agent:gemini-3.6-flash-high",
             "cursor-agent:grok-4.5-xhigh",
             "claude-code:fable:high",
         ]

@@ -125,7 +125,9 @@
 #       - gpt-5.6-sol-xhigh
 #       - gemini-3.1-pro
 #       - gemini-3.5-flash
+#       - gemini-3.6-flash-high
 #       - kimi-k2.7-code
+#       - kimi-k3-high
 #       - glm-5.2-high
 #       - grok-4.5-xhigh
 #       - claude-sonnet-5-thinking-xhigh
@@ -183,6 +185,7 @@
 #     max_concurrent: 2
 #     models:
 #       - openrouter/moonshotai/kimi-k2.7-code
+#       - openrouter/moonshotai/kimi-k3:thinking
 #       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
 #       - openrouter/z-ai/glm-5.2:xhigh
 #       - kilo/z-ai/glm-5.2
@@ -237,6 +240,9 @@
 #     default_timeout: 1200
 #     supports_json_output: true
 #     models:
+#       - Gemini 3.6 Flash (High)
+#       - Gemini 3.6 Flash (Medium)
+#       - Gemini 3.6 Flash (Low)
 #       - Gemini 3.5 Flash (Medium)
 #       - Gemini 3.5 Flash (High)
 #       - Gemini 3.5 Flash (Low)
@@ -271,9 +277,9 @@ defaults:
   ## uncommented the (blank) list inherits the base.
   models:
 #     - cursor-agent:composer-2.5
-#     - cursor-agent:gemini-3.1-pro
+#     - cursor-agent:gemini-3.6-flash-high
 #     - cursor-agent:grok-4.5-xhigh
-#     - kilocode:openrouter/moonshotai/kimi-k2.7-code:xhigh
+#     - kilocode:openrouter/moonshotai/kimi-k3:thinking
 #     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
 #     - kilocode:openrouter/z-ai/glm-5.2:xhigh
 #     - kilocode:openrouter/minimax/minimax-m3:xhigh
@@ -286,7 +292,7 @@ defaults:
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same
   ## uncommenting rule as defaults.models.
   quick_models:
-#     - cursor-agent:composer-2.5
+#     - cursor-agent:grok-4.5-xhigh
 #     - cursor-agent:gpt-5.6-sol-xhigh
 #     - claude-code:fable:high
 

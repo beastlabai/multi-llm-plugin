@@ -54,7 +54,9 @@ providers:
       - gpt-5.6-sol-xhigh
       - gemini-3.1-pro
       - gemini-3.5-flash
+      - gemini-3.6-flash-high
       - kimi-k2.7-code
+      - kimi-k3-high
       - glm-5.2-high
       - grok-4.5-xhigh
       - claude-sonnet-5-thinking-xhigh
@@ -137,6 +139,7 @@ providers:
     max_concurrent: 2
     models:
       - openrouter/moonshotai/kimi-k2.7-code
+      - openrouter/moonshotai/kimi-k3:thinking
       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
       - openrouter/z-ai/glm-5.2:xhigh
       - kilo/z-ai/glm-5.2
@@ -216,14 +219,18 @@ providers:
     default_timeout: 1200
     supports_json_output: true  # Single JSON envelope with "response" field
     # Model names are the exact DISPLAY NAMES from `agy models` (spaces and
-    # parentheses included). GOTCHA: an invalid model name is SILENTLY
-    # ignored — agy falls back to its default model with status SUCCESS —
-    # so keep these matching `agy models` output exactly.
+    # parentheses included), so keep these matching `agy models` exactly.
+    # An unknown name is rejected outright: agy returns an ERROR envelope
+    # ("model ... is not recognized") listing the valid names (verified
+    # 2026-07-29; older builds silently fell back to the default model).
     # Auth is Google OAuth only: requires a one-time `agy` sign-in
     # (persisted in ~/.gemini/antigravity-cli/); no API keys involved.
     # Effort is already encoded in the display-name model strings ("(High)",
     # "(Low)" etc.); no ":effort" suffix support.
     models:
+      - "Gemini 3.6 Flash (High)"
+      - "Gemini 3.6 Flash (Medium)"
+      - "Gemini 3.6 Flash (Low)"
       - "Gemini 3.5 Flash (Medium)"
       - "Gemini 3.5 Flash (High)"
       - "Gemini 3.5 Flash (Low)"
@@ -261,11 +268,11 @@ defaults:
   models:
     - cursor-agent:composer-2.5
     #- cursor-agent:gpt-5.6-sol-xhigh
-    - cursor-agent:gemini-3.1-pro
+    - cursor-agent:gemini-3.6-flash-high
     - cursor-agent:grok-4.5-xhigh
     #- cursor-agent:kimi-k2.7-code
     #- opencode:opencode/big-pickle
-    - kilocode:openrouter/moonshotai/kimi-k2.7-code:xhigh
+    - kilocode:openrouter/moonshotai/kimi-k3:thinking
     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
     - kilocode:openrouter/z-ai/glm-5.2:xhigh
     - kilocode:openrouter/minimax/minimax-m3:xhigh
@@ -284,7 +291,7 @@ defaults:
   # Used instead of defaults.models for faster reviews with fewer models
   # Omit --quick to use the full defaults.models list, or pass --interactive to pick manually
   quick_models:
-    - cursor-agent:composer-2.5
+    - cursor-agent:grok-4.5-xhigh
     - cursor-agent:gpt-5.6-sol-xhigh
     - claude-code:fable:high
 
