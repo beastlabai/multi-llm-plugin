@@ -2821,6 +2821,257 @@ class TestCodexProvider:
         mock_which.assert_called_once_with("codex")
 
 
+def _codex_stream(*events) -> str:
+    """Join events into the NDJSON stream shape `codex exec --json` writes."""
+    return "\n".join(json.dumps(event) for event in events)
+
+
+def _agent_message(text: str, item_id: str = "item_1") -> dict:
+    return {"type": "item.completed",
+            "item": {"id": item_id, "type": "agent_message", "text": text}}
+
+
+class TestCodexParseOutput:
+    """Parsing of the `codex exec --json` NDJSON event stream.
+
+    Event shapes here are taken from live codex-cli 0.144.0 output. The reply
+    is nested in `item.completed` -> `item.type == "agent_message"`; there is
+    no top-level "text"/"message"/"content" event type (issue #2).
+    """
+
+    @pytest.fixture
+    def provider(self):
+        return CodexProvider()
+
+    def test_agent_message_item_is_parsed(self, provider):
+        """The advertised happy path: reply nested in item.completed."""
+        stdout = _codex_stream(
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "turn.started"},
+            _agent_message('[{"task":"ship","verdict":"ready"}]'),
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship", "verdict": "ready"}]
+
+    def test_reasoning_item_text_never_leaks(self, provider):
+        """`reasoning` items also carry `text` — they must not reach the payload."""
+        stdout = _codex_stream(
+            {"type": "item.completed",
+             "item": {"id": "rs_1", "type": "reasoning", "text": "SECRET_CHAIN_OF_THOUGHT"}},
+            _agent_message('[{"task":"ship"}]', item_id="item_2"),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+        assert "SECRET_CHAIN_OF_THOUGHT" not in json.dumps(result["data"])
+
+    def test_last_agent_message_wins_over_prose(self, provider):
+        """Prose then JSON: take the final message, don't concatenate."""
+        stdout = _codex_stream(
+            _agent_message("Here is my analysis of the tasks.", item_id="item_1"),
+            _agent_message('[{"task":"ship"}]', item_id="item_2"),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+
+    def test_streaming_item_events_are_ignored(self, provider):
+        """item.started/item.updated are deltas; only item.completed counts."""
+        stdout = _codex_stream(
+            {"type": "item.started",
+             "item": {"id": "item_1", "type": "agent_message", "text": '[{"a":'}},
+            {"type": "item.updated",
+             "item": {"id": "item_1", "type": "agent_message", "text": '[{"a":1}]'}},
+            _agent_message('[{"a":1}]'),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"a": 1}]
+
+    def test_benign_item_error_does_not_fail_a_good_run(self, provider):
+        """Nested item errors are routinely non-fatal (unknown model metadata)."""
+        stdout = _codex_stream(
+            {"type": "item.completed",
+             "item": {"id": "item_0", "type": "error",
+                      "message": "Model metadata for `x` not found. Defaulting to fallback metadata"}},
+            _agent_message('[{"task":"ship"}]', item_id="item_1"),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+
+    def test_top_level_error_is_surfaced(self, provider):
+        """A quota failure must not be reported as 'No text events found'."""
+        stdout = _codex_stream(
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "error", "message": "Quota exceeded. Check your plan and billing details."},
+            {"type": "turn.failed",
+             "error": {"message": "Quota exceeded. Check your plan and billing details."}},
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "Quota exceeded" in result["error"]
+
+    def test_turn_failed_alone_is_surfaced(self, provider):
+        stdout = _codex_stream({"type": "turn.failed", "error": {"message": "upstream 503"}})
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "upstream 503" in result["error"]
+
+    def test_benign_item_error_surfaced_when_nothing_else_parsed(self, provider):
+        """With no reply at all, the nested error is better than a generic message."""
+        stdout = _codex_stream(
+            {"type": "item.completed",
+             "item": {"id": "item_0", "type": "error", "message": "sandbox denied"}},
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "sandbox denied" in result["error"]
+
+    def test_no_events_reports_no_text(self, provider):
+        stdout = _codex_stream(
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "turn.completed", "usage": {}},
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert result["error"] == "No text events found in output"
+        assert result["data"] is None
+
+    def test_empty_agent_message_reports_empty(self, provider):
+        result = provider.parse_output(_codex_stream(_agent_message("   ")), "")
+
+        assert result["success"] is False
+        assert result["error"] == "Empty text response"
+
+    def test_malformed_and_non_dict_lines_are_skipped(self, provider):
+        stdout = "\n".join([
+            "not json at all",
+            json.dumps(["a", "list", "not", "an", "object"]),
+            json.dumps(_agent_message('[{"task":"ship"}]')),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+
+    def test_prose_wrapped_json_is_extracted(self, provider):
+        """Non-JSON-leading replies still go through the extractor."""
+        stdout = _codex_stream(
+            _agent_message('Sure! Here you go:\n```json\n[{"task":"ship"}]\n```'))
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+
+    def test_falls_back_to_joined_messages(self, provider):
+        """If the final message alone yields nothing, try all of them joined."""
+        stdout = _codex_stream(
+            _agent_message('[{"task":"ship"}]', item_id="item_1"),
+            _agent_message("Let me know if you need anything else.", item_id="item_2"),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship"}]
+
+    def test_legacy_text_events_still_parse(self, provider):
+        """Pre-dotted-namespace shapes remain supported as a fallback."""
+        stdout = _codex_stream({"type": "text", "part": {"type": "text", "text": '[{"a":1}]'}})
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"a": 1}]
+
+    def test_agent_message_beats_legacy_events(self, provider):
+        stdout = _codex_stream(
+            {"type": "text", "text": '[{"from":"legacy"}]'},
+            _agent_message('[{"from":"agent_message"}]'),
+        )
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["data"] == [{"from": "agent_message"}]
+
+
+class TestCodexParseRealCaptures:
+    """Regression tests against streams captured from a real codex CLI.
+
+    Both fixtures are verbatim `codex exec --json` output from codex-cli
+    0.144.0. They are the streams the pre-fix parser rejected outright.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "codex"
+
+    @pytest.fixture
+    def provider(self):
+        return CodexProvider()
+
+    def test_real_single_message_capture(self, provider):
+        """gpt-5.6-sol at xhigh effort — the model this repo ships by default."""
+        stdout = (self.FIXTURES / "gpt5_sol_single_message.jsonl").read_text(encoding="utf-8")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list)
+        assert result["data"], "expected a non-empty findings array"
+        assert all("severity" in item for item in result["data"])
+
+    def test_real_agentic_capture_excludes_reasoning(self, provider):
+        """Agentic run with real chain-of-thought and two agent messages."""
+        stdout = (self.FIXTURES / "agentic_reasoning_multi_message.jsonl").read_text(encoding="utf-8")
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [
+            {"entry": "directory listing blocked by sandbox"},
+            {"entry": "directory listing blocked by sandbox"},
+            {"entry": "directory listing blocked by sandbox"},
+        ]
+
+    def test_real_agentic_capture_leaks_no_reasoning_text(self, provider):
+        """Every reasoning item's text must be absent from the parsed payload."""
+        stdout = (self.FIXTURES / "agentic_reasoning_multi_message.jsonl").read_text(encoding="utf-8")
+        reasoning = [
+            json.loads(line)["item"]["text"]
+            for line in stdout.splitlines()
+            if line.strip() and json.loads(line).get("type") == "item.completed"
+            and json.loads(line)["item"].get("type") == "reasoning"
+        ]
+        assert reasoning, "fixture must contain reasoning items to be meaningful"
+
+        payload = json.dumps(provider.parse_output(stdout, "")["data"])
+
+        for text in reasoning:
+            assert text[:40] not in payload
+
+
 class TestProviderBinaryNotFound:
     """Tests for provider availability when binaries are not found."""
 

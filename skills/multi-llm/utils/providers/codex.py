@@ -45,9 +45,36 @@ class CodexProvider(LLMProvider):
             ]
         return ["codex", "exec", "--full-auto", "--json", "--model", model, prompt]
 
+    @staticmethod
+    def _extract_json(text: str) -> Dict[str, Any]:
+        """Parse ``text`` as JSON, falling back to embedded-JSON extraction."""
+        if text.startswith(('[', '{')):
+            try:
+                return {"success": True, "data": json.loads(text)}
+            except json.JSONDecodeError:
+                pass
+
+        return extract_json_from_text(text, prefer_arrays=True)
+
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
-        """Parse NDJSON event stream output from Codex CLI."""
-        text_parts: List[str] = []
+        """Parse the NDJSON event stream emitted by ``codex exec --json``.
+
+        The assistant's reply arrives as ``item.completed`` events whose nested
+        item has ``type == "agent_message"``. Three details matter, all verified
+        against live codex-cli 0.144.0 output:
+
+        - ``reasoning`` items are also ``item.completed`` and also carry a
+          ``text`` field, so the item type must be checked or chain-of-thought
+          leaks into the payload.
+        - ``item.started``/``item.updated`` carry streaming deltas; ignoring
+          them keeps text from being counted twice.
+        - A turn may contain several agent messages (prose, then the answer),
+          so the last is preferred over concatenating standalone JSON documents.
+        """
+        messages: List[str] = []
+        legacy_parts: List[str] = []
+        fatal_errors: List[str] = []
+        item_errors: List[str] = []
 
         for line in stdout.strip().split('\n'):
             line = line.strip()
@@ -56,36 +83,86 @@ class CodexProvider(LLMProvider):
 
             try:
                 event = json.loads(line)
-                event_type = event.get("type", "")
-
-                # Handle various event types
-                if event_type == "text":
-                    if "text" in event:
-                        text_parts.append(event["text"])
-                    part = event.get("part", {})
-                    if part.get("type") == "text" and "text" in part:
-                        text_parts.append(part["text"])
-                elif event_type == "message":
-                    if "content" in event:
-                        text_parts.append(event["content"])
-                elif event_type == "content":
-                    if "text" in event:
-                        text_parts.append(event["text"])
             except json.JSONDecodeError:
                 continue
 
-        if not text_parts:
-            return {"success": False, "error": "No text events found in output", "raw": stdout, "data": None}
+            if not isinstance(event, dict):
+                continue
 
-        full_text = "".join(text_parts).strip()
+            event_type = event.get("type", "")
 
-        if not full_text:
+            if event_type == "item.completed":
+                item = event.get("item")
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        messages.append(text)
+                elif item_type == "error":
+                    # Not fatal on its own: codex emits these for benign
+                    # conditions such as unrecognised model metadata, on runs
+                    # that go on to succeed.
+                    message = item.get("message")
+                    if isinstance(message, str) and message:
+                        item_errors.append(message)
+            elif event_type == "error":
+                message = event.get("message")
+                if isinstance(message, str) and message:
+                    fatal_errors.append(message)
+            elif event_type == "turn.failed":
+                error = event.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    if isinstance(message, str) and message:
+                        fatal_errors.append(message)
+            # Legacy event shapes, kept as a fallback for Codex builds that
+            # predate the dotted-namespace stream. No 0.14x release emits these.
+            elif event_type == "text":
+                if isinstance(event.get("text"), str):
+                    legacy_parts.append(event["text"])
+                part = event.get("part")
+                if isinstance(part, dict) and part.get("type") == "text" \
+                        and isinstance(part.get("text"), str):
+                    legacy_parts.append(part["text"])
+            elif event_type == "message":
+                if isinstance(event.get("content"), str):
+                    legacy_parts.append(event["content"])
+            elif event_type == "content":
+                if isinstance(event.get("text"), str):
+                    legacy_parts.append(event["text"])
+
+        candidates: List[str] = []
+        if messages:
+            candidates.append(messages[-1])
+            if len(messages) > 1:
+                candidates.append("\n".join(messages))
+        elif legacy_parts:
+            candidates.append("".join(legacy_parts))
+
+        if not candidates:
+            error = "No text events found in output"
+            reported = fatal_errors or item_errors
+            if reported:
+                error = "Codex reported an error: " + "; ".join(reported)
+            return {"success": False, "error": error, "raw": stdout, "data": None}
+
+        if not any(candidate.strip() for candidate in candidates):
             return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
 
-        if full_text.startswith(('[', '{')):
-            try:
-                return {"success": True, "data": json.loads(full_text)}
-            except json.JSONDecodeError:
-                pass
+        result: Dict[str, Any] = {}
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            result = self._extract_json(candidate)
+            if result.get("success"):
+                return result
 
-        return extract_json_from_text(full_text, prefer_arrays=True)
+        if fatal_errors:
+            result = dict(result)
+            result["error"] = "{} (codex reported: {})".format(
+                result.get("error", "Failed to parse response"), "; ".join(fatal_errors)
+            )
+        return result
