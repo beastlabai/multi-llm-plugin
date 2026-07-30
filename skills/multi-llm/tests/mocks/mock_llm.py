@@ -443,6 +443,12 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         run_parser = subparsers.add_parser("run")
         run_parser.add_argument("--format", dest="output_format", default="json")
         run_parser.add_argument("--model", default="claude-sonnet")
+        # The rest of what OpenCodeProvider.build_command actually emits. The
+        # mock must accept the real argv or the e2e path silently degrades to
+        # an argparse exit-2 that looks like a provider failure.
+        run_parser.add_argument("--print-logs", dest="print_logs", action="store_true")
+        run_parser.add_argument("--log-level", dest="log_level", default=None)
+        run_parser.add_argument("--variant", default=None)
         run_parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         if args.command != "run":

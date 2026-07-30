@@ -665,11 +665,14 @@ class TestNoRealLLMCalls:
         calls = mock_provider.get_calls()
         providers = {c.provider for c in calls}
 
-        # All requested providers should have been called via mock
-        for provider in ["cursor-agent", "gemini"]:
-            if provider not in providers:
-                # opencode may fail to parse args, but cursor-agent and gemini should work
-                pass
+        # All requested providers should have been called via mock. opencode
+        # is included deliberately: this is the only test that drives the real
+        # build_command through the mock's argument parser, so it is what
+        # catches the two drifting apart. (It was previously exempted with a
+        # no-op `pass`, which asserted nothing for any provider.)
+        assert {"cursor-agent", "gemini", "opencode"} <= providers, (
+            f"expected every requested provider to reach the mock, got {sorted(providers)}"
+        )
 
     def test_mock_call_count_matches_providers(
         self,
