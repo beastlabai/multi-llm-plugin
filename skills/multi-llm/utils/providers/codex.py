@@ -15,7 +15,10 @@ class CodexProvider(LLMProvider):
     """Provider for OpenAI Codex CLI tool.
 
     Codex outputs NDJSON (newline-delimited JSON) events when using --json flag.
-    Uses 'codex exec --full-auto --json' for non-interactive execution.
+    Uses 'codex exec --sandbox workspace-write --json' for non-interactive
+    execution. The sandbox mode must be passed explicitly: codex's no-flag
+    default is trust-dependent (read-only in a repo the user has not marked
+    trusted), and this skill runs codex in arbitrary repositories.
 
     Model strings support an optional ``model[:effort]`` suffix (e.g.
     ``gpt-5.5:high``), translated to ``-c model_reasoning_effort=<effort>``.
@@ -35,15 +38,24 @@ class CodexProvider(LLMProvider):
         return shutil.which("codex") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
+        # --sandbox workspace-write, not the older --full-auto: 0.146.0 keeps
+        # --full-auto only as a hidden compatibility trap (internally
+        # `removed_full_auto`) and warns on every run. The two produce an
+        # identical effective policy — approval_policy is forced to "never"
+        # in exec mode regardless — so this is a rename, not a permission
+        # change.
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         if effort is not None:
             return [
-                "codex", "exec", "--full-auto", "--json",
+                "codex", "exec", "--sandbox", "workspace-write", "--json",
                 "--model", base_model,
                 "-c", f"model_reasoning_effort={effort}",
                 prompt,
             ]
-        return ["codex", "exec", "--full-auto", "--json", "--model", model, prompt]
+        return [
+            "codex", "exec", "--sandbox", "workspace-write", "--json",
+            "--model", model, prompt,
+        ]
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:

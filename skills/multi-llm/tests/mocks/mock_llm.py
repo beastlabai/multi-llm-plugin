@@ -430,7 +430,11 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         parser = argparse.ArgumentParser(description="Mock codex CLI")
         subparsers = parser.add_subparsers(dest="command")
         exec_parser = subparsers.add_parser("exec")
-        exec_parser.add_argument("--full-auto", action="store_true")
+        # Real codex spells this `-s, --sandbox <SANDBOX_MODE>`. --full-auto is
+        # deliberately NOT accepted: codex 0.146.0 keeps it only as a hidden
+        # deprecation trap, so rejecting it here catches a regression that
+        # reintroduces the old flag.
+        exec_parser.add_argument("-s", "--sandbox", default=None)
         exec_parser.add_argument("--json", action="store_true")
         exec_parser.add_argument("--model", default="gpt-4")
         exec_parser.add_argument("prompt", nargs="?", default="")
