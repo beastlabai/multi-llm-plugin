@@ -443,7 +443,14 @@ class TestMockLLMOutputFormats:
         assert "output_tokens" in output["stats"]
 
     def test_opencode_format(self, tmp_path):
-        """Test opencode outputs correct NDJSON wire format."""
+        """Test opencode outputs correct NDJSON wire format.
+
+        Mirrors real `opencode run --format json` output. Every event carries
+        the `timestamp`/`sessionID` envelope and a `part`; the top-level type
+        is underscored (`step_start`) while `part.type` is hyphenated
+        (`step-start`); and only parts with `time.end` set are emitted as
+        `text`, which is how the CLI excludes the user's own prompt echo.
+        """
         result = run_mock_llm(
             "opencode",
             ["run", "test prompt"],
@@ -452,21 +459,25 @@ class TestMockLLMOutputFormats:
 
         assert result.returncode == 0
 
-        # opencode format: NDJSON events (step_start, text, step_finish)
         lines = result.stdout.strip().split("\n")
         assert len(lines) == 3
 
         events = [json.loads(line) for line in lines]
-        event_types = [e["type"] for e in events]
+        assert [e["type"] for e in events] == ["step_start", "text", "step_finish"]
 
-        assert event_types[0] == "step_start"
-        assert event_types[1] == "text"
-        assert event_types[2] == "step_finish"
+        # The envelope the real emitter always writes.
+        for event in events:
+            assert isinstance(event["timestamp"], int), "timestamp is epoch milliseconds"
+            assert event["sessionID"].startswith("ses_")
+            assert "part" in event, "every event type except `error` carries a part"
 
-        # Text event should have part.text
-        text_event = events[1]
-        assert "part" in text_event
-        assert "text" in text_event["part"]
+        # Hyphenated part types, against underscored top-level types.
+        assert [e["part"]["type"] for e in events] == ["step-start", "text", "step-finish"]
+
+        # A completed text part: this is the only place the reply lives.
+        text_part = events[1]["part"]
+        assert "text" in text_part
+        assert text_part["time"]["end"] is not None, "only completed parts are emitted"
 
     def test_codex_format(self, tmp_path):
         """Test codex outputs correct NDJSON wire format.
