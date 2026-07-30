@@ -941,7 +941,26 @@ class TestOpenCodeProvider:
 
         cmd = provider.build_command(prompt, model)
 
-        assert cmd == ["opencode", "run", "--format", "json", "--model", "claude-3", "Generate code"]
+        assert cmd == [
+            "opencode", "run", "--format", "json", "--print-logs", "--log-level", "ERROR",
+            "--model", "claude-3", "Generate code",
+        ]
+
+    def test_opencode_build_command_requests_error_logs(self, provider):
+        """Logging is on and pinned to ERROR, for every model shape.
+
+        Without --print-logs a stream error (an exhausted key, say) makes
+        opencode retry internally while writing to neither stream: the run
+        burns the full timeout and reports no cause. ERROR keeps a healthy
+        run silent, and the logs go to stderr so stdout stays pure NDJSON.
+        """
+        for model in ("openai/gpt-5.5", "openai/gpt-5.5:high"):
+            cmd = provider.build_command("Generate code", model)
+
+            assert "--print-logs" in cmd, f"{model!r} built a command with logging off"
+            assert cmd[cmd.index("--log-level") + 1] == "ERROR"
+            # The prompt must stay the final element regardless.
+            assert cmd[-1] == "Generate code"
 
     def test_opencode_reasoning_efforts_constant(self):
         """Module-level REASONING_EFFORTS holds exactly the seven valid efforts."""
@@ -959,6 +978,9 @@ class TestOpenCodeProvider:
             "run",
             "--format",
             "json",
+            "--print-logs",
+            "--log-level",
+            "ERROR",
             "--model",
             "openai/gpt-5.5",
             "--variant",
@@ -976,6 +998,9 @@ class TestOpenCodeProvider:
                 "run",
                 "--format",
                 "json",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 "openai/gpt-5.5",
                 "--variant",
@@ -993,6 +1018,9 @@ class TestOpenCodeProvider:
                 "run",
                 "--format",
                 "json",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 model,
                 "Generate code",

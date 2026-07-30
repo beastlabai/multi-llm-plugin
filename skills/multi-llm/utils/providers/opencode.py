@@ -40,9 +40,21 @@ class OpenCodeProvider(LLMProvider):
         return shutil.which("opencode") is not None
 
     def build_command(self, prompt: str, model: str) -> List[str]:
-        # opencode run --format json --model <model> [--variant <effort>] "<prompt>"
+        # opencode run --format json --print-logs --log-level ERROR
+        #     --model <model> [--variant <effort>] "<prompt>"
+        #
+        # --print-logs is the only way to learn why a run produced nothing.
+        # A stream error (an exhausted key, say) makes opencode retry
+        # internally while writing to neither stream, so the run burns the
+        # full timeout and reports no cause. The logs go to stderr and are
+        # pinned to ERROR, so stdout stays pure NDJSON and a healthy run
+        # stays silent.
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
-        cmd = ["opencode", "run", "--format", "json", "--model", base_model]
+        cmd = [
+            "opencode", "run", "--format", "json",
+            "--print-logs", "--log-level", "ERROR",
+            "--model", base_model,
+        ]
         if effort is not None:
             cmd += ["--variant", effort]
         cmd.append(prompt)
