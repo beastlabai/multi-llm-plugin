@@ -54,6 +54,7 @@ from utils.llm_client import (
     _extract_json_from_text,
     invoke_for_json,
 )
+from utils.providers.cursor_agent import CursorAgentProvider
 
 
 class TestCheckCursorAgentAvailable:
@@ -390,6 +391,60 @@ class TestInvokeWithProvider:
         assert "exited with code 1" in result["error"]
         assert result["details"]["exit_code"] == 1
         assert result["details"]["stderr"] == "Command failed: invalid arguments"
+
+    def test_subprocess_failure_reason_recovered_from_stdout(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """A provider that reports its cause on stdout gets it into the error.
+
+        opencode exits 1 with the real reason on stdout and stderr empty, so
+        without describe_failure the caller sees only a bare exit code.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = json.dumps({
+            "type": "error",
+            "timestamp": 1785403158514,
+            "sessionID": "ses_TEST",
+            "error": {
+                "name": "ProviderAuthError",
+                "data": {"providerID": "google", "message": "API key is missing."},
+            },
+        })
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="opencode:google/gemini-2.5-pro",
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "exited with code 1" in result["error"]
+        assert "ProviderAuthError: API key is missing." in result["error"]
+
+    def test_subprocess_failure_reason_survives_broken_provider_hook(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """A raising describe_failure must not mask the subprocess failure."""
+        mock_result = MagicMock()
+        mock_result.returncode = 3
+        mock_result.stdout = "whatever"
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        with patch.object(
+            CursorAgentProvider, "describe_failure", side_effect=RuntimeError("boom")
+        ):
+            result = invoke_with_provider(
+                prompt="Test",
+                model_spec="cursor-agent:gpt-4",
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "exited with code 3" in result["error"]
 
     def test_subprocess_failed_various_exit_codes(self, mock_subprocess, mock_provider_available):
         """Test SUBPROCESS_FAILED with various exit codes."""

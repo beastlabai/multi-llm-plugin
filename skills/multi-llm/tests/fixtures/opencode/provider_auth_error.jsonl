@@ -1,0 +1,1 @@
+{"type":"error","timestamp":1785403158514,"sessionID":"ses_04dadd1efffe0X99tnrZoM6euV","error":{"name":"ProviderAuthError","data":{"providerID":"google","message":"Google Generative AI API key is missing. Pass it using the 'apiKey' parameter or the GOOGLE_GENERATIVE_AI_API_KEY environment variable."}}}
