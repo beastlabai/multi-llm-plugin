@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers.agy import AgyProvider
 from utils.providers.aider import AiderProvider
-from utils.providers.base import split_reasoning_effort
+from utils.providers.base import LLMProvider, split_reasoning_effort
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
@@ -941,7 +941,26 @@ class TestOpenCodeProvider:
 
         cmd = provider.build_command(prompt, model)
 
-        assert cmd == ["opencode", "run", "--format", "json", "--model", "claude-3", "Generate code"]
+        assert cmd == [
+            "opencode", "run", "--format", "json", "--print-logs", "--log-level", "ERROR",
+            "--model", "claude-3", "Generate code",
+        ]
+
+    def test_opencode_build_command_requests_error_logs(self, provider):
+        """Logging is on and pinned to ERROR, for every model shape.
+
+        Without --print-logs a stream error (an exhausted key, say) makes
+        opencode retry internally while writing to neither stream: the run
+        burns the full timeout and reports no cause. ERROR keeps a healthy
+        run silent, and the logs go to stderr so stdout stays pure NDJSON.
+        """
+        for model in ("openai/gpt-5.5", "openai/gpt-5.5:high"):
+            cmd = provider.build_command("Generate code", model)
+
+            assert "--print-logs" in cmd, f"{model!r} built a command with logging off"
+            assert cmd[cmd.index("--log-level") + 1] == "ERROR"
+            # The prompt must stay the final element regardless.
+            assert cmd[-1] == "Generate code"
 
     def test_opencode_reasoning_efforts_constant(self):
         """Module-level REASONING_EFFORTS holds exactly the seven valid efforts."""
@@ -959,6 +978,9 @@ class TestOpenCodeProvider:
             "run",
             "--format",
             "json",
+            "--print-logs",
+            "--log-level",
+            "ERROR",
             "--model",
             "openai/gpt-5.5",
             "--variant",
@@ -976,6 +998,9 @@ class TestOpenCodeProvider:
                 "run",
                 "--format",
                 "json",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 "openai/gpt-5.5",
                 "--variant",
@@ -993,6 +1018,9 @@ class TestOpenCodeProvider:
                 "run",
                 "--format",
                 "json",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 model,
                 "Generate code",
@@ -1013,6 +1041,186 @@ class TestOpenCodeProvider:
 
         assert provider.is_available() is False
         mock_which.assert_called_once_with("opencode")
+
+
+def _oc_event(event_type: str, **rest):
+    """Build one opencode event with the envelope the real CLI always emits."""
+    return json.dumps({
+        "type": event_type,
+        "timestamp": 1785403656879,
+        "sessionID": "ses_TEST",
+        **rest,
+    })
+
+
+def _oc_text(text: str, part_id: str = "prt_1"):
+    """A completed assistant text part — the shape carrying the reply."""
+    return _oc_event("text", part={
+        "id": part_id,
+        "sessionID": "ses_TEST",
+        "messageID": "msg_TEST",
+        "type": "text",
+        "text": text,
+        "time": {"start": 1769172934123, "end": 1769172934123},
+    })
+
+
+class TestOpenCodeRealSchema:
+    """Tests pinned to the schema `opencode run --format json` really emits.
+
+    The pre-existing tests used hand-rolled events shaped to match the parser
+    — the same blind spot that let issue #2 (codex) reach production. These
+    use the full envelope (`timestamp`, `sessionID`, `part.time`) taken from
+    the CLI's own emitter and from recorded sessions.
+    """
+
+    @pytest.fixture
+    def provider(self):
+        return OpenCodeProvider()
+
+    def test_full_envelope_stream_parses(self, provider):
+        """The real event shape, envelope fields and all, still parses."""
+        stdout = "\n".join([
+            _oc_event("step_start", part={"id": "prt_0", "type": "step-start"}),
+            _oc_text('[{"task": "ship", "verdict": "ready"}]'),
+            _oc_event("step_finish", part={"id": "prt_2", "type": "step-finish"}),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"task": "ship", "verdict": "ready"}]
+
+    def test_last_message_wins_over_earlier_draft(self, provider):
+        """A draft quoted mid-run must not shadow the final answer.
+
+        OpenCode emits one assistant message per step; recorded sessions reach
+        47. Extracting from the concatenation returns the *first* match, so a
+        narrated draft would be returned instead of the real answer.
+        """
+        stdout = "\n".join([
+            _oc_text('Here is a first pass:\n\n```json\n[{"draft": true}]\n```\n', "prt_1"),
+            _oc_text("Checking the files now...", "prt_2"),
+            _oc_text('[{"draft": false, "final": true}]', "prt_3"),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"draft": False, "final": True}]
+
+    def test_separate_messages_are_not_run_together(self, provider):
+        """Consecutive messages are separated, not glued end-to-start."""
+        stdout = "\n".join([
+            _oc_text("No fenced JSON here", "prt_1"),
+            _oc_text('trailing prose {"answer": 1} more prose', "prt_2"),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == {"answer": 1}
+
+    def test_reasoning_events_do_not_leak(self, provider):
+        """`reasoning` events (only with --thinking) must never be treated as text."""
+        stdout = "\n".join([
+            _oc_event("reasoning", part={
+                "id": "prt_r",
+                "type": "reasoning",
+                "text": '[{"leaked": "chain of thought"}]',
+            }),
+            _oc_text('[{"answer": true}]'),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"answer": True}]
+
+    def test_tool_use_parts_do_not_leak(self, provider):
+        """`tool_use` carries a part whose type is `tool`, not `text`."""
+        stdout = "\n".join([
+            _oc_event("tool_use", part={
+                "id": "prt_t",
+                "type": "tool",
+                "tool": "read",
+                "state": {"output": '[{"leaked": "tool output"}]'},
+            }),
+            _oc_text('[{"answer": true}]'),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is True
+        assert result["data"] == [{"answer": True}]
+
+    def test_error_event_has_no_part_key(self, provider):
+        """`error` is the one event with no `part`; it must not crash the loop."""
+        stdout = _oc_event("error", error={
+            "name": "ProviderAuthError",
+            "data": {"providerID": "google", "message": "API key is missing."},
+        })
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "ProviderAuthError" in result["error"]
+        assert "API key is missing." in result["error"]
+
+    def test_error_event_beats_generic_no_text_message(self, provider):
+        """A reported error is surfaced instead of "No text events found"."""
+        stdout = "\n".join([
+            _oc_event("step_start", part={"id": "prt_0", "type": "step-start"}),
+            _oc_event("error", error={"name": "UnknownError", "data": {"message": "boom"}}),
+        ])
+
+        result = provider.parse_output(stdout, "")
+
+        assert result["success"] is False
+        assert "UnknownError: boom" in result["error"]
+        assert "No text events found" not in result["error"]
+
+    def test_describe_failure_extracts_message(self, provider):
+        """describe_failure recovers the reason from an error event on stdout."""
+        stdout = _oc_event("error", error={
+            "name": "ProviderAuthError",
+            "data": {"providerID": "google", "message": "API key is missing."},
+        })
+
+        assert provider.describe_failure(stdout, "") == "ProviderAuthError: API key is missing."
+
+    def test_describe_failure_none_without_error_event(self, provider):
+        """A clean stream has nothing to add beyond the exit code."""
+        assert provider.describe_failure(_oc_text("[1]"), "") is None
+
+    def test_describe_failure_survives_garbage(self, provider):
+        """Non-JSON stdout must not raise — it is a diagnostic path."""
+        assert provider.describe_failure("not json at all\n\n", "") is None
+        assert provider.describe_failure("", "") is None
+
+    def test_describe_failure_ignores_non_dict_error(self, provider):
+        """A malformed `error` payload yields None rather than a stray string."""
+        assert provider.describe_failure(_oc_event("error", error="boom"), "") is None
+
+    def test_describe_failure_name_only(self, provider):
+        """An error with no nested message still reports its name."""
+        stdout = _oc_event("error", error={"name": "ProviderAuthError"})
+
+        assert provider.describe_failure(stdout, "") == "ProviderAuthError"
+
+    def test_real_capture_auth_error(self, provider):
+        """Verbatim capture from a live opencode 1.18.8 auth failure.
+
+        The CLI wrote this to *stdout* and left stderr empty, exiting 1 --
+        the reason describe_failure exists.
+        """
+        fixture = Path(__file__).parent / "fixtures" / "opencode" / "provider_auth_error.jsonl"
+        stdout = fixture.read_text(encoding="utf-8")
+
+        assert provider.describe_failure(stdout, "") == (
+            "ProviderAuthError: Google Generative AI API key is missing. Pass it using "
+            "the 'apiKey' parameter or the GOOGLE_GENERATIVE_AI_API_KEY environment variable."
+        )
 
 
 class TestKiloCodeProvider:
@@ -2339,6 +2547,39 @@ class TestPromptTransport:
         assert registered == {cls for cls, _, _ in TRANSPORT_CASES}
 
 
+class TestDescribeFailure:
+    """The opt-in hook that recovers a failure reason from a non-zero exit."""
+
+    def test_default_is_none_for_every_provider(self):
+        """Providers that report errors on stderr need no override.
+
+        stderr is already carried in details, so the base implementation adds
+        nothing. Only opencode — which writes errors to stdout and leaves
+        stderr empty — overrides this.
+        """
+        from utils.provider_registry import _PROVIDERS
+
+        overriding = {
+            provider.name
+            for provider in _PROVIDERS.values()
+            if provider.describe_failure("some stdout", "some stderr") is not None
+        }
+
+        assert overriding == set()
+
+    def test_opencode_is_the_only_override(self):
+        """Guards the claim above: opencode does return a reason when there is one."""
+        from utils.provider_registry import _PROVIDERS
+
+        overrides = {
+            name
+            for name, provider in _PROVIDERS.items()
+            if type(provider).describe_failure is not LLMProvider.describe_failure
+        }
+
+        assert overrides == {"opencode"}
+
+
 class TestAgyProvider:
     """Tests for the AgyProvider class."""
 
@@ -2726,7 +2967,8 @@ class TestCodexProvider:
         assert cmd == [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--json",
             "--model",
             "gpt-5.5",
@@ -2743,7 +2985,8 @@ class TestCodexProvider:
             assert cmd == [
                 "codex",
                 "exec",
-                "--full-auto",
+                "--sandbox",
+                "workspace-write",
                 "--json",
                 "--model",
                 "gpt-5.5",
@@ -2759,7 +3002,8 @@ class TestCodexProvider:
         assert cmd == [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--json",
             "--model",
             "foo:bar",
@@ -2772,37 +3016,37 @@ class TestCodexProvider:
         """A model without a colon is passed verbatim with no -c argument."""
         cmd = provider.build_command("p", "gpt-5.5")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5", "p"]
 
     def test_codex_build_command_passthrough_unknown_suffix(self, provider):
         """An unknown suffix is not an effort: model passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:turbo")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:turbo", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:turbo", "p"]
 
     def test_codex_build_command_passthrough_wrong_case_suffix(self, provider):
         """Effort matching is case-sensitive: :HIGH is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:HIGH")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:HIGH", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:HIGH", "p"]
 
     def test_codex_build_command_passthrough_empty_suffix(self, provider):
         """A trailing colon with no effort is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:", "p"]
 
     def test_codex_build_command_passthrough_bare_effort_word(self, provider):
         """A bare effort word as the full model name (no colon) is passed verbatim."""
         cmd = provider.build_command("p", "high")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "high", "p"]
 
     def test_codex_build_command_passthrough_empty_base(self, provider):
         """An empty base before the colon (:high) is passed verbatim, no -c."""
         cmd = provider.build_command("p", ":high")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", ":high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", ":high", "p"]
 
     @patch("shutil.which")
     def test_codex_is_available_true(self, mock_which, provider):
