@@ -469,7 +469,12 @@ class TestMockLLMOutputFormats:
         assert "text" in text_event["part"]
 
     def test_codex_format(self, tmp_path):
-        """Test codex outputs correct NDJSON wire format."""
+        """Test codex outputs correct NDJSON wire format.
+
+        Mirrors real `codex exec --json` output: the reply is nested in an
+        `item.completed` event whose item type is `agent_message`. There is no
+        top-level "text" event — asserting one is what masked issue #2.
+        """
         result = run_mock_llm(
             "codex",
             ["exec", "test prompt"],
@@ -478,17 +483,23 @@ class TestMockLLMOutputFormats:
 
         assert result.returncode == 0
 
-        # codex format: NDJSON events with text type
         lines = result.stdout.strip().split("\n")
-        assert len(lines) >= 1
-
         events = [json.loads(line) for line in lines]
 
-        # Should have text event with part.text
-        text_event = events[0]
-        assert text_event["type"] == "text"
-        assert "part" in text_event
-        assert "text" in text_event["part"]
+        assert events[0]["type"] == "thread.started"
+        assert [e["type"] for e in events] == [
+            "thread.started",
+            "turn.started",
+            "item.completed",
+            "turn.completed",
+        ]
+
+        item = events[2]["item"]
+        assert item["type"] == "agent_message"
+        assert isinstance(item["text"], str) and item["text"]
+
+        # No event carries the reply at the top level.
+        assert not any("text" in e for e in events)
 
     def test_kilocode_format(self, tmp_path):
         """Test kilocode outputs correct wire format."""

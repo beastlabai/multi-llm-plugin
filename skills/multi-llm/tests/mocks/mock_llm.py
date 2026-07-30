@@ -9,7 +9,7 @@ Supported Providers:
     - cursor-agent: {"type": "result", "result": "..."}
     - gemini: {"session_id": "...", "response": "...", "stats": {...}}
     - opencode: NDJSON events (step_start, text, step_finish)
-    - codex: NDJSON events (text, message, content)
+    - codex: NDJSON events (thread.started, turn.started, item.completed, turn.completed)
     - kilocode: Direct JSON output
 
 Environment Variables (Legacy - for backward compatibility):
@@ -311,18 +311,35 @@ def format_opencode_output(content: str) -> str:
 def format_codex_output(content: str) -> str:
     """Format output for codex provider.
 
-    Format: NDJSON events (text type events)
-    The codex parser looks for:
-    - event.type == "text" with event.text or event.part.text
-    - event.type == "message" with event.content
-    - event.type == "content" with event.text
+    Format: NDJSON event stream, mirroring real `codex exec --json` output
+    (captured from codex-cli 0.144.0):
+
+        thread.started -> turn.started -> item.completed(agent_message)
+        -> turn.completed
+
+    The assistant reply lives in the nested item, NOT in a top-level "text"
+    event. Keep this in step with the real CLI: a mock shaped to match the
+    parser instead of the CLI is what let issue #2 ship unnoticed.
     """
     events = [
+        {"type": "thread.started", "thread_id": "mock-thread-1"},
+        {"type": "turn.started"},
         {
-            "type": "text",
-            "part": {
-                "type": "text",
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "agent_message",
                 "text": content,
+            },
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 10,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 12,
+                "reasoning_output_tokens": 0,
             },
         },
     ]
