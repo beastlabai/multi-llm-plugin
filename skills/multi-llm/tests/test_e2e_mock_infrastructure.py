@@ -166,7 +166,7 @@ class TestMockLLMArgumentParsing:
         """Test codex 'exec' subcommand parsing."""
         result = run_mock_llm(
             "codex",
-            ["exec", "--full-auto", "--json", "--model", "gpt-4", "test prompt"],
+            ["exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-4", "test prompt"],
             tmp_dir=tmp_path,
         )
 

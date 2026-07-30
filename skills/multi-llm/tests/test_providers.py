@@ -2726,7 +2726,8 @@ class TestCodexProvider:
         assert cmd == [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--json",
             "--model",
             "gpt-5.5",
@@ -2743,7 +2744,8 @@ class TestCodexProvider:
             assert cmd == [
                 "codex",
                 "exec",
-                "--full-auto",
+                "--sandbox",
+                "workspace-write",
                 "--json",
                 "--model",
                 "gpt-5.5",
@@ -2759,7 +2761,8 @@ class TestCodexProvider:
         assert cmd == [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--json",
             "--model",
             "foo:bar",
@@ -2772,37 +2775,37 @@ class TestCodexProvider:
         """A model without a colon is passed verbatim with no -c argument."""
         cmd = provider.build_command("p", "gpt-5.5")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5", "p"]
 
     def test_codex_build_command_passthrough_unknown_suffix(self, provider):
         """An unknown suffix is not an effort: model passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:turbo")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:turbo", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:turbo", "p"]
 
     def test_codex_build_command_passthrough_wrong_case_suffix(self, provider):
         """Effort matching is case-sensitive: :HIGH is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:HIGH")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:HIGH", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:HIGH", "p"]
 
     def test_codex_build_command_passthrough_empty_suffix(self, provider):
         """A trailing colon with no effort is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "gpt-5.5:", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:", "p"]
 
     def test_codex_build_command_passthrough_bare_effort_word(self, provider):
         """A bare effort word as the full model name (no colon) is passed verbatim."""
         cmd = provider.build_command("p", "high")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", "high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "high", "p"]
 
     def test_codex_build_command_passthrough_empty_base(self, provider):
         """An empty base before the colon (:high) is passed verbatim, no -c."""
         cmd = provider.build_command("p", ":high")
 
-        assert cmd == ["codex", "exec", "--full-auto", "--json", "--model", ":high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", ":high", "p"]
 
     @patch("shutil.which")
     def test_codex_is_available_true(self, mock_which, provider):
