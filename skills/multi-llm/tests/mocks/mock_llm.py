@@ -284,26 +284,50 @@ def format_gemini_output(content: str) -> str:
 def format_opencode_output(content: str) -> str:
     """Format output for opencode provider.
 
-    Format: NDJSON events (step_start, text, step_finish)
+    Mirrors the real `opencode run --format json` stream. Every event carries
+    a millisecond `timestamp` and `sessionID` envelope plus a `part` object;
+    note that the top-level type uses underscores (`step_start`) while
+    `part.type` uses hyphens (`step-start`). Only parts whose `time.end` is
+    set are emitted as `text` events, which is how the CLI excludes the user's
+    own prompt echo and the mid-stream `text-start` marker.
     """
+    now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+    session_id = "ses_mock000000000000000000000"
+    message_id = "msg_mock000000000000000000000"
+
+    def envelope(event_type: str, **rest: object) -> dict:
+        return {"type": event_type, "timestamp": now_ms, "sessionID": session_id, **rest}
+
     events = [
-        {
-            "type": "step_start",
-            "step_id": "mock-step-1",
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        },
-        {
-            "type": "text",
-            "part": {
+        envelope(
+            "step_start",
+            part={
+                "id": "prt_mock_step_start",
+                "sessionID": session_id,
+                "messageID": message_id,
+                "type": "step-start",
+            },
+        ),
+        envelope(
+            "text",
+            part={
+                "id": "prt_mock_text",
+                "sessionID": session_id,
+                "messageID": message_id,
                 "type": "text",
                 "text": content,
+                "time": {"start": now_ms, "end": now_ms},
             },
-        },
-        {
-            "type": "step_finish",
-            "step_id": "mock-step-1",
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        },
+        ),
+        envelope(
+            "step_finish",
+            part={
+                "id": "prt_mock_step_finish",
+                "sessionID": session_id,
+                "messageID": message_id,
+                "type": "step-finish",
+            },
+        ),
     ]
     return "\n".join(json.dumps(event) for event in events)
 
@@ -419,6 +443,12 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         run_parser = subparsers.add_parser("run")
         run_parser.add_argument("--format", dest="output_format", default="json")
         run_parser.add_argument("--model", default="claude-sonnet")
+        # The rest of what OpenCodeProvider.build_command actually emits. The
+        # mock must accept the real argv or the e2e path silently degrades to
+        # an argparse exit-2 that looks like a provider failure.
+        run_parser.add_argument("--print-logs", dest="print_logs", action="store_true")
+        run_parser.add_argument("--log-level", dest="log_level", default=None)
+        run_parser.add_argument("--variant", default=None)
         run_parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         if args.command != "run":
@@ -430,7 +460,11 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         parser = argparse.ArgumentParser(description="Mock codex CLI")
         subparsers = parser.add_subparsers(dest="command")
         exec_parser = subparsers.add_parser("exec")
-        exec_parser.add_argument("--full-auto", action="store_true")
+        # Real codex spells this `-s, --sandbox <SANDBOX_MODE>`. --full-auto is
+        # deliberately NOT accepted: codex 0.146.0 keeps it only as a hidden
+        # deprecation trap, so rejecting it here catches a regression that
+        # reintroduces the old flag.
+        exec_parser.add_argument("-s", "--sandbox", default=None)
         exec_parser.add_argument("--json", action="store_true")
         exec_parser.add_argument("--model", default="gpt-4")
         exec_parser.add_argument("prompt", nargs="?", default="")

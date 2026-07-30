@@ -94,6 +94,24 @@ class LLMProvider(ABC):
         """
         pass
 
+    def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
+        """Extract a human-readable reason from a non-zero-exit invocation.
+
+        ``parse_output`` is only called when the CLI exits 0, so a provider
+        that reports its errors on *stdout* rather than stderr would otherwise
+        have them discarded — the caller sees a bare exit code with empty
+        stderr and nothing to diagnose. Override this to recover the message.
+
+        Args:
+            stdout: The standard output from the failed CLI invocation.
+            stderr: The standard error from the failed CLI invocation.
+
+        Returns:
+            A short description of the failure, or None when the provider has
+            nothing to add beyond the exit code and stderr. None by default.
+        """
+        return None
+
     def get_env(self, model: str) -> Dict[str, str]:
         """Return additional environment variables for subprocess.
 

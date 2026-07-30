@@ -480,6 +480,18 @@ def invoke_with_provider(
         duration = time.time() - start_time
 
         if result.returncode != 0:
+            error_message = f"{provider_name} exited with code {result.returncode}"
+            # Some CLIs report the actual cause on stdout and leave stderr
+            # empty (opencode does this for auth/quota errors), which would
+            # otherwise leave the caller with a bare exit code. A provider
+            # override must never mask the real failure, so it is best-effort.
+            try:
+                reason = provider.describe_failure(result.stdout, result.stderr)
+            except Exception:  # noqa: BLE001 - diagnostics must not raise
+                reason = None
+            if reason:
+                error_message = f"{error_message}: {reason}"
+
             # Save log on failure if requested
             if log_file:
                 _save_log(
@@ -490,13 +502,13 @@ def invoke_with_provider(
                     stderr=result.stderr,
                     returncode=result.returncode,
                     success=False,
-                    error=f"{provider_name} exited with code {result.returncode}",
+                    error=error_message,
                     duration_seconds=duration
                 )
 
             return {
                 "success": False,
-                "error": f"{provider_name} exited with code {result.returncode}",
+                "error": error_message,
                 "error_code": ERROR_SUBPROCESS_FAILED,
                 "details": {
                     "exit_code": result.returncode,
