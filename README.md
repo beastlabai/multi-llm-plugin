@@ -6,7 +6,7 @@
 
 The diversity works on two axes: not only do you get different **LLM models** (Opus, GPT, Gemini, Grok, Composer, ...), you also get different **code harnesses** (Codex, OpenCode, Cursor Agent, Gemini CLI, Grok Build, Cline, goose, Aider, Antigravity CLI, Pi, ...) - each with its own prompting, tooling, and context-gathering behavior. Two harnesses running the *same* model can still surface different findings, so combining both axes widens the crowd further.
 
-📺 **[Watch the video tutorial](https://www.youtube.com/watch?v=_ySRt7rr0r8)** for a walkthrough of the plugin in action.
+📺 **[Short video intro](https://www.youtube.com/watch?v=91lpnxAsyqs)** or **[Full video walkthrough](https://www.youtube.com/watch?v=_ySRt7rr0r8)** of the plugin in action.
 
 Orchestrate **plan reviews, task generation, implementation, and code reviews across multiple LLM providers in parallel** - or ask every model the same free-text question about a plan and get one consolidated answer.
 
@@ -361,7 +361,7 @@ Contributions are welcome - pull requests, bug reports, feature suggestions, and
 
 ## About BeastLab.ai
 
-This plugin is maintained by [BeastLab.ai](https://beastlab.ai) - a frontier lab building multi-agent reasoning models. Beast models run multiple internal agents that deliberate at inference time for deeper reasoning on complex coding, agentic workflows, and research tasks. If you want to try one of the most capable LLM offerings available today, visit [beastlab.ai](https://beastlab.ai) to explore the lineup and integration guide.
+This plugin is maintained by [BeastLab.ai](https://beastlab.ai) - a frontier lab building multi-agent reasoning models.
 
 **Disclaimer:** BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any kind. BeastLab.ai is not affiliated with, endorsed by, or sponsored by any of the code harnesses (Cursor, Claude Code, Codex, OpenCode, Gemini CLI, Grok Build, Kilo Code, Cline, goose, Aider, Antigravity CLI, Pi, etc.) or third-party LLM providers referenced in this project. Trademarks and product names belong to their respective owners.
 
