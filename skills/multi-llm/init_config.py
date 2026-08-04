@@ -570,7 +570,7 @@ def _inject_under_key(body: str, key: str, specs: "list[str]") -> str:
 def _apply_d2a_guard(body, detected_list, models_specs, quick_specs, base_config):
     """Ensure ``defaults.models`` / ``quick_models`` are runnable despite detection.
 
-    The base default panel omits some providers (gemini/opencode), so a machine
+    The base default panel omits some providers (gemini/cline), so a machine
     whose only detected providers are uncovered uncomments ZERO entries → the
     list would inherit base (which references uninstalled providers). When that
     happens for ≥1 detected provider, inject each detected provider's first base
