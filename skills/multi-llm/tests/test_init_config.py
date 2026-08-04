@@ -6,7 +6,7 @@ and UNCOMMENTS their lines in an inert template. This module covers:
 - The toggler (`auto_uncomment` / `_toggle_template`): per-provider sub-block
   uncommenting, `/`-bearing specs, sub-block boundaries, the `default_provider`
   rewrite (first detected in declaration order), and "nothing detected" inertness.
-- The D2a empty-panel guard (inject + notice) for gemini/opencode-only machines.
+- The D2a empty-panel guard (inject + notice) for gemini/cline-only machines.
 - End-to-end init: detection → write → merged resolution through load_config.
 - Re-init `--force` after a detection change (outside-marker preservation).
 - The in-marker `modes:` example safety (never uncommented into orphan items).
@@ -187,8 +187,9 @@ class TestTogglerStateMachine:
 
 
 # ---------------------------------------------------------------------------
-# D2a guard — exercised against the REAL template + base (gemini/opencode are the
-# off-panel providers in the shipped base config).
+# D2a guard — exercised against the REAL template + base (gemini/cline are the
+# off-panel providers in the shipped base config; opencode used to serve here but
+# joined the default panel).
 # ---------------------------------------------------------------------------
 
 
@@ -216,22 +217,22 @@ class TestD2aGuard:
         assert expected == ["gemini:gemini-3-flash"]
         assert any("gemini" in n and "defaults.models" in n for n in notices)
 
-    def test_opencode_only_injects_first_model(self):
-        parsed, _expected, notices = _real_init(["opencode"])
-        assert parsed["defaults"]["models"] == ["opencode:opencode/big-pickle"]
-        assert parsed["defaults"]["quick_models"] == ["opencode:opencode/big-pickle"]
-        assert any("opencode" in n for n in notices)
+    def test_cline_only_injects_first_model(self):
+        parsed, _expected, notices = _real_init(["cline"])
+        assert parsed["defaults"]["models"] == ["cline:openrouter/z-ai/glm-5.2"]
+        assert parsed["defaults"]["quick_models"] == ["cline:openrouter/z-ai/glm-5.2"]
+        assert any("cline" in n for n in notices)
 
     def test_multi_offpanel_injects_both_and_names_both(self):
-        parsed, _expected, notices = _real_init(["gemini", "opencode"])
+        parsed, _expected, notices = _real_init(["gemini", "cline"])
         assert parsed["defaults"]["models"] == [
             "gemini:gemini-3-flash",
-            "opencode:opencode/big-pickle",
+            "cline:openrouter/z-ai/glm-5.2",
         ]
         # quick_models gets only the FIRST detected provider's first model.
         assert parsed["defaults"]["quick_models"] == ["gemini:gemini-3-flash"]
         models_notice = next(n for n in notices if "defaults.models" in n)
-        assert "gemini" in models_notice and "opencode" in models_notice
+        assert "gemini" in models_notice and "cline" in models_notice
 
     def test_covered_provider_present_no_injection(self):
         # {gemini, claude-code}: claude-code:fable:high is already in the panel, so
@@ -242,28 +243,24 @@ class TestD2aGuard:
 
     def test_notice_text_single_vs_multi(self):
         _p1, _e1, n1 = _real_init(["gemini"])
-        _p2, _e2, n2 = _real_init(["gemini", "opencode"])
+        _p2, _e2, n2 = _real_init(["gemini", "cline"])
         single = next(n for n in n1 if "defaults.models" in n)
         multi = next(n for n in n2 if "defaults.models" in n)
         assert "{gemini}" in single
-        assert "{gemini, opencode}" in multi
+        assert "{gemini, cline}" in multi
 
     def test_injection_does_not_corrupt_provider_catalogs(self):
         # Regression: D2a inject must scope to defaults.models / quick_models and
         # NEVER splice the prefixed spec into a detected provider's OWN models
         # catalog (whose `models:` key is uncommented at a deeper indent). The
         # provider blocks must stay BARE model ids after D2a.
-        opencode_catalog = [
-            "opencode/big-pickle",
-            "opencode/sonnet",
-            "opencode/deepseek-v4-flash-free",
-            "opencode/hy3-free",
-            "opencode/nemotron-3-ultra-free",
-            "google/gemini-3.1-pro-preview",
-            "openai/gpt-5.5",
+        cline_catalog = [
+            "openrouter/z-ai/glm-5.2",
+            "openrouter/moonshotai/kimi-k2.7-code",
+            "openrouter/openai/gpt-5.5",
         ]
         for detected, catalogs in (
-            (["opencode"], {"opencode": opencode_catalog}),
+            (["cline"], {"cline": cline_catalog}),
             (
                 ["gemini"],
                 {
@@ -277,7 +274,7 @@ class TestD2aGuard:
                 },
             ),
             (
-                ["gemini", "opencode"],
+                ["gemini", "cline"],
                 {
                     "gemini": [
                         "gemini-3-flash",
@@ -286,7 +283,7 @@ class TestD2aGuard:
                         "gemini-2.5-flash",
                         "gemini-2.5-pro",
                     ],
-                    "opencode": opencode_catalog,
+                    "cline": cline_catalog,
                 },
             ),
         ):
