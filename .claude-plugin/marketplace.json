@@ -10,7 +10,7 @@
     {
       "name": "multi-llm",
       "source": "./",
-      "description": "Multi-LLM orchestration: plan review, task generation, implementation, and code review across multiple LLM providers in parallel.",
+      "description": "Multi-LLM orchestration: parallel plan review, task generation, implementation, and code review across 12 coding harnesses (Codex, Cursor, opencode, pi, aider, Antigravity…).",
       "category": "workflow",
       "keywords": [
         "multi-llm",
