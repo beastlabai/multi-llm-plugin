@@ -12,7 +12,7 @@ it is handled entirely by this instruction file routing to the standalone
 supported provider CLIs (claude-code→`claude`, cursor-agent→`cursor-agent`,
 gemini→`gemini`, grok→`grok`, opencode→`opencode`, codex→`codex`,
 kilocode→`kilocode`, cline→`cline`, goose→`goose`, aider→`aider`, agy→`agy`,
-pi→`pi`),
+pi→`pi`, muse→`muse`),
 copies an **inert template** to the target path, then **uncomments** the lines
 that belong to the detected providers — their full `providers:` sub-blocks
 (command, timeouts, concurrency, `models:` list), the `defaults.models` /
@@ -71,7 +71,7 @@ Claude Code, a plain terminal, or CI.
 
 - **`default_provider`** is set to the **first detected provider in base
   declaration order** (claude-code, cursor-agent, gemini, grok, opencode,
-  codex, kilocode, cline, goose, aider, agy, pi). So with both claude-code and cursor-agent installed it becomes
+  codex, kilocode, cline, goose, aider, agy, pi, muse). So with both claude-code and cursor-agent installed it becomes
   `claude-code`. When **nothing** is detected it is left commented and inherits
   the base default.
 - **Nothing detected → no error.** With no provider CLIs on `PATH` the script

@@ -254,6 +254,25 @@ providers:
       - "Claude Opus 4.6 (Thinking)"
       - "GPT-OSS 120B (Medium)"
 
+  muse:
+    command: muse
+    default_timeout: 1800
+    supports_json_output: true  # Uses --json (JSONL event stream)
+    # Meta's Muse Code harness. Auth is a stored provider credential
+    # (`muse login` / `muse auth set`), not an env var.
+    # ":effort" suffix (e.g. muse-spark-1.2:xhigh) -> "--reasoning-effort <level>".
+    # Valid: none, minimal, low, medium, high, xhigh, ultra. GOTCHA: muse
+    # hard-errors on any other value, so an unknown suffix stays part of the
+    # model name and fails model resolution instead. WITHOUT a suffix muse does
+    # not apply the default from --help; it reads reasoning_effort from
+    # ~/.config/muse/settings.json.
+    # Timeout is generous on purpose: muse retries a failing provider call up
+    # to 10 times with exponential backoff (a 429 alone waits 60s), so an
+    # unfunded account burns minutes before reporting the 402.
+    models:
+      - muse-spark-1.2
+      - muse-spark-1.2:xhigh
+
   pi:
     command: pi
     default_timeout: 1200
@@ -301,6 +320,7 @@ defaults:
     #- aider:openrouter/z-ai/glm-5.2
     #- "agy:Gemini 3.1 Pro (High)"
     #- pi:openrouter/z-ai/glm-5.2
+    #- muse:muse-spark-1.2:xhigh
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models

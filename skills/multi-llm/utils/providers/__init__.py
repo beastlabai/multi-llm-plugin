@@ -10,6 +10,7 @@ from .gemini import GeminiProvider
 from .goose import GooseProvider
 from .grok import GrokProvider
 from .kilocode import KiloCodeProvider
+from .muse import MuseProvider
 from .opencode import OpenCodeProvider
 from .pi import PiProvider
 
@@ -24,6 +25,7 @@ __all__ = [
     "GooseProvider",
     "GrokProvider",
     "KiloCodeProvider",
+    "MuseProvider",
     "OpenCodeProvider",
     "PiProvider",
 ]

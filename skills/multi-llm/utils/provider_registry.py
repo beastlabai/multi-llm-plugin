@@ -39,6 +39,7 @@ from .providers.gemini import GeminiProvider
 from .providers.goose import GooseProvider
 from .providers.grok import GrokProvider
 from .providers.kilocode import KiloCodeProvider
+from .providers.muse import MuseProvider
 from .providers.opencode import OpenCodeProvider
 from .providers.pi import PiProvider
 from .providers.base import LLMProvider
@@ -55,6 +56,7 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "goose": GooseProvider(),
     "grok": GrokProvider(),
     "kilocode": KiloCodeProvider(),
+    "muse": MuseProvider(),
     "opencode": OpenCodeProvider(),
     "pi": PiProvider(),
 }

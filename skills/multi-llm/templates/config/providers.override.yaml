@@ -255,6 +255,14 @@
 #       - Claude Opus 4.6 (Thinking)
 #       - GPT-OSS 120B (Medium)
 
+#   muse:
+#     command: muse
+#     default_timeout: 1800
+#     supports_json_output: true
+#     models:
+#       - muse-spark-1.2
+#       - muse-spark-1.2:xhigh
+
 #   pi:
 #     command: pi
 #     default_timeout: 1200
