@@ -328,7 +328,7 @@ class TestEndToEndInit:
         assert written["defaults"]["models"] == [
             "cursor-agent:composer-2.5",
             "cursor-agent:gemini-3.6-flash-high",
-            "cursor-agent:grok-4.5-xhigh",
+            "cursor-agent:cursor-grok-4.5-high",
             "claude-code:fable:high",
         ]
 
