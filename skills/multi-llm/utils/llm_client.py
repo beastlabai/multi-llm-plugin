@@ -357,7 +357,8 @@ def invoke_with_provider(
     model_spec: str,
     timeout: Optional[int] = None,
     log_file: Optional[Union[str, Path]] = None,
-    cwd: Optional[str] = None
+    cwd: Optional[str] = None,
+    prompt_transport: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -373,6 +374,14 @@ def invoke_with_provider(
         timeout: Optional timeout override in seconds. Uses provider default
                 if not specified.
         log_file: Optional path to save full output log for debugging.
+        prompt_transport: Optional non-argv transport override (D2d) —
+            ``"stdin"`` writes the prompt to the child's stdin and omits it from
+            argv, so no part of it is measured against the Windows
+            command-line cap. Defaults to the adapter's ``prompt_transport``
+            (``"argv"`` for every adapter today), keeping existing invocations
+            byte-identical. Refused with SUBPROCESS_FAILED when the adapter does
+            not declare support, rather than silently falling back to argv and
+            re-introducing the cap the caller was avoiding.
 
     Returns:
         Dict with 'success' key and either:
@@ -420,11 +429,23 @@ def invoke_with_provider(
     # Build command using provider, resolving cmd[0] to an absolute path
     # (and past any Windows .cmd/.bat npm shim, to a sibling .exe or the
     # shim's `node <cli.js>` target — see _resolve_executable).
-    cmd = provider.build_command(prompt, model)
+    transport = prompt_transport or provider.prompt_transport
+    if transport != "argv" and not provider.supports_prompt_transport(transport):
+        return {
+            "success": False,
+            "error": (
+                f"{provider_name} does not support the {transport!r} prompt "
+                f"transport (supported: "
+                f"{', '.join(provider.supported_prompt_transports)})"
+            ),
+            "error_code": ERROR_SUBPROCESS_FAILED,
+            "details": {"provider": provider_name, "model": model},
+        }
+    cmd, stdin_text = provider.build_command_for_transport(prompt, model, transport)
     launcher, is_batch_shim = _resolve_executable(cmd[0])
     cmd = [*launcher, *cmd[1:]]
 
-    if _IS_WINDOWS and provider.prompt_transport == "argv":
+    if _IS_WINDOWS and transport == "argv":
         # Interim safeguard until the explicit `cmd /c` escaping path lands
         # (launch-strategy step (c)): a batch shim means cmd.exe reparses
         # the command line, so refuse metacharacter-bearing prompts rather
@@ -472,10 +493,16 @@ def invoke_with_provider(
             timeout=effective_timeout,
             env=env,
             cwd=cwd,
-            # No provider reads stdin (prompts are passed via argv); closing it
+            # Under the argv transport no provider reads stdin, and closing it
             # prevents CLIs that poll stdin for piped input (e.g. agy) from
             # blocking forever when the orchestrator's stdin is a non-EOF pipe.
-            stdin=subprocess.DEVNULL
+            # Under the stdin transport the prompt IS the child's stdin, and it
+            # is closed at EOF once written, which those CLIs treat the same way.
+            **(
+                {"input": stdin_text}
+                if stdin_text is not None
+                else {"stdin": subprocess.DEVNULL}
+            ),
         )
         duration = time.time() - start_time
 

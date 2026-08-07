@@ -10,19 +10,48 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Import the invoke_for_json utility
 try:
     from .llm_client import invoke_for_json
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .cli_common import reaggregate_command_for_script as build_reaggregate_command
+    from .subagent_prompts import build_validation_prompt
+    from .subagent_tasks import (
+        PromptBudget,
+        build_inputs,
+        make_task,
+        make_task_file,
+        split_indices,
+    )
 except ImportError:
     from utils.llm_client import invoke_for_json
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.cli_common import (
         reaggregate_command_for_script as build_reaggregate_command,
     )
+    from utils.subagent_prompts import build_validation_prompt
+    from utils.subagent_tasks import (
+        PromptBudget,
+        build_inputs,
+        make_task,
+        make_task_file,
+        split_indices,
+    )
+
+
+#: The shared-context ceiling for a validation prompt. Excerpted **once per
+#: phase** and the identical excerpt reused across every batch: per-batch
+#: re-truncation would both bloat the file and break prompt determinism.
+VALIDATION_CONTEXT_LIMIT = 30000
+
+
+def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
+    """Return the one shared context excerpt a phase's batches all embed."""
+    if len(context) <= limit:
+        return context
+    return context[:limit] + "\n\n[... truncated ...]"
 
 
 # Error type constants - ALWAYS use these constants, never raw strings
@@ -864,6 +893,53 @@ except ImportError:
     )
 
 
+def build_validation_batch_records(
+    groups: List[Dict[str, Any]],
+    group_indices: List[str],
+    group_ids: List[str],
+) -> List[Dict[str, Any]]:
+    """Build the suggestion records one validation batch embeds in its prompt.
+
+    The records travel as *values* inside the prompt (``context_mode: inline``),
+    never as a path to ``grouped.json``, because a headless runner is not
+    guaranteed a workspace-read tool.
+
+    Args:
+        groups: All groups for the phase.
+        group_indices: This batch's indices into ``groups``.
+        group_ids: ``group_ids[i]`` is the stable id of ``groups[i]``.
+
+    Returns:
+        One record per group in the batch, carrying the global ``index`` and the
+        ``group_hash`` the subagent must echo back.
+    """
+    records: List[Dict[str, Any]] = []
+    for idx in group_indices:
+        group = groups[idx]
+        group_dict = group.to_dict() if hasattr(group, 'to_dict') else group
+        records.append({
+            "index": idx,
+            # Both spellings carry the same value: the prompt tells the subagent
+            # to copy `group_hash`, while `merge_batched_validation_results`
+            # accepts either, so no reader can miss it.
+            "group_hash": group_ids[idx],
+            "group_id": group_ids[idx],
+            "theme": group_dict.get("theme", "Unknown"),
+            "category": group_dict.get("category", "unknown"),
+            "models": group_dict.get("models", []),
+            "suggestions": [
+                {
+                    "title": s.get("title", ""),
+                    "desc": s.get("desc", ""),
+                    "importance": s.get("importance", "medium"),
+                    "type": s.get("type", "unknown"),
+                }
+                for s in group_dict.get("suggestions", [])
+            ],
+        })
+    return records
+
+
 def prepare_batched_validation_tasks(
     groups: List[Dict[str, Any]],
     context: str,
@@ -874,6 +950,10 @@ def prepare_batched_validation_tasks(
     orchestrator: str = "review_plan_orchestrator.py",
     base_ref: str = "",
     tasks_file: str = "",
+    kind: str = "validation",
+    context_label: str = "Plan content",
+    extra_instructions: str = "",
+    prompt_budget: Optional[PromptBudget] = None,
 ) -> Dict[str, Any]:
     """
     Prepare batched validation tasks for sequential subagent processing.
@@ -881,44 +961,67 @@ def prepare_batched_validation_tasks(
     Instead of creating one task with all groups, this creates multiple batch
     tasks that can be processed sequentially by subagents with fresh context.
 
-    This function uses a reference-based approach: instead of embedding full
-    prompts in the validation_tasks.json file, it stores references to the
-    grouped.json and plan files. Subagents read these files directly and
-    construct their own understanding.
+    Each batch carries a **complete prompt** (D2/D2f). This deliberately
+    reverses this function's original reference-based design, in which the file
+    stored only references to ``grouped.json`` and the plan and a Claude reading
+    the instruction markdown assembled the prompt itself. Prompt-in-JSON is what
+    makes one task file executable by a native-subagent host *and* by the Python
+    executor with byte-identical prompt text; resolving the references at
+    dispatch time would only fix the executor path, since a native host has no
+    Python at dispatch time. The reference-based approach survives as
+    ``context_mode: workspace-read`` — declared in the task and capability-gated,
+    instead of implicit in who reads the file.
+
+    The shared context is excerpted **once** and the identical excerpt reused
+    across batches: per-batch re-truncation would break prompt determinism.
 
     Args:
         groups: List of suggestion groups to validate
-        context: Context for validation (plan content or diff) - no longer embedded
+        context: Context for validation (plan content or diff); excerpted once
+            and embedded in every batch prompt
         output_dir: Directory where subagents should write batch results
-        plan_file: Path to the plan file for reference
-        model: Model hint (not used by Claude Code, but preserved for reference)
+        plan_file: Path to the plan file (provenance and the ``inputs`` hash;
+            never interpolated into prompt text)
+        model: Model hint, preserved verbatim (free-form model string or ``auto``)
         max_per_batch: Maximum groups per batch for normal items
         orchestrator: Name of the orchestrator script for reaggregate command
-        base_ref: Git ref for code diff context (empty string for plan reviews)
+        base_ref: Git ref for code diff context (empty string for plan reviews);
+            recorded as ``inputs.diff_base``
         tasks_file: Path to the tasks file for review-tasks validation context
+        kind: ``"validation"`` or ``"revalidation"`` — the task ``kind``
+        context_label: What the embedded context is (``"Plan content"``, …)
+        extra_instructions: Optional capability-neutral phase guidance appended
+            to every batch prompt (e.g. the code-review issue-location guidance)
+        prompt_budget: Optional D2d budget. Over-budget batches are split; a
+            single group that still does not fit fails loudly rather than being
+            truncated.
 
     Returns:
         Dict with:
-        - batches: List of batch task dicts with group_indices, output_path, etc.
+        - tasks / batches: the materialized tasks (same objects under both keys)
+        - tasks_schema_version, kind, inputs: the D2g file envelope
         - total_batches: Number of batches
         - batching_stats: Statistics about the batching
-        - grouped_file: Path to grouped.json for subagent to read
-        - plan_file: Path to plan file for subagent to read
-        - phase_dir: Directory for this phase
-        - reaggregate_command: Command to run after all batches complete
-        - base_ref: Git ref for code diff context
+        - grouped_file, plan_file, phase_dir, reaggregate_command, base_ref
     """
+    grouped_file = str(Path(output_dir) / "grouped.json")
+    inputs = build_inputs(
+        plan_file=plan_file,
+        grouped_file=grouped_file,
+        diff_base=base_ref,
+    )
+
     if not groups:
-        return {
-            "batches": [],
+        empty = make_task_file(kind=kind, tasks=[], inputs=inputs, task_list_key="batches", extra={
             "total_batches": 0,
             "batching_stats": estimate_validation_batching_stats([]),
-            "grouped_file": str(Path(output_dir) / "grouped.json"),
+            "grouped_file": grouped_file,
             "plan_file": plan_file,
             "phase_dir": output_dir,
             "model_hint": model,
             "base_ref": base_ref,
-        }
+        })
+        return empty
 
     # Create batches
     validation_batches = batch_validation_groups(
@@ -936,22 +1039,59 @@ def prepare_batched_validation_tasks(
             group_dict = group
         group_ids.append(generate_group_id(group_dict))
 
-    # Build batch task for each batch - reference-based (no embedded prompts)
-    batch_tasks = []
-    for batch in validation_batches:
-        output_path = Path(output_dir) / f"validation_batch_{batch.batch_index}.json"
+    # The one shared excerpt, reused verbatim by every batch below.
+    shared_context = excerpt_context(context)
+    budget = prompt_budget or PromptBudget(None)
 
-        # Include group_ids parallel to group_indices for stable matching
-        batch_group_ids = [group_ids[idx] for idx in batch.group_indices]
+    # Work list of (group_indices, is_high_priority). A batch whose materialized
+    # prompt exceeds the D2d budget is split in half and re-queued; a single
+    # group that still does not fit raises (never truncated).
+    pending: List[Tuple[List[int], bool]] = [
+        (list(batch.group_indices), batch.is_high_priority)
+        for batch in validation_batches
+    ]
 
-        batch_tasks.append({
-            "batch_index": batch.batch_index,
-            "group_indices": batch.group_indices,
-            "group_ids": batch_group_ids,
-            "groups_count": batch.size,
-            "is_high_priority": batch.is_high_priority,
-            "output_path": str(output_path),
-        })
+    batch_tasks: List[Dict[str, Any]] = []
+    next_index = 0
+    while pending:
+        indices, is_high = pending.pop(0)
+        records = build_validation_batch_records(groups, indices, group_ids)
+        prompt = build_validation_prompt(
+            plan_excerpt=shared_context,
+            suggestion_records=records,
+            kind=kind,
+            context_label=context_label,
+            extra_instructions=extra_instructions,
+        )
+        if not budget.fits(prompt):
+            first, second = split_indices(indices)
+            if second:
+                pending.insert(0, (second, is_high))
+                pending.insert(0, (first, is_high))
+                continue
+            # Unsplittable and over budget: fail loudly with the actionable fix.
+            budget.resolution(prompt, splittable=False)
+
+        output_name = f"validation_batch_{next_index}.json"
+        batch_tasks.append(make_task(
+            kind=kind,
+            task_id=f"{kind}-batch-{next_index}",
+            prompt=prompt,
+            output_name=output_name,
+            inputs=inputs,
+            phase_dir=output_dir,
+            model_hint=model,
+            extra={
+                "batch_index": next_index,
+                "group_indices": indices,
+                "group_ids": [group_ids[idx] for idx in indices],
+                "groups_count": len(indices),
+                "is_high_priority": is_high,
+                "plan_file": plan_file,
+                "grouped_file": grouped_file,
+            },
+        ))
+        next_index += 1
 
     stats = estimate_validation_batching_stats(groups, max_per_batch)
 
@@ -962,11 +1102,10 @@ def prepare_batched_validation_tasks(
     # Bash(uv:*) allow rule keeps matching.
     reaggregate_command = build_reaggregate_command(orchestrator, plan_file)
 
-    result = {
-        "batches": batch_tasks,
+    extra: Dict[str, Any] = {
         "total_batches": len(batch_tasks),
         "batching_stats": stats,
-        "grouped_file": str(Path(output_dir) / "grouped.json"),
+        "grouped_file": grouped_file,
         "plan_file": plan_file,
         "phase_dir": output_dir,
         "reaggregate_command": reaggregate_command,
@@ -974,8 +1113,14 @@ def prepare_batched_validation_tasks(
         "base_ref": base_ref,
     }
     if tasks_file:
-        result["tasks_file"] = tasks_file
-    return result
+        extra["tasks_file"] = tasks_file
+    return make_task_file(
+        kind=kind,
+        tasks=batch_tasks,
+        inputs=inputs,
+        task_list_key="batches",
+        extra=extra,
+    )
 
 
 def merge_batched_validation_results(
@@ -1225,19 +1370,29 @@ def prepare_batched_revalidation_tasks(
             item_indices.append(i)
 
     if not items_to_revalidate:
-        return {
-            "batches": [],
-            "total_batches": 0,
-            "items_to_revalidate": 0,
-            "item_indices": [],
-            "original_validation": validation_results,
-            "batching_stats": estimate_validation_batching_stats([]),
-            "grouped_file": str(Path(output_dir) / "grouped.json"),
-            "plan_file": plan_file,
-            "phase_dir": output_dir,
-            "model_hint": model,
-            "base_ref": base_ref,
-        }
+        grouped_file = str(Path(output_dir) / "grouped.json")
+        return make_task_file(
+            kind="revalidation",
+            tasks=[],
+            inputs=build_inputs(
+                plan_file=plan_file,
+                grouped_file=grouped_file,
+                diff_base=base_ref,
+            ),
+            task_list_key="batches",
+            extra={
+                "total_batches": 0,
+                "items_to_revalidate": 0,
+                "item_indices": [],
+                "original_validation": validation_results,
+                "batching_stats": estimate_validation_batching_stats([]),
+                "grouped_file": grouped_file,
+                "plan_file": plan_file,
+                "phase_dir": output_dir,
+                "model_hint": model,
+                "base_ref": base_ref,
+            },
+        )
 
     # Create batched tasks for the subset
     batched_tasks = prepare_batched_validation_tasks(
@@ -1248,7 +1403,8 @@ def prepare_batched_revalidation_tasks(
         model=model,
         max_per_batch=max_per_batch,
         orchestrator=orchestrator,
-        base_ref=base_ref
+        base_ref=base_ref,
+        kind="revalidation",
     )
 
     # Add mapping info for merging back

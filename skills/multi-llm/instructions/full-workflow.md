@@ -144,7 +144,7 @@ Task tool call:
        - Each task should modify 1-5 files maximum
        - Identify dependencies between tasks (use explicit depends_on arrays)
        - Define clear acceptance criteria for each task
-       - Set appropriate subagent_type:
+       - Set appropriate executor_role:
          - general-purpose: All implementation tasks (default)
          - human: Manual steps requiring user action
     4. Write the tasks JSON to a temporary file using the Write tool (NOT Bash):
@@ -172,7 +172,7 @@ Task tool call:
                "files_to_create": [],
                "acceptance_criteria": [],
                "estimated_complexity": "low|medium|high",
-               "subagent_type": "general-purpose"
+               "executor_role": "agent"
              }
            ]
          }

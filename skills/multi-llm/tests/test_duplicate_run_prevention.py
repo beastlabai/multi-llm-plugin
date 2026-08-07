@@ -608,7 +608,9 @@ class TestPartialCompletionGuard:
         """Exit code 3 when validation_tasks.json exists but no batch files."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"tasks_schema_version": 2, "kind": "validation",
+                         "inputs": {"plan_sha256": "", "grouped_sha256": ""},
+                         "batches": []}), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -665,7 +667,9 @@ class TestPartialCompletionGuard:
         """--force bypasses the secondary partial-completion guard."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"tasks_schema_version": 2, "kind": "validation",
+                         "inputs": {"plan_sha256": "", "grouped_sha256": ""},
+                         "batches": []}), encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -686,7 +690,9 @@ class TestPartialCompletionGuard:
         """Auto-heals legacy state when report + validation exist but phase not marked."""
         phase_dir = get_phase_dir(temp_plan, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"batches": []}), encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text(json.dumps({"tasks_schema_version": 2, "kind": "validation",
+                         "inputs": {"plan_sha256": "", "grouped_sha256": ""},
+                         "batches": []}), encoding="utf-8")
         (phase_dir / "validation.json").write_text(json.dumps({"groups": []}), encoding="utf-8")
         (phase_dir / "report.md").write_text("# Report\n\nNo issues found.", encoding="utf-8")
 

@@ -63,6 +63,13 @@ from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
 )
+from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
+from utils.subagent_tasks import (
+    TaskFileError,
+    build_inputs,
+    read_task_file,
+    write_salvage_task_file,
+)
 from utils.interactive import resolve_models
 from utils.provider_registry import (
     get_all_model_specs,
@@ -341,8 +348,10 @@ def prepare_fixes_for_subagents(
             "description": issue.get("desc") or issue.get("description", "No description provided"),
             "location_hints": location_hints,
             "plan_path": str(plan_path.absolute()),
-            # subagent_type defaults to general-purpose
-            # Claude Code determines appropriate type based on issue context
+            # D2h: executor_role is the host-neutral routing field every reader
+            # branches on; subagent_type rides along as optional Claude-only
+            # metadata for hosts whose native Task tool requires the parameter.
+            "executor_role": "agent",
             "subagent_type": "general-purpose",
             "status": "pending"
         }
@@ -464,6 +473,31 @@ def update_plan_with_fixes(
         print(f"Updated plan with fix results: {plan_path}")
     except Exception as e:
         print(f"ERROR: Failed to update plan file: {e}")
+
+
+def emit_salvage_task(
+    salvage_request: Dict,
+    salvage_path: Path,
+    phase_dir: Path,
+    plan_path: Path,
+) -> None:
+    """Materialize the salvage task beside a just-written salvage request.
+
+    The prompt is assembled in Python (D2/D2i) rather than by a Claude reading
+    ``references/salvage-handling.md``, so any invoker can run it. Best-effort:
+    the parse error that produced the request must not be masked by a task-file
+    problem, and a request with no task file is still recoverable by hand.
+    """
+    try:
+        task_path = write_salvage_task_file(
+            salvage_request=salvage_request,
+            salvage_request_path=str(salvage_path),
+            phase_dir=str(phase_dir),
+            plan_file=str(plan_path),
+        )
+        print(f"[SALVAGE_TASK] {task_path}")
+    except Exception as task_error:  # noqa: BLE001 - diagnostics only
+        print(f"Warning: could not materialize salvage task: {task_error}")
 
 
 async def run_single_review(
@@ -590,6 +624,7 @@ async def run_single_review(
             with open(salvage_path, 'w', encoding='utf-8') as f:
                 json.dump(salvage_request, f, indent=2)
             print(f"[SALVAGE_NEEDED] {salvage_path}")
+            emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
 
         return False, None, error_msg
 
@@ -629,6 +664,7 @@ async def run_single_review(
             json.dump(salvage_request, f, indent=2)
 
         print(f"[SALVAGE_NEEDED] {salvage_path}")
+        emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
         return False, None, f"Could not extract JSON from response: {raw_preview}"
     else:
         return False, None, f"Expected JSON array, got {type(output_data).__name__}"
@@ -1160,8 +1196,21 @@ async def reaggregate_from_existing_files(
         # Check if we're merging validation batch results
         if not args.skip_validation and validation_tasks_path.exists():
             print("\nMerging validation batch results...")
-            with open(validation_tasks_path, 'r', encoding='utf-8') as f:
-                batch_metadata = json.load(f)
+            # Same resume guard as the plan-review path: a v1 file (no prompts to
+            # recover) or moved inputs both mean "re-materialize this phase", not
+            # "interpret it anyway". Exit 3, nothing dispatched.
+            try:
+                batch_metadata = read_task_file(
+                    str(validation_tasks_path),
+                    phase_dir=str(phase_dir),
+                    current_inputs=build_inputs(
+                        plan_file=str(plan_path),
+                        grouped_file=str(grouped_path),
+                    ),
+                )
+            except TaskFileError as task_file_error:
+                print(f"ERROR: {task_file_error}", file=sys.stderr)
+                return 3
 
             validation_results = merge_batched_validation_results(
                 output_dir=str(phase_dir),
@@ -1192,6 +1241,7 @@ async def reaggregate_from_existing_files(
                 model=args.validation_model,
                 orchestrator="code_review_orchestrator.py",
                 base_ref=base_ref,
+                extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
             )
 
             # Save validation task instructions
@@ -1324,7 +1374,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     print("ERROR: Partial completion detected for 'code-review'.")
                     print(f"  validation_tasks.json exists but validation has not started.")
-                    print(f"  Resume validation from the instruction file steps.")
+                    print(f"  Resume it: for each task in that file, run task.prompt as a")
+                    print(f"  subagent and write the JSON it returns to task.output_path.")
                     sys.exit(3)
         elif grouped_path.exists():
             print("ERROR: Partial completion detected for 'code-review'.")
@@ -1537,6 +1588,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     model=args.validation_model,
                     orchestrator="code_review_orchestrator.py",
                     base_ref=base_ref,
+                    extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
                 )
 
                 # Save validation task instructions
@@ -1607,13 +1659,16 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print(f"{'='*60}")
         print(f"\nValid issues to fix: {valid_count}")
         print(f"Fix tasks file: {fix_tasks_path}")
-        print("\nClaude Code MUST NOW:")
+        # Host-neutral: the invoker runs task.prompt and persists what comes
+        # back. No agent-type vocabulary, which is also what keeps the
+        # forbidden-token lint green on printed text.
+        print("\nThe invoker MUST NOW:")
         print("1. Read the fix tasks JSON file")
-        print("2. For EACH task, spawn a Task subagent using the 'subagent_type' field")
-        print("3. DO NOT implement fixes manually - DELEGATE to subagents")
+        print("2. For each task, run task.prompt as a subagent, then write the")
+        print("   JSON it returns to task.output_path")
+        print("3. DO NOT implement fixes manually - delegate every task")
         print("4. After all fixes complete, update the code review file with results")
         print("5. Update the original plan file to reference the code review")
-        print("\nSubagent routing: all batches use 'general-purpose' subagent_type")
         print(f"{'='*60}\n")
 
     # Check for salvage requests and print reaggregate command

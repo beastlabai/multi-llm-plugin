@@ -498,6 +498,73 @@ class SkillRunner:
                 duration_seconds=duration,
             )
 
+    @staticmethod
+    def simulate_subagents(
+        task_file: Path,
+        result_for: Optional[Any] = None,
+    ) -> List[Path]:
+        """Play the invoker half of the D3a print/persist contract for a task file.
+
+        A materialized task file (``tasks_schema_version: 2``) carries one
+        complete task per entry: the invoker runs ``task.prompt`` as a subagent
+        and writes the JSON it returns to ``task.output_path``. This helper does
+        the writing so an e2e test can drive the post-materialization half of a
+        phase without a real subagent — it never invents a prompt, which is the
+        whole point of materializing them.
+
+        Args:
+            task_file: Path to ``validation_tasks.json`` and friends.
+            result_for: Optional ``task -> result`` callable. The default returns
+                a validation-shaped document echoing each ``group_hash`` as
+                ``valid``, which is what the batched-validation merge expects.
+
+        Returns:
+            The list of files written, in task order.
+        """
+        document = json.loads(task_file.read_text(encoding="utf-8"))
+        if document.get("tasks_schema_version") != 2:
+            raise AssertionError(
+                f"{task_file} is not a tasks_schema_version 2 task file "
+                f"(found {document.get('tasks_schema_version')!r}); a v1 file "
+                f"carries no prompts to run."
+            )
+        tasks = document.get("tasks")
+        if tasks is None:
+            tasks = document.get("batches", [])
+
+        def _default(task: Dict[str, Any]) -> Any:
+            return {
+                "groups": [
+                    {
+                        "group_index": index,
+                        "group_hash": group_id,
+                        "status": "valid",
+                        "reason": "simulated",
+                        "confidence": 1.0,
+                    }
+                    for index, group_id in zip(
+                        task.get("group_indices", []), task.get("group_ids", [])
+                    )
+                ],
+                "metadata": {
+                    "model": "harness",
+                    "timestamp": "1970-01-01T00:00:00",
+                    "schema_version": "2.1",
+                },
+            }
+
+        builder = result_for or _default
+        written: List[Path] = []
+        phase_dir = task_file.parent
+        for task in tasks:
+            assert task.get("prompt"), f"task {task.get('task_id')} carries no prompt"
+            output_path = phase_dir / task["output_name"]
+            output_path.write_text(
+                json.dumps(builder(task), indent=2), encoding="utf-8"
+            )
+            written.append(output_path)
+        return written
+
     def set_scenario(self, scenario_path: Path) -> None:
         """Update the scenario path for subsequent runs.
 

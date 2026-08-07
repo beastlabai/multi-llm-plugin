@@ -485,8 +485,12 @@ def format_task_for_output(
         "title": task.title,
         "description": task.description,
         "prompt": build_task_prompt(task, plan_preamble, plan_path, all_tasks=all_tasks),
+        # D2h: `executor_role` is what every reader branches on; `subagent_type`
+        # rides along as optional Claude-only metadata for hosts whose native
+        # Task tool requires the parameter.
+        "executor_role": task.executor_role,
         "subagent_type": task.subagent_type,
-        "is_human": task.subagent_type == "human",
+        "is_human": task.executor_role == "human",
         "depends_on": task.depends_on,
         "files_to_modify": task.files_to_modify,
         "files_to_create": task.files_to_create,
@@ -706,7 +710,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for batch in output_data["batches"]:
             print(f"\n  Batch {batch['batch_index']}:")
             for task in batch["tasks"]:
-                print(f"    - {task['id']}: {task['title']} ({task['subagent_type']})")
+                print(f"    - {task['id']}: {task['title']} ({task['executor_role']})")
 
         print(f"\nWould write to: {args.output}")
         sys.exit(0)

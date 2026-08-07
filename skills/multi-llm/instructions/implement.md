@@ -50,9 +50,9 @@ The implementation summary (`{plan}/implement/summary.md`) contains:
 
 ## Subagent Routing
 
-Each task includes a `subagent_type` field:
+Each task includes an `executor_role` field:
 
-| subagent_type | Usage |
+| executor_role | Usage |
 |---------------|-------|
 | `general-purpose` | All implementation tasks (default) |
 | `human` | Manual steps (API keys, config, manual testing) |
@@ -75,7 +75,7 @@ State is persisted in `{plan}/state.json` (plan-local):
 
 **MANDATORY**: These rules MUST be followed:
 
-1. **ALWAYS use the Task tool**: When implementing tasks, ALWAYS use the Task tool with `subagent_type: "general-purpose"`. NEVER implement code manually.
+1. **ALWAYS delegate**: When implementing tasks, ALWAYS run the task as a subagent (`executor_role: "agent"`). NEVER implement code manually.
 
 2. **OUTPUT TRACKING**: After completing tasks:
    - Update state file with task status (completed/failed)
@@ -237,7 +237,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
    - For each task, spawn a Task subagent:
      ```
      Task tool call:
-     - subagent_type: task["subagent_type"]  (e.g., "general-purpose")
+     - executor_role: task["executor_role"]  (always "agent" here; a "human" task never reaches this step)
      - description: task["title"]
      - prompt: task["prompt"]
      ```
@@ -333,7 +333,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
      ```bash
      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
        --state-file "$STATE_FILE" --phase "implement" \
-       --label "{task_id}: {task_title}" --subagent-type "{subagent_type}" \
+       --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
        --total-batches {total_tasks} --batch-index {N}
      ```

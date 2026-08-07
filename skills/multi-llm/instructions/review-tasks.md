@@ -132,72 +132,29 @@ uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tas
 
 After the background task completes, check the log file `{plan}/review-tasks/orchestrator-run.log` for validation markers.
 
-#### Reference-Based Validation
+#### The task file
 
-The `validation_tasks.json` file uses a reference-based format (small metadata file):
-```json
-{
-  "batches": [
-    {
-      "batch_index": 0,
-      "group_indices": [0, 1, 2],
-      "output_path": "{plan}/review-tasks/validation_batch_0.json"
-    }
-  ],
-  "grouped_file": "{plan}/review-tasks/grouped.json",
-  "plan_file": "/absolute/path/to/plan.md",
-  "tasks_file": "/absolute/path/to/plan/tasks/tasks.md",
-  "reaggregate_command": "uv run ... --reaggregate"
-}
-```
+`validation_tasks.json` carries `tasks_schema_version: 2` and one complete task
+per batch under `batches` — each with `prompt`, `output_name`, the derived
+`output_path`, `result_channel: file`, `context_mode: inline`,
+`capability_tier`, `executor_role` and `task_id`. The context excerpt and this
+batch's records travel **inside** `prompt`, so no subagent has to open a file.
+
+**For each task in the file, run `task.prompt` as a subagent, then write the JSON
+it returns to `task.output_path`.** That is the whole contract — do not assemble
+a prompt, and do not tell the subagent to write the file itself.
+
+A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+`inputs` hashes no longer match their sources, is refused with exit 3: re-run the
+phase with `--force` to re-materialize it.
 
 #### Single Batch: `[VALIDATION_PENDING]`
 
 If `[VALIDATION_PENDING]` marker is present:
-1. Read `validation_tasks.json` from `{plan}/review-tasks/` (small metadata file)
-2. Spawn one validation subagent that reads the source files directly:
-
-   ```
-   Task tool call:
-     subagent_type: general-purpose
-     description: "Validate task review findings"
-     prompt: |
-       Validate finding groups from a task review.
-
-       Read these files:
-       - Grouped findings: {grouped_file from validation_tasks.json}
-       - Plan context: {plan_file from validation_tasks.json}
-       - Tasks file: {tasks_file from validation_tasks.json}
-
-       Validate ONLY these groups (use group_hash from grouped.json to identify each):
-       {for each i: "  index {group_indices[i]} (group_hash: {group_ids[i]})" from batches[N]}
-       You MUST output EXACTLY {len(group_indices)} results -- one per requested group.
-       Do NOT validate or include results for any other groups.
-
-       For each group, determine:
-       - "valid": Finding is real, should be addressed
-       - "invalid": False positive, not applicable
-       - "needs-human-decision": Requires human judgment
-
-       Use the Write tool (not Bash) to save results to: {output_path from batches[N]}
-
-       Output format:
-       {
-         "groups": [
-           {"group_index": 0, "group_hash": "<copy from group's group_hash field>", "status": "valid|invalid|needs-human-decision", "reason": "...", "confidence": 0.0-1.0}
-         ],
-         "metadata": {"model": "claude", "timestamp": "ISO", "schema_version": "2.1"}
-       }
-
-       IMPORTANT: Copy the exact group_hash value from each group in grouped.json into your output.
-
-       CRITICAL: Your entire response MUST be a single brief line, e.g.:
-       "Done: wrote 3 validation results to /path/to/output.json"
-       Do NOT include reasoning, analysis, or explanation in your response.
-   ```
-
-3. Wait for the subagent to complete
-4. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+1. Read `validation_tasks.json` from `{plan}/review-tasks/`
+2. Run the single task's `prompt` as a subagent and write its JSON reply to that
+   task's `output_path`
+3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
 
 #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -212,7 +169,7 @@ If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
 
 **Strategy A: Direct parallel spawning (at most 4 batches)**
 
-For each batch in the `batches` array, spawn a Task agent using the same prompt template as single-batch validation above, but with that batch's `group_indices` and `output_path`.
+For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
 **Run all batches in parallel** (single message with multiple Task tool calls).
 

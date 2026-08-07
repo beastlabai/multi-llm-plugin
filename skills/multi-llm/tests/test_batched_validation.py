@@ -289,15 +289,27 @@ class TestPrepareBatchedValidationTasks:
                 output_dir=tmpdir
             )
             for batch in result["batches"]:
-                # Reference-based format: minimal fields per batch
+                # Batching bookkeeping the merge path still reads
                 assert "batch_index" in batch
                 assert "group_indices" in batch
                 assert "groups_count" in batch
                 assert "is_high_priority" in batch
                 assert "output_path" in batch
-                # No longer includes prompt or suggestions_json (reference-based)
-                assert "prompt" not in batch, "Prompt should not be embedded in reference-based format"
-                assert "suggestions_json" not in batch, "suggestions_json should not be embedded"
+                # D2/D2f: the prompt is materialized in Python, so each batch is
+                # a complete, self-contained task any invoker can run.
+                assert batch["prompt"], "Batch must carry a complete prompt"
+                assert batch["output_name"] == f"validation_batch_{batch['batch_index']}.json"
+                assert batch["result_channel"] == "file"
+                assert batch["context_mode"] == "inline"
+                assert batch["capability_tier"] == "full"
+                assert batch["executor_role"] == "agent"
+                assert batch["kind"] == "validation"
+                assert batch["tasks_schema_version"] == 2
+                assert batch["task_id"] == f"validation-batch-{batch['batch_index']}"
+                assert "plan_sha256" in batch["inputs"]
+                # suggestions_json was the single-task path's field name; the
+                # records now travel inside `prompt`.
+                assert "suggestions_json" not in batch
 
     def test_batch_output_paths(self, sample_context):
         """Batch output paths are correctly formatted."""
@@ -472,11 +484,17 @@ class TestPrepareBatchedValidationTasks:
             assert result["batches"] == []
             assert result["total_batches"] == 0
 
-    def test_validation_tasks_file_size_small(self, sample_context):
-        """Validation tasks JSON stays small regardless of batch count."""
-        # Create many groups that would generate a large file if prompts were embedded
+    def test_validation_tasks_file_size_is_bounded_and_stated(self, sample_context):
+        """Embedding duplicates the shared excerpt per batch — bounded, not free.
+
+        D2f costs this out explicitly: at the 30,000-char context ceiling plus
+        per-batch suggestion JSON, a ~13-batch phase takes validation_tasks.json
+        from a few KB to a few hundred KB. That is acceptable for a per-phase
+        scratch file, and the ceiling below is what keeps it from becoming a
+        multi-megabyte file unnoticed.
+        """
         groups = [make_group("MEDIUM", f"Theme {i}") for i in range(50)]
-        long_context = "x" * 10000  # Long context that would bloat file if embedded
+        long_context = "x" * 10000
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result = prepare_batched_validation_tasks(
@@ -487,17 +505,20 @@ class TestPrepareBatchedValidationTasks:
                 max_per_batch=4
             )
 
-            # Serialize to JSON and check size
             json_str = json.dumps(result, indent=2)
+            batches = result["batches"]
+            # Roughly (context + per-batch records + instructions) x batches.
+            per_batch_ceiling = len(long_context) + 8000
+            assert len(json_str) < per_batch_ceiling * len(batches) + 20000, (
+                f"File larger than the D2f cost model predicts: {len(json_str)} bytes"
+            )
 
-            # With reference-based format, file should be small (< 10KB)
-            # because prompts and suggestions_json are not embedded
-            assert len(json_str) < 10000, f"File too large: {len(json_str)} bytes"
-
-            # Verify no prompt or suggestions_json in batches
-            for batch in result["batches"]:
-                assert "prompt" not in batch
-                assert "suggestions_json" not in batch
+            # The shared context is excerpted ONCE and reused verbatim: no batch
+            # re-truncates it, which would also break prompt determinism.
+            excerpts = {b["prompt"].split("## Suggestion groups")[0] for b in batches}
+            assert len(excerpts) == 1, "shared context excerpt differs across batches"
+            for batch in batches:
+                assert long_context in batch["prompt"]
 
 
 # ============================================================================
@@ -1853,13 +1874,13 @@ class TestMarkerOutput:
             # Multiple batches case
             assert result["total_batches"] == 3
             # Orchestrator would output [VALIDATION_BATCHES_PENDING] for multiple batches
-            # Verify reference-based structure supports iteration
+            # Verify the materialized structure supports iteration
             for batch in result["batches"]:
                 assert batch["output_path"] is not None
                 assert batch["batch_index"] is not None
                 assert batch["group_indices"] is not None
-                # No embedded prompts in reference-based format
-                assert "prompt" not in batch
+                # Every batch carries a complete prompt (D2)
+                assert batch["prompt"]
 
     def test_empty_returns_zero_batches(self, sample_context):
         """Empty groups returns zero batches (no pending marker needed)."""

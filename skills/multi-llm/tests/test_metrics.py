@@ -190,12 +190,15 @@ class TestGeneratePhaseReport:
 
         # Should contain markdown table structure
         assert "## Resource Usage" in report
-        assert "| Task | Subagent Type | Tokens | Tool Uses | Duration |" in report
+        assert "| Task | Executor | Tokens | Tool Uses | Duration |" in report
 
         # Should contain entries
         assert "Task A" in report
         assert "Task B" in report
-        assert "general-purpose" in report
+        # D2h: the flag keeps its name, the recorded value becomes the
+        # host-neutral executor role.
+        assert "agent" in report
+        assert "general-purpose" not in report
         assert "5,000" in report
         assert "3,000" in report
 

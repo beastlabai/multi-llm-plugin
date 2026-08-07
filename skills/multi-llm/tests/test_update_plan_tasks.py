@@ -105,8 +105,20 @@ class TestGenerateTasksMarkdown:
         assert "**Complexity**: low" in result
         assert "**Complexity**: medium" in result
 
-    def test_subagent_type_displayed(self):
-        """Test that subagent type is shown."""
+    def test_executor_role_displayed(self):
+        """tasks.md names the host-neutral executor role, not a Claude agent type."""
+        tasks = [{
+            "id": "T001",
+            "title": "Database migration",
+            "executor_role": "agent"
+        }]
+        result = generate_tasks_markdown(tasks, "plan.md")
+
+        assert "**Executor**: agent" in result
+        assert "general-purpose" not in result
+
+    def test_legacy_subagent_type_still_renders_as_executor(self):
+        """A record written before the D2h rename renders through its legacy field."""
         tasks = [{
             "id": "T001",
             "title": "Database migration",
@@ -114,7 +126,8 @@ class TestGenerateTasksMarkdown:
         }]
         result = generate_tasks_markdown(tasks, "plan.md")
 
-        assert "**Subagent**: general-purpose" in result
+        assert "**Executor**: agent" in result
+        assert "**Subagent**" not in result
 
     def test_acceptance_criteria_displayed(self):
         """Test that acceptance criteria are shown as checkboxes."""
@@ -532,8 +545,8 @@ class TestHumanTaskRendering:
         assert "**Type**: Manual (user action required)" in result
         assert "**Subagent**: human" not in result
 
-    def test_non_human_task_still_shows_subagent(self):
-        """Test that non-human tasks still render with Subagent label."""
+    def test_non_human_task_shows_executor(self):
+        """Test that non-human tasks render with the Executor label."""
         tasks = [{
             "id": "T001",
             "title": "Implement feature",
@@ -541,7 +554,7 @@ class TestHumanTaskRendering:
         }]
         result = generate_tasks_markdown(tasks, "plan.md")
 
-        assert "**Subagent**: general-purpose" in result
+        assert "**Executor**: agent" in result
         assert "**Type**: Manual" not in result
 
     def test_human_task_mermaid_stadium_shape(self):
@@ -579,5 +592,5 @@ class TestHumanTaskRendering:
         ]
         result = generate_tasks_markdown(tasks, "plan.md")
 
-        assert "**Subagent**: general-purpose" in result
+        assert "**Executor**: agent" in result
         assert "**Type**: Manual (user action required)" in result

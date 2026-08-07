@@ -255,6 +255,21 @@ def _compute_eta(
     }
 
 
+def normalize_recorded_executor(value: str) -> str:
+    """Map a legacy ``subagent_type`` value onto the recorded executor value.
+
+    ``general-purpose`` is Claude Code vocabulary that exists on no other host
+    and carries no information, so it records as ``agent``; ``human`` keeps its
+    meaning (no invoker ever ran it). Anything else — notably the resolved
+    ``provider:model`` runner spec the Python executor records — passes through
+    verbatim, which is what makes the two invokers read differently in
+    ``--status`` output instead of both printing ``general-purpose``.
+    """
+    if value == "general-purpose":
+        return "agent"
+    return value
+
+
 def record_metric(
     state_path: Path,
     phase: str,
@@ -280,7 +295,9 @@ def record_metric(
         state_path: Path to the state JSON file (must exist).
         phase: Workflow phase name (e.g. "implement", "apply-suggestions").
         label: Human-readable label for this metric entry.
-        subagent_type: Optional subagent type (e.g. "general-purpose").
+        subagent_type: Optional executor value ("agent", "human", or the
+            resolved provider:model runner spec). The flag and JSON key keep
+            their historical name; see normalize_recorded_executor.
         token_count: Optional token count consumed.
         tool_uses: Optional number of tool invocations.
         duration_ms: Optional wall-clock duration in milliseconds.
@@ -300,7 +317,13 @@ def record_metric(
         "timestamp": datetime.now().isoformat(),
     }
     if subagent_type is not None:
-        entry["subagent_type"] = subagent_type
+        # D2h: the flag name and the JSON key stay put (this is a CLI surface
+        # with recorded history in existing metrics.json files); what goes *in*
+        # becomes the host-neutral executor role. `general-purpose` carried no
+        # information — it is pure Claude Code vocabulary — so it is normalized
+        # to `agent`. A resolved `provider:model` runner spec (the executor path)
+        # or any other value passes through verbatim.
+        entry["subagent_type"] = normalize_recorded_executor(subagent_type)
     if token_count is not None:
         entry["token_count"] = token_count
     if tool_uses is not None:
@@ -346,8 +369,8 @@ def generate_phase_report(state_path: Path, phase: str) -> str:
     lines = [
         "## Resource Usage",
         "",
-        "| Task | Subagent Type | Tokens | Tool Uses | Duration |",
-        "|------|---------------|--------|-----------|----------|",
+        "| Task | Executor | Tokens | Tool Uses | Duration |",
+        "|------|----------|--------|-----------|----------|",
     ]
 
     total_tokens: Optional[int] = None

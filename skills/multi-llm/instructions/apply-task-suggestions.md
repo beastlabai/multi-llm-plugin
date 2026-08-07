@@ -537,7 +537,7 @@ Apply the following task suggestion to the tasks file:
 - New tasks MUST include ALL canonical fields:
   - `files_to_modify`, `files_to_create`
   - `estimated_complexity`
-  - `subagent_type` (or manual type specification)
+  - `executor_role` (`agent`, or `human` for a manual step)
   - `depends_on`
   - Acceptance criteria
 - After adding, regenerate the dependency graph and header metadata (task count, complexity summary)
@@ -596,7 +596,7 @@ Apply the following N related task suggestions to the tasks file (Task reference
 
 ### For "addition" type:
 - Add new task(s) using `### Task T0XX:` format, assign next available ID
-- New tasks MUST include ALL canonical fields: `files_to_modify`, `files_to_create`, `estimated_complexity`, `subagent_type`, `depends_on`, and acceptance criteria
+- New tasks MUST include ALL canonical fields: `files_to_modify`, `files_to_create`, `estimated_complexity`, `executor_role`, `depends_on`, and acceptance criteria
 - After adding, regenerate the dependency graph and header metadata
 
 ### For "modification" type:

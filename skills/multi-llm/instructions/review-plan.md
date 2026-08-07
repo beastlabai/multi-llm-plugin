@@ -177,70 +177,30 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After the background task completes, check the log file `{plan}/review-plan/orchestrator-run.log` for validation markers.
 
-   #### Reference-Based Validation
+   #### The task file
 
-   The `validation_tasks.json` file uses a reference-based format (small metadata file):
-   ```json
-   {
-     "batches": [
-       {
-         "batch_index": 0,
-         "group_indices": [0, 1, 2],
-         "output_path": "{plan}/review-plan/validation_batch_0.json"
-       }
-     ],
-     "grouped_file": "{plan}/review-plan/grouped.json",
-     "plan_file": "/absolute/path/to/plan.md",
-     "reaggregate_command": "uv run ... --reaggregate"
-   }
-   ```
+   `validation_tasks.json` carries `tasks_schema_version: 2` and one complete
+   task per batch under `batches` — each with `prompt`, `output_name`, the
+   derived `output_path`, `result_channel: file`, `context_mode: inline`,
+   `capability_tier`, `executor_role` and `task_id`. The plan excerpt and this
+   batch's suggestion records travel **inside** `prompt`, so no subagent has to
+   open a file.
+
+   **For each task in the file, run `task.prompt` as a subagent, then write the
+   JSON it returns to `task.output_path`.** That is the whole contract — do not
+   assemble a prompt, and do not tell the subagent to write the file itself.
+
+   A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+   `inputs` hashes no longer match the plan and grouped.json, is refused with
+   exit 3: re-run the phase with `--force` to re-materialize it.
 
    #### Single Batch: `[VALIDATION_PENDING]`
 
    If `[VALIDATION_PENDING]` marker is present:
-   1. Read `validation_tasks.json` from `{plan}/review-plan/` (small metadata file)
-   2. Spawn one validation subagent that reads the source files directly:
-
-      ```
-      Task tool call:
-        subagent_type: general-purpose
-        description: "Validate plan review suggestions"
-        prompt: |
-          Validate suggestion groups from a plan review.
-
-          Read these files:
-          - Grouped suggestions: {grouped_file from validation_tasks.json}
-          - Plan context: {plan_file from validation_tasks.json}
-
-          Validate ONLY these groups (use group_hash from grouped.json to identify each):
-          {for each i: "  index {group_indices[i]} (group_hash: {group_ids[i]})" from batches[N]}
-          You MUST output EXACTLY {len(group_indices)} results — one per requested group.
-          Do NOT validate or include results for any other groups.
-
-          For each group, determine:
-          - "valid": Issue is real, should be addressed
-          - "invalid": False positive, not applicable
-          - "needs-human-decision": Requires human judgment
-
-          Use the Write tool (not Bash) to save results to: {output_path from batches[N]}
-
-          Output format:
-          {
-            "groups": [
-              {"group_index": 0, "group_hash": "<copy from group's group_hash field>", "status": "valid|invalid|needs-human-decision", "reason": "...", "confidence": 0.0-1.0}
-            ],
-            "metadata": {"model": "claude", "timestamp": "ISO", "schema_version": "2.1"}
-          }
-
-          IMPORTANT: Copy the exact group_hash value from each group in grouped.json into your output.
-
-          CRITICAL: Your entire response MUST be a single brief line, e.g.:
-          "Done: wrote 3 validation results to /path/to/output.json"
-          Do NOT include reasoning, analysis, or explanation in your response.
-      ```
-
-   3. Wait for the subagent to complete
-   4. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+   1. Read `validation_tasks.json` from `{plan}/review-plan/`
+   2. Run the single task's `prompt` as a subagent and write its JSON reply to
+      that task's `output_path`
+   3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -256,9 +216,9 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-   For each batch in the `batches` array, spawn a Task agent using the same prompt template as single-batch validation above, but with that batch's `group_indices` and `output_path`.
+   For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
-   **Run all batches in parallel** (single message with multiple Task tool calls).
+   **Run all batches in parallel** (single message with multiple subagent calls).
 
    **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
@@ -323,17 +283,15 @@ Items with `needs-human-decision` status are included in the report for the user
    - `[CONSOLIDATION_BATCHES_PENDING]` — multiple batches
 
    Then:
-   1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`)
-   2. Read the `consolidate_suggestions.txt` prompt template from `${CLAUDE_SKILL_DIR}/prompts/`
-   3. Count the number of batches as `{total_batches}` and mark the consolidation phase start:
+   1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`) — every task in its `batches` array carries a complete `prompt`
+   2. Count the number of batches as `{total_batches}` and mark the consolidation phase start:
       ```bash
       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" --total-batches {total_batches}
       ```
-   4. For each batch, spawn a Task subagent (`subagent_type: general-purpose`) with the prompt template filled with that batch's groups data
-   5. Instruct each subagent: **"Respond with ONLY the JSON output. No explanation."**
-   6. Save each subagent's output to `consolidation_batch_N.json` in the phase directory
-   7. After each batch completes, record metrics with cumulative `--batch-index`:
+   3. For each task in the file, run `task.prompt` as a subagent — the filled `consolidate_suggestions.txt` template and that batch's group records are already inside it
+   4. Write the JSON each subagent returns to that task's `output_path` (`consolidation_batch_N.json` in the phase directory)
+   5. After each batch completes, record metrics with cumulative `--batch-index`:
       ```bash
       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" \
@@ -342,9 +300,9 @@ Items with `needs-human-decision` status are included in the report for the user
         --total-batches {total_batches} --batch-index {N}
       ```
 
-   **Strategy A (≤ 4 batches):** Spawn all batch subagents directly from the main agent in parallel (single message with multiple Task tool calls).
+   **Strategy A (≤ 4 batches):** Run all batch subagents from the main agent in parallel (single message with multiple subagent calls).
 
-   **Strategy B (> 4 batches):** Split batches into waves of up to 4 (last wave may absorb remaining batches, up to 6). For each wave, spawn all batch subagents in parallel (single message with multiple Task calls), wait for completion, then proceed to the next wave.
+   **Strategy B (> 4 batches):** Split batches into waves of up to 4 (last wave may absorb remaining batches, up to 6). For each wave, run all batch subagents in parallel (single message), wait for completion, then proceed to the next wave.
 
    **c) Run reaggregation after all batches complete:**
 
@@ -379,13 +337,9 @@ Claude:
 2. User selects: gpt-5.2, gemini-3-pro
 3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
 4. Orchestrator outputs [VALIDATION_PENDING] marker
-5. Claude reads plans/my-feature/review-plan/validation_task.json
-6. Claude spawns validation subagent:
-   Task tool call:
-     subagent_type: general-purpose
-     description: "Validate plan review suggestions"
-     prompt: <prompt from validation_task.json>
-7. Subagent completes and writes validation.json
+5. Claude reads plans/my-feature/review-plan/validation_tasks.json
+6. For each task: Claude runs task.prompt as a subagent
+7. Claude writes each subagent's JSON reply to that task's output_path
 8. Claude runs reaggregation:
    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" \
      --plan-file plans/my-feature.md --reaggregate

@@ -1,0 +1,83 @@
+You are validating review suggestions for accuracy.
+
+## Context (Plan content)
+
+# Fixture plan
+
+## Step 1
+Do the thing.
+
+
+## Suggestion groups to validate (2)
+
+[
+  {
+    "category": "reliability",
+    "group_hash": "aaaa000000000000",
+    "group_id": "aaaa000000000000",
+    "index": 0,
+    "models": [
+      "model-a",
+      "model-b"
+    ],
+    "suggestions": [
+      {
+        "desc": "A transient 503 currently loses the file.",
+        "importance": "MEDIUM",
+        "title": "Retry uploads",
+        "type": "addition"
+      }
+    ],
+    "theme": "Add retry to the upload call"
+  },
+  {
+    "category": "docs",
+    "group_hash": "bbbb000000000000",
+    "group_id": "bbbb000000000000",
+    "index": 1,
+    "models": [
+      "model-a"
+    ],
+    "suggestions": [
+      {
+        "desc": "The plan never states the directory.",
+        "importance": "LOW",
+        "title": "Say where config lives",
+        "type": "clarification"
+      }
+    ],
+    "theme": "Document the config location"
+  }
+]
+
+## Task
+
+For each of the 2 suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": cannot be determined from the context above and
+  requires human judgment
+
+Compare each group against the context above to verify it. Judge only the
+groups listed above; ignore anything else.
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+
+{
+  "groups": [
+    {"group_index": 0, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0}
+  ],
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"}
+}
+
+Rules:
+1. Output EXACTLY one result per requested group — no more, no fewer.
+2. Copy each group's `group_hash` value verbatim into its result. The
+   `group_index` you echo is advisory; the hash is what the results are joined
+   on, so a wrong hash discards the result.
+3. Confidence is a number between 0.0 and 1.0.
+4. Be conservative: when you cannot decide from the context given, answer
+   "needs-human-decision" rather than guessing.

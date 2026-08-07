@@ -1,0 +1,141 @@
+You are consolidating suggestion groups from a multi-LLM plan review.
+
+## Input
+
+You are given a set of suggestion groups for a specific plan section. Each group was identified by one or more LLM reviewers as a potential improvement to the plan. Many groups may address the same underlying concern with different wording or emphasis. Your job is to cluster related groups and produce a single consolidated suggestion per cluster.
+
+### Input JSON
+
+[
+  {
+    "group_id": "aaaa000000000000",
+    "importance": "MEDIUM",
+    "index": 0,
+    "reference": "Step 1",
+    "suggestions": [
+      {
+        "description": "No retry today.",
+        "title": "Retry uploads"
+      }
+    ],
+    "theme": "Add retry to the upload call",
+    "type": "addition"
+  },
+  {
+    "group_id": "bbbb000000000000",
+    "importance": "HIGH",
+    "index": 1,
+    "reference": "Step 1",
+    "suggestions": [
+      {
+        "description": "Use exponential backoff.",
+        "title": "Backoff"
+      }
+    ],
+    "theme": "Uploads need backoff",
+    "type": "modification"
+  }
+]
+
+Total input groups: 2
+
+## What to Do
+
+1. Read each input group carefully, focusing on the `theme`, `importance`, and individual `suggestions[].description` fields.
+2. Identify groups that address the **same underlying concern** — even if they use different wording, focus on different facets of the same issue, or propose different solutions to the same problem.
+3. For each cluster of related groups, produce a **single consolidated suggestion** with:
+   - A new synthesized title (not just concatenating originals). Max 120 characters.
+   - A synthesized description that preserves nuance from ALL underlying suggestions. Mention specific points from each underlying group — do not summarize generically.
+   - The highest importance level among the underlying groups (HIGH > MEDIUM > LOW).
+   - The most actionable type among the underlying groups. Priority: `addition` > `modification` > `deletion` > `clarification`.
+   - The exact `group_id` values and `index` values from the input groups.
+   - A 1-2 sentence reasoning explaining why these groups belong together.
+4. Groups that do not relate to any other group are **singletons**. Include them in the `singletons` array with their `group_id`, `group_index`, and a brief reasoning for why they stand alone.
+
+## Output Format
+
+Output ONLY valid JSON matching this exact structure:
+
+{
+  "verification": "passed",
+  "clusters": [
+    {
+      "title": "<new synthesized title, max 120 characters>",
+      "description": "<synthesized description preserving nuance from every underlying suggestion>",
+      "importance": "HIGH|MEDIUM|LOW",
+      "type": "addition|modification|deletion|clarification",
+      "underlying_group_ids": ["<group_id>", "<group_id>"],
+      "underlying_group_indices": [0, 1],
+      "reasoning": "<1-2 sentences on why these belong together>"
+    }
+  ],
+  "singletons": [
+    {
+      "group_id": "<group_id>",
+      "group_index": 0,
+      "reasoning": "<1-2 sentences on why this group stands alone>"
+    }
+  ]
+}
+
+## Example
+
+### Example Input (3 groups):
+
+[
+  {"index": 0, "group_id": "aaaa000000000000", "theme": "Add retry to the upload call", "importance": "MEDIUM", "type": "addition", "suggestions": [{"title": "Retry uploads", "description": "The upload call has no retry, so a transient 503 loses the file."}]},
+  {"index": 1, "group_id": "bbbb000000000000", "theme": "Uploads need backoff on transient failures", "importance": "HIGH", "type": "modification", "suggestions": [{"title": "Exponential backoff for uploads", "description": "Wrap the upload in exponential backoff; a bare retry loop will hammer the service."}]},
+  {"index": 2, "group_id": "cccc000000000000", "theme": "Document the config file location", "importance": "LOW", "type": "clarification", "suggestions": [{"title": "Say where config lives", "description": "The plan never states which directory the config file is read from."}]}
+]
+
+### Example Output:
+
+{
+  "verification": "passed",
+  "clusters": [
+    {
+      "title": "Make uploads resilient to transient failures with bounded exponential backoff",
+      "description": "The upload call currently has no retry at all, so a transient 503 loses the file; and a bare retry loop would hammer the service, so the retry must use bounded exponential backoff rather than immediate repetition.",
+      "importance": "HIGH",
+      "type": "modification",
+      "underlying_group_ids": ["aaaa000000000000", "bbbb000000000000"],
+      "underlying_group_indices": [0, 1],
+      "reasoning": "Both address the same underlying concern — upload failures on transient errors — one naming the missing retry and the other the backoff policy it needs."
+    }
+  ],
+  "singletons": [
+    {
+      "group_id": "cccc000000000000",
+      "group_index": 2,
+      "reasoning": "Documentation of the config location is unrelated to upload reliability."
+    }
+  ]
+}
+
+## Critical Rules
+
+- Every input group appears EXACTLY ONCE across `clusters[].underlying_group_ids` and `singletons[].group_id`. Never in two clusters, never in both a cluster and singletons, never omitted.
+- `underlying_group_ids` and `underlying_group_indices` must have the same length and must correspond element-by-element.
+- A cluster contains at least 2 groups. A single group is a singleton, not a one-element cluster.
+- Copy `group_id` and `index` values verbatim from the input. Never invent, renumber or reformat them.
+- Set `"verification": "passed"` only after you have checked the three rules above against your own output. If you cannot satisfy them, return every group as a singleton instead of guessing.
+
+## Ambiguous Case Handling
+
+- **Group fits multiple clusters**: Assign to the cluster where the overlap is strongest (most shared concepts). In your `reasoning`, note the secondary cluster connection: "Also related to [other cluster topic] but primary concern is [this cluster topic]."
+- **All groups are unrelated**: Return an empty `clusters` array and all groups as `singletons`. This is a valid outcome.
+- **All groups are related**: Return a single cluster containing all groups. This is valid but should only happen if they genuinely address the same underlying concern.
+- **Borderline cases**: When uncertain whether two groups address the same concern, prefer keeping them separate (as singletons or smaller clusters). False merges are worse than missed merges — users can always mentally group singletons, but splitting a bad merge requires re-running consolidation.
+
+## Assignment Rule
+
+ASSIGNMENT RULE: Each input group must appear in EXACTLY ONE cluster's underlying_group_ids OR in singletons. Never in multiple clusters. Never in both a cluster and singletons. Never omitted.
+
+## Output
+
+Output ONLY the JSON object described above. No markdown, no code blocks, no explanation — just raw JSON.
+
+## Reply
+
+Print ONLY the JSON object described above — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.

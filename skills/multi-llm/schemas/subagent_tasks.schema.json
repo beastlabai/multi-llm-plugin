@@ -1,0 +1,221 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "subagent_tasks.schema.json",
+  "title": "Materialized subagent task file (tasks_schema_version 2)",
+  "description": "Validates every materialized task file the orchestrators emit — validation_tasks.json, revalidation_tasks.json, consolidation_tasks.json, salvage_task_<model>.json, human_decision_tasks.json and task_generation_tasks.json. Version 1 is the historical reference-based shape that carried no prompt; a reader that finds tasks_schema_version missing or != 2 refuses the file with exit 3 and re-materializes the phase (compatibility policy is regenerate, never upgrade-in-place). This key is deliberately distinct from metadata.schema_version, which versions validation *results*.",
+  "type": "object",
+  "required": ["tasks_schema_version", "kind", "inputs"],
+  "anyOf": [
+    {"required": ["tasks"]},
+    {"required": ["batches"]}
+  ],
+  "properties": {
+    "tasks_schema_version": {
+      "const": 2,
+      "description": "Integer task-file format version. Missing means 1."
+    },
+    "kind": {
+      "$ref": "#/$defs/kind",
+      "description": "The kind every task in this file has."
+    },
+    "inputs": {
+      "$ref": "#/$defs/inputs",
+      "description": "File-level copy of the inputs block; identical to every task's own inputs."
+    },
+    "tasks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/task"},
+      "description": "The task list. Batched kinds carry it under the historical name `batches` instead, so the list is never duplicated on disk; use one accessor (utils.subagent_tasks.tasks_of) rather than guessing."
+    },
+    "batches": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/task"},
+      "description": "The task list under its historical name, for the batched kinds whose merge and reaggregation paths already read it."
+    }
+  },
+  "$defs": {
+    "kind": {
+      "enum": [
+        "validation",
+        "revalidation",
+        "consolidation",
+        "salvage",
+        "human_decision_judge",
+        "task_generation"
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_sha256"],
+      "properties": {
+        "plan_sha256": {
+          "type": "string",
+          "description": "Content hash of the plan file, computed the same way StateManager._compute_plan_hash does (sha256 hexdigest truncated to 16 chars). Empty string when the phase has no plan file."
+        },
+        "grouped_sha256": {
+          "type": "string",
+          "description": "Content hash of grouped.json."
+        },
+        "diff_base": {
+          "type": "string",
+          "description": "Git ref the diff was taken against (state.head_at_start) — code-review and apply phases only."
+        },
+        "diff_sha256": {
+          "type": "string",
+          "description": "Content hash of the diff text — code-review and apply phases only."
+        },
+        "salvage_request_sha256": {
+          "type": "string",
+          "description": "Content hash of the salvage request record — salvage only."
+        },
+        "items_sha256": {
+          "type": "string",
+          "description": "Content hash of the judged item set — human_decision_judge only."
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tasks_schema_version",
+        "task_id",
+        "kind",
+        "prompt",
+        "output_name",
+        "result_channel",
+        "context_mode",
+        "capability_tier",
+        "executor_role",
+        "inputs"
+      ],
+      "properties": {
+        "tasks_schema_version": {"const": 2},
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable, path-free identifier for this task. Named in every refusal message."
+        },
+        "kind": {"$ref": "#/$defs/kind"},
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The complete prompt. Under context_mode inline it embeds every input the subagent needs; it never names plan_file, grouped_file or output_path."
+        },
+        "output_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Bare basename resolved against the phase dir the task file was loaded from."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Derived absolute convenience path for native invokers. Invoker plumbing, never a subagent instruction."
+        },
+        "result_channel": {
+          "enum": ["file", "inline-json"],
+          "description": "Producer intent. Every materialized task is `file`. `inline-json` names only the legacy Claude-Code-interactive shape and is refused before dispatch with exit 3."
+        },
+        "context_mode": {
+          "enum": ["inline", "workspace-read"],
+          "description": "How the task's inputs travel. `inline` embeds content in prompt and runs against any runner. `workspace-read` references absolute paths and requires a runner declaring supports_workspace_reads."
+        },
+        "capability_tier": {
+          "enum": ["full", "cheap"],
+          "description": "Role annotation, never a model. Resolution chain: model_hint (when set and not `auto`) -> capability_tier -> driver.subagent_runner_cheap / driver.subagent_runner -> host default. `cheap` is a permission to downgrade, and the per-kind rules below forbid it wherever AGENTS.md forbids downgrading. No currently materialized kind permits it: `cheap` is reserved for the human-decision fan-out coordinator, a dispatch-only role that writes no verdict and therefore has no task file."
+        },
+        "executor_role": {
+          "enum": ["agent", "human"],
+          "description": "`agent` means any invoker may dispatch this. `human` means no invoker ever dispatches it; it routes to the human-task pause and the executor refuses it before dispatch (exit 3)."
+        },
+        "inputs": {"$ref": "#/$defs/inputs"},
+        "model_hint": {
+          "type": "string",
+          "description": "Free-form model string, or `auto`. Keeps its historical meaning; `full`/`cheap` belong to capability_tier alone and are a schema error here.",
+          "not": {"enum": ["full", "cheap"]}
+        },
+        "subagent_type": {
+          "enum": ["general-purpose", "human"],
+          "description": "Optional Claude-Code-only metadata, demoted for one release. No reader branches on it. Must agree with executor_role."
+        },
+        "plan_file": {"type": "string", "description": "Provenance only."},
+        "grouped_file": {"type": "string", "description": "Provenance only."},
+        "batch_index": {"type": "integer", "minimum": 0},
+        "group_ids": {"type": "array", "items": {"type": "string"}},
+        "group_indices": {"type": "array", "items": {"type": "integer"}},
+        "groups_count": {"type": "integer", "minimum": 0},
+        "is_high_priority": {"type": "boolean"},
+        "section_key": {"type": "string"},
+        "group_id": {"type": "string", "minLength": 1},
+        "items_count": {"type": "integer", "minimum": 0},
+        "suggestion_id": {"type": "string", "minLength": 1},
+        "model": {"type": "string"},
+        "phase": {"type": "string"},
+        "repo_root": {"type": "string"}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"enum": ["validation", "revalidation"]}}},
+          "then": {
+            "required": ["batch_index", "group_ids", "capability_tier"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "context_mode": {"const": "inline"},
+              "inputs": {"required": ["plan_sha256", "grouped_sha256"]}
+            }
+          }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "consolidation"}}},
+          "then": {
+            "required": ["batch_index", "group_ids"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "context_mode": {"const": "inline"},
+              "inputs": {"required": ["plan_sha256", "grouped_sha256"]}
+            }
+          }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "salvage"}}},
+          "then": {
+            "required": ["suggestion_id"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "inputs": {"required": ["salvage_request_sha256"]}
+            }
+          }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "human_decision_judge"}}},
+          "then": {
+            "required": ["group_id"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "context_mode": {"const": "inline"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "task_generation"}}},
+          "then": {
+            "required": ["repo_root"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "context_mode": {"enum": ["inline", "workspace-read"]}
+            }
+          }
+        },
+        {
+          "if": {"required": ["executor_role"], "properties": {"executor_role": {"const": "human"}}},
+          "then": {"properties": {"subagent_type": {"const": "human"}}}
+        },
+        {
+          "if": {"required": ["executor_role"], "properties": {"executor_role": {"const": "agent"}}},
+          "then": {"properties": {"subagent_type": {"const": "general-purpose"}}}
+        }
+      ]
+    }
+  }
+}

@@ -71,6 +71,15 @@ from .validation import (
     revalidate_failed_items,
     save_validation_results,
 )
+from .human_decisions import (
+    apply_verdicts_to_work_set,
+    build_judge_tasks,
+    group_id_of,
+    ingest_verdicts,
+    judge_item_from_group,
+    record_verdicts,
+    write_judge_tasks,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +556,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self._setup()
             self._load_and_parse_inputs()
             self._apply_user_feedback()
+            self._handle_human_decisions()
             self._prepare_batches()
             return self._write_outputs()
         except OrchestratorError as e:
@@ -1214,6 +1224,136 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             len(self.needs_human),
             len(self.skipped),
         )
+
+    # ==================================================================
+    # Phase 4 — _prepare_batches
+    # ==================================================================
+
+    # ==================================================================
+    # Phase 3b — human-decision judging (D2a/D2b)
+    # ==================================================================
+
+    def human_decision_scope(self) -> List[Dict[str, Any]]:
+        """Return the needs-human-decision groups a judge should decide.
+
+        ``--claude-decide`` puts every needs-human item in scope; otherwise only
+        the ones the reviewer pre-marked "Let Claude decide" in the report (the
+        per-item routing marker). The judge prompt is one deterministic function
+        of that set, so an unattended run and an interactive one that picked "Let
+        Claude decide" produce the same prompt for the same items.
+        """
+        if getattr(self.args, "claude_decide", False):
+            return list(self.needs_human)
+        return [g for g in self.needs_human if g.get("claude_decide")]
+
+    def human_decision_phase_dir(self) -> str:
+        """The phase dir judging tasks and verdict files live in."""
+        return os.path.dirname(self.get_output_path())
+
+    def _handle_human_decisions(self) -> None:
+        """Phase 3b: ingest judge verdicts, then materialize any still needed.
+
+        Additive by construction, in both directions:
+
+        * When the invoker has already persisted ``human_decision_batch_<n>.json``
+          files, they are validated, mapped by stable ``group_id``, recorded
+          through ``record_human_decision`` with today's exact translation, and
+          the work set is rebuilt from those decisions — so ``--resume`` sees
+          exactly the state an interactive pass would have produced.
+        * Any in-scope item still without a verdict gets a materialized
+          ``human_decision_judge`` task written to ``human_decision_tasks.json``.
+          Nothing exits early and no existing output changes shape, so an
+          orchestrator stays directly invocable with identical flags and exit
+          codes.
+
+        A group with no verdict stays ``needs-human-decision``: never silently
+        approved, never silently dropped. Under ``--yes`` those groups are
+        skipped with a warning by the caller's normal unattended handling;
+        interactively they fall back to the normal ask.
+        """
+        scope = self.human_decision_scope()
+        phase_dir = self.human_decision_phase_dir()
+        expected_ids = [group_id_of(g) for g in scope]
+
+        ingest = ingest_verdicts(phase_dir=phase_dir, expected_group_ids=expected_ids)
+        for message in ingest.errors:
+            print(f"ERROR: human-decision verdict rejected: {message}", file=sys.stderr)
+        if ingest.unexpected:
+            print(
+                "Warning: ignoring verdicts for groups that are not in scope: "
+                f"{sorted(set(ingest.unexpected))}",
+                file=sys.stderr,
+            )
+
+        if ingest.verdicts and not ingest.conflicts:
+            items_by_group = {
+                group_id_of(g): judge_item_from_group(g) for g in scope
+            }
+            if self.state is not None:
+                record_verdicts(
+                    state=self.state,
+                    phase=self.phase_name,
+                    ingest=ingest,
+                    items_by_group=items_by_group,
+                )
+                self.state.save()
+            counts = apply_verdicts_to_work_set(
+                verdicts=ingest.verdicts,
+                needs_human=self.needs_human,
+                valid=self.valid,
+                skipped=self.skipped,
+            )
+            print(
+                "Ingested Claude decisions: "
+                f"{counts['approved']} approved, {counts['salvaged']} salvaged, "
+                f"{counts['skipped']} skipped, {counts['unresolved']} still "
+                "needing a decision",
+                file=sys.stderr,
+            )
+
+        remaining = [
+            g for g in self.needs_human
+            if group_id_of(g) in set(expected_ids)
+        ]
+        if not remaining:
+            return
+
+        # Judging ran but did not cover everything, and this is an unattended
+        # run: skip the leftovers with a warning rather than stalling. When
+        # judging has not run at all (no verdict file yet) there is nothing to
+        # be unattended about — the tasks are materialized below and the invoker
+        # runs them. Interactively, leftovers fall back to the normal ask by
+        # staying in needs_human.
+        if ingest.verdicts and getattr(self.args, "yes", False):
+            for group in remaining:
+                print(
+                    "Warning: no judge verdict for group "
+                    f"{group_id_of(group)}; skipping it (--yes).",
+                    file=sys.stderr,
+                )
+                group["validation_status"] = "skipped"
+                group["reason"] = "No Claude decision returned for this group"
+                self.skipped.append(group)
+            leftover = {id(g) for g in remaining}
+            self.needs_human[:] = [
+                g for g in self.needs_human if id(g) not in leftover
+            ]
+            return
+
+        items = [judge_item_from_group(g) for g in remaining]
+        try:
+            document = build_judge_tasks(
+                items=items,
+                phase_dir=phase_dir,
+                plan_file=str(self.plan_path),
+            )
+            tasks_path = write_judge_tasks(document, phase_dir)
+        except Exception as exc:  # noqa: BLE001 - must not fail the apply run
+            self.logger.warning("Could not materialize judging tasks: %s", exc)
+            return
+
+        print(f"\n[HUMAN_DECISION_JUDGING_PENDING] {tasks_path}")
+        print(f"Items to judge: {len(items)}")
 
     # ==================================================================
     # Phase 4 — _prepare_batches
