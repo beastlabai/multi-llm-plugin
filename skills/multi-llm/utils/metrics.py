@@ -515,10 +515,10 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv=None) -> int:
     bootstrap_streams()
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command is None:
         parser.print_usage(sys.stderr)
@@ -562,6 +562,8 @@ def main() -> None:
         if output:
             print(output)
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

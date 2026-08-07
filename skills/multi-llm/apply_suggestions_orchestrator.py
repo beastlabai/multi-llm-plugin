@@ -73,7 +73,7 @@ class ApplySuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Suggest
     # ----------------------------------------------------------------
 
     @classmethod
-    def parse_args(cls):
+    def parse_args(cls, argv=None):
         """Build and parse CLI arguments for apply-suggestions."""
         parser = build_common_arg_parser(
             description="Prepare validated suggestions for application to a plan",
@@ -104,7 +104,7 @@ Bulk Approval Examples:
             include_revalidate_all_human=True,
             include_internal_revalidation=True,
         )
-        return parser.parse_args()
+        return parser.parse_args(argv)
 
     # ----------------------------------------------------------------
     # Abstract method implementations
@@ -343,14 +343,13 @@ Bulk Approval Examples:
                     print(f"  Reason: {s['validation_reason']}")
 
 
-def main():
+def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
-    args = ApplySuggestionsOrchestrator.parse_args()
+    args = ApplySuggestionsOrchestrator.parse_args(argv)
     orchestrator = ApplySuggestionsOrchestrator(args)
-    exit_code = orchestrator.run()
-    sys.exit(exit_code)
+    return orchestrator.run()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

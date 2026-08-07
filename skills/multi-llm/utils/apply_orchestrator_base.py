@@ -39,6 +39,7 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
+from .cli_common import build_parent_parser
 from .apply_selection_helpers import (
     merge_validation_with_groups,
     resolve_priority_args,
@@ -181,6 +182,7 @@ def build_common_arg_parser(
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
+        parents=[build_parent_parser()],
     )
 
     # =================================================================
@@ -269,13 +271,9 @@ def build_common_arg_parser(
     )
 
     # --- Safety Guardrails ---
-    parser.add_argument(
-        "--yes",
-        "-y",
-        action="store_true",
-        help="Confirm bulk approval operations (required with --approve-all)",
-    )
-
+    # `--yes` / `-y` (and its `--non-interactive` spelling) come from the shared
+    # cross-cutting parent parser so the flag is defined once for every entry
+    # point; `--approve-all` still requires it.
     parser.add_argument(
         "--force",
         "-f",

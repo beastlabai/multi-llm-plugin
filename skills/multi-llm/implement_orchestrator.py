@@ -38,6 +38,7 @@ from utils import (
     get_current_head,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
 from check_workflow_prerequisites import check_apply_task_suggestions_prerequisite
@@ -76,10 +77,11 @@ def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
         return {"met": True, "reason": "Could not read validation"}
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Prepare implementation tasks from a plan file for Claude Code execution"
+        description="Prepare implementation tasks from a plan file for Claude Code execution",
+        parents=[build_parent_parser()],
     )
 
     parser.add_argument(
@@ -117,7 +119,7 @@ def parse_args() -> argparse.Namespace:
         help='Show task summary without writing output file'
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _plan_path_hash(plan_path: Path, project_root: str) -> str:
@@ -521,10 +523,10 @@ def format_batches_for_output(
     return output_batches
 
 
-def main():
+def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     bootstrap_streams()
-    args = parse_args()
+    args = parse_args(argv)
 
     # Validate plan file (resolve to absolute path first to handle
     # uv --directory which changes the working directory)
@@ -736,8 +738,8 @@ def main():
     state.mark_phase_completed("implement")
     state.save()
 
-    sys.exit(0)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

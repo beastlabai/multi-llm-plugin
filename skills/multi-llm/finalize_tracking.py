@@ -49,7 +49,7 @@ def get_all_modified_files() -> Set[str]:
     return modified
 
 
-def main() -> int:
+def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
     parser = argparse.ArgumentParser(
@@ -65,7 +65,7 @@ def main() -> int:
         action="store_true",
         help="Show what would be tracked without updating state"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     state_path = Path(args.state_file)
 
@@ -137,4 +137,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

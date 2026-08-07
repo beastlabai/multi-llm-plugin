@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import cli_common
 from utils.validation import prepare_batched_validation_tasks
 
 SKILL_DIR = "${CLAUDE_SKILL_DIR}"
@@ -70,7 +71,11 @@ class TestReaggregateCommandUsesProject:
                 orchestrator="review_plan_orchestrator.py",
             )
             cmd = result["reaggregate_command"]
-            assert f"{SKILL_DIR}/review_plan_orchestrator.py" in cmd
+            # Fully resolved from __file__ (no ${CLAUDE_SKILL_DIR} a shell has
+            # to expand) and routed through the single entry point.
+            resolved = cli_common.skill_dir()
+            assert f'"{resolved / "multi_llm.py"}"' in cmd
+            assert "CLAUDE_SKILL_DIR" not in cmd
 
 
 class TestNoDirectoryInSourceFiles:

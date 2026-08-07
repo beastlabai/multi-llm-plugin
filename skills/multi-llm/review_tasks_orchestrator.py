@@ -30,12 +30,13 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser
 from utils.prompt_loader import load_prompt
 from utils.provider_registry import get_all_model_specs
 from utils.review_orchestrator_base import (
@@ -62,7 +63,7 @@ def load_task_review_prompt_template() -> str:
     return load_prompt(TASK_REVIEW_PROMPT_FILE)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command line arguments for task review."""
     try:
         available_models = get_all_model_specs()
@@ -74,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Review generated implementation tasks against the original plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[build_parent_parser()],
         epilog=f"""
 Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
@@ -109,12 +111,6 @@ Examples:
         default=None,
         help='List of models in provider:model format (e.g., cursor-agent:auto gemini:gemini-2.5-flash). '
              'Bare model names use default provider from providers.yaml.'
-    )
-
-    parser.add_argument(
-        '--interactive', '-i',
-        action='store_true',
-        help='Force interactive model selection (ignores YAML defaults)'
     )
 
     parser.add_argument(
@@ -185,16 +181,16 @@ Examples:
         help='HTML report template style: "pr" for PR-style contextual view, "flat" for classic card layout (default: pr)'
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-async def main():
+async def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
     # see utils/stream_bootstrap.py for the full rationale.
     bootstrap_streams()
 
-    args = parse_args()
+    args = parse_args(argv)
 
     # Load the prompt template
     prompt_template = load_task_review_prompt_template()
@@ -247,7 +243,10 @@ async def main():
         tasks_path=Path(tasks_path) if tasks_path else None,
         template_style=args.report_style,
     )
+    # Any non-zero outcome is raised as SystemExit by the orchestration itself;
+    # reaching here means the phase completed.
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main(sys.argv[1:])))

@@ -42,18 +42,20 @@ def backup_before_write(file_path: str) -> Optional[str]:
 
 
 # CLI entry point for subagents
-def main() -> None:
+def main(argv=None) -> int:
     bootstrap_streams()
-    if len(sys.argv) != 2:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) != 1:
         print("Usage: python -m utils.backup <file_path>", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
-    result = backup_before_write(sys.argv[1])
+    result = backup_before_write(args[0])
     if result:
         print(f"Backed up to: {result}")
     else:
         print("No backup needed (file does not exist)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser
 from utils.output_handler import get_phase_dir, slugify_question
 from utils.prompt_loader import load_prompt
 from utils.interactive import resolve_models
@@ -549,6 +550,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Ask each configured LLM a free-text question about a plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[build_parent_parser()],
         epilog=f"""
 Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
@@ -594,11 +596,6 @@ Examples:
         nargs="+",
         default=None,
         help="List of models in provider:model format (bare names use default provider)",
-    )
-    parser.add_argument(
-        "--interactive", "-i",
-        action="store_true",
-        help="Force interactive model selection (ignores YAML defaults)",
     )
     parser.add_argument(
         "--quick", "-q",
@@ -885,4 +882,4 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(main(sys.argv[1:])))
