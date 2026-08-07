@@ -1,7 +1,7 @@
 """OpenAI Codex CLI provider implementation with NDJSON event stream parsing."""
 import json
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import LLMProvider, split_reasoning_effort
@@ -25,6 +25,11 @@ class CodexProvider(LLMProvider):
     Valid efforts are listed in REASONING_EFFORTS; anything else passes
     through verbatim as the model name.
     """
+
+    # `codex exec` reads the prompt from stdin when no prompt argument is given
+    # (`codex exec < prompt.txt`), so this adapter has a real non-argv transport
+    # (D2d). The fan-out default stays "argv"; materialized prompts use stdin.
+    supported_prompt_transports = ("argv", "stdin")
 
     @property
     def name(self) -> str:
@@ -56,6 +61,21 @@ class CodexProvider(LLMProvider):
             "codex", "exec", "--sandbox", "workspace-write", "--json",
             "--model", model, prompt,
         ]
+
+    def build_command_for_transport(
+        self,
+        prompt: str,
+        model: str,
+        transport: str = "argv",
+        prompt_file: Optional[str] = None,
+    ) -> Tuple[List[str], Optional[str]]:
+        """Deliver the prompt on argv or on stdin (prompt omitted from argv)."""
+        if transport != "stdin":
+            return super().build_command_for_transport(
+                prompt, model, transport, prompt_file
+            )
+        cmd = self.build_command(prompt, model)
+        return cmd[:-1], prompt
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:

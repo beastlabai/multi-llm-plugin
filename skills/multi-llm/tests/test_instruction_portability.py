@@ -165,11 +165,11 @@ PLACEHOLDER_MANIFEST = {
     "instructions/implement.md": (24, 0),
     "instructions/init-config.md": (3, 0),
     "instructions/review-code.md": (24, 0),
-    "instructions/review-plan.md": (27, 0),
+    "instructions/review-plan.md": (26, 0),
     "instructions/review-tasks.md": (16, 0),
     "references/human-decision-batch.md": (0, 0),
     "references/resume-detection.md": (0, 0),
-    "references/salvage-handling.md": (2, 0),
+    "references/salvage-handling.md": (0, 0),
     "references/uv-check.md": (1, 0),
     "references/wave-batching.md": (0, 0),
     "SKILL.md": (7, 0),
@@ -332,7 +332,7 @@ class TestPlaceholderManifest:
         }
         # Not an assertion that `remaining` is empty (the rewrite has not landed);
         # an assertion that the pinned total cannot silently grow.
-        assert sum(remaining.values()) == 241, (
+        assert sum(remaining.values()) == 238, (
             "the ${CLAUDE_SKILL_DIR} debt outside SKILL.md changed to "
             f"{sum(remaining.values())}. Lower it freely with the corpus "
             "rewrite; a rise means a new host-coupled site was added."

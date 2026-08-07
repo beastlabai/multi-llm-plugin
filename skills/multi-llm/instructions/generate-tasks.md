@@ -52,7 +52,7 @@ Generates detailed implementation tasks from a high-level plan. **Claude Code it
       "files_to_create": ["path/to/new-file.ts"],
       "acceptance_criteria": ["Criterion 1", "Criterion 2"],
       "estimated_complexity": "low|medium|high",
-      "subagent_type": "general-purpose|human"
+      "executor_role": "agent|human"
     }
   ]
 }
@@ -68,81 +68,73 @@ The `plan_preamble` field provides essential context for subagents implementing 
 
 Keep it concise: 3-5 sentences, approximately 200 tokens. This context is included in every task prompt.
 
-**subagent_type values:**
-- `general-purpose`: Default for all implementation tasks
-- `human`: Manual steps the user must perform (e.g., API key creation, external service config, manual testing)
+**executor_role values:**
+- `agent`: Default for all implementation tasks — any invoker may dispatch them
+- `human`: Manual steps the user must perform (e.g., API key creation, external service config, manual testing). No invoker ever dispatches a `human` task; it routes to the human-task pause. Rendered in `tasks.md` as "**Type**: Manual (user action required)".
 
 ## Guidelines for Task Generation
 
+These rules are the **prompt body** the `task_generation` subagent receives, not just documentation: they are rendered from `TASK_AUTHORING_RULES` in `utils/subagent_prompts.py` and inlined verbatim into `task.prompt`, so a runner that cannot open this file still gets them. Edit the constant, never this block — a test fails when the two diverge.
+
+<!-- BEGIN GENERATED: task-authoring-rules — rendered from utils/subagent_prompts.py TASK_AUTHORING_RULES. Edit the constant, not this block. -->
+
 **Task Granularity**
-- First task (T001) should be setup/foundation with no dependencies
-- Each task should modify 1-5 files maximum
-- Complex features should be broken into multiple tasks
+- Produce 5-15 discrete implementation tasks, each completable in 15-60 minutes
+- The first task (T001) is setup/foundation and has NO dependencies
+- Each task modifies 1-5 files maximum
+- Complex features are broken into multiple tasks
 - Tasks should be independently testable when possible
-- Generate a `human` task when:
+- Give a task `executor_role: human` when:
   - The plan explicitly states something must be done manually
-  - The task requires access to external services/dashboards the agent cannot reach
+  - The task requires access to external services/dashboards an agent cannot reach
   - The task requires physical or manual verification
-- Human task descriptions should include clear step-by-step instructions since the user (not an agent) will read them
-- Human task acceptance criteria should describe how the user can verify completion
+- Human task descriptions include clear step-by-step instructions, since a person (not an agent) will read them
+- Human task acceptance criteria describe how the user can verify completion
 
 **Dependencies**
-- Use explicit `depends_on` arrays referencing task IDs
-- Independent tasks can share the same dependencies (enables parallel execution)
-- Avoid circular dependencies
+- Use explicit `depends_on` arrays referencing task ids
+- Independent tasks can share the same dependencies (this enables parallel execution)
+- Never create circular dependencies
 - Tasks with no dependencies can run in parallel
 
 **Codebase Exploration**
-- Look for existing patterns to follow (search similar features)
+- Look for existing patterns to follow (search for similar features)
 - Identify integration points with existing code
 - Check for related tests that need updates
 - Note any shared utilities or components to reuse
 
 **Task Descriptions**
 
-Each task description must cover three components (2-5 sentences total):
+Each description covers three components in 2-5 sentences:
 
 1. **What** to implement — the concrete deliverable
 2. **How** — key implementation approach, patterns/functions to reuse, APIs to call
-3. **Interface contracts** — if this task produces or consumes interfaces, types, files, or data structures used by other tasks, state them explicitly
+3. **Interface contracts** — if this task produces or consumes interfaces, types, files or data structures other tasks use, state them explicitly
 
-*Example — weak vs strong description:*
+*Weak:* "Add validation to the form component." — this says *what* at a surface level and nothing about *how* or which interfaces are involved, so the implementer must guess the approach, which helpers exist, and whether other tasks depend on its output.
 
-> **Weak:** "Add validation to the form component."
->
-> This tells the subagent *what* at a surface level, but nothing about *how* or what interfaces are involved. The subagent must guess the validation approach, which helpers exist, and whether other tasks depend on its output.
-
-> **Strong:** "Add Zod schema validation to UserProfileForm using the existing `validateWithSchema()` helper from `lib/validation.ts`. The schema should enforce email format, required fields, and max-length constraints matching the DB column limits in `T001`'s migration. Export the `UserProfileSchema` type from this file — `T003` (API handler) imports it for request body validation."
->
-> This covers *what* (Zod validation on UserProfileForm), *how* (reuse `validateWithSchema()`, match DB constraints from T001), and *interface contracts* (exports `UserProfileSchema` for T003).
+*Strong:* "Add Zod schema validation to UserProfileForm using the existing `validateWithSchema()` helper from `lib/validation.ts`. The schema enforces email format, required fields and max-length constraints matching the DB column limits in `T001`'s migration. Export the `UserProfileSchema` type from this file — `T003` (API handler) imports it for request body validation." — this covers what, how, and the interface contract.
 
 **Acceptance Criteria**
 
-Acceptance criteria must be **task-scoped, specific and verifiable** — each criterion should describe an observable outcome that can be checked with a concrete test, command, or inspection. Avoid vague criteria like "works correctly" or "handles errors properly."
+Acceptance criteria are **task-scoped, specific and verifiable**: each one describes an observable outcome checkable with a concrete test, command or inspection. Avoid "works correctly" or "handles errors properly".
 
-**Test scope rules**: Acceptance criteria may include running a **specific, narrowly-scoped test** (a single test file or test class) directly related to this task's changes, but must NOT include broad regression tests like "full test suite passes", "all tests pass", or "existing tests still pass." Full regression testing runs automatically once post-implementation — individual tasks should only verify their own changes.
+**Test scope rule**: a criterion may run a **specific, narrowly-scoped test** (a single test file or test class) related to this task's changes, but must NOT include broad regression tests like "full test suite passes", "all tests pass" or "existing tests still pass". Full regression testing runs once after implementation; individual tasks verify only their own changes.
 
-*Example — bad vs good criteria:*
+*Bad:* "Form validation works correctly" / "Errors are handled properly" / "Performance is acceptable" / "Full test suite passes" / "All existing tests still pass".
 
-> **Bad criteria:**
-> - "Form validation works correctly"
-> - "Errors are handled properly"
-> - "Performance is acceptable"
-> - "Full test suite passes: uv run -- pytest"
-> - "All existing tests still pass"
->
-> These are not verifiable — what does "correctly" mean? What errors? What performance threshold? Broad test suite runs waste time and tokens when run per-task.
-
-> **Good criteria:**
-> - "Submitting the form with an empty email field shows the error message 'Email is required' below the input"
-> - "`validateWithSchema()` returns `{ valid: false, errors: [...] }` when any required field is missing"
-> - "The exported `UserProfileSchema` type is importable from `lib/validation.ts` and matches the column types in the `user_profiles` table migration"
-> - "`uv run -- pytest tests/test_validation.py::TestUserProfileSchema -v` passes"
+*Good:* "Submitting the form with an empty email field shows the error message 'Email is required' below the input" / "`validateWithSchema()` returns `{ valid: false, errors: [...] }` when any required field is missing" / "The exported `UserProfileSchema` type is importable from `lib/validation.ts` and matches the column types in the `user_profiles` table migration".
 
 **File References**
-- Use relative paths from project root
-- Clearly distinguish between files to modify vs create
+- Use paths relative to the project root
+- Clearly distinguish files to modify from files to create
 - Only reference files that actually need changes
+
+**Plan Preamble**
+
+`plan_preamble` is 3-5 sentences (roughly 200 tokens) of shared context injected into every task prompt: the overall goal/outcome, key architectural decisions, technology/library choices and global conventions.
+
+<!-- END GENERATED: task-authoring-rules -->
 
 ## Output Format
 
@@ -299,7 +291,7 @@ If `prerequisites_met` is `true`, proceed with task generation.
         "Index exists on user_id column for the user_features table"
       ],
       "estimated_complexity": "medium",
-      "subagent_type": "general-purpose"
+      "executor_role": "agent"
     },
     {
       "id": "T002",
@@ -314,7 +306,7 @@ If `prerequisites_met` is `true`, proceed with task generation.
         "FeatureService type is exported and importable by T003"
       ],
       "estimated_complexity": "medium",
-      "subagent_type": "general-purpose"
+      "executor_role": "agent"
     }
   ]
 }

@@ -1,0 +1,104 @@
+You are decomposing the plan `fixture-plan.md` into implementation tasks.
+
+## Plan
+
+# Fixture plan
+
+Build the thing.
+
+
+## Repository
+
+The repository root is: /repo
+
+Explore it before authoring tasks: search the repository for the files and
+patterns the plan names, then read the ones a task would create or modify. Base
+every task on what the code actually contains — never on the plan's prose alone.
+
+## Task-authoring rules
+
+**Task Granularity**
+- Produce 5-15 discrete implementation tasks, each completable in 15-60 minutes
+- The first task (T001) is setup/foundation and has NO dependencies
+- Each task modifies 1-5 files maximum
+- Complex features are broken into multiple tasks
+- Tasks should be independently testable when possible
+- Give a task `executor_role: human` when:
+  - The plan explicitly states something must be done manually
+  - The task requires access to external services/dashboards an agent cannot reach
+  - The task requires physical or manual verification
+- Human task descriptions include clear step-by-step instructions, since a person (not an agent) will read them
+- Human task acceptance criteria describe how the user can verify completion
+
+**Dependencies**
+- Use explicit `depends_on` arrays referencing task ids
+- Independent tasks can share the same dependencies (this enables parallel execution)
+- Never create circular dependencies
+- Tasks with no dependencies can run in parallel
+
+**Codebase Exploration**
+- Look for existing patterns to follow (search for similar features)
+- Identify integration points with existing code
+- Check for related tests that need updates
+- Note any shared utilities or components to reuse
+
+**Task Descriptions**
+
+Each description covers three components in 2-5 sentences:
+
+1. **What** to implement — the concrete deliverable
+2. **How** — key implementation approach, patterns/functions to reuse, APIs to call
+3. **Interface contracts** — if this task produces or consumes interfaces, types, files or data structures other tasks use, state them explicitly
+
+*Weak:* "Add validation to the form component." — this says *what* at a surface level and nothing about *how* or which interfaces are involved, so the implementer must guess the approach, which helpers exist, and whether other tasks depend on its output.
+
+*Strong:* "Add Zod schema validation to UserProfileForm using the existing `validateWithSchema()` helper from `lib/validation.ts`. The schema enforces email format, required fields and max-length constraints matching the DB column limits in `T001`'s migration. Export the `UserProfileSchema` type from this file — `T003` (API handler) imports it for request body validation." — this covers what, how, and the interface contract.
+
+**Acceptance Criteria**
+
+Acceptance criteria are **task-scoped, specific and verifiable**: each one describes an observable outcome checkable with a concrete test, command or inspection. Avoid "works correctly" or "handles errors properly".
+
+**Test scope rule**: a criterion may run a **specific, narrowly-scoped test** (a single test file or test class) related to this task's changes, but must NOT include broad regression tests like "full test suite passes", "all tests pass" or "existing tests still pass". Full regression testing runs once after implementation; individual tasks verify only their own changes.
+
+*Bad:* "Form validation works correctly" / "Errors are handled properly" / "Performance is acceptable" / "Full test suite passes" / "All existing tests still pass".
+
+*Good:* "Submitting the form with an empty email field shows the error message 'Email is required' below the input" / "`validateWithSchema()` returns `{ valid: false, errors: [...] }` when any required field is missing" / "The exported `UserProfileSchema` type is importable from `lib/validation.ts` and matches the column types in the `user_profiles` table migration".
+
+**File References**
+- Use paths relative to the project root
+- Clearly distinguish files to modify from files to create
+- Only reference files that actually need changes
+
+**Plan Preamble**
+
+`plan_preamble` is 3-5 sentences (roughly 200 tokens) of shared context injected into every task prompt: the overall goal/outcome, key architectural decisions, technology/library choices and global conventions.
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+
+{
+  "schema_version": "1.0",
+  "plan_preamble": "<3-5 sentences of shared context>",
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "<5-10 words>",
+      "description": "<what, how, interface contracts>",
+      "depends_on": [],
+      "files_to_create": ["path/from/repo/root"],
+      "files_to_modify": ["path/from/repo/root"],
+      "acceptance_criteria": ["<specific, verifiable outcome>"],
+      "estimated_complexity": "low|medium|high",
+      "executor_role": "agent|human"
+    }
+  ]
+}
+
+Rules:
+1. Ids are `T001`, `T002`, … — unique, zero-padded, in order.
+2. `depends_on` names only ids declared in this document, forms no cycle, and at
+   least one task has an empty `depends_on`.
+3. `executor_role` is "agent" for anything an agent can do and "human" only for
+   the manual cases listed in the rules above.

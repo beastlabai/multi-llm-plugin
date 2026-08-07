@@ -73,39 +73,27 @@ Trigger this mode when **any** of the following hold:
   pre-marked set is gathered and processed (partition-then-process) before the
   interactive set.
 
-The evaluation is identical in every case; only the *set of items* it runs on differs. The per-item trigger exists so a user who is unsure about one specific item can offload just that decision to Claude — exactly as `--claude-decide` would have handled it — without touching the other items. For each item in scope, evaluate it autonomously and choose one of **three** outcomes per item:
+The evaluation is identical in every case; only the *set of items* it runs on differs. The per-item trigger exists so a user who is unsure about one specific item can offload just that decision to Claude — exactly as `--claude-decide` would have handled it — without touching the other items.
+
+### Who owns the prompt, and where the verdict goes
+
+**Python owns the prompt; this section is narrative, not a template.** The apply orchestrator materializes one judging task per in-scope item into `{phase}/human_decision_tasks.json` (`utils/human_decisions.py`). **For each task in that file, run `task.prompt` as a subagent, then write the JSON it returns to `task.output_path`** — the same print/persist contract every other materialized task uses, and the reason no invoker needs to assemble a judging prompt.
+
+Always judge in a **subagent**, never inline in the main conversation — the reasoning is token-heavy and would crowd the main agent's context. The main agent stays responsible for *applying* and *recording*. Judging is complex reasoning: use the **full model**, never a cheap tier. Only a pure-orchestration fan-out coordinator (which writes no verdict) may be downgraded.
+
+The rules below travel **inside** `task.prompt`, not as a pointer to this file: a headless runner may have no way to open it. They are rendered from `HUMAN_DECISION_JUDGE_RULES` in `utils/subagent_prompts.py`, which is the single source of truth — a test fails when this block and that constant diverge.
+
+**The verdict is a file with a schema, not a shape everyone remembers.** `human_decision_batch_<n>.json` is `{"schema_version": "1.0", "verdicts": [...]}`, each verdict `{group_id, decision, reason, salvaged_description, dropped}` with `decision ∈ approve|salvage|skip` and `salvaged_description`/`dropped` non-null iff `decision == "salvage"` — pinned by `schemas/human_decision_verdicts.schema.json`. The wrapper object (rather than a bare array) is what lets the ingest distinguish a truncated write from a legitimately empty verdict set. Verdicts are never returned as chat text: one that never touches disk is unrecoverable after a crash, invisible to `--resume`, and meaningless under `--detach`.
+
+Re-invoking the apply orchestrator once the verdict files exist ingests them: each verdict is schema-validated (naming the offending file and index), mapped by stable `group_id` — never by batch or list position — recorded via `record_human_decision`, and the work set is rebuilt from the recorded decisions, with `salvaged_description` substituted into the suggestion before batching. A group with no verdict stays `needs-human-decision`; it is never silently approved or dropped. Duplicate `group_id`s are an error unless the objects are identical, in which case the first wins.
+
+<!-- BEGIN GENERATED: judge-rules — rendered from utils/subagent_prompts.py HUMAN_DECISION_JUDGE_RULES. Edit the constant, not this block. -->
+
+### Three outcomes
 
 - **Approve (as-is)** — the suggestion is sound; apply it unchanged.
-- **Salvage (partial)** — only *part* of the suggestion is valid/worthwhile; rewrite it down to that defensible core and apply the rewritten version. **This is the default whenever an item is partially valid — never skip a whole suggestion just because part of it is wrong.**
+- **Salvage (partial)** — only *part* of the suggestion is valid or worthwhile; rewrite it down to that defensible core and apply the rewritten version. **This is the default whenever an item is partially valid — never skip a whole suggestion just because part of it is wrong.**
 - **Skip** — there is nothing worthwhile to keep; drop the item entirely.
-
-### Delegate the judgment to a subagent
-
-Always make the Approve / Salvage / Skip judgment in a **subagent**, never inline in the main conversation — the reasoning is token-heavy and would crowd the main agent's context. The main agent stays responsible for *applying* and *recording* the decisions; the subagent only *judges* and returns its verdict.
-
-- **Per-item trigger (one item):** spawn ONE Task subagent for that single item.
-- **Batch trigger (all items), ≤4 items:** spawn ONE Task subagent that judges all of them.
-- **Batch trigger (all items), >4 items:** spawn ONE coordinator subagent (`model: haiku`) that fans out per-batch judging subagents internally and aggregates their replies (same pattern as validation batching), to keep the main context clean.
-
-Use the **full model** for the judging subagent(s) — this is complex reasoning; never downgrade the judge to haiku. Only a pure-orchestration coordinator may use haiku.
-
-Give each judging subagent:
-- the item(s) details: `title`, `description`, `importance`, `validation_reason`, `confidence`, and `models`, plus the stable `group_id` (= `group_hash`) of each item; and
-- an instruction to apply the **Evaluation Criteria** and **Deciding Approve vs. Salvage vs. Skip** rules below (point it at the "Let Claude Decide" Mode section of this reference, `references/human-decision-batch.md`).
-
-Instruct the subagent to respond with **ONLY** a compact JSON array (no prose, no markdown fences), one object per item:
-
-```json
-[
-  {
-    "group_id": "<group_id>",
-    "decision": "approve" | "salvage" | "skip",
-    "reason": "<one brief sentence>",
-    "salvaged_description": "<rewritten description — only when decision == salvage; else null>",
-    "dropped": "<what was intentionally left out — only when decision == salvage; else null>"
-  }
-]
-```
 
 ### Evaluation Criteria
 
@@ -123,15 +111,17 @@ Read each item's details (title, description, importance, validation_reason, con
 Apply the criteria above to each **distinct claim inside the suggestion**, not just the suggestion as a whole. Many `needs-human-decision` items are a mix — one solid point bundled with an overreach, a speculative extra, or an out-of-scope aside. Salvaging the worthwhile part is the **default** for such items.
 
 1. **Identify the worthwhile core**: Which specific part(s) address a genuine bug, correctness, security, or clarity issue and survive the criteria above?
-2. **Whole thing is sound** → **Approve** as-is.
-3. **Part is worthwhile, the rest is questionable / speculative / out-of-scope / low-confidence** → **Salvage**: rewrite the description to keep only the worthwhile core and drop the rest. Salvage only ever **narrows** a suggestion — never add anything that was not in the original. The existing criteria still govern the kept part (e.g. deletion caution, security lean-approve).
-4. **Nothing survives** — the item is purely subjective, speculative, redundant, or wrong → **Skip**. Salvage only when a concrete, defensible improvement remains; do **not** manufacture value or apply a watered-down change just to avoid skipping. If there is nothing worthwhile, skip it entirely.
+2. **Whole thing is sound** -> **Approve** as-is.
+3. **Part is worthwhile, the rest is questionable / speculative / out-of-scope / low-confidence** -> **Salvage**: rewrite the description to keep only the worthwhile core and drop the rest. Salvage only ever **narrows** a suggestion — never add anything that was not in the original. The existing criteria still govern the kept part (e.g. deletion caution, security lean-approve).
+4. **Nothing survives** — the item is purely subjective, speculative, redundant, or wrong -> **Skip**. Salvage only when a concrete, defensible improvement remains; do **not** manufacture value or apply a watered-down change just to avoid skipping. If there is nothing worthwhile, skip it entirely.
 
 A salvaged item is applied like an approval, except the **rewritten** description is what gets applied — never the original.
 
+<!-- END GENERATED: judge-rules -->
+
 ### Process
 
-1. Spawn the judging subagent(s) as described in **Delegate the judgment to a subagent** for the item(s) in scope (all `needs-human-decision` items for a batch/`--claude-decide` trigger; just the one selected item for a per-item trigger), and collect their Approve / Salvage / Skip verdicts.
+1. Run the judging tasks from `human_decision_tasks.json` as described above for the item(s) in scope (all `needs-human-decision` items for a batch/`--claude-decide` trigger; just the one selected item for a per-item trigger), writing each reply to its `task.output_path`, then re-invoke the apply orchestrator so it ingests the verdicts.
 2. Present an informational summary (not a prompt — do not ask for confirmation):
 
 ```

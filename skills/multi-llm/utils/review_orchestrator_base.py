@@ -57,6 +57,12 @@ from .validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
 )
+from .subagent_tasks import (
+    TaskFileError,
+    build_inputs,
+    read_task_file,
+    write_salvage_task_file,
+)
 from . import (
     group_similar_suggestions,
     export_groups_to_json,
@@ -790,6 +796,20 @@ def save_model_result(
             json.dump(salvage_request, f, indent=2)
 
         print(f"[SALVAGE_NEEDED] {salvage_path}")
+        # The salvage prompt is materialized in Python (D2/D2i) instead of being
+        # assembled from references/salvage-handling.md, so any invoker can run
+        # it. Best-effort: a salvage request that cannot be paired with a task
+        # file is still recoverable by hand, and must not mask the parse error
+        # that produced it.
+        try:
+            salvage_task_path = write_salvage_task_file(
+                salvage_request=salvage_request,
+                salvage_request_path=salvage_path,
+                phase_dir=phase_dir,
+            )
+            print(f"[SALVAGE_TASK] {salvage_task_path}")
+        except Exception as task_error:  # noqa: BLE001 - diagnostics only
+            print(f"[{model}] Warning: could not materialize salvage task: {task_error}")
 
         error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
         with open(error_path, 'w', encoding='utf-8') as f:
@@ -1319,10 +1339,27 @@ async def reaggregate_from_existing_files(
     # Check if batched validation completed
     elif os.path.exists(validation_tasks_path) and not args.skip_validation:
         print("\nFound validation_tasks.json, checking for completed batches...")
+        # A phase dir outlives the run that wrote it, and with prompts embedded a
+        # task file is a snapshot: a run started under one skill version and
+        # resumed under the other would silently mis-spawn, and a plan edited
+        # between materialization and resume leaves prompts that still validate
+        # cleanly while reviewing text nobody is looking at any more. Both fail
+        # loudly here (exit 3) rather than dispatching anything. Read outside the
+        # try below, whose broad handler would otherwise downgrade the refusal to
+        # a warning.
         try:
-            with open(validation_tasks_path, 'r', encoding='utf-8') as f:
-                batch_metadata = json.load(f)
-
+            batch_metadata = read_task_file(
+                validation_tasks_path,
+                phase_dir=phase_dir,
+                current_inputs=build_inputs(
+                    plan_file=str(plan_path),
+                    grouped_file=grouped_path,
+                ),
+            )
+        except TaskFileError as task_file_error:
+            print(f"ERROR: {task_file_error}", file=sys.stderr)
+            sys.exit(task_file_error.exit_code)
+        try:
             total_batches = batch_metadata.get("total_batches", 0)
             batches_found = 0
             for batch in batch_metadata.get("batches", []):

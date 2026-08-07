@@ -2,7 +2,7 @@
 
 import json
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import LLMProvider, split_reasoning_effort
@@ -28,6 +28,13 @@ class ClaudeCodeProvider(LLMProvider):
     When invoked from within a Claude Code session, the CLAUDECODE env var is
     stripped to avoid the nested-session guard.
     """
+
+    # `claude -p` reads the prompt from stdin when no prompt argument is given,
+    # so this adapter has a real non-argv transport (D2d). Materialized prompts
+    # are dispatched over stdin, which removes the Windows command-line cap from
+    # the prompt budget entirely; the fan-out path's default stays "argv" so
+    # existing invocations are byte-identical.
+    supported_prompt_transports = ("argv", "stdin")
 
     @property
     def name(self) -> str:
@@ -67,6 +74,26 @@ class ClaudeCodeProvider(LLMProvider):
             cmd += ["--effort", effort]
         cmd.append(prompt)
         return cmd
+
+    def build_command_for_transport(
+        self,
+        prompt: str,
+        model: str,
+        transport: str = "argv",
+        prompt_file: Optional[str] = None,
+    ) -> Tuple[List[str], Optional[str]]:
+        """Deliver the prompt on argv or on stdin.
+
+        Under ``stdin`` the prompt is omitted from argv entirely and returned as
+        the text to write to the child, so no part of it is measured against a
+        command-line cap.
+        """
+        if transport != "stdin":
+            return super().build_command_for_transport(
+                prompt, model, transport, prompt_file
+            )
+        cmd = self.build_command(prompt, model)
+        return cmd[:-1], prompt
 
     def get_remove_env(self) -> List[str]:
         """Strip CLAUDECODE env var to bypass nested-session guard.

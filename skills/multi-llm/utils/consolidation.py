@@ -46,6 +46,20 @@ except ImportError:
         merge_consolidated_selections,
     )
 
+try:
+    from .prompt_loader import load_prompt
+    from .subagent_prompts import build_consolidation_prompt
+    from .subagent_tasks import PromptBudget, build_inputs, make_task, make_task_file
+except ImportError:
+    from utils.prompt_loader import load_prompt
+    from utils.subagent_prompts import build_consolidation_prompt
+    from utils.subagent_tasks import (
+        PromptBudget,
+        build_inputs,
+        make_task,
+        make_task_file,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -377,11 +391,58 @@ def _split_into_budget_batches(
     return batches
 
 
+def build_consolidation_group_records(
+    groups: List[Dict[str, Any]],
+    group_indices: List[int],
+    group_ids: List[str],
+    char_budget: int = CONSOLIDATION_CHAR_BUDGET,
+) -> List[Dict[str, Any]]:
+    """Build the group records one consolidation batch embeds in its prompt.
+
+    A solo group whose content exceeds ``char_budget`` is content-truncated by
+    ``_truncate_group_content`` — the truncation the batcher always deferred to
+    "prompt-build time", which is here now that prompt assembly lives in Python.
+    That is a *content* reduction with an explicit marker, not the silent
+    instruction-tail truncation D2d forbids.
+
+    Args:
+        groups: All groups for the phase.
+        group_indices: This batch's indices into ``groups``.
+        group_ids: ``group_ids[i]`` is the stable id of ``groups[i]``.
+
+    Returns:
+        One record per group in the batch.
+    """
+    records: List[Dict[str, Any]] = []
+    solo = len(group_indices) == 1
+    for idx in group_indices:
+        group = groups[idx]
+        if solo and _measure_group_content_length(group) > char_budget:
+            group = _truncate_group_content(group, char_budget)
+        records.append({
+            "index": idx,
+            "group_id": group_ids[idx],
+            "theme": group.get("theme", "Unknown"),
+            "importance": group.get("importance", "MEDIUM"),
+            "type": group.get("type", "unknown"),
+            "reference": group.get("reference", ""),
+            "suggestions": [
+                {
+                    "title": s.get("title", ""),
+                    "description": s.get("description", s.get("desc", "")),
+                }
+                for s in group.get("suggestions", [])
+            ],
+        })
+    return records
+
+
 def prepare_consolidation_tasks(
     groups: List[Dict[str, Any]],
     section_groups: Dict[str, List[int]],
     phase_dir: str,
     plan_file: str,
+    prompt_budget: Optional[PromptBudget] = None,
 ) -> Dict[str, Any]:
     """
     Prepare consolidation batch tasks for subagent processing.
@@ -436,6 +497,14 @@ def prepare_consolidation_tasks(
     for group in groups:
         group_ids.append(generate_group_id(group))
 
+    # Read once, embed per batch: the template is I/O, the generator is pure.
+    template = load_prompt("consolidate_suggestions.txt")
+    inputs = build_inputs(
+        plan_file=plan_file,
+        grouped_file=str(phase_path / "grouped.json"),
+    )
+    budget = prompt_budget or PromptBudget(None)
+
     batches: List[Dict[str, Any]] = []
     singleton_sections: Dict[str, List[int]] = {}
     batch_counter = 0
@@ -466,30 +535,61 @@ def prepare_consolidation_tasks(
 
         # Create batch entries with global sequential numbering
         for sub_batch_indices in sub_batches:
-            output_path = phase_path / f"consolidation_batch_{batch_counter}.json"
+            output_name = f"consolidation_batch_{batch_counter}.json"
+            output_path = phase_path / output_name
             batch_group_ids = [group_ids[idx] for idx in sub_batch_indices]
 
-            batches.append({
-                "batch_index": batch_counter,
-                "section_key": section_key,
-                "group_indices": sub_batch_indices,
-                "group_ids": batch_group_ids,
-                "groups_count": len(sub_batch_indices),
-                "output_path": str(output_path),
-            })
+            # The prompt embeds the filled prompts/consolidate_suggestions.txt
+            # plus this batch's group records — the values, not a path to
+            # grouped.json.
+            prompt = build_consolidation_prompt(
+                template=template,
+                group_records=build_consolidation_group_records(
+                    groups, sub_batch_indices, group_ids
+                ),
+            )
+            if not budget.fits(prompt):
+                # Sections are already split by MAX_GROUPS_PER_CONSOLIDATION_BATCH
+                # and CONSOLIDATION_CHAR_BUDGET, so an over-budget prompt here
+                # means the runner's transport is the constraint. Fail loudly with
+                # the fix; never truncate the instruction tail.
+                budget.resolution(prompt, splittable=False)
+
+            batches.append(make_task(
+                kind="consolidation",
+                task_id=f"consolidation-batch-{batch_counter}",
+                prompt=prompt,
+                output_name=output_name,
+                inputs=inputs,
+                output_path=str(output_path),
+                extra={
+                    "batch_index": batch_counter,
+                    "section_key": section_key,
+                    "group_indices": sub_batch_indices,
+                    "group_ids": batch_group_ids,
+                    "groups_count": len(sub_batch_indices),
+                    "plan_file": plan_file,
+                    "grouped_file": str(phase_path / "grouped.json"),
+                },
+            ))
             batch_counter += 1
 
     # Build the tasks metadata
-    tasks_metadata: Dict[str, Any] = {
-        "format_version": CURRENT_FORMAT_VERSION,
-        "batches": batches,
-        "singleton_sections": singleton_sections,
-        "total_batches": len(batches),
-        "phase_dir": phase_dir,
-        "plan_file": plan_file,
-        "grouped_file": "grouped.json",
-        "reaggregate_command": "--reaggregate-consolidation",
-    }
+    tasks_metadata: Dict[str, Any] = make_task_file(
+        kind="consolidation",
+        tasks=batches,
+        inputs=inputs,
+        task_list_key="batches",
+        extra={
+            "format_version": CURRENT_FORMAT_VERSION,
+            "singleton_sections": singleton_sections,
+            "total_batches": len(batches),
+            "phase_dir": phase_dir,
+            "plan_file": plan_file,
+            "grouped_file": "grouped.json",
+            "reaggregate_command": "--reaggregate-consolidation",
+        },
+    )
 
     # Write consolidation_tasks.json
     tasks_path = phase_path / "consolidation_tasks.json"

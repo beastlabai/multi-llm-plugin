@@ -24,6 +24,7 @@ from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import get_output_paths, get_relative_output_path
 from utils.plan_updater import insert_tasks_file_reference
 from utils.state_manager import get_or_create_state
+from utils.subagent_tasks import derive_executor_role
 
 
 COMPLEXITY_COLORS = {
@@ -31,6 +32,19 @@ COMPLEXITY_COLORS = {
     "medium": "#f4a460",
     "high": "#cd5c5c",
 }
+
+
+def task_executor_role(task: Dict[str, Any]) -> str:
+    """Return a task record's executor role (D2h).
+
+    ``executor_role`` is authoritative; a record written before the rename is
+    read through its legacy ``subagent_type``, so no reader branches on the
+    Claude-Code-only field any more.
+    """
+    role = task.get("executor_role")
+    if role in ("agent", "human"):
+        return role
+    return derive_executor_role(task.get("subagent_type"))
 
 
 def generate_dependency_diagram(tasks: List[Dict[str, Any]]) -> str:
@@ -53,7 +67,7 @@ def generate_dependency_diagram(tasks: List[Dict[str, Any]]) -> str:
             title = title[:37] + "..."
         # Escape quotes in title for Mermaid
         title = title.replace('"', '#quot;')
-        if task.get("subagent_type") == "human":
+        if task_executor_role(task) == "human":
             lines.append(f'    {task_id}(["{task_id}: {title}"])')
         else:
             lines.append(f'    {task_id}["{task_id}: {title}"]')
@@ -74,7 +88,7 @@ def generate_dependency_diagram(tasks: List[Dict[str, Any]]) -> str:
     # Style nodes by complexity
     for task in tasks:
         task_id = task.get("id", "T000")
-        if task.get("subagent_type") == "human":
+        if task_executor_role(task) == "human":
             color = "#87ceeb"  # Light blue for human/manual tasks
         else:
             complexity = task.get("estimated_complexity", "medium")
@@ -125,7 +139,7 @@ def generate_tasks_markdown(tasks: List[Dict[str, Any]], plan_name: str) -> str:
         files_to_create = task.get("files_to_create", [])
         acceptance_criteria = task.get("acceptance_criteria", [])
         complexity = task.get("estimated_complexity", "medium")
-        subagent_type = task.get("subagent_type", "general-purpose")
+        executor_role = task_executor_role(task)
 
         # Task header
         lines.append(f"### Task {task_id}: {title}")
@@ -143,12 +157,15 @@ def generate_tasks_markdown(tasks: List[Dict[str, Any]], plan_name: str) -> str:
         if files_to_create:
             lines.append(f"**Files to create**: {', '.join(files_to_create)}")
 
-        # Complexity and subagent
+        # Complexity and executor. tasks.md is read by every host and by humans,
+        # so it names the host-neutral executor role, never a Claude Code agent
+        # type. The human branch's wording is unchanged — it was already
+        # host-neutral and users recognize it.
         lines.append(f"**Complexity**: {complexity}")
-        if subagent_type == "human":
+        if executor_role == "human":
             lines.append("**Type**: Manual (user action required)")
         else:
-            lines.append(f"**Subagent**: {subagent_type}")
+            lines.append(f"**Executor**: {executor_role}")
         lines.append("")
 
         # Description

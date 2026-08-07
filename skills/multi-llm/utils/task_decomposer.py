@@ -7,6 +7,11 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 
+try:
+    from .subagent_tasks import derive_executor_role, subagent_type_for_role
+except ImportError:
+    from utils.subagent_tasks import derive_executor_role, subagent_type_for_role
+
 
 class TaskStatus(Enum):
     """Status of a task in the decomposition."""
@@ -29,10 +34,29 @@ class Task:
     files_to_modify: List[str] = field(default_factory=list)
     files_to_create: List[str] = field(default_factory=list)
     estimated_complexity: str = "medium"  # low, medium, high
+    # Host-neutral routing field (D2h). "human" means no invoker ever dispatches
+    # this task — it is a manual step. Every reader branches on this;
+    # `subagent_type` is optional Claude-only metadata derived from it.
+    executor_role: str = "agent"
     subagent_type: str = "general-purpose"
     acceptance_criteria: List[str] = field(default_factory=list)
     batch_group: Optional[int] = None
     error_message: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Keep ``executor_role`` and the legacy ``subagent_type`` in agreement.
+
+        The task schema rejects a task whose ``subagent_type`` disagrees with its
+        ``executor_role``, so the two can never drift while the legacy field
+        lasts. ``human`` wins in either direction: it is the marker that no
+        invoker may dispatch this task, and erring toward "do not dispatch" is
+        the only safe reconciliation.
+        """
+        if self.subagent_type == "human" or self.executor_role == "human":
+            self.executor_role = "human"
+            self.subagent_type = "human"
+        elif self.executor_role != "human":
+            self.executor_role = "agent"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -45,6 +69,7 @@ class Task:
             "files_to_modify": self.files_to_modify,
             "files_to_create": self.files_to_create,
             "estimated_complexity": self.estimated_complexity,
+            "executor_role": self.executor_role,
             "subagent_type": self.subagent_type,
             "acceptance_criteria": self.acceptance_criteria,
             "batch_group": self.batch_group,
@@ -66,6 +91,13 @@ class Task:
         else:
             acceptance_criteria = []
 
+        # executor_role is authoritative when present; otherwise it is derived
+        # from the legacy subagent_type, so a task file written before the D2h
+        # rename still routes its human tasks correctly on resume.
+        executor_role = data.get("executor_role")
+        if executor_role not in ("agent", "human"):
+            executor_role = derive_executor_role(data.get("subagent_type"))
+
         return cls(
             id=data["id"],
             title=data["title"],
@@ -75,7 +107,10 @@ class Task:
             files_to_modify=data.get("files_to_modify", []),
             files_to_create=data.get("files_to_create", []),
             estimated_complexity=data.get("estimated_complexity", "medium"),
-            subagent_type=data.get("subagent_type", "general-purpose"),
+            executor_role=executor_role,
+            subagent_type=data.get(
+                "subagent_type", subagent_type_for_role(executor_role)
+            ),
             acceptance_criteria=acceptance_criteria,
             batch_group=data.get("batch_group"),
             error_message=data.get("error_message"),
@@ -145,8 +180,8 @@ class TaskDecomposer:
                 files_to_create=files_to_create,
                 estimated_complexity=estimated_complexity,
                 acceptance_criteria=acceptance_criteria,
-                # subagent_type defaults to "general-purpose"
-                # Claude Code sets appropriate type during --generate-tasks
+                # executor_role defaults to "agent"; task generation marks the
+                # manual steps as "human".
             )
             tasks.append(task)
             self.tasks[task.id] = task

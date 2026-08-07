@@ -111,7 +111,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
 **MANDATORY**: These rules MUST be followed when applying fixes:
 
-1. **ALWAYS use the Task tool**: When applying fixes, ALWAYS use the Task tool with `subagent_type: "general-purpose"`. NEVER implement fixes manually.
+1. **ALWAYS delegate**: When applying fixes, ALWAYS run the fix task as a subagent (`executor_role: "agent"`). NEVER implement fixes manually.
 
 2. **OUTPUT TRACKING**: After applying fixes (with `--apply-fixes`):
    - Update `{plan}_code_review.md` to mark issues as fixed with summaries
@@ -190,99 +190,41 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After the background task completes, check the log file `{plan}/code-review/orchestrator-run.log` for validation markers.
 
-   #### Reference-Based Validation
+   #### The task file
 
-   The `validation_tasks.json` file uses a reference-based format (small metadata file):
-   ```json
-   {
-     "batches": [
-       {
-         "batch_index": 0,
-         "group_indices": [0, 1, 2],
-         "output_path": "{plan}/code-review/validation_batch_0.json"
-       }
-     ],
-     "grouped_file": "{plan}/code-review/grouped.json",
-     "plan_file": "/absolute/path/to/plan.md",
-     "reaggregate_command": "uv run ... code_review_orchestrator.py ... --reaggregate"
-   }
-   ```
+   `validation_tasks.json` carries `tasks_schema_version: 2` and one complete
+   task per batch under `batches` — each with `prompt`, `output_name`, the
+   derived `output_path`, `result_channel: file`, `context_mode: inline`,
+   `capability_tier`, `executor_role` and `task_id`. The plan excerpt, this
+   batch's issue records (including each issue's `file` and `line_range`) and the
+   code-inspection guidance all travel **inside** `prompt`.
+
+   **For each task in the file, run `task.prompt` as a subagent, then write the
+   JSON it returns to `task.output_path`.** That is the whole contract — do not
+   assemble a prompt, and do not tell the subagent to write the file itself.
+
+   A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+   `inputs` hashes no longer match the plan and grouped.json, is refused with
+   exit 3: re-run the phase with `--force` to re-materialize it.
 
    #### Single Batch: `[VALIDATION_PENDING]`
 
    If `[VALIDATION_PENDING]` marker is present:
-   1. Read `validation_tasks.json` from `{plan}/code-review/` (small metadata file)
-   2. Spawn one validation subagent that reads the source files directly:
-
-      ```
-      Task tool call:
-        subagent_type: general-purpose
-        description: "Validate code review issues"
-        prompt: |
-          Validate issue groups from a code review.
-
-          Read these files:
-          - Grouped issues: {grouped_file from validation_tasks.json}
-          - Plan context: {plan_file from validation_tasks.json}
-          - Base git ref: {base_ref from validation_tasks.json}
-
-          For each group, examine the actual code before making your determination:
-          - Read the file(s) referenced in the group's issues (use the `file` and `line_range` fields)
-          - If base_ref is non-empty, optionally run `git diff {base_ref} -- {file}` to see what changed (skip this step when base_ref is empty to avoid misleading unstaged diffs)
-          - Compare what the code actually does against what the issue claims
-
-          If an issue is missing `file` or `line_range` metadata (e.g., the finding refers to a deleted/renamed file, or describes a cross-cutting concern without a specific location):
-          - Attempt validation using whatever context is available: the issue description, the plan file, and any other files in the group that do have location data
-          - If you can determine validity from the description and plan alone, return `valid` or `invalid` as normal
-          - If the missing location context makes it impossible to verify the claim with confidence, return `needs-human-decision` with a note explaining that file/line metadata was absent
-
-          Code context collection limits:
-          - Max files per group: 5 files. If a group references more files, prioritize by: (1) files explicitly named in `file` fields, (2) files with the smallest line ranges (most specific references). Break ties using importance (HIGH > MEDIUM > LOW).
-          - Max lines per file: 200 lines around referenced line range (100 before, 100 after). If no line range is specified, read the first 200 lines of the file.
-          - Max diff chunks per file: 3 hunks with --unified=5
-          - If diff output exceeds 3 hunks, note "diff truncated" in your reasoning and make your determination from the available context
-          - Prioritize HIGH importance issues when limits are reached
-
-          Validate ONLY these groups (use group_hash from grouped.json to identify each):
-          {for each i: "  index {group_indices[i]} (group_hash: {group_ids[i]})" from batches[N]}
-          You MUST output EXACTLY {len(group_indices)} results — one per requested group.
-          Do NOT validate or include results for any other groups.
-
-          For each group, determine:
-          - "valid": Issue is real, should be addressed
-          - "invalid": False positive, not applicable
-          - "needs-human-decision": Requires human judgment
-
-          Use the Write tool (not Bash) to save results to: {output_path from batches[N]}
-
-          Output format:
-          {
-            "groups": [
-              {"group_index": 0, "group_hash": "<copy from group's group_hash field>", "status": "valid|invalid|needs-human-decision", "reason": "...", "confidence": 0.0-1.0}
-            ],
-            "metadata": {"model": "claude", "timestamp": "ISO", "schema_version": "2.1"}
-          }
-
-          IMPORTANT: Copy the exact group_hash value from each group in grouped.json into your output.
-
-          CRITICAL: Your entire response MUST be a single brief line, e.g.:
-          "Done: wrote 3 validation results to /path/to/output.json"
-          Do NOT include reasoning, analysis, or explanation in your response.
-      ```
-
-   3. Wait for the subagent to complete
+   1. Read `validation_tasks.json` from `{plan}/code-review/`
+   2. Run the single task's `prompt` as a subagent and write its JSON reply to
+      that task's `output_path`
 
    **Record metrics** for each validation subagent. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
    ```bash
    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "code-review" \
-     --label "Validation batch {N}" --subagent-type "general-purpose" \
+     --label "Validation batch {N}" --subagent-type "agent" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
    Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
-   4. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+   3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -297,7 +239,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-   For each batch in the `batches` array, spawn a Task agent using the same prompt template as single-batch validation above, but with that batch's `group_indices` and `output_path`.
+   For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
    **Run all batches in parallel** (single message with multiple Task tool calls).
 
@@ -339,7 +281,7 @@ Items with `needs-human-decision` status are included in the report for the user
    b. For each task, spawn a Task subagent:
       ```
       Task tool call:
-      - subagent_type: "general-purpose"
+      - executor_role: "agent"
       - description: "Fix: {task.title}"
       - prompt: |
           Fix the following code issue:
@@ -364,7 +306,7 @@ Items with `needs-human-decision` status are included in the report for the user
    ```bash
    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "code-review" \
-     --label "Fix: {task_title}" --subagent-type "{subagent_type}" \
+     --label "Fix: {task_title}" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_fixes} --batch-index {N}
    ```

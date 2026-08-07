@@ -48,7 +48,7 @@ The orchestrator groups related fixes by file for efficient processing:
 
 ### Subagent Routing
 
-All fix batches use `subagent_type: "general-purpose"` — the only implementation subagent type available in Claude Code.
+All fix batches use `executor_role: "agent"` — a code review never emits a manual step. (Batches also carry the Claude-Code-only `subagent_type` for hosts whose native Task tool requires that parameter; no reader branches on it.)
 
 ### Efficiency Gains
 
@@ -66,7 +66,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
 3. **Smart Batching**: Group related fixes by file location
 4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6.
 5. **Batch Application**: Process each batch with a specialist subagent:
-   - Spawn a Task subagent with the appropriate `subagent_type`
+   - Run the batch as a subagent (every batch is `executor_role: "agent"`)
    - Wait for completion before moving to the next batch
    - This prevents conflicts from concurrent edits
 6. **Run Verification**: Execute `pnpm typecheck` after all fixes
@@ -208,7 +208,7 @@ This prints a formatted summary with each fix's title and status. Display this o
 Use the **Read tool** to load `{plan}/apply-fixes/orchestrator_output.json`.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
-- `batches`: Array of batch objects, each with `prompt`, `file_key`, `subagent_type`, `fixes`
+- `batches`: Array of batch objects, each with `prompt`, `file_key`, `executor_role`, `fixes`
 - `needs_human_review`: Items requiring human decision
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
@@ -237,7 +237,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
 
-3. **Spawn a Task subagent** using the `subagent_type` from the batch (not always `general-purpose` — use the batch-specific type):
+3. **Run the batch as a subagent** (`executor_role: "agent"` on every fix batch):
    - `general-purpose` for all fixes
 4. **Wait for completion** - Do NOT parallelize batch processing
 
@@ -271,7 +271,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
    ```bash
    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
-     --label "Batch {N} ({file_key})" --subagent-type "{subagent_type}" \
+     --label "Batch {N} ({file_key})" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
@@ -440,12 +440,12 @@ The orchestrator outputs JSON with batches:
           "line_range": [42, 50],
           "anchor_text": "user.profile.name",
           "importance": "HIGH",
-          "subagent_type": "general-purpose"
+          "executor_role": "agent"
         }
       ],
       "file_key": "src/api.ts",
       "batch_type": "bug",
-      "subagent_type": "general-purpose",
+      "executor_role": "agent",
       "fix_count": 2,
       "priority_score": 6.0,
       "prompt": "Fix the following issues in src/api.ts..."
@@ -513,7 +513,7 @@ Claude:
    Efficiency: 4 subagent calls saved (50% gain)
 
 For each batch (sequentially):
-- Spawns Task subagent with batch.subagent_type
+- Runs the batch as a subagent (batch.executor_role)
 - Uses pre-generated batch.prompt
 - Waits for completion
 - Logs results
@@ -612,7 +612,7 @@ Fix 2: [What was changed]
 ## Critical Rules
 
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
-2. **USE SUBAGENT TYPES**: Always use the `subagent_type` from each batch
+2. **DELEGATE EVERY BATCH**: Every batch is `executor_role: "agent"` — run it as a subagent, never inline
 3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
 4. **NEVER IMPLEMENT MANUALLY**: Always use Task tool with the appropriate subagent type
 5. **TRACK EVERYTHING**: Log every applied/skipped fix for the report
@@ -700,89 +700,30 @@ uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code
 
 When running with `--revalidate` (without `--internal-revalidation`), the orchestrator outputs a revalidation marker.
 
-#### Reference-Based Revalidation
+#### The task file
 
-The `revalidation_tasks.json` file uses a reference-based format (small metadata file):
-```json
-{
-  "batches": [
-    {
-      "batch_index": 0,
-      "group_indices": [0, 2, 5],
-      "output_path": "{plan}/code-review/validation_batch_0.json"
-    }
-  ],
-  "grouped_file": "{plan}/code-review/grouped.json",
-  "plan_file": "/absolute/path/to/plan.md",
-  "item_indices": [0, 2, 5],
-  "reaggregate_command": "uv run ... apply_code_fixes_orchestrator.py ..."
-}
-```
+`revalidation_tasks.json` carries `tasks_schema_version: 2` and one complete task
+per batch under `batches` — each with `prompt`, `output_name`, the derived
+`output_path`, `result_channel: file`, `context_mode: inline`, `capability_tier`,
+`executor_role` and `task_id`. The plan excerpt and this batch's issue records
+travel **inside** `prompt`; `item_indices` and `original_validation` stay on the
+file for the merge step.
+
+**For each task in the file, run `task.prompt` as a subagent, then write the JSON
+it returns to `task.output_path`.** That is the whole contract — do not assemble a
+prompt, and do not tell the subagent to write the file itself.
+
+A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+`inputs` hashes no longer match their sources, is refused with exit 3: re-run the
+phase with `--force` to re-materialize it.
 
 #### Single Batch: `[REVALIDATION_PENDING]`
 
 If `[REVALIDATION_PENDING]` marker is present:
-1. Read `revalidation_tasks.json` from `{plan}/code-review/` (small metadata file)
-2. Spawn a single revalidation subagent that reads source files directly:
-
-   ```
-   Task tool call:
-     subagent_type: general-purpose
-     description: "Revalidate failed code fixes"
-     prompt: |
-       Revalidate code issue groups that previously failed validation.
-
-       Read these files:
-       - Grouped issues: {grouped_file from revalidation_tasks.json}
-       - Plan context: {plan_file from revalidation_tasks.json}
-       - Base git ref: {base_ref from revalidation_tasks.json}
-
-       For each group, examine the actual code before making your determination:
-       - Read the file(s) referenced in the group's issues (use the `file` and `line_range` fields)
-       - If base_ref is non-empty, optionally run `git diff {base_ref} -- {file}` to see what changed (skip this step when base_ref is empty to avoid misleading unstaged diffs)
-       - Compare what the code actually does against what the issue claims
-
-       If an issue is missing `file` or `line_range` metadata (e.g., the finding refers to a deleted/renamed file, or describes a cross-cutting concern without a specific location):
-       - Attempt validation using whatever context is available: the issue description, the plan file, and any other files in the group that do have location data
-       - If you can determine validity from the description and plan alone, return `valid` or `invalid` as normal
-       - If the missing location context makes it impossible to verify the claim with confidence, return `needs-human-decision` with a note explaining that file/line metadata was absent
-
-       Code context collection limits:
-       - Max files per group: 5 files
-       - Max lines per file: 200 lines around referenced line range (if no line range is specified, read the first 200 lines)
-       - Max diff chunks per file: 3 hunks with --unified=5
-       - If diff output exceeds 3 hunks, note "diff truncated" in your reasoning and make your determination from the available context
-       - Prioritize HIGH importance issues when limits are reached
-       - When selecting which files to examine under limits, prefer files referenced by HIGH importance issues first, then MEDIUM, then LOW
-
-       Revalidate ONLY these groups (use group_hash from grouped.json to identify each):
-       {for each i: "  index {group_indices[i]} (group_hash: {group_ids[i]})" from batches[N]}
-       You MUST output EXACTLY {len(group_indices)} results — one per requested group.
-       Do NOT revalidate or include results for any other groups.
-
-       For each group, determine:
-       - "valid": Issue is real, should be addressed
-       - "invalid": False positive, not applicable
-       - "needs-human-decision": Requires human judgment
-
-       Use the Write tool (not Bash) to save results to: {output_path from batches[N]}
-
-       Output format:
-       {
-         "groups": [
-           {"group_index": 0, "group_hash": "<copy from group's group_hash field>", "status": "valid|invalid|needs-human-decision", "reason": "...", "confidence": 0.0-1.0}
-         ],
-         "metadata": {"model": "claude", "timestamp": "ISO", "schema_version": "2.1"}
-       }
-
-       IMPORTANT: Copy the exact group_hash value from each group in grouped.json into your output.
-
-       CRITICAL: Your entire response MUST be a single brief line, e.g.:
-       "Done: wrote 3 revalidation results to /path/to/output.json"
-       Do NOT include reasoning, analysis, or explanation in your response.
-   ```
-
-3. After the subagent writes the result file, run the orchestrator again (without `--revalidate`)
+1. Read `revalidation_tasks.json` from `{plan}/code-review/`
+2. Run the single task's `prompt` as a subagent and write its JSON reply to that
+   task's `output_path`
+3. After the result file is written, run the orchestrator again (without `--revalidate`)
 
 #### Multiple Batches: `[REVALIDATION_BATCHES_PENDING]`
 
@@ -792,9 +733,9 @@ If `[REVALIDATION_BATCHES_PENDING]` marker is present:
 
 **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-For each batch in `batches` array, spawn a Task agent using the same prompt template above, but with that batch's `group_indices` and `output_path`.
+For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
-**Run all batches in parallel** (single message with multiple Task tool calls).
+**Run all batches in parallel** (single message with multiple subagent calls).
 
 **Strategy B: Wave-based parallel spawning (> 4 batches)**
 

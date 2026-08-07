@@ -38,6 +38,7 @@ from utils.apply_selection_helpers import merge_validation_with_groups
 from utils.code_fix_batcher import (
     CodeFixBatch,
     batch_code_fixes,
+    determine_executor_role,
     determine_subagent_type,
     estimate_batch_processing_stats,
     format_fix_batch_prompt,
@@ -334,6 +335,12 @@ def format_fix_for_output(group: Dict[str, Any], index: int) -> Dict[str, Any]:
         "validation_confidence": group.get("validation_confidence", 0.0),
         "models": group.get("models", []),
         "suggestion_count": len(suggestions),
+        "executor_role": determine_executor_role({
+            "file": file_path,
+            "type": fix_type,
+            "description": desc,
+            "title": title,
+        }),
         "subagent_type": determine_subagent_type({
             "file": file_path,
             "type": fix_type,
@@ -785,7 +792,7 @@ Bulk Approval Examples:
         return md_validation_overrides, {}
 
     def format_item_for_output(self, group: Dict[str, Any], index: int) -> Dict[str, Any]:
-        """Format a grouped issue for output, including subagent_type routing."""
+        """Format a grouped issue for output, including executor_role routing."""
         return format_fix_for_output(group, index)
 
     def create_batches(self, items: List[Dict[str, Any]]) -> List[CodeFixBatch]:
@@ -796,6 +803,7 @@ Bulk Approval Examples:
                     fixes=[f],
                     file_key=f.get("file", "unknown"),
                     batch_type=f.get("type", "bug"),
+                    executor_role=f.get("executor_role", "agent"),
                     subagent_type=f.get("subagent_type", "general-purpose"),
                     total_chars=len(f.get("description", ""))
                 )
@@ -934,7 +942,10 @@ Bulk Approval Examples:
                 batch_fixes = batch.get("fixes", []) if isinstance(batch, dict) else batch.fixes
                 batch_file = batch.get("file_key", "") if isinstance(batch, dict) else batch.file_key
                 batch_type = batch.get("batch_type", "") if isinstance(batch, dict) else batch.batch_type
-                batch_subagent = batch.get("subagent_type", "") if isinstance(batch, dict) else batch.subagent_type
+                batch_executor = (
+                    batch.get("executor_role", "agent") if isinstance(batch, dict)
+                    else batch.executor_role
+                )
                 batch_size = batch.get("fix_count", len(batch_fixes)) if isinstance(batch, dict) else batch.size
                 batch_priority = batch.get("priority_score", 0) if isinstance(batch, dict) else batch.priority_score
 
@@ -943,7 +954,7 @@ Bulk Approval Examples:
                 print(f"{'='*60}")
                 print(f"File: {batch_file}")
                 print(f"Type: {batch_type}")
-                print(f"Subagent: {batch_subagent}")
+                print(f"Executor: {batch_executor}")
                 print(f"Priority score: {batch_priority}")
 
                 for j, f in enumerate(batch_fixes):

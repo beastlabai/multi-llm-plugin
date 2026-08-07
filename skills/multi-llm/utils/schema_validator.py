@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 SCHEMA_DIR = Path(__file__).parent.parent / "schemas"
 
@@ -100,6 +100,204 @@ def validate_against_schema(
         errors.append(f"{path}: value '{data}' not in enum {schema['enum']}")
 
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Fuller JSON Schema subset (draft-07 keywords the task/verdict schemas need)
+# ---------------------------------------------------------------------------
+#
+# ``validate_against_schema`` above is a deliberately loose validator whose
+# behavior several older call sites depend on (it ignores
+# ``additionalProperties``, ``allOf``, ``if``/``then`` and ``$ref`` entirely).
+# The D2 task-JSON, verdict and generated-task schemas need those keywords to
+# express per-``kind`` required sets, the ``additionalProperties: false`` rule
+# that makes a typo'd field fail at materialization, and the
+# ``subagent_type``/``executor_role`` agreement rule. Rather than tighten the
+# loose validator under existing consumers, ``validate_document`` implements the
+# larger subset and is used by the new validators only.
+#
+# Supported: type (incl. type arrays), enum, const, required, properties,
+# additionalProperties (bool), items, minItems, uniqueItems, minLength,
+# minimum, maximum, pattern, allOf, anyOf, oneOf, not, if/then/else and local
+# ``$ref`` (``#/$defs/...`` / ``#/definitions/...``).
+
+_TYPE_MAP = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+    "null": type(None),
+}
+
+
+def _matches_type(value: Any, expected: Union[str, List[str]]) -> bool:
+    names = [expected] if isinstance(expected, str) else list(expected)
+    for name in names:
+        py_type = _TYPE_MAP.get(name)
+        if py_type is None:
+            return True  # unknown type name: do not fail the document on it
+        if name == "integer":
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return True
+            continue
+        if name == "number":
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return True
+            continue
+        if name in ("string", "array", "object", "null"):
+            if isinstance(value, py_type):
+                return True
+            continue
+        if isinstance(value, py_type):
+            return True
+    return False
+
+
+def _resolve_ref(ref: str, root: Dict[str, Any]) -> Dict[str, Any]:
+    if not ref.startswith("#/"):
+        raise ValidationError(f"Unsupported $ref (only local refs): {ref}")
+    node: Any = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or part not in node:
+            raise ValidationError(f"Unresolvable $ref: {ref}")
+        node = node[part]
+    if not isinstance(node, dict):
+        raise ValidationError(f"$ref does not point at a schema: {ref}")
+    return node
+
+
+def validate_document(
+    data: Any,
+    schema: Dict[str, Any],
+    path: str = "",
+    root: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Validate ``data`` against ``schema``, returning a list of error strings.
+
+    Implements the draft-07 subset documented above. ``path`` is the dotted
+    location used in messages; ``root`` is the document the ``$ref`` pointers
+    resolve against (defaults to ``schema`` itself).
+    """
+    if root is None:
+        root = schema
+    errors: List[str] = []
+    where = path or "<root>"
+
+    if "$ref" in schema:
+        return validate_document(data, _resolve_ref(schema["$ref"], root), path, root)
+
+    if "const" in schema and data != schema["const"]:
+        errors.append(f"{where}: expected {schema['const']!r}, got {data!r}")
+
+    if "enum" in schema and data not in schema["enum"]:
+        errors.append(f"{where}: value {data!r} not in enum {schema['enum']}")
+
+    if "type" in schema and not _matches_type(data, schema["type"]):
+        errors.append(
+            f"{where}: expected type {schema['type']}, got {type(data).__name__}"
+        )
+        return errors  # further keyword checks would be noise
+
+    if isinstance(data, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(data) < min_length:
+            errors.append(
+                f"{where}: string shorter than minLength {min_length}"
+            )
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and not re.search(pattern, data):
+            errors.append(f"{where}: {data!r} does not match pattern {pattern}")
+
+    if isinstance(data, (int, float)) and not isinstance(data, bool):
+        if "minimum" in schema and data < schema["minimum"]:
+            errors.append(f"{where}: {data} < minimum {schema['minimum']}")
+        if "maximum" in schema and data > schema["maximum"]:
+            errors.append(f"{where}: {data} > maximum {schema['maximum']}")
+
+    if isinstance(data, dict):
+        for field in schema.get("required", []):
+            if field not in data:
+                errors.append(f"{where}: missing required field '{field}'")
+        properties = schema.get("properties", {})
+        for name, sub_schema in properties.items():
+            if name in data:
+                sub_path = f"{path}.{name}" if path else name
+                errors.extend(
+                    validate_document(data[name], sub_schema, sub_path, root)
+                )
+        extra_schema = schema.get("additionalProperties")
+        if extra_schema is False:
+            unknown = sorted(set(data) - set(properties))
+            for name in unknown:
+                errors.append(f"{where}: unexpected field '{name}'")
+        elif isinstance(extra_schema, dict):
+            for name in sorted(set(data) - set(properties)):
+                sub_path = f"{path}.{name}" if path else name
+                errors.extend(
+                    validate_document(data[name], extra_schema, sub_path, root)
+                )
+
+    if isinstance(data, list):
+        items_schema = schema.get("items")
+        if isinstance(items_schema, dict):
+            for index, item in enumerate(data):
+                errors.extend(
+                    validate_document(item, items_schema, f"{path}[{index}]", root)
+                )
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(data) < min_items:
+            errors.append(f"{where}: fewer than minItems {min_items} entries")
+        if schema.get("uniqueItems"):
+            seen: List[Any] = []
+            for item in data:
+                if item in seen:
+                    errors.append(f"{where}: duplicate entry {item!r}")
+                    break
+                seen.append(item)
+
+    for sub_schema in schema.get("allOf", []):
+        errors.extend(validate_document(data, sub_schema, path, root))
+
+    if "anyOf" in schema:
+        if not any(
+            not validate_document(data, sub, path, root)
+            for sub in schema["anyOf"]
+        ):
+            errors.append(f"{where}: matched none of the anyOf alternatives")
+
+    if "oneOf" in schema:
+        matches = sum(
+            1
+            for sub in schema["oneOf"]
+            if not validate_document(data, sub, path, root)
+        )
+        if matches != 1:
+            errors.append(
+                f"{where}: matched {matches} oneOf alternatives (exactly 1 required)"
+            )
+
+    if "not" in schema and not validate_document(data, schema["not"], path, root):
+        errors.append(f"{where}: value {data!r} is explicitly disallowed")
+
+    if "if" in schema:
+        condition_holds = not validate_document(data, schema["if"], path, root)
+        branch = "then" if condition_holds else "else"
+        if branch in schema:
+            errors.extend(validate_document(data, schema[branch], path, root))
+
+    return errors
+
+
+def validate_with_schema_file(data: Any, schema_name: str) -> List[str]:
+    """Validate already-parsed ``data`` against a schema file by name."""
+    return validate_document(data, load_schema(schema_name))
 
 
 def validate_json_output(
@@ -234,6 +432,52 @@ def validate_code_review_issues(issues: List[Dict[str, Any]]) -> Tuple[bool, Lis
         "code_review_issues.schema.json"
     )
     return is_valid, errors
+
+
+SUBAGENT_TASKS_SCHEMA = "subagent_tasks.schema.json"
+HUMAN_DECISION_VERDICTS_SCHEMA = "human_decision_verdicts.schema.json"
+GENERATED_TASKS_SCHEMA = "generated_tasks.schema.json"
+
+#: The one task-file format version this release writes and reads.
+TASKS_SCHEMA_VERSION = 2
+
+
+def validate_subagent_task(task: Dict[str, Any], where: str = "task") -> List[str]:
+    """Validate one materialized task object against the D2g schema.
+
+    Args:
+        task: A single task dict (an entry of a task file's ``tasks`` array).
+        where: Label used as the error path prefix (e.g. ``"tasks[0]"``).
+
+    Returns:
+        A list of error strings; empty when the task validates.
+    """
+    schema = load_schema(SUBAGENT_TASKS_SCHEMA)
+    return validate_document(task, schema["$defs"]["task"], where, schema)
+
+
+def validate_subagent_task_file(data: Any) -> List[str]:
+    """Validate a whole materialized task file against the D2g schema.
+
+    Checks the file-level wrapper (``tasks_schema_version``, ``kind``,
+    ``inputs``, ``tasks``) and every task in it. Task files also carry
+    producer-specific bookkeeping keys (``total_batches``, ``batching_stats``,
+    ``reaggregate_command``, …), so the *file* object permits extra properties;
+    ``additionalProperties: false`` is enforced on the task objects, which is
+    where a typo'd or dropped field would otherwise dispatch a task that is
+    merely shaped right.
+    """
+    return validate_with_schema_file(data, SUBAGENT_TASKS_SCHEMA)
+
+
+def validate_human_decision_verdicts(data: Any) -> List[str]:
+    """Validate a ``human_decision_batch_<n>.json`` document."""
+    return validate_with_schema_file(data, HUMAN_DECISION_VERDICTS_SCHEMA)
+
+
+def validate_generated_tasks_document(data: Any) -> List[str]:
+    """Validate a ``task_generation_result.json`` document."""
+    return validate_with_schema_file(data, GENERATED_TASKS_SCHEMA)
 
 
 def validate_state_file(state: Dict[str, Any]) -> Tuple[bool, List[str]]:

@@ -1,0 +1,73 @@
+You are deciding what to do with 1 review item that automated validation
+could not settle. For each one, choose Approve, Salvage or Skip.
+
+## Items to judge (1)
+
+[
+  {
+    "confidence": 0.4,
+    "description": "A transient 503 currently loses the file, and the plan also speculates about a queue nobody asked for.",
+    "group_id": "aaaa000000000000",
+    "importance": "MEDIUM",
+    "models": [
+      "model-a",
+      "model-b"
+    ],
+    "title": "Retry uploads",
+    "validation_reason": "Could go either way on the queue part."
+  }
+]
+
+### Three outcomes
+
+- **Approve (as-is)** — the suggestion is sound; apply it unchanged.
+- **Salvage (partial)** — only *part* of the suggestion is valid or worthwhile; rewrite it down to that defensible core and apply the rewritten version. **This is the default whenever an item is partially valid — never skip a whole suggestion just because part of it is wrong.**
+- **Skip** — there is nothing worthwhile to keep; drop the item entirely.
+
+### Evaluation Criteria
+
+Read each item's details (title, description, importance, validation_reason, confidence) and decide based on:
+
+1. **Clear improvement vs. subjective preference**: Approve items that address genuine bugs, security issues, or correctness problems. Be cautious with purely stylistic or preference-based items.
+2. **Validation reason signals**: If the validation reason indicates genuine ambiguity ("could go either way", "trade-off", "matter of preference"), lean toward skipping. If it indicates implementation uncertainty ("not sure about scope", "might affect other files"), lean toward approving.
+3. **Importance as risk signal**: Be more conservative (lean skip) with HIGH importance items — they have bigger impact if wrong. Be more permissive (lean approve) with LOW importance items.
+4. **Security items lean approve**: Security-type items (XSS, injection, auth bypass, data exposure) should lean toward approval.
+5. **Deletion caution**: For items that involve removing code/content, require stronger confidence before approving. Deletions are harder to reverse.
+6. **Model consensus**: If the `models` array shows multiple models flagged this as `needs-human-decision`, be more cautious. If only one model flagged it while others said `valid`, lean toward approving.
+
+### Deciding Approve vs. Salvage vs. Skip
+
+Apply the criteria above to each **distinct claim inside the suggestion**, not just the suggestion as a whole. Many `needs-human-decision` items are a mix — one solid point bundled with an overreach, a speculative extra, or an out-of-scope aside. Salvaging the worthwhile part is the **default** for such items.
+
+1. **Identify the worthwhile core**: Which specific part(s) address a genuine bug, correctness, security, or clarity issue and survive the criteria above?
+2. **Whole thing is sound** -> **Approve** as-is.
+3. **Part is worthwhile, the rest is questionable / speculative / out-of-scope / low-confidence** -> **Salvage**: rewrite the description to keep only the worthwhile core and drop the rest. Salvage only ever **narrows** a suggestion — never add anything that was not in the original. The existing criteria still govern the kept part (e.g. deletion caution, security lean-approve).
+4. **Nothing survives** — the item is purely subjective, speculative, redundant, or wrong -> **Skip**. Salvage only when a concrete, defensible improvement remains; do **not** manufacture value or apply a watered-down change just to avoid skipping. If there is nothing worthwhile, skip it entirely.
+
+A salvaged item is applied like an approval, except the **rewritten** description is what gets applied — never the original.
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+
+{
+  "schema_version": "1.0",
+  "verdicts": [
+    {
+      "group_id": "<copy the item's group_id verbatim>",
+      "decision": "approve|salvage|skip",
+      "reason": "<one brief sentence>",
+      "salvaged_description": "<the rewritten description — only when decision is salvage, otherwise null>",
+      "dropped": "<what was intentionally left out — only when decision is salvage, otherwise null>"
+    }
+  ]
+}
+
+Rules:
+1. Output EXACTLY one verdict per item above, keyed by the item's `group_id`
+   copied verbatim. Verdicts are matched by that id, never by position.
+2. `salvaged_description` and `dropped` are non-empty strings when — and only
+   when — `decision` is "salvage". For "approve" and "skip" both are null.
+3. Never omit an item. An item you cannot decide is a "skip" with the reason
+   saying so.

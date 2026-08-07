@@ -1,0 +1,791 @@
+#!/usr/bin/env python3
+"""Materialized task files: construction, hashing, budget and refusals (D2a/D2c-D2h).
+
+``utils/subagent_prompts.py`` renders the prompt text; this module owns
+everything else a materialized task file needs:
+
+* the canonical task object and its ``tasks_schema_version: 2`` file wrapper,
+  validated against ``schemas/subagent_tasks.schema.json`` **on write and on
+  read** (D2g);
+* the ``inputs`` hash block that binds a task to the inputs it was materialized
+  from, computed with the same content hash ``StateManager`` uses for the plan,
+  and the resume-time recomputation that refuses a stale file with **exit 3**;
+* the ``executor_role`` derivation that replaces every ``subagent_type ==
+  "human"`` test (D2h);
+* the pre-dispatch refusals — ``result_channel: inline-json``,
+  ``executor_role: human``, and ``context_mode: workspace-read`` against a runner
+  with no workspace-read capability — as reusable functions, so the Phase-3
+  executor calls exactly the code these tests pin (D2a/D2c);
+* the D2d prompt budget: a per-runner ceiling measured in **UTF-16 code units**
+  (astral characters count double, the unit Windows actually limits), unbounded
+  for a non-argv transport, with over-budget resolved by splitting the batch or
+  downgrading to ``workspace-read`` — never by silently truncating.
+
+Nothing here dispatches anything; ``utils/subagent_executor.py`` (D3) is the
+consumer.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .schema_validator import (
+        TASKS_SCHEMA_VERSION,
+        validate_subagent_task,
+        validate_subagent_task_file,
+    )
+    from .llm_client import (
+        CMDLINE_CAP_UTF16_BATCH,
+        CMDLINE_CAP_UTF16_NATIVE,
+        CMDLINE_UTF16_HEADROOM,
+        _utf16_code_units,
+    )
+except ImportError:  # pragma: no cover
+    from utils.schema_validator import (
+        TASKS_SCHEMA_VERSION,
+        validate_subagent_task,
+        validate_subagent_task_file,
+    )
+    from utils.llm_client import (
+        CMDLINE_CAP_UTF16_BATCH,
+        CMDLINE_CAP_UTF16_NATIVE,
+        CMDLINE_UTF16_HEADROOM,
+        _utf16_code_units,
+    )
+
+
+__all__ = [
+    "TASKS_SCHEMA_VERSION",
+    "KINDS",
+    "TaskFileError",
+    "TaskRefusal",
+    "content_hash",
+    "file_content_hash",
+    "build_inputs",
+    "derive_executor_role",
+    "subagent_type_for_role",
+    "make_task",
+    "make_task_file",
+    "tasks_of",
+    "write_task_file",
+    "read_task_file",
+    "assert_dispatchable",
+    "refuse_reason",
+    "resolve_output_path",
+    "utf16_units",
+    "preferred_prompt_transport",
+    "prompt_budget_utf16",
+    "PromptBudget",
+]
+
+
+KINDS = (
+    "validation",
+    "revalidation",
+    "consolidation",
+    "salvage",
+    "human_decision_judge",
+    "task_generation",
+)
+
+#: Providers that carry a real non-argv prompt transport (D2d). Kept here rather
+#: than imported so this module stays usable without instantiating adapters.
+_NON_ARGV_TRANSPORT_PROVIDERS = ("claude-code", "codex", "opencode")
+
+
+class TaskFileError(Exception):
+    """A materialized task file cannot be used, and the phase must re-materialize.
+
+    Carries ``exit_code = 3`` ("needs a human"): every raise site names the
+    offending file, what changed, and the fix.
+    """
+
+    exit_code = 3
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class TaskRefusal(TaskFileError):
+    """A single task must not be dispatched. ``task_id`` is always named."""
+
+    def __init__(self, message: str, task_id: str = "") -> None:
+        super().__init__(message)
+        self.task_id = task_id
+
+
+# ---------------------------------------------------------------------------
+# Hashing — the same content hash StateManager already uses for the plan
+# ---------------------------------------------------------------------------
+
+def content_hash(text: str) -> str:
+    """Return the 16-char content hash used throughout the skill.
+
+    Identical to ``StateManager._compute_plan_hash``'s digest so a task file's
+    ``inputs.plan_sha256`` and ``state.plan_hash`` are directly comparable.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def file_content_hash(path: Optional[str]) -> str:
+    """Hash a file's contents, or return ``""`` when it does not exist.
+
+    Mirrors ``_compute_plan_hash``'s empty-string-for-missing behavior so a
+    phase with no plan file (or a unit test with none) round-trips instead of
+    failing the resume check.
+    """
+    if not path:
+        return ""
+    try:
+        return content_hash(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def build_inputs(
+    *,
+    plan_file: Optional[str] = None,
+    grouped_file: Optional[str] = None,
+    diff_base: Optional[str] = None,
+    diff_text: Optional[str] = None,
+    salvage_request_file: Optional[str] = None,
+    items: Optional[Any] = None,
+) -> Dict[str, str]:
+    """Build the ``inputs`` hash block for a task file.
+
+    Every key is optional except ``plan_sha256``, which is always present (empty
+    string when the phase has no plan file). A task file is a *snapshot* and a
+    phase dir outlives the run that wrote it, so these hashes are what stop a
+    stale prompt from producing a confidently wrong result against text nobody is
+    reviewing any more.
+    """
+    inputs: Dict[str, str] = {"plan_sha256": file_content_hash(plan_file)}
+    if grouped_file is not None:
+        inputs["grouped_sha256"] = file_content_hash(grouped_file)
+    if diff_base:
+        inputs["diff_base"] = diff_base
+    if diff_text is not None:
+        inputs["diff_sha256"] = content_hash(diff_text)
+    if salvage_request_file is not None:
+        inputs["salvage_request_sha256"] = file_content_hash(salvage_request_file)
+    if items is not None:
+        inputs["items_sha256"] = content_hash(
+            json.dumps(items, sort_keys=True, ensure_ascii=False)
+        )
+    return inputs
+
+
+# ---------------------------------------------------------------------------
+# executor_role (D2h)
+# ---------------------------------------------------------------------------
+
+def derive_executor_role(subagent_type: Optional[str]) -> str:
+    """Map a legacy ``subagent_type`` onto the host-neutral executor role.
+
+    ``"human"`` was never an agent type — it is the marker that no subagent may
+    run this task — so it becomes ``"human"``. Everything else (``
+    general-purpose`` carries no information; it is pure Claude Code vocabulary)
+    becomes ``"agent"``.
+    """
+    return "human" if subagent_type == "human" else "agent"
+
+
+def subagent_type_for_role(executor_role: str) -> str:
+    """The Claude-Code-only ``subagent_type`` that agrees with a given role.
+
+    The schema rejects a task whose ``subagent_type`` disagrees with its
+    ``executor_role``, so producers derive one from the other rather than setting
+    both by hand.
+    """
+    return "human" if executor_role == "human" else "general-purpose"
+
+
+# ---------------------------------------------------------------------------
+# Task construction
+# ---------------------------------------------------------------------------
+
+#: Canonical key order. Deterministic output keeps golden task fixtures stable.
+_TASK_KEY_ORDER = (
+    "tasks_schema_version",
+    "task_id",
+    "kind",
+    "prompt",
+    "output_name",
+    "output_path",
+    "result_channel",
+    "context_mode",
+    "capability_tier",
+    "executor_role",
+    "subagent_type",
+    "model_hint",
+    "inputs",
+    "batch_index",
+    "group_indices",
+    "group_ids",
+    "groups_count",
+    "is_high_priority",
+    "section_key",
+    "group_id",
+    "items_count",
+    "suggestion_id",
+    "model",
+    "phase",
+    "repo_root",
+    "plan_file",
+    "grouped_file",
+)
+
+
+def make_task(
+    *,
+    kind: str,
+    task_id: str,
+    prompt: str,
+    output_name: str,
+    inputs: Dict[str, str],
+    phase_dir: Optional[str] = None,
+    output_path: Optional[str] = None,
+    context_mode: str = "inline",
+    capability_tier: str = "full",
+    executor_role: str = "agent",
+    result_channel: str = "file",
+    subagent_type: Optional[str] = None,
+    model_hint: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    validate: bool = True,
+) -> Dict[str, Any]:
+    """Build one materialized task object.
+
+    Args:
+        kind: One of :data:`KINDS`.
+        task_id: Stable, path-free identifier, named in every refusal message.
+        prompt: The complete prompt (see ``utils/subagent_prompts.py``).
+        output_name: Bare basename, resolved against the phase dir on read.
+        inputs: The block from :func:`build_inputs`.
+        phase_dir: Used to derive the absolute ``output_path`` convenience field.
+        output_path: Explicit absolute output path (overrides ``phase_dir``).
+        context_mode: ``inline`` (the default and the only mode produced today)
+            or ``workspace-read``.
+        capability_tier: ``full`` for every currently materialized kind.
+        executor_role: ``agent`` or ``human``.
+        result_channel: Always ``file`` for a materialized task.
+        subagent_type: Optional Claude-Code-only metadata; derived from
+            ``executor_role`` when omitted. Pass ``""`` to omit it entirely (the
+            normal case for a host with no agent-type vocabulary).
+        model_hint: Free-form model string or ``auto``; keeps its historical
+            meaning. ``full``/``cheap`` belong to ``capability_tier`` alone.
+        extra: Per-kind fields (``batch_index``, ``group_ids``, ``group_id``,
+            ``suggestion_id``, …).
+        validate: Validate against the schema before returning (write-side
+            check). Only tests that deliberately build an invalid task pass
+            ``False``.
+
+    Returns:
+        The task dict, keys in canonical order.
+
+    Raises:
+        TaskFileError: when ``validate`` is set and the task does not validate.
+    """
+    task: Dict[str, Any] = {
+        "tasks_schema_version": TASKS_SCHEMA_VERSION,
+        "task_id": task_id,
+        "kind": kind,
+        "prompt": prompt,
+        "output_name": output_name,
+        "result_channel": result_channel,
+        "context_mode": context_mode,
+        "capability_tier": capability_tier,
+        "executor_role": executor_role,
+        "inputs": dict(inputs),
+    }
+    if subagent_type is None:
+        task["subagent_type"] = subagent_type_for_role(executor_role)
+    elif subagent_type:
+        task["subagent_type"] = subagent_type
+    if model_hint is not None:
+        task["model_hint"] = model_hint
+    if output_path:
+        task["output_path"] = output_path
+    elif phase_dir:
+        task["output_path"] = os.path.join(phase_dir, output_name)
+    if extra:
+        task.update(extra)
+
+    ordered = {k: task[k] for k in _TASK_KEY_ORDER if k in task}
+    ordered.update({k: v for k, v in task.items() if k not in ordered})
+
+    if validate:
+        errors = validate_subagent_task(ordered, where=f"task {task_id}")
+        if errors:
+            raise TaskFileError(
+                f"Refusing to materialize task {task_id!r} ({kind}): it does not "
+                f"match schemas/subagent_tasks.schema.json — "
+                + "; ".join(errors)
+            )
+    return ordered
+
+
+def tasks_of(document: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return a task file's task list under whichever key it uses.
+
+    The batched kinds carry their tasks under the historical ``batches`` key
+    (which the merge and reaggregation paths already read) and everything else
+    under ``tasks``. Storing the list twice would double a several-hundred-KB
+    phase file for nothing, so there is one list and one accessor.
+    """
+    listed = document.get("tasks")
+    if listed is None:
+        listed = document.get("batches")
+    return list(listed or [])
+
+
+def make_task_file(
+    *,
+    kind: str,
+    tasks: Sequence[Dict[str, Any]],
+    inputs: Dict[str, str],
+    extra: Optional[Dict[str, Any]] = None,
+    validate: bool = True,
+    task_list_key: str = "tasks",
+) -> Dict[str, Any]:
+    """Wrap materialized tasks in the ``tasks_schema_version: 2`` file envelope.
+
+    Args:
+        task_list_key: ``"tasks"`` (the default) or ``"batches"`` for the batched
+            kinds whose readers already use that name. Either way the list
+            appears exactly once; :func:`tasks_of` is the accessor.
+    """
+    document: Dict[str, Any] = {
+        "tasks_schema_version": TASKS_SCHEMA_VERSION,
+        "kind": kind,
+        "inputs": dict(inputs),
+        task_list_key: list(tasks),
+    }
+    if extra:
+        document.update(extra)
+        # `extra` may legitimately restate the list key (a producer building its
+        # historical payload); the materialized tasks always win.
+        document[task_list_key] = list(tasks)
+    if validate:
+        errors = validate_subagent_task_file(document)
+        if errors:
+            raise TaskFileError(
+                "Refusing to write a task file that does not match "
+                "schemas/subagent_tasks.schema.json — " + "; ".join(errors)
+            )
+    return document
+
+
+def write_task_file(path: str, document: Dict[str, Any]) -> None:
+    """Validate a task file and write it, creating parent directories."""
+    errors = validate_subagent_task_file(document)
+    if errors:
+        raise TaskFileError(
+            f"Refusing to write {path}: it does not match "
+            "schemas/subagent_tasks.schema.json — " + "; ".join(errors)
+        )
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Read side (resume): version window + inputs binding, both exit 3
+# ---------------------------------------------------------------------------
+
+_REMATERIALIZE_FIX = (
+    "Prompts are derived data, so a stale task file is never patched: either "
+    "finish the phase under the skill version that wrote it, or re-run the "
+    "phase with --force to re-materialize it"
+)
+
+
+def check_task_file_version(document: Any, path: str, phase_dir: str) -> None:
+    """Raise :class:`TaskFileError` unless the file is ``tasks_schema_version: 2``.
+
+    A missing field means version 1 — today's implicit reference-based shape,
+    which contains no prompts to recover, so "migrating" it is just re-running
+    the phase. ``> 2`` is refused the same way. There is no silent upconversion
+    in either direction.
+    """
+    if not isinstance(document, dict):
+        raise TaskFileError(
+            f"Refusing task file {path}: expected a JSON object, got "
+            f"{type(document).__name__}. Phase dir: {phase_dir}. "
+            f"{_REMATERIALIZE_FIX}."
+        )
+    found = document.get("tasks_schema_version")
+    if found == TASKS_SCHEMA_VERSION:
+        return
+    described = "missing (which means version 1)" if found is None else repr(found)
+    raise TaskFileError(
+        f"Refusing task file {path}: tasks_schema_version is {described}, but "
+        f"this release reads and writes {TASKS_SCHEMA_VERSION}. Phase dir: "
+        f"{phase_dir}. {_REMATERIALIZE_FIX}."
+    )
+
+
+def check_task_file_inputs(
+    document: Dict[str, Any],
+    path: str,
+    phase_dir: str,
+    current_inputs: Dict[str, str],
+) -> None:
+    """Raise :class:`TaskFileError` when any recorded input hash has moved.
+
+    Editing the plan, regrouping, or moving HEAD between materialization and
+    resume leaves prompts that still validate cleanly and produce confidently
+    wrong results. Only keys present in *both* blocks are compared, so a caller
+    that cannot recompute an input (no diff available on this code path, say)
+    simply does not check it rather than failing the file spuriously.
+    """
+    recorded = document.get("inputs") or {}
+    if not isinstance(recorded, dict):
+        raise TaskFileError(
+            f"Refusing task file {path}: its `inputs` block is not an object. "
+            f"Phase dir: {phase_dir}. {_REMATERIALIZE_FIX}."
+        )
+    changed = [
+        (key, recorded.get(key), current_inputs[key])
+        for key in sorted(current_inputs)
+        if key in recorded and recorded.get(key) != current_inputs[key]
+    ]
+    if not changed:
+        return
+    details = "; ".join(
+        f"{key}: materialized from {was!r}, now {now!r}" for key, was, now in changed
+    )
+    raise TaskFileError(
+        f"Refusing task file {path}: the inputs it was materialized from have "
+        f"changed ({details}). Phase dir: {phase_dir}. Re-run the phase with "
+        f"--force to re-materialize it, or restore the changed input. Nothing "
+        f"was dispatched."
+    )
+
+
+def read_task_file(
+    path: str,
+    *,
+    phase_dir: Optional[str] = None,
+    current_inputs: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Read, version-check, schema-check and input-bind a materialized task file.
+
+    Args:
+        path: The task file to read.
+        phase_dir: The phase dir named in refusal messages and used to resolve
+            each task's ``output_name``. Defaults to the file's own directory.
+        current_inputs: Freshly recomputed input hashes; when given, any recorded
+            hash that has moved refuses the file.
+
+    Returns:
+        The parsed document.
+
+    Raises:
+        TaskFileError: exit code 3 — wrong version, invalid shape, or moved
+            inputs. Nothing is dispatched in any of those cases.
+    """
+    resolved_phase_dir = phase_dir or os.path.dirname(os.path.abspath(path))
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TaskFileError(
+            f"Refusing task file {path}: it could not be read as JSON ({exc}). "
+            f"Phase dir: {resolved_phase_dir}. {_REMATERIALIZE_FIX}."
+        ) from exc
+
+    check_task_file_version(document, path, resolved_phase_dir)
+    errors = validate_subagent_task_file(document)
+    if errors:
+        raise TaskFileError(
+            f"Refusing task file {path}: it does not match "
+            f"schemas/subagent_tasks.schema.json — " + "; ".join(errors)
+            + f". Phase dir: {resolved_phase_dir}. {_REMATERIALIZE_FIX}."
+        )
+    if current_inputs:
+        check_task_file_inputs(document, path, resolved_phase_dir, current_inputs)
+    return document
+
+
+def write_salvage_task_file(
+    *,
+    salvage_request: Dict[str, Any],
+    salvage_request_path: str,
+    phase_dir: str,
+    plan_file: str = "",
+) -> str:
+    """Materialize the salvage task that goes with a ``[SALVAGE_NEEDED]`` marker.
+
+    The salvage *request* file is left exactly as it was — it is what the task's
+    ``inputs.salvage_request_sha256`` binds to, so a re-materialized prompt cannot
+    silently pair with a rewritten request. The task lands in a sibling
+    ``salvage_task_<model>.json``, whose name matches the reaggregation
+    exclude-pattern list and so is never parsed as a model result.
+
+    Args:
+        salvage_request: The already-written request record.
+        salvage_request_path: Where it was written (hashed for ``inputs``).
+        phase_dir: The phase directory; the task file and ``output_name`` resolve
+            against it.
+        plan_file: Plan path for ``inputs.plan_sha256`` (provenance only).
+
+    Returns:
+        The path of the task file written.
+    """
+    from .subagent_prompts import build_salvage_prompt  # local: avoid cycles
+
+    output_name = os.path.basename(salvage_request.get("output_path", "") or "")
+    suggestion_id = os.path.splitext(output_name)[0] or "unknown"
+    task = make_task(
+        kind="salvage",
+        task_id=f"salvage-{suggestion_id}",
+        prompt=build_salvage_prompt(salvage_request),
+        output_name=output_name or f"{suggestion_id}.json",
+        inputs=build_inputs(
+            plan_file=plan_file,
+            salvage_request_file=salvage_request_path,
+        ),
+        phase_dir=phase_dir,
+        extra={
+            "suggestion_id": suggestion_id,
+            "model": salvage_request.get("model", ""),
+            "phase": salvage_request.get("phase", ""),
+        },
+    )
+    document = make_task_file(
+        kind="salvage",
+        tasks=[task],
+        inputs=task["inputs"],
+        extra={
+            "total_tasks": 1,
+            "phase_dir": phase_dir,
+            "salvage_request_path": salvage_request_path,
+        },
+    )
+    task_path = os.path.join(phase_dir, f"salvage_task_{suggestion_id}.json")
+    write_task_file(task_path, document)
+    return task_path
+
+
+def resolve_output_path(task: Dict[str, Any], phase_dir: str) -> str:
+    """Resolve a task's ``output_name`` against the phase dir it was loaded from.
+
+    ``output_path`` on the task is a derived convenience field for native
+    invokers; ``output_name`` plus the loaded-from dir is authoritative, which is
+    what lets a moved or copied phase dir still work.
+    """
+    return os.path.join(phase_dir, task["output_name"])
+
+
+# ---------------------------------------------------------------------------
+# Pre-dispatch refusals (D2a / D2c / D2h) — reusable by the D3 executor
+# ---------------------------------------------------------------------------
+
+def refuse_reason(
+    task: Dict[str, Any],
+    *,
+    supports_workspace_reads: bool = True,
+    runner: str = "the configured runner",
+) -> Optional[str]:
+    """Return why ``task`` must not be dispatched, or ``None`` when it may be.
+
+    Three refusals, all pre-dispatch and all naming the ``task_id``:
+
+    * ``result_channel: inline-json`` — a verdict that never touches disk is
+      unrecoverable after a crash, invisible to ``--resume`` and meaningless
+      under ``--detach``. The executor's write leg never branches on
+      ``result_channel``, so an ``inline-json`` materialized task can only mean a
+      stale or wrong producer, and the field it got wrong is precisely the one
+      that says whether ``output_name`` was derived at all — there is often no
+      path to normalize *to*.
+    * ``executor_role: human`` — not an agent type at all, but the marker that no
+      invoker ever dispatches this task; it routes to the human-task pause.
+    * ``context_mode: workspace-read`` against a runner that declares no
+      workspace-read capability — better than sending a prompt full of
+      unreadable paths, which degrades into a confidently empty answer.
+    """
+    task_id = task.get("task_id", "<unnamed>")
+    channel = task.get("result_channel")
+    if channel != "file":
+        return (
+            f"Task {task_id}: result_channel is {channel!r}, but every "
+            f"materialized task must be 'file' — a result that never touches "
+            f"disk cannot survive a crash, --resume or --detach. This task was "
+            f"written by a stale or incorrect producer; re-run the phase with "
+            f"--force to re-materialize it. Nothing was dispatched."
+        )
+    if task.get("executor_role") == "human":
+        return (
+            f"Task {task_id}: executor_role is 'human', which means no invoker "
+            f"ever dispatches it — it routes to the human-task pause. Nothing "
+            f"was dispatched."
+        )
+    if task.get("context_mode") == "workspace-read" and not supports_workspace_reads:
+        return (
+            f"Task {task_id}: context_mode is 'workspace-read', which requires a "
+            f"runner declaring supports_workspace_reads; {runner} does not. "
+            f"Nothing was dispatched."
+        )
+    return None
+
+
+def assert_dispatchable(
+    task: Dict[str, Any],
+    *,
+    supports_workspace_reads: bool = True,
+    runner: str = "the configured runner",
+) -> None:
+    """Raise :class:`TaskRefusal` (exit 3) when ``task`` must not be dispatched."""
+    reason = refuse_reason(
+        task, supports_workspace_reads=supports_workspace_reads, runner=runner
+    )
+    if reason is not None:
+        raise TaskRefusal(reason, task_id=task.get("task_id", ""))
+
+
+# ---------------------------------------------------------------------------
+# D2d — prompt transport and budget
+# ---------------------------------------------------------------------------
+
+def utf16_units(text: str) -> int:
+    """Length of ``text`` in UTF-16 code units (astral characters count twice)."""
+    return _utf16_code_units(text)
+
+
+def preferred_prompt_transport(provider_name: Optional[str]) -> str:
+    """The transport a runner should use for a materialized prompt.
+
+    ``stdin`` wherever the adapter has a real non-argv transport (the
+    ``subagent_runner``-eligible providers), ``argv`` otherwise. A materialized
+    prompt is far larger than the metadata JSON it replaces, and argv cannot
+    carry a 30 KB prompt on Windows, so the transport is chosen explicitly rather
+    than inherited by accident.
+    """
+    if not provider_name:
+        return "argv"
+    base = provider_name.split(":", 1)[0]
+    try:  # ask the adapter itself; fall back to the known-good list
+        from .provider_registry import get_provider  # local: avoids a cycle
+    except ImportError:  # pragma: no cover
+        try:
+            from utils.provider_registry import get_provider
+        except ImportError:
+            get_provider = None  # type: ignore[assignment]
+    if get_provider is not None:
+        provider = get_provider(base)
+        if provider is not None:
+            for candidate in ("stdin", "file"):
+                if provider.supports_prompt_transport(candidate):
+                    return candidate
+            return "argv"
+    return "stdin" if base in _NON_ARGV_TRANSPORT_PROVIDERS else "argv"
+
+
+def prompt_budget_utf16(
+    *,
+    transport: str = "argv",
+    non_prompt_argv: Optional[Iterable[str]] = None,
+    is_batch_shim: bool = False,
+    enforce_on_posix: bool = False,
+) -> Optional[int]:
+    """Return the prompt ceiling in UTF-16 code units, or ``None`` for unbounded.
+
+    * ``stdin`` / ``file`` transports are effectively unbounded — the prompt never
+      reaches a command line.
+    * an ``argv`` transport is bounded by the applicable Windows cap
+      (8,191 units for a ``.cmd``/``.bat`` shim run through cmd.exe, 32,767 for a
+      native ``CreateProcess``) minus ``CMDLINE_UTF16_HEADROOM`` minus the
+      rendered non-prompt argv.
+
+    The caps are a Windows constraint, so on POSIX the budget is unbounded unless
+    ``enforce_on_posix`` is set (which the tests use to pin the arithmetic on any
+    platform).
+    """
+    if transport in ("stdin", "file"):
+        return None
+    if os.name != "nt" and not enforce_on_posix:
+        return None
+    cap = CMDLINE_CAP_UTF16_BATCH if is_batch_shim else CMDLINE_CAP_UTF16_NATIVE
+    budget = cap - CMDLINE_UTF16_HEADROOM
+    if non_prompt_argv:
+        import subprocess  # local: keeps module import cheap and side-effect free
+
+        budget -= _utf16_code_units(subprocess.list2cmdline(list(non_prompt_argv)))
+    return max(budget, 0)
+
+
+class PromptBudget:
+    """A prompt ceiling plus the over-budget decision (split, or downgrade).
+
+    Never truncates: truncating the instruction tail turns a validation prompt
+    into an unanswerable one, and truncating a salvage ``raw_output`` salvages
+    half an array.
+    """
+
+    def __init__(
+        self,
+        max_units: Optional[int] = None,
+        *,
+        transport: str = "argv",
+        supports_workspace_reads: bool = False,
+    ) -> None:
+        self.max_units = max_units
+        self.transport = transport
+        self.supports_workspace_reads = supports_workspace_reads
+
+    @property
+    def unbounded(self) -> bool:
+        return self.max_units is None
+
+    def units(self, prompt: str) -> int:
+        return utf16_units(prompt)
+
+    def fits(self, prompt: str) -> bool:
+        return self.max_units is None or utf16_units(prompt) <= self.max_units
+
+    def exceeded_by(self, prompt: str) -> int:
+        """How many UTF-16 code units over budget ``prompt`` is (0 when it fits)."""
+        if self.max_units is None:
+            return 0
+        return max(0, utf16_units(prompt) - self.max_units)
+
+    def resolution(self, prompt: str, *, splittable: bool) -> str:
+        """What to do about ``prompt``: ``"ok"``, ``"split"``, ``"workspace-read"``.
+
+        Raises:
+            TaskFileError: when the prompt is over budget and neither splitting
+                nor a workspace-read downgrade is available — the one case where
+                there is nothing to do but fail loudly, since truncation is never
+                an option.
+        """
+        if self.fits(prompt):
+            return "ok"
+        if splittable:
+            return "split"
+        if self.supports_workspace_reads:
+            return "workspace-read"
+        raise TaskFileError(
+            f"A materialized prompt is {utf16_units(prompt)} UTF-16 code units "
+            f"but the runner's {self.transport} transport allows "
+            f"{self.max_units}; it cannot be split further and the runner "
+            f"declares no workspace-read capability. Configure a runner with a "
+            f"stdin/file prompt transport (driver.subagent_runner) or one that "
+            f"supports workspace reads. The prompt is never truncated."
+        )
+
+
+def split_indices(indices: Sequence[int]) -> Tuple[List[int], List[int]]:
+    """Halve a batch's index list. Returns ``(first, second)``; second may be empty."""
+    if len(indices) < 2:
+        return list(indices), []
+    middle = len(indices) // 2
+    return list(indices[:middle]), list(indices[middle:])

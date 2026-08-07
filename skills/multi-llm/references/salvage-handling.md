@@ -1,33 +1,26 @@
 # Salvage Handling
 
-After the orchestrator completes, check for `[SALVAGE_NEEDED]` markers in the output.
+When a model's review output cannot be parsed as JSON, the orchestrator writes a
+salvage *request* (`salvage_{model}.json`) and, beside it, a **materialized
+salvage task** (`salvage_task_{model}.json`) — printing
+`[SALVAGE_NEEDED] {request_path}` and `[SALVAGE_TASK] {task_path}`.
 
-For each salvage request, use the Task tool to spawn a subagent:
+**For each task in the task file, run `task.prompt` as a subagent, then write the
+JSON it returns to `task.output_path`.** That is the whole contract; the prompt
+is assembled in Python (`utils/subagent_prompts.build_salvage_prompt`) and
+carries the request's `raw_output`, `expected_type` and `expected_schema` inline,
+so a runner with no workspace access can serve it.
 
-```
-Task tool call:
-  subagent_type: general-purpose
-  model: haiku  # Fast model for simple extraction
-  description: "Salvage JSON from {model} output"
-  prompt: |
-    You are a JSON extraction specialist. Read the salvage request file and extract valid JSON.
+Two steps that used to live in this prompt are the invoker's, not the subagent's:
 
-    Salvage request file: {salvage_request_path}
+1. **Back up before overwriting.** Immediately before writing `task.output_path`,
+   run `utils/backup.py` on it; an existing file is copied to
+   `{filename}-BEFORE-SALVAGE-{timestamp}.json`.
+2. **Delete the salvage request** after reaggregation, not after extraction — the
+   request is what the task's `inputs.salvage_request_sha256` binds to.
 
-    Steps:
-    1. Read the salvage request JSON file
-    2. From the `raw_output` field, extract the valid JSON array
-       - Look for JSON arrays `[{...}, {...}]` in the text
-       - If multiple arrays exist, use the last complete one
-       - Fix common syntax errors (trailing commas, etc.)
-    3. Validate each item has the required fields from `expected_schema`
-    4. Backup any existing file at `output_path` before overwriting:
-       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/backup.py" "{output_path}"
-       - If the file exists, it will be copied to: `{filename}-BEFORE-SALVAGE-{timestamp}.json`
-       - Report "Backed up existing file to: {backup_path}" if backup was created
-    5. Write the valid JSON array to `output_path`
-    6. Delete the salvage request file
-    7. Report: number of items salvaged, backup path (if any), or error if failed
-```
-
-After ALL salvage subagents complete, run reaggregation. The orchestrator prints a `[REAGGREGATE_AFTER_SALVAGE]` marker with the exact command — copy and run it. This is mandatory: reaggregation regenerates grouped.json, validation.json, and report files to include the salvaged data. Do NOT report results to the user until reaggregation is complete.
+After ALL salvage tasks complete, run reaggregation. The orchestrator prints a
+`[REAGGREGATE_AFTER_SALVAGE]` marker with the exact command — copy and run it.
+This is mandatory: reaggregation regenerates grouped.json, validation.json and
+the report files to include the salvaged data. Do NOT report results to the user
+until reaggregation is complete.

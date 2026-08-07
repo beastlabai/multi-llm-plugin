@@ -37,6 +37,55 @@ class LLMProvider(ABC):
     # ("file") mode should override this to opt out of that check.
     prompt_transport: str = "argv"
 
+    # Which transports this adapter can actually deliver a prompt over (D2d).
+    # ``prompt_transport`` above is the one the fan-out path uses by default;
+    # this tuple is what a *caller* may ask for, and it is what the materialized
+    # -prompt budget is derived from: a materialized prompt is far larger than
+    # the metadata JSON it replaces (validation alone permits ~30,000 characters
+    # of context before the suggestion list), and argv cannot carry that on
+    # Windows, where the whole rendered command line is capped at 8,191 UTF-16
+    # code units for a .cmd/.bat shim and 32,767 natively. An adapter declaring
+    # "stdin" or "file" makes the budget effectively unbounded; an argv-only
+    # adapter keeps the cap, and the producer splits the batch rather than
+    # truncating.
+    supported_prompt_transports: Tuple[str, ...] = ("argv",)
+
+    def supports_prompt_transport(self, transport: str) -> bool:
+        """Whether this adapter can deliver a prompt over ``transport``."""
+        return transport in self.supported_prompt_transports
+
+    def build_command_for_transport(
+        self,
+        prompt: str,
+        model: str,
+        transport: str = "argv",
+        prompt_file: Optional[str] = None,
+    ) -> Tuple[List[str], Optional[str]]:
+        """Build argv plus the text to write to the child's stdin.
+
+        Args:
+            prompt: The prompt text.
+            model: The model identifier.
+            transport: ``"argv"`` (prompt is an argv element), ``"stdin"``
+                (``build_command`` omits it and the caller writes it to the
+                child's stdin) or ``"file"`` (prompt already written to
+                ``prompt_file``, whose path travels on argv).
+            prompt_file: Path the prompt was written to, for ``"file"``.
+
+        Returns:
+            ``(argv, stdin_text)``; ``stdin_text`` is ``None`` unless the
+            transport is ``"stdin"``.
+
+        Raises:
+            ValueError: when this adapter does not support ``transport``.
+        """
+        if transport == "argv":
+            return self.build_command(prompt, model), None
+        raise ValueError(
+            f"{self.name} does not support the {transport!r} prompt transport "
+            f"(supported: {', '.join(self.supported_prompt_transports)})"
+        )
+
     @property
     @abstractmethod
     def name(self) -> str:

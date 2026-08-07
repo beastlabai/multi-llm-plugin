@@ -15,6 +15,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+try:
+    from .subagent_tasks import subagent_type_for_role
+except ImportError:
+    from utils.subagent_tasks import subagent_type_for_role
+
 
 # Configuration constants
 MAX_FIXES_PER_BATCH = 3  # Hard limit to prevent context overload
@@ -28,6 +33,11 @@ class CodeFixBatch:
     fixes: List[Dict[str, Any]] = field(default_factory=list)
     file_key: str = ""  # Primary file being fixed
     batch_type: str = "mixed"  # bug, security, improvement, style, mixed
+    # Host-neutral routing field (D2h): "agent" means any invoker may dispatch
+    # this batch, "human" means no invoker ever does. Every reader branches on
+    # this; `subagent_type` below is optional Claude-only metadata derived from
+    # it and is never consulted to choose a runner.
+    executor_role: str = "agent"
     subagent_type: str = "general-purpose"
     total_chars: int = 0
 
@@ -88,6 +98,7 @@ class CodeFixBatch:
             "fixes": self.fixes,
             "file_key": self.file_key,
             "batch_type": self.batch_type,
+            "executor_role": self.executor_role,
             "subagent_type": self.subagent_type,
             "fix_count": self.size,
             "total_chars": self.total_chars,
@@ -95,12 +106,30 @@ class CodeFixBatch:
         }
 
 
+def determine_executor_role(fix: Dict[str, Any]) -> str:
+    """
+    Determine the host-neutral executor role for a code fix (D2h).
+
+    Code fixes are always agent work — a code review never emits a manual step —
+    so this returns "agent" unconditionally. It exists as a function so the one
+    place that decides is the one place to change.
+
+    Args:
+        fix: A code review fix dictionary
+
+    Returns:
+        "agent"
+    """
+    return "agent"
+
+
 def determine_subagent_type(fix: Dict[str, Any]) -> str:
     """
-    Determine the subagent type for a code fix.
+    Determine the Claude-Code-only ``subagent_type`` for a code fix.
 
-    Claude Code only supports general-purpose subagents for implementation work,
-    so this always returns "general-purpose".
+    Kept for the hosts whose native Task tool requires the parameter, derived
+    from :func:`determine_executor_role` so the two can never disagree (the task
+    schema rejects a disagreement). No reader branches on it.
 
     Args:
         fix: A code review fix dictionary
@@ -108,7 +137,7 @@ def determine_subagent_type(fix: Dict[str, Any]) -> str:
     Returns:
         "general-purpose"
     """
-    return "general-purpose"
+    return subagent_type_for_role(determine_executor_role(fix))
 
 
 def get_line_start(fix: Dict[str, Any]) -> int:
@@ -173,6 +202,7 @@ def batch_code_fixes(
     # Process high-risk fixes first (each in its own batch for safety)
     for fix in high_risk:
         batch = CodeFixBatch(file_key=fix.get("file", "unknown"))
+        batch.executor_role = determine_executor_role(fix)
         batch.subagent_type = determine_subagent_type(fix)
         batch.add(fix)
         batches.append(batch)
@@ -194,6 +224,7 @@ def batch_code_fixes(
         file_fixes.sort(key=get_line_start)
 
         current_batch = CodeFixBatch(file_key=file_path)
+        current_batch.executor_role = determine_executor_role(file_fixes[0])
         current_batch.subagent_type = determine_subagent_type(file_fixes[0])
 
         for fix in file_fixes:
@@ -205,6 +236,7 @@ def batch_code_fixes(
                 if current_batch.size > 0:
                     batches.append(current_batch)
                 current_batch = CodeFixBatch(file_key=file_path)
+                current_batch.executor_role = determine_executor_role(fix)
                 current_batch.subagent_type = determine_subagent_type(fix)
                 current_batch.add(fix)
 
@@ -351,9 +383,11 @@ def estimate_batch_processing_stats(batches: List[CodeFixBatch]) -> Dict[str, An
 
     type_distribution: Dict[str, int] = defaultdict(int)
     subagent_distribution: Dict[str, int] = defaultdict(int)
+    executor_distribution: Dict[str, int] = defaultdict(int)
     for b in batches:
         type_distribution[b.batch_type] += 1
         subagent_distribution[b.subagent_type] += 1
+        executor_distribution[b.executor_role] += 1
 
     return {
         "total_fixes": total_fixes,
@@ -366,4 +400,5 @@ def estimate_batch_processing_stats(batches: List[CodeFixBatch]) -> Dict[str, An
         "multi_fix_batches": sum(1 for b in batches if b.size > 1),
         "batch_type_distribution": dict(type_distribution),
         "subagent_distribution": dict(subagent_distribution),
+        "executor_distribution": dict(executor_distribution),
     }
