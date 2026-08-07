@@ -228,6 +228,22 @@ def find_output_dir(plan_file: str, *, guard_double_nesting: bool = True) -> str
     return out_dir
 
 
+def output_dir_path(plan_path: Path) -> Path:
+    """Where a plan's generated files live — **computed, never created**.
+
+    :func:`get_output_dir` is the same computation plus ``mkdir``. Readers that
+    must not write (``status``, which is polled while another run owns the dir)
+    use this one; producers keep using ``get_output_dir``.
+    """
+    plan_path = Path(plan_path)
+    return plan_path.parent / sanitize_prefix(plan_path.stem)
+
+
+def phase_dir_path(plan_path: Path, phase: str) -> Path:
+    """A phase's output directory — computed, never created (see above)."""
+    return output_dir_path(plan_path) / PHASE_DIRECTORIES.get(phase, phase)
+
+
 def get_phase_dir(plan_path: Path, phase: str) -> Path:
     """Get the output directory for a specific phase.
 
@@ -315,8 +331,7 @@ def get_output_dir(plan_path: Path) -> Path:
     Returns:
         Path to the output subfolder
     """
-    prefix = sanitize_prefix(plan_path.stem)
-    output_dir = plan_path.parent / prefix
+    output_dir = output_dir_path(plan_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 

@@ -59,6 +59,8 @@ from utils.state_manager import (
     CURRENT_FORMAT_VERSION,
 )
 from utils.output_handler import get_phase_dir
+from utils.detach import record_output_files, report_progress
+from utils.review_orchestrator_base import maybe_detach
 from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
@@ -1520,6 +1522,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
     print("Running code review in agent exploration mode...")
     print("")
 
+    # --- the detach boundary (see utils/review_orchestrator_base.maybe_detach) --
+    # Late on purpose: everything above is pre-flight that must fail on the
+    # caller's terminal — models resolved, base ref validated, changed files
+    # discovered — and nothing below runs in the invoker.
+    detach_phase_dir = get_phase_dir(plan_path, 'code-review')
+    detach_outcome = maybe_detach(
+        args=args,
+        mode='review-code',
+        phase_dir=str(detach_phase_dir),
+        plan_file=str(plan_path),
+        phase='code-review',
+        model_specs=model_specs,
+    )
+    if detach_outcome is not None:
+        sys.exit(detach_outcome)
+    report_progress(
+        str(detach_phase_dir), step="fanout",
+        models_total=len(model_specs), models_done=0,
+    )
+
     fix_tasks_path = None
     with intent_to_add_untracked(changed_files):
         # Run reviews - agents receive tracked files list and base ref for git diff
@@ -1640,6 +1662,15 @@ async def main(argv: Optional[List[str]] = None) -> int:
         report_path = report_path.with_suffix(".md")
         report_path.write_text(report, encoding="utf-8")
         print(f"\nReport saved to: {report_path}")
+
+        # A detached run's caller never saw this stdout, so `status` hands the
+        # artifacts back instead (no-op in the foreground).
+        record_output_files(
+            str(phase_dir),
+            report=str(report_path),
+            report_html=str(phase_dir / "report.html"),
+            grouped=str(phase_dir / "grouped.json"),
+        )
 
         # Mark phase as completed in state
         state.mark_phase_completed("code-review")

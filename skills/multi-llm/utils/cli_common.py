@@ -141,6 +141,22 @@ def reaggregate_command(
     return dispatcher_command(mode, plan_file, "--reaggregate", base=base)
 
 
+def durable_reaggregate_fields(
+    orchestrator_script: str, plan_file: Union[str, Path]
+) -> Dict[str, str]:
+    """What a *persisted* checkpoint may store about its follow-up command.
+
+    Never the resolved command: the Claude plugin cache is keyed by commit hash,
+    so a skill-dir-absolute command written into ``.status.json`` points at a
+    directory that no longer exists after the next plugin update. Skill-dir
+    movement is **rebindable** — unlike a content hash — so the durable form is the
+    mode word plus the plan path, and the reader rebuilds the command from the
+    *running* skill dir (``utils/detach.resolved_reaggregate_command``).
+    """
+    mode = _modes().mode_for_script(orchestrator_script) or orchestrator_script
+    return {"reaggregate_mode": mode, "plan_file": str(plan_file)}
+
+
 def reaggregate_command_for_script(
     orchestrator_script: str,
     plan_file: Union[str, Path],
@@ -155,6 +171,11 @@ def reaggregate_command_for_script(
     """
     mode = _modes().mode_for_script(orchestrator_script) or orchestrator_script
     return reaggregate_command(mode, plan_file, base=base)
+
+
+def modes_table():
+    """The ``modes`` module, for callers under ``utils/`` (public alias)."""
+    return _modes()
 
 
 def _modes():
@@ -213,9 +234,11 @@ def build_parent_parser(
     utility with no notion of interactivity); they are not an invitation to
     redefine one locally.
 
-    ``--detach`` and ``--exec-subagents`` are accepted and stored but have no
-    behaviour yet — a later change owns their semantics, and their rejection
-    rules with them.
+    ``--detach`` now has behaviour for the long-running fan-out modes (see
+    ``utils/detach.py``); ``--exec-subagents`` is still accepted and stored only.
+    The two hidden ``--internal-*`` re-entry flags are defined here rather than
+    per orchestrator because the detached worker is re-executed through
+    ``multi_llm.py`` and every mode's parser has to accept them.
     """
     parent = argparse.ArgumentParser(add_help=False)
     group = parent.add_argument_group("cross-cutting options")
@@ -246,14 +269,46 @@ def build_parent_parser(
     group.add_argument(
         "--detach",
         action="store_true",
-        help="Reserved: run the phase detached and poll its status file "
-             "(accepted and recorded; not yet implemented).",
+        help="Run the phase in a self-daemonized process (fan-out modes only) "
+             "and return immediately with its log path and a status command to "
+             "poll. Implies --yes. Never combine with a host's own background "
+             "primitive.",
+    )
+    group.add_argument(
+        "--if-not-running",
+        action="store_true",
+        help="With --detach: if a run for this phase is already in flight, print "
+             "its run_id/log/status command and exit 0 instead of failing.",
+    )
+    group.add_argument(
+        "--max-detached",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Ceiling on concurrent detached runs for this project "
+             "(default 4, or $MULTI_LLM_MAX_DETACHED).",
     )
     group.add_argument(
         "--exec-subagents",
         action="store_true",
         help="Reserved: run materialized subagent prompts through the provider "
              "executor (accepted and recorded; not yet implemented).",
+    )
+    # Hidden re-entry flags: the detached worker is re-executed as
+    # `multi_llm.py <mode> … --internal-worker --internal-run-id <uuid>`, so every
+    # mode's parser must accept them. Suppressed from --help, never rendered into
+    # a follow-up command or a MULTI_LLM_RESULT.next value.
+    group.add_argument(
+        INTERNAL_FLAG_PREFIX + "worker",
+        dest="internal_worker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
+        INTERNAL_FLAG_PREFIX + "run-id",
+        dest="internal_run_id",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     return parent
 
@@ -357,6 +412,37 @@ def record_next(command: Optional[str]) -> None:
     """Record the single follow-up command, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_next(command)
+
+
+# ---------------------------------------------------------------------------
+# The invocation record (what a detached child re-executes)
+# ---------------------------------------------------------------------------
+
+_INVOCATION: Optional[Dict[str, Any]] = None
+
+
+def record_invocation(mode: str, argv: Sequence[str]) -> None:
+    """Remember the mode word and the **normalized** argv the dispatcher built.
+
+    ``--detach`` rebuilds the child's command line from this rather than echoing
+    ``sys.argv``, which is what keeps the detached worker identical whether the
+    invoker was reached through a rendered shim, the ``"$MULTI_LLM_SKILL_DIR"``
+    spelling or a direct call. Recording it here (instead of threading argv
+    through every orchestrator signature) also means a direct
+    ``python review_plan_orchestrator.py`` still works — it simply falls back to
+    the argv its own ``main`` received.
+    """
+    global _INVOCATION
+    _INVOCATION = {"mode": mode, "argv": list(argv)}
+
+
+def clear_invocation() -> None:
+    global _INVOCATION
+    _INVOCATION = None
+
+
+def invocation() -> Optional[Dict[str, Any]]:
+    return _INVOCATION
 
 
 def parse_result_line(text: str) -> Optional[Dict[str, Any]]:

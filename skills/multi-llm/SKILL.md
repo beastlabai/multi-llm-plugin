@@ -63,7 +63,7 @@ A unified skill for multi-LLM plan automation. Supports eleven workflow modes pl
 7. **Review Code** (`--review-code`): Review code changes against the plan
 8. **Apply Code Fixes** (`--apply-code-fixes`): Apply validated fixes from code review
 9. **Full Workflow** (`--full`): Run all modes in sequence
-10. **Status** (`--status`): Show current workflow state and suggested next action
+10. **Status** (`--status`): Show current workflow state and suggested next action. Two views over two files, selected with `--view`: `workflow` (phases from `state.json` — the default report) and `run` (a detached run's live state from `{phase}/.status.json`). Claude Code never needs the run view: it backgrounds orchestrators with `run_in_background` and gets a completion notification, so `--detach`/polling is for hosts that cap shell time. Exit codes follow the run view (`0` done, `2` still running, `3` needs a human).
 11. **Ask** (`--ask`): Ask each model a free-text question about a plan; aggregate answers into one markdown file
 12. **Init Config** (`--init`): Set up a per-project provider config override at `<git-root>/.multi-llm/providers.yaml` (no plan path; routed via `instructions/init-config.md`). Fully automatic and zero-prompt: it auto-detects which provider CLIs are installed on `PATH` and writes a preconfigured override (uncommenting the detected providers' blocks and `default_provider`); `--template-only` skips detection and writes the inert commented stub. Flags: `--dir PATH`, `--force`, `--gitignore`, `--template-only`.
 
