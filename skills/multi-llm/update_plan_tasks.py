@@ -203,7 +203,7 @@ def validate_tasks_json(data: Any) -> tuple[bool, str]:
     return True, ""
 
 
-def main() -> int:
+def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
     parser = argparse.ArgumentParser(
@@ -224,7 +224,7 @@ def main() -> int:
         action="store_true",
         help="Show what would be done without modifying files"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     plan_path = Path(args.plan_file).resolve()
     tasks_json_path = Path(args.tasks_file).resolve()
@@ -307,4 +307,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

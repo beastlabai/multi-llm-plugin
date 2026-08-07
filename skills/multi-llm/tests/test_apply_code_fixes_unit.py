@@ -1146,9 +1146,9 @@ class TestMainFunction:
     @patch("sys.argv", ["prog", "--plan-file", "nonexistent.md"])
     def test_exits_on_missing_plan_file(self):
         """Exits with error on missing plan file."""
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 1
+        # main() returns its exit code (the dispatcher does the sys.exit); the
+        # __main__ block still turns it into the same process exit status.
+        assert main() == 1
 
     def test_approve_all_requires_confirmation(
         self, sample_plan_file, sample_output_dir, sample_grouped_issues, sample_validation_results
@@ -1163,9 +1163,7 @@ class TestMainFunction:
         (code_review_dir / "validation.json").write_text(json.dumps(validation_data), encoding="utf-8")
 
         with patch("sys.argv", ["prog", "--plan-file", str(sample_plan_file), "--approve-all"]):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
+            assert main() == 1
 
     def test_approve_all_works_with_yes_flag(
         self, sample_plan_file, sample_output_dir, sample_grouped_issues, sample_validation_results
@@ -1203,9 +1201,7 @@ class TestMainFunction:
     def test_exits_on_missing_output_dir(self, sample_plan_file):
         """Exits with error when output directory doesn't exist."""
         with patch("sys.argv", ["prog", "--plan-file", str(sample_plan_file)]):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
+            assert main() == 1
 
 
 # --- TestDeprecationWarnings ---

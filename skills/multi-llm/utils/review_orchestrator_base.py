@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .cli_common import record_next
 from .output_handler import sanitize_prefix, get_phase_dir
 from .prompt_loader import load_prompt
 from .interactive import resolve_models
@@ -1407,6 +1408,10 @@ async def reaggregate_from_existing_files(
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
             print("\nAfter validation completes, run:")
             print(f"  {batched_tasks.get('reaggregate_command', '')}")
+            # The single follow-up a native-subagent host is owed, also exposed
+            # on the dispatcher's MULTI_LLM_RESULT line so a host that cannot
+            # parse prose does not have to regex-mine this stdout.
+            record_next(batched_tasks.get('reaggregate_command') or None)
             return
     else:
         print("\nSkipping validation (--skip-validation flag set)")
@@ -1783,6 +1788,7 @@ async def run_review_orchestration(
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
                 print("\nAfter validation completes, run:")
                 print(f"  {batched_tasks.get('reaggregate_command', '')}")
+                record_next(batched_tasks.get('reaggregate_command') or None)
 
                 update_status(phase_dir, {
                     "state": "validation_pending",

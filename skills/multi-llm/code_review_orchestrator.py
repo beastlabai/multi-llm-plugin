@@ -51,6 +51,7 @@ from utils import (
     PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser, reaggregate_command, record_next
 from utils.state_manager import (
     load_groups_payload,
     save_groups_payload,
@@ -109,7 +110,7 @@ def save_model_result(
     return False
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     # Get available models for help text
     available_models = get_all_model_specs()
@@ -117,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Review implementation changes against a plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[build_parent_parser()],
         epilog=f"""
 Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
@@ -152,12 +154,6 @@ Examples:
         default=None,
         help='List of models in provider:model format (e.g., cursor-agent:auto gemini:gemini-2.5-flash). '
              'Bare model names use default provider from providers.yaml.'
-    )
-
-    parser.add_argument(
-        '--interactive', '-i',
-        action='store_true',
-        help='Force interactive model selection (ignores YAML defaults)'
     )
 
     parser.add_argument(
@@ -234,7 +230,7 @@ Examples:
         help='HTML report template style: "pr" for PR-style contextual view, "flat" for classic card layout (default: pr)'
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_code_review_prompt() -> str:
@@ -1215,6 +1211,7 @@ async def reaggregate_from_existing_files(
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
             print("\nAfter validation completes, run:")
             print(f"  {batched_tasks.get('reaggregate_command', '')}")
+            record_next(batched_tasks.get('reaggregate_command') or None)
             return  # Exit early - Claude Code handles validation
         else:
             print("\nSkipping validation (--skip-validation flag set)")
@@ -1239,13 +1236,13 @@ async def reaggregate_from_existing_files(
         state.save()
 
 
-async def main():
+async def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
     # see utils/stream_bootstrap.py for the full rationale.
     bootstrap_streams()
 
-    args = parse_args()
+    args = parse_args(argv)
 
     # Validate plan file (resolve to absolute path first to handle
     # uv --directory which changes the working directory)
@@ -1561,11 +1558,12 @@ async def main():
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
                 print("\nAfter validation completes, run:")
-                reaggregate_cmd = (
-                    f'uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" '
-                    f'--plan-file "{plan_path}" --reaggregate'
-                )
+                # Fully resolved: a skill-dir placeholder no shell expands is
+                # the bug. Still starts with `uv run`, so Claude Code's
+                # Bash(uv:*) allow rule keeps matching.
+                reaggregate_cmd = reaggregate_command('review-code', plan_path)
                 print(f"  {reaggregate_cmd}")
+                record_next(reaggregate_cmd)
                 return  # Exit early - Claude Code handles validation
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
@@ -1637,14 +1635,17 @@ async def main():
             print(f"  {i}. {model_name} -> {basename}")
             print(f"     Output: {output_file}")
 
-        # Print the reaggregate command for Claude Code to use after salvage
+        # Print the reaggregate command for the host to use after salvage.
+        # Fully resolved (see above) and still `uv run …`-prefixed.
+        salvage_reaggregate_cmd = reaggregate_command('review-code', plan_path)
         print("")
-        print(f"[REAGGREGATE_AFTER_SALVAGE] uv run --project \"${{CLAUDE_SKILL_DIR}}\" -- python \"${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py\" --plan-file \"{plan_path}\" --reaggregate")
+        print(f"[REAGGREGATE_AFTER_SALVAGE] {salvage_reaggregate_cmd}")
+        record_next(salvage_reaggregate_cmd)
         print("")
         print("Claude Code: After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
 
-    sys.exit(1 if high_count > 0 else 0)
+    return 1 if high_count > 0 else 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main(sys.argv[1:])))

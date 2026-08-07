@@ -227,7 +227,7 @@ def resolve_output_file(args: argparse.Namespace) -> str:
     return str(phase_dir / "orchestrator_output.json")
 
 
-def main():
+def main(argv=None) -> int:
     bootstrap_streams()
     parser = argparse.ArgumentParser(description="Display decision summary from orchestrator output")
     parser.add_argument("--output-file", help="Path to orchestrator_output.json")
@@ -237,7 +237,7 @@ def main():
         choices=["apply-suggestions", "apply-code-fixes", "apply-task-suggestions"],
         help="Phase name: apply-suggestions, apply-code-fixes, or apply-task-suggestions",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     output_path = resolve_output_file(args)
     if args.phase:
@@ -255,7 +255,8 @@ def main():
 
     data = load_output(output_path)
     display(data, phase)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

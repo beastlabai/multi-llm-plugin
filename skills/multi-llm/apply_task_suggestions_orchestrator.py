@@ -74,7 +74,7 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
     # ----------------------------------------------------------------
 
     @classmethod
-    def parse_args(cls):
+    def parse_args(cls, argv=None):
         """Build and parse CLI arguments for apply-task-suggestions."""
         parser = build_common_arg_parser(
             description="Prepare validated task suggestions for application to tasks.md",
@@ -96,7 +96,7 @@ Bulk Approval Examples:
             include_output_format=True,
             include_mark_completed=True,
         )
-        return parser.parse_args()
+        return parser.parse_args(argv)
 
     # ----------------------------------------------------------------
     # Hooks
@@ -572,14 +572,13 @@ Suggestion N: Already addressed by prior changes - skipped
         return "\n".join(prompt_parts)
 
 
-def main():
+def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
-    args = ApplyTaskSuggestionsOrchestrator.parse_args()
+    args = ApplyTaskSuggestionsOrchestrator.parse_args(argv)
     orchestrator = ApplyTaskSuggestionsOrchestrator(args)
-    exit_code = orchestrator.run()
-    sys.exit(exit_code)
+    return orchestrator.run()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # via utils.review_orchestrator_base which handles validation orchestration.
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser
 from utils.output_handler import sanitize_prefix, get_phase_dir
 from utils.prompt_loader import load_prompt
 from utils.state_manager import load_groups_payload
@@ -311,7 +312,7 @@ async def reaggregate_from_existing_files(prefix, out_dir, phase_dir, plan_path,
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     # Get available models for help text - wrapped in try/except to allow --help
     # even if providers.yaml is missing or malformed
@@ -325,6 +326,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run plan reviews across multiple LLM models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[build_parent_parser()],
         epilog=f"""
 Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
@@ -360,12 +362,6 @@ Examples:
         default=None,
         help='List of models in provider:model format (e.g., cursor-agent:auto gemini:gemini-2.5-flash). '
              'Bare model names use default provider from providers.yaml.'
-    )
-
-    parser.add_argument(
-        '--interactive', '-i',
-        action='store_true',
-        help='Force interactive model selection (ignores YAML defaults)'
     )
 
     parser.add_argument(
@@ -468,7 +464,7 @@ Examples:
         help='HTML report template style: "pr" for PR-style contextual view, "flat" for classic card layout (default: pr)'
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -688,13 +684,13 @@ def reaggregate_consolidation_mode(
     print(f"  Merged: {merged_count}, Singletons: {singleton_count}")
 
 
-async def main():
+async def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
     # see utils/stream_bootstrap.py for the full rationale.
     bootstrap_streams()
 
-    args = parse_args()
+    args = parse_args(argv)
 
     # Load the prompt template
     prompt_template = load_review_prompt_template()
@@ -730,7 +726,10 @@ async def main():
         tasks_path=None,
         template_style=args.report_style,
     )
+    # Any non-zero outcome is raised as SystemExit by the orchestration itself;
+    # reaching here means the phase completed.
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main(sys.argv[1:])))

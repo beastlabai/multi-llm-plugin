@@ -135,8 +135,9 @@ class TestMainWrapsPipelineWithIntentToAdd:
              patch.object(cro, "generate_review_report",
                           side_effect=parent.generate_review_report), \
              patch.object(cro, "get_phase_dir",
-                          return_value=tmp_path / "phase"), \
-             pytest.raises(SystemExit):
+                          return_value=tmp_path / "phase"):
+            # main() returns its exit code rather than calling sys.exit(): the
+            # dispatcher owns the process exit, and so does the __main__ block.
             asyncio.run(cro.main())
 
         # intent_to_add_untracked called exactly once with the changed files

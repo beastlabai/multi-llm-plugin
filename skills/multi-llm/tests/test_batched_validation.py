@@ -404,8 +404,11 @@ class TestPrepareBatchedValidationTasks:
                 orchestrator="review_plan_orchestrator.py"
             )
             cmd = result["reaggregate_command"]
-            assert "review_plan_orchestrator.py" in cmd
-            assert "--plan-file" in cmd
+            # The printed follow-up names the single entry point and the mode
+            # word, never a second orchestrator path (D1d "not dual-surface").
+            assert "multi_llm.py" in cmd
+            assert "review-plan" in cmd
+            assert "review_plan_orchestrator.py" not in cmd
             assert "/path/to/plan.md" in cmd
             assert "--reaggregate" in cmd
 
@@ -420,8 +423,9 @@ class TestPrepareBatchedValidationTasks:
                 orchestrator="code_review_orchestrator.py"
             )
             cmd = result["reaggregate_command"]
-            assert "code_review_orchestrator.py" in cmd
-            assert "review_plan_orchestrator.py" not in cmd
+            assert "review-code" in cmd
+            assert "review-plan" not in cmd
+            assert "code_review_orchestrator.py" not in cmd
 
     def test_model_hint_preserved(self, sample_groups, sample_context):
         """Model hint is preserved in result."""

@@ -107,7 +107,7 @@ def cmd_clear(args: argparse.Namespace) -> None:
         path.unlink()
 
 
-def main() -> None:
+def main(argv=None) -> int:
     bootstrap_streams()
     parser = argparse.ArgumentParser(description="Manage prior batch changes")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -126,9 +126,10 @@ def main() -> None:
     clear_p = sub.add_parser("clear")
     clear_p.add_argument("--output-dir", required=True)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     {"read": cmd_read, "append": cmd_append, "clear": cmd_clear}[args.command](args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

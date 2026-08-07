@@ -10,6 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils.cli_common import build_parent_parser
+
+# One table owns the phase vocabulary: the dispatcher resolves a `--mode`/
+# `--phase` word against the same rows (`modes.py`), so `review-code` (the mode
+# word) and `code-review` (the phase name) can never drift apart per host.
+from modes import PREREQUISITE_PHASES
 from utils.state_manager import StateManager
 from utils.output_handler import get_output_dir
 
@@ -258,9 +264,7 @@ def build_prompt(mode: str, missing: list) -> dict:
 
 def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) -> dict:
     """Get current workflow state for all phases."""
-    ALL_PHASES = ["review-plan", "apply-suggestions", "generate-tasks",
-                  "review-tasks", "apply-task-suggestions", "implement",
-                  "code-review", "apply-code-fixes"]
+    ALL_PHASES = list(PREREQUISITE_PHASES)
 
     phases = {}
     suggested_next = None
@@ -336,22 +340,23 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
     return result
 
 
-def main():
+def main(argv=None) -> int:
     bootstrap_streams()
-    parser = argparse.ArgumentParser(description="Check workflow prerequisites")
+    parser = argparse.ArgumentParser(
+        description="Check workflow prerequisites",
+        parents=[build_parent_parser()],
+    )
     parser.add_argument("--plan-file", required=True, help="Path to plan file")
     parser.add_argument("--status", action="store_true",
                         help="Show current workflow state")
     parser.add_argument("--mode", "--phase", required=False,
-                        choices=["review-plan", "apply-suggestions", "generate-tasks",
-                                 "review-tasks", "apply-task-suggestions", "implement",
-                                 "code-review", "apply-code-fixes"],
+                        choices=list(PREREQUISITE_PHASES),
                         help="Mode to check prerequisites for")
     parser.add_argument("--skip", action="store_true",
                         help="Mark the phase as skipped (requires --mode and --reason)")
     parser.add_argument("--reason", type=str, default="",
                         help="Reason for skipping the phase (used with --skip)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     plan_path = Path(args.plan_file).resolve()
 
@@ -469,8 +474,8 @@ def main():
             result["prompt"] = advisory_prompt
 
     print(json.dumps(result, indent=2))
-    sys.exit(0)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

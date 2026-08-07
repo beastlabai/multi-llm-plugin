@@ -48,6 +48,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
+from utils.cli_common import build_parent_parser  # noqa: E402
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
 from utils.provider_registry import get_provider, load_base_config  # noqa: E402
 
@@ -957,6 +958,7 @@ def main(argv: "list[str] | None" = None) -> int:
             "automatic, zero prompts, no model-listing subprocess calls."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[build_parent_parser()],
     )
     parser.add_argument(
         "--dir",

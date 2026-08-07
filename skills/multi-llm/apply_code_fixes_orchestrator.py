@@ -531,7 +531,7 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     # ----------------------------------------------------------------
 
     @classmethod
-    def parse_args(cls):
+    def parse_args(cls, argv=None):
         """Build and parse CLI arguments for apply-fixes."""
         parser = build_common_arg_parser(
             description="Prepare validated code review fixes for application",
@@ -564,7 +564,7 @@ Bulk Approval Examples:
         )
         # Code fixes uses a smaller default batch size than the common parser
         parser.set_defaults(max_batch_size=3)
-        return parser.parse_args()
+        return parser.parse_args(argv)
 
     # ----------------------------------------------------------------
     # Hooks
@@ -965,14 +965,13 @@ Bulk Approval Examples:
                     print(f"  Reason: {f['validation_reason']}")
 
 
-def main():
+def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
-    args = ApplyCodeFixesOrchestrator.parse_args()
+    args = ApplyCodeFixesOrchestrator.parse_args(argv)
     orchestrator = ApplyCodeFixesOrchestrator(args)
-    exit_code = orchestrator.run()
-    sys.exit(exit_code)
+    return orchestrator.run()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

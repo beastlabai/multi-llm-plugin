@@ -1,31 +1,87 @@
 #!/usr/bin/env python3
+"""Portability regression guards for the instruction/driver layer.
+
+Two generations of guard live here.
+
+**Windows/macOS quoting (original).** Phase 1 of the portability plan swept every
+shell-argument occurrence of ``${CLAUDE_SKILL_DIR}`` in the instruction/reference
+markdown into the double-quoted form (Windows install paths routinely contain
+spaces, e.g. ``C:\\Users\\John Smith\\...``, so an unquoted expansion word-splits
+and the command dies before Python starts), and audited the ``allowed-tools``
+glob syntax. Those two machine greps are ``TestSkillDirQuoting`` and
+``TestAllowedToolsGlobSyntax``.
+
+**Host-harness portability (the substitution validator).** The driver layer is
+being made host-neutral: the shared instruction core refers to the skill dir as a
+single ``{SKILL_DIR}`` **template token** — *not shell syntax*, since a driving
+agent that copies ``uv run --project {SKILL_DIR}`` verbatim gets
+``{SKILL_DIR}: No such file or directory`` — and the token is substituted by a
+command (``multi_llm.py util instructions <mode>``) before an agent ever reads it,
+never by the reader. The classes below enforce the six rules that keep that true:
+
+1. *Site inventory* — every ``{SKILL_DIR}`` occurrence sits inside the invariant
+   ``uv run --project … multi_llm.py`` prefix; an occurrence anywhere else fails.
+2. *Corpus completeness* — a checked-in per-file manifest, asserted exhaustive
+   over the corpus in **both** directions, recording the expected occurrence count
+   per file so a regression that reintroduces a second substitution site is a
+   failure rather than silent drift.
+3. *Render-and-parse* — every command block in every file, rendered against a
+   fixture skill dir **containing a space**, carries no brace token, ``shlex``
+   splits cleanly, and yields the skill dir as exactly one argv element.
+4. *The served core is token-free* — ``util instructions <mode>`` emits the source
+   file with the prefix already substituted, for every mode that has one.
+5. *Printed follow-ups are resolved at the source* — the follow-up commands the
+   orchestrators print carry no placeholder, name an existing path, and keep the
+   allow-rule prefix Claude Code matches ``Bash(...)`` permissions on.
+6. *Negative cases* — ``${SKILL_DIR}``/``$SKILL_DIR`` are never defined and are a
+   failure wherever they appear; the ``${CLAUDE_SKILL_DIR}`` counts are pinned.
+
+**What this asserts today vs. after the corpus rewrite.** The instruction markdown
+has *not* yet been rewritten to ``{SKILL_DIR}`` (a later change owns that sweep),
+so the manifest currently records today's non-zero ``${CLAUDE_SKILL_DIR}`` counts
+and a zero ``{SKILL_DIR}`` count per file. Every rule above is enforced *now* on
+whatever occurrences exist, and rules 3–5 are already fully load-bearing (they run
+against the current ``${CLAUDE_SKILL_DIR}`` corpus, because the renderer
+substitutes every spelling of the placeholder). When the corpus is rewritten, the
+only edit needed here is flipping each manifest row's two counts — at which point
+rule 1 stops being vacuous and rule 6's "the only residual
+``${CLAUDE_SKILL_DIR}`` is the Claude Code ``SKILL.md`` shim" becomes assertable
+by setting every other row's first number to 0.
+
+Known blind spot (accepted by the plan): the unquoted-path-argument pattern stops
+scanning a line at its first double quote, so a mixed line with one quoted and one
+later-unquoted occurrence can pass. That residual case is a manual-review concern;
+these tests block the shapes that actually occurred.
 """
-Windows/macOS portability regression guards for the instruction layer.
 
-Phase 1 of the portability plan swept every shell-argument occurrence of
-``${CLAUDE_SKILL_DIR}`` in the instruction/reference markdown into the
-double-quoted form (Windows install paths routinely contain spaces, e.g.
-``C:\\Users\\John Smith\\...``, so an unquoted expansion word-splits and the
-command dies before Python starts). These tests encode the plan's two machine
-greps plus the allowed-tools glob-syntax audit so a future edit cannot silently
-reintroduce the bugs.
-
-Known blind spot (accepted by the plan): the unquoted-path-argument pattern
-stops scanning a line at its first double quote, so a mixed line with one
-quoted and one later-unquoted occurrence can pass. That residual case is a
-manual-review concern; these tests block the shapes that actually occurred.
-"""
-
+import ast
+import json
+import os
 import re
+import shlex
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
+import pytest
+
 SKILL_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(SKILL_ROOT))
+
+import modes as mode_table  # noqa: E402
+import multi_llm  # noqa: E402
+from utils import cli_common  # noqa: E402
 
 
 def _scanned_files():
     files = sorted(SKILL_ROOT.glob("instructions/*.md"))
     files += sorted(SKILL_ROOT.glob("references/*.md"))
     files.append(SKILL_ROOT / "SKILL.md")
+    # `hosts/` does not exist yet (a later change adds the per-host shims); the
+    # manifest tests below fail loudly the moment it appears without rows.
+    files += sorted(SKILL_ROOT.glob("hosts/**/*.md"))
+    files += sorted(SKILL_ROOT.glob("hosts/**/*.md.tmpl"))
     return files
 
 
@@ -80,3 +136,1050 @@ class TestAllowedToolsGlobSyntax:
             "`:*` prefix or exact string only):\n"
             + "\n".join(f"  {line}" for line in offending)
         )
+
+
+# ===========================================================================
+# The {SKILL_DIR} substitution validator
+# ===========================================================================
+
+#: Per-file expected placeholder counts: ``path -> (${CLAUDE_SKILL_DIR}, {SKILL_DIR})``.
+#:
+#: Asserted exhaustive in both directions, so a file added to (or removed from)
+#: the corpus without a manifest row is a failure — the test cannot pass by
+#: silently skipping the file that was missed.
+#:
+#: The second number is the *substitution-site* count the design budgets for:
+#: after the corpus rewrite each file collapses to at most the one invariant
+#: ``uv run --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py`` prefix per
+#: command, so a row whose count grows unexpectedly is a regression that
+#: reintroduced a second site. Today every row is ``(today's count, 0)``; the
+#: rewrite flips them to ``(0, n)`` — except ``SKILL.md``, the one file that keeps
+#: ``${CLAUDE_SKILL_DIR}`` because Claude Code expands it at load time.
+PLACEHOLDER_MANIFEST = {
+    "instructions/apply-code-fixes.md": (28, 0),
+    "instructions/apply-suggestions.md": (28, 0),
+    "instructions/apply-task-suggestions.md": (26, 0),
+    "instructions/ask.md": (4, 0),
+    "instructions/full-workflow.md": (50, 0),
+    "instructions/generate-tasks.md": (8, 0),
+    "instructions/implement.md": (24, 0),
+    "instructions/init-config.md": (3, 0),
+    "instructions/review-code.md": (24, 0),
+    "instructions/review-plan.md": (27, 0),
+    "instructions/review-tasks.md": (16, 0),
+    "references/human-decision-batch.md": (0, 0),
+    "references/resume-detection.md": (0, 0),
+    "references/salvage-handling.md": (2, 0),
+    "references/uv-check.md": (1, 0),
+    "references/wave-batching.md": (0, 0),
+    "SKILL.md": (7, 0),
+}
+
+#: The one file allowed to keep ``${CLAUDE_SKILL_DIR}``: it *is* the Claude Code
+#: shim, and the host expands the variable at load time.
+CLAUDE_SHIM = "SKILL.md"
+
+#: A fixture skill dir with a space in every segment that can carry one, so a
+#: quoting bug cannot hide behind a space-free path. Contains the marker word
+#: "fixture" in exactly one segment, which the argv assertions key on.
+FIXTURE_SKILL_DIR = "/tmp/multi llm fixture/skill dir"
+
+#: The invariant prefix a ``{SKILL_DIR}`` occurrence is allowed to sit inside.
+INVARIANT_PREFIX_RE = re.compile(
+    r"uv run --project \"?\{SKILL_DIR\}\"? -- python \"?\{SKILL_DIR\}/multi_llm\.py\"?"
+)
+
+UV_COMMAND_RE = re.compile(r"^(PYTHONUNBUFFERED=1\s+)?uv\s+run\b")
+
+#: Any brace-delimited token that names a skill dir, in any spelling. Scoped this
+#: way because the corpus legitimately carries authoring placeholders
+#: (``{total_batches}``, ``{plan_stem}``) that a reader fills in.
+SKILL_DIR_BRACE_RE = re.compile(r"\$?\{[A-Za-z_]*SKILL_DIR\}")
+
+#: Placeholder spellings that must never survive into text an agent reads.
+FORBIDDEN_IN_RENDERED = (
+    "{SKILL_DIR}",
+    "${SKILL_DIR}",
+    "$SKILL_DIR",
+    "${CLAUDE_SKILL_DIR}",
+    "$MULTI_LLM_SKILL_DIR",
+    "${MULTI_LLM_SKILL_DIR}",
+)
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(SKILL_ROOT).as_posix()
+
+
+def _command_units(text: str):
+    """Yield ``(line_no, command)`` for every shell command unit in ``text``.
+
+    A "unit" is one logical command: successive physical lines are joined while a
+    backslash continuation is open *or* a double quote is still unbalanced, so a
+    multi-line ``python -c "…"`` heredoc-style block is one unit rather than a
+    truncated fragment that could never parse.
+    """
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = re.sub(r"^[-*+]\s+", "", lines[index].strip())
+        if not UV_COMMAND_RE.match(stripped):
+            index += 1
+            continue
+        start = index + 1
+        unit = stripped
+        while index + 1 < len(lines) and (
+            unit.rstrip().endswith("\\") or unit.count('"') % 2 == 1
+        ):
+            if unit.rstrip().endswith("\\"):
+                unit = unit.rstrip()[:-1].rstrip()
+            index += 1
+            unit += " " + lines[index].strip()
+        yield start, unit
+        index += 1
+
+
+def _assert_command_is_clean(where: str, command: str, base: str):
+    """The three render-and-parse assertions, shared by every caller."""
+    for token in FORBIDDEN_IN_RENDERED:
+        assert token not in command, (
+            f"{where}: unexpanded placeholder {token} survived rendering:\n"
+            f"  {command[:200]}"
+        )
+    # Scoped to skill-dir tokens rather than every brace: the corpus also
+    # carries authoring placeholders an agent fills in ({total_batches},
+    # {plan_stem}), which are not this rule's concern.
+    residue = SKILL_DIR_BRACE_RE.search(command)
+    assert residue is None, (
+        f"{where}: skill-dir brace token {residue.group(0)} left in a rendered "
+        f"command:\n  {command[:200]}"
+    )
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        pytest.fail(f"{where}: rendered command does not shlex.split ({exc}):\n  {command[:200]}")
+
+    assert argv and argv[0] in ("uv", "PYTHONUNBUFFERED=1"), (
+        f"{where}: the allow-rule prefix is part of the printed command's "
+        f"contract — a command whose first token is not `uv` (or "
+        f"`PYTHONUNBUFFERED=1 uv`) stops matching Claude Code's Bash(uv:*) glob "
+        f"and turns every follow-up into a permission prompt:\n  {command[:200]}"
+    )
+    assert "--project" in argv, f"{where}: no --project in {argv[:6]}"
+    project = argv[argv.index("--project") + 1]
+    assert project == base, (
+        f"{where}: the skill dir must be exactly one argv element in the "
+        f"--project slot, got {project!r} (word-splitting on a space):\n"
+        f"  {command[:200]}"
+    )
+    marker = "fixture" if "fixture" in base else base
+    for element in argv:
+        if marker in element:
+            assert element == base or element.startswith(base + "/"), (
+                f"{where}: skill-dir fragment {element!r} is a separate argv "
+                f"element — the path word-split on a space:\n  {command[:200]}"
+            )
+
+
+class TestPlaceholderManifest:
+    """Rule 2: the per-file manifest is exhaustive and its counts are pinned."""
+
+    def test_manifest_covers_every_corpus_file(self):
+        on_disk = {_rel(p) for p in _scanned_files()}
+        missing = on_disk - set(PLACEHOLDER_MANIFEST)
+        assert not missing, (
+            "instruction/shim file on disk with no PLACEHOLDER_MANIFEST row "
+            f"(add one, with its expected placeholder counts): {sorted(missing)}"
+        )
+
+    def test_manifest_has_no_stale_rows(self):
+        on_disk = {_rel(p) for p in _scanned_files()}
+        stale = set(PLACEHOLDER_MANIFEST) - on_disk
+        assert not stale, (
+            f"PLACEHOLDER_MANIFEST names files that no longer exist: {sorted(stale)}"
+        )
+
+    @pytest.mark.parametrize("rel", sorted(PLACEHOLDER_MANIFEST))
+    def test_placeholder_counts_match_manifest(self, rel):
+        expected_claude, expected_token = PLACEHOLDER_MANIFEST[rel]
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        assert text.count("${CLAUDE_SKILL_DIR}") == expected_claude, (
+            f"{rel}: ${{CLAUDE_SKILL_DIR}} count changed "
+            f"({text.count('${CLAUDE_SKILL_DIR}')} != {expected_claude}). The "
+            "corpus rewrite lowers these numbers; nothing else should raise one."
+        )
+        assert text.count("{SKILL_DIR}") == expected_token, (
+            f"{rel}: {{SKILL_DIR}} count changed "
+            f"({text.count('{SKILL_DIR}')} != {expected_token}). Each file "
+            "budgets one substitution site per command; a second one is a "
+            "regression."
+        )
+
+    def test_claude_skill_dir_budget_is_declining(self):
+        """Only ``SKILL.md`` is *permitted* a permanent ``${CLAUDE_SKILL_DIR}``.
+
+        Every other row is expected to reach 0 with the corpus rewrite, so this
+        records the remaining debt rather than asserting it away.
+        """
+        assert PLACEHOLDER_MANIFEST[CLAUDE_SHIM][0] > 0, (
+            "SKILL.md is the Claude Code shim and resolves the token via "
+            "${CLAUDE_SKILL_DIR}; losing every occurrence means the shim broke."
+        )
+        remaining = {
+            rel: counts[0]
+            for rel, counts in PLACEHOLDER_MANIFEST.items()
+            if rel != CLAUDE_SHIM and counts[0]
+        }
+        # Not an assertion that `remaining` is empty (the rewrite has not landed);
+        # an assertion that the pinned total cannot silently grow.
+        assert sum(remaining.values()) == 241, (
+            "the ${CLAUDE_SKILL_DIR} debt outside SKILL.md changed to "
+            f"{sum(remaining.values())}. Lower it freely with the corpus "
+            "rewrite; a rise means a new host-coupled site was added."
+        )
+
+
+class TestPlaceholderSites:
+    """Rule 1: a ``{SKILL_DIR}`` occurrence may only sit in the invariant prefix."""
+
+    @pytest.mark.parametrize("rel", sorted(PLACEHOLDER_MANIFEST))
+    def test_token_only_inside_invariant_prefix(self, rel):
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        offenders = []
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            occurrences = line.count("{SKILL_DIR}")
+            if not occurrences:
+                continue
+            covered = sum(
+                match.group(0).count("{SKILL_DIR}")
+                for match in INVARIANT_PREFIX_RE.finditer(line)
+            )
+            if covered < occurrences:
+                offenders.append((line_no, line.strip()))
+        assert not offenders, (
+            f"{rel}: {{SKILL_DIR}} outside the invariant "
+            "`uv run --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py` "
+            "prefix. The token belongs nowhere else — not in prompts, not in "
+            "task JSON, not in printed follow-ups:\n"
+            + "\n".join(f"  line {ln}: {txt}" for ln, txt in offenders)
+        )
+
+
+class TestRenderAndParse:
+    """Rule 3: every command block renders clean under a space-bearing skill dir."""
+
+    def test_the_probe_is_not_vacuous(self):
+        total = sum(
+            len(list(_command_units((SKILL_ROOT / rel).read_text(encoding="utf-8"))))
+            for rel in PLACEHOLDER_MANIFEST
+        )
+        assert total >= 50, f"suspiciously few uv command units found: {total}"
+
+    @pytest.mark.parametrize("rel", sorted(PLACEHOLDER_MANIFEST))
+    def test_command_blocks_render_and_split(self, rel):
+        source = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
+        for line_no, command in _command_units(rendered):
+            _assert_command_is_clean(f"{rel}:{line_no}", command, FIXTURE_SKILL_DIR)
+
+
+class TestServedCoreIsTokenFree:
+    """Rule 4: ``util instructions <mode>`` serves a token-free core file."""
+
+    SERVED = [m.name for m in mode_table.MODES if m.instruction_file]
+
+    def test_every_available_mode_has_a_core_file_on_disk(self):
+        for mode in mode_table.MODES:
+            if mode.instruction_file is None:
+                continue
+            path = SKILL_ROOT / mode_table.instruction_path(mode.name)
+            assert path.exists(), (
+                f"mode '{mode.name}' declares core file {mode.instruction_file} "
+                "but it is missing on disk — the served surface would silently "
+                "diverge from the dispatch table."
+            )
+
+    def test_served_surface_is_not_vacuous(self):
+        assert len(self.SERVED) >= 11, self.SERVED
+
+    @pytest.mark.parametrize("mode", SERVED)
+    def test_rendered_core_is_token_free(self, mode):
+        """Rendered under a fixture skill dir *containing a space*."""
+        source = (SKILL_ROOT / mode_table.instruction_path(mode)).read_text(
+            encoding="utf-8"
+        )
+        rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
+        for token in FORBIDDEN_IN_RENDERED:
+            assert token not in rendered, (
+                f"util instructions {mode}: {token} survived rendering"
+            )
+        # Byte-for-byte identical to the source *except* at the placeholders:
+        # the line count is unchanged and every placeholder-free line matches.
+        source_lines = source.splitlines()
+        rendered_lines = rendered.splitlines()
+        assert len(rendered_lines) == len(source_lines)
+        for line_no, (before, after) in enumerate(
+            zip(source_lines, rendered_lines), start=1
+        ):
+            if any(token in before for token in FORBIDDEN_IN_RENDERED):
+                assert FIXTURE_SKILL_DIR in after, f"{mode}:{line_no}"
+            else:
+                assert after == before, (
+                    f"util instructions {mode}:{line_no} changed a line that "
+                    f"carried no placeholder:\n  - {before}\n  + {after}"
+                )
+
+    @pytest.mark.parametrize("mode", SERVED)
+    def test_cli_serves_token_free_core(self, mode, capsys):
+        exit_code = multi_llm.main(["util", "instructions", mode])
+        out = capsys.readouterr().out
+        assert exit_code == 0, out
+        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0]
+        for token in FORBIDDEN_IN_RENDERED:
+            assert token not in body, f"util instructions {mode}: {token} in output"
+        assert str(cli_common.skill_dir()) in body or "${" not in body
+
+    def test_missing_mode_is_an_error(self, capsys):
+        assert multi_llm.main(["util", "instructions", "no-such-mode"]) == 3
+        assert multi_llm.main(["util", "instructions", "install-host"]) == 3
+        capsys.readouterr()
+
+    def test_alias_serves_the_canonical_file(self, capsys):
+        assert multi_llm.main(["util", "instructions", "code-review"]) == 0
+        aliased = capsys.readouterr().out
+        assert multi_llm.main(["util", "instructions", "review-code"]) == 0
+        canonical = capsys.readouterr().out
+        assert aliased == canonical
+
+
+class TestPrintedFollowUps:
+    """Rule 5: the orchestrators' printed follow-ups are resolved at the source."""
+
+    @pytest.fixture
+    def fixture_skill_dir(self, tmp_path, monkeypatch):
+        """A real directory whose path contains a space, so "names an existing
+        path" is checkable rather than notional."""
+        base = tmp_path / "multi llm fixture" / "skill dir"
+        base.mkdir(parents=True)
+        (base / "multi_llm.py").write_text("# fixture\n", encoding="utf-8")
+        monkeypatch.setattr(cli_common, "_SKILL_DIR", base)
+        return base
+
+    @pytest.mark.parametrize(
+        "script",
+        ["review_plan_orchestrator.py", "review_tasks_orchestrator.py",
+         "code_review_orchestrator.py"],
+    )
+    def test_validation_reaggregate_command(self, script, fixture_skill_dir, tmp_path):
+        """``utils/validation.py``'s reaggregate hint (the ``:956`` site)."""
+        from utils.validation import prepare_batched_validation_tasks
+
+        plan = tmp_path / "a plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        result = prepare_batched_validation_tasks(
+            groups=[{
+                "group_id": "g1",
+                "importance": "HIGH",
+                "suggestions": [{"id": "s1", "description": "d", "section": "s"}],
+            }],
+            context="ctx",
+            output_dir=str(tmp_path),
+            plan_file=str(plan),
+            orchestrator=script,
+        )
+        command = result["reaggregate_command"]
+        _assert_command_is_clean("validation.py", command, str(fixture_skill_dir))
+        argv = shlex.split(command)
+        assert argv[argv.index("--") + 2] == str(fixture_skill_dir / "multi_llm.py")
+        assert Path(argv[argv.index("--") + 2]).exists()
+        assert str(plan) in argv
+        assert "--reaggregate" in argv
+        assert script not in command, (
+            "the printed follow-up must name the single entry point, never a "
+            "second orchestrator path"
+        )
+
+    def test_code_review_print_sites(self, fixture_skill_dir):
+        """``code_review_orchestrator.py``'s two print sites (``:1565``, ``:1642``).
+
+        Both now build their command through the shared helper, so driving the
+        helper for the mode they pass is equivalent to driving the print sites —
+        and a source scan below proves neither site can regress to a literal.
+        """
+        command = cli_common.reaggregate_command("review-code", "/tmp/a plan.md")
+        _assert_command_is_clean("code_review_orchestrator.py", command,
+                                 str(fixture_skill_dir))
+        assert " review-code " in command
+
+    def test_no_production_print_emits_a_placeholder(self):
+        """A stdout-wide scan: no ``print`` may carry a skill-dir placeholder.
+
+        This is what makes the change durable — the golden regression bundle
+        compares phase artifacts, never stdout, so a printed command that stopped
+        working would otherwise be unguarded.
+        """
+        offenders = []
+        for path in _production_python_files():
+            for line_no, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if "CLAUDE_SKILL_DIR" not in line and "{SKILL_DIR}" not in line:
+                    continue
+                if "print(" in line or "[REAGGREGATE" in line:
+                    offenders.append((_rel(path), line_no, line.strip()))
+        assert not offenders, (
+            "orchestrator stdout must contain no unexpanded placeholder — print "
+            "a path resolved from __file__ instead:\n"
+            + "\n".join(f"  {f}:{ln}: {txt}" for f, ln, txt in offenders)
+        )
+
+    def test_validation_module_has_no_placeholder_left(self):
+        text = (SKILL_ROOT / "utils" / "validation.py").read_text(encoding="utf-8")
+        assert "CLAUDE_SKILL_DIR" not in text, (
+            "utils/validation.py builds a printed follow-up; it must resolve the "
+            "skill dir from __file__ and carry no placeholder at all."
+        )
+
+    def test_result_next_carries_no_placeholder_or_internal_flag(self):
+        ctx = cli_common.ResultContext(mode="review-code", phase="code-review")
+        ctx.set_next(cli_common.reaggregate_command("review-code", "/tmp/a plan.md"))
+        payload = ctx.payload(0)
+        for token in FORBIDDEN_IN_RENDERED:
+            assert token not in payload["next"]
+        fresh = cli_common.ResultContext(mode="review-code")
+        fresh.set_next(
+            "uv run ... multi_llm.py review-code p.md --internal-worker"
+        )
+        assert fresh.payload(0)["next"] is None, (
+            "an --internal-* flag must never be rendered into a follow-up"
+        )
+
+
+class TestNegativeSpellings:
+    """Rule 6: the illegal spellings stay illegal."""
+
+    @pytest.mark.parametrize("token", ["${SKILL_DIR}", "$SKILL_DIR"])
+    def test_illegal_variable_spelling_is_absent(self, token):
+        hits = [
+            (_rel(path), i, line.strip())
+            for path in _scanned_files()
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            )
+            if token in line
+        ]
+        assert not hits, (
+            f"`{token}` is never defined — the brace token `{{SKILL_DIR}}` is a "
+            "template placeholder and the only legal *shell* spelling is "
+            '`"$MULTI_LLM_SKILL_DIR"`. Found at:\n'
+            + "\n".join(f"  {f}:{ln}: {txt}" for f, ln, txt in hits)
+        )
+
+    def test_renderer_does_not_define_the_illegal_spellings(self):
+        assert "${SKILL_DIR}" not in cli_common._SKILL_DIR_TOKENS
+        assert "$SKILL_DIR" not in cli_common._SKILL_DIR_TOKENS
+
+    def test_instructions_and_shims_name_only_the_entry_point(self):
+        """The instruction core names exactly one script.
+
+        Recorded as the *current* debt: the rewrite that switches the corpus to
+        ``multi_llm.py`` drives this number to 0. It is pinned so a new direct
+        ``*_orchestrator.py`` reference cannot slip in unnoticed.
+        """
+        hits = [
+            _rel(path)
+            for path in _scanned_files()
+            if re.search(r"_orchestrator\.py", path.read_text(encoding="utf-8"))
+        ]
+        assert sorted(hits) == [
+            "instructions/apply-code-fixes.md",
+            "instructions/apply-suggestions.md",
+            "instructions/apply-task-suggestions.md",
+            "instructions/ask.md",
+            "instructions/full-workflow.md",
+            "instructions/generate-tasks.md",
+            "instructions/implement.md",
+            "instructions/review-code.md",
+            "instructions/review-plan.md",
+            "instructions/review-tasks.md",
+        ], (
+            "the set of files naming a *_orchestrator.py path changed. The "
+            "instruction core is meant to name only multi_llm.py; shrink this "
+            "list, never grow it."
+        )
+
+
+# ===========================================================================
+# The mode table is the one owner
+# ===========================================================================
+
+class TestModeTable:
+    def test_argument_hint_renders_from_the_table(self):
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        line = next(
+            l for l in text.splitlines() if l.startswith("argument-hint:")
+        )
+        actual = line.split("argument-hint:", 1)[1].strip()
+        assert actual == mode_table.render_argument_hint(), (
+            "SKILL.md's argument-hint no longer matches modes.py. It is rendered "
+            "from the table, never copied: add the mode as a row and regenerate."
+        )
+
+    def test_every_mode_word_is_dispatchable(self):
+        for mode in mode_table.MODES:
+            assert mode_table.resolve(mode.name) is mode
+            if mode.unavailable is None:
+                assert mode.target_module, mode.name
+
+    def test_aliases_resolve_and_are_closed(self):
+        for alias, target in mode_table.ALIASES.items():
+            assert mode_table.resolve(alias).name == target
+            assert alias not in mode_table.mode_names(), (
+                f"alias {alias} shadows a real mode word"
+            )
+        # No prefix or fuzzy matching.
+        assert mode_table.resolve("review-pl") is None
+        assert mode_table.resolve("REVIEW-PLAN") is None
+
+    def test_util_is_not_a_mode(self):
+        assert mode_table.resolve(mode_table.UTIL_NAMESPACE) is None
+        for mode in mode_table.MODES:
+            assert mode_table.UTIL_NAMESPACE != mode.name
+        # Excluded from --help's *mode list* (it is still named once, as the
+        # pointer to `multi_llm.py util --help`).
+        help_text = multi_llm.render_help()
+        mode_block = help_text.split("modes:", 1)[1].split("aliases:", 1)[0]
+        listed = [
+            line.strip().split()[0]
+            for line in mode_block.splitlines()
+            if line.startswith("  ") and line.strip()
+            and not line.strip().startswith("(")
+        ]
+        assert mode_table.UTIL_NAMESPACE not in listed, listed
+        assert set(listed) == set(mode_table.mode_names())
+
+    def test_internal_flags_are_hidden_from_help(self):
+        help_text = multi_llm.render_help() + multi_llm.render_util_help()
+        for flag in multi_llm.INTERNAL_FLAGS:
+            assert flag not in help_text, f"{flag} must not appear in --help"
+
+    def test_script_to_mode_covers_every_orchestrator(self):
+        scripts = {p.name for p in SKILL_ROOT.glob("*_orchestrator.py")}
+        assert set(mode_table.SCRIPT_TO_MODE) == scripts, (
+            "every *_orchestrator.py needs a mode word so a printed follow-up "
+            "can name the entry point instead of the script"
+        )
+
+    def test_prerequisite_phases_match_the_script(self):
+        assert list(mode_table.PREREQUISITE_PHASES) == [
+            "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
+            "apply-task-suggestions", "implement", "code-review",
+            "apply-code-fixes",
+        ]
+
+
+# ===========================================================================
+# Import must be side-effect free
+# ===========================================================================
+
+def _production_python_files():
+    excluded = {"tests", "__pycache__", ".venv"}
+    return sorted(
+        p
+        for p in SKILL_ROOT.rglob("*.py")
+        if not any(part in excluded or part.startswith(".") for part in
+                   p.relative_to(SKILL_ROOT).parts)
+    )
+
+
+def _dispatch_target_modules():
+    """Every module the dispatcher can import: modes plus the util namespace."""
+    targets = {
+        m.target_module for m in mode_table.MODES if m.target_module
+    }
+    targets |= {
+        module for module, _attr, _summary in multi_llm.UTIL_COMMANDS.values()
+        if module
+    }
+    return sorted(targets)
+
+
+class TestDispatchTargetsImportCleanly:
+    """Import is side-effect free, so two targets can share one interpreter.
+
+    In-process dispatch plus machine-owned continuations means a single
+    invocation can import and run more than one target; a module that parsed
+    argv, printed, or wrote a file at import would make that unsafe.
+    """
+
+    def test_target_discovery_is_not_vacuous(self):
+        targets = _dispatch_target_modules()
+        assert len(targets) >= 14, targets
+        assert "review_plan_orchestrator" in targets
+        assert "utils.metrics" in targets
+
+    def test_importing_every_target_is_silent_and_writes_nothing(self, tmp_path):
+        """One process imports them all: no stdout, no file writes, no argv use."""
+        targets = _dispatch_target_modules()
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            textwrap.dedent(
+                f"""
+                import json, os, sys
+                sys.path.insert(0, {str(SKILL_ROOT)!r})
+                # A bogus argv: a module that reads sys.argv at import time or
+                # parses it eagerly cannot survive this.
+                sys.argv = ["import-probe"]
+                before = sorted(os.listdir("."))
+                import importlib
+                for name in {targets!r}:
+                    importlib.import_module(name)
+                after = sorted(os.listdir("."))
+                sys.stderr.write(json.dumps({{"before": before, "after": after}}))
+                """
+            ),
+            encoding="utf-8",
+        )
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        proc = subprocess.run(
+            [sys.executable, str(probe)],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == "", (
+            "importing a dispatch target wrote to stdout, which would corrupt "
+            f"the MULTI_LLM_RESULT contract:\n{proc.stdout}"
+        )
+        listing = json.loads(proc.stderr)
+        assert listing["before"] == listing["after"] == [], (
+            f"importing a dispatch target created files in the CWD: {listing}"
+        )
+
+    @pytest.mark.parametrize("module", _dispatch_target_modules())
+    def test_no_module_level_argparse_or_argv(self, module):
+        """AST guard: argparse and argv stay inside ``main(argv)``."""
+        path = SKILL_ROOT / (module.replace(".", "/") + ".py")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        offenders = []
+
+        def walk(node, inside_function):
+            for child in ast.iter_child_nodes(node):
+                nested = inside_function or isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                            ast.ClassDef)
+                )
+                if not nested and not _is_main_guard(child):
+                    if isinstance(child, ast.Attribute) and child.attr == "argv":
+                        offenders.append(("sys.argv", child.lineno))
+                    if isinstance(child, ast.Call):
+                        name = getattr(child.func, "attr", None) or getattr(
+                            child.func, "id", None
+                        )
+                        if name in ("ArgumentParser", "parse_args"):
+                            offenders.append((name, child.lineno))
+                if not _is_main_guard(child):
+                    walk(child, nested)
+
+        walk(tree, False)
+        assert not offenders, (
+            f"{module}: argument parsing must live inside main(argv); found "
+            f"{offenders} at module scope."
+        )
+
+    @pytest.mark.parametrize("module", _dispatch_target_modules())
+    def test_main_accepts_an_argv_list(self, module):
+        """``main(argv)`` is the contract; the __main__ block just exits on it."""
+        import importlib
+        import inspect
+
+        target = getattr(importlib.import_module(module), "main")
+        signature = inspect.signature(target)
+        assert len(signature.parameters) >= 1, (
+            f"{module}.main must accept an argv list so the dispatcher can hand "
+            "it the residual argv verbatim"
+        )
+
+
+def _is_main_guard(node) -> bool:
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    left, comparators = node.test.left, node.test.comparators
+    names = {n.id for n in [left, *comparators] if isinstance(n, ast.Name)}
+    consts = {n.value for n in [left, *comparators] if isinstance(n, ast.Constant)}
+    return "__name__" in names and "__main__" in consts
+
+
+# ===========================================================================
+# The dispatcher's public grammar
+# ===========================================================================
+
+def _capturing_target(store):
+    """A ``_load_target`` stand-in that records the residual argv verbatim."""
+
+    def loader(module_path, attr):
+        def target(argv):
+            store["argv"] = list(argv)
+            store["module"] = module_path
+            return 0
+
+        return target
+
+    return loader
+
+
+class TestDispatcherGrammar:
+    def test_help_exits_zero_and_lists_every_mode(self, capsys):
+        assert multi_llm.main(["--help"]) == 0
+        out = capsys.readouterr().out
+        for name in mode_table.mode_names():
+            assert name in out
+
+    def test_missing_mode_is_exit_three(self, capsys):
+        assert multi_llm.main([]) == 3
+        captured = capsys.readouterr()
+        assert "review-plan" in captured.err
+
+    def test_unknown_mode_is_exit_three_and_lists_modes(self, capsys):
+        assert multi_llm.main(["reviewplan"]) == 3
+        err = capsys.readouterr().err
+        assert "unknown mode 'reviewplan'" in err
+        assert "review-plan" in err
+
+    def test_a_flag_in_the_mode_slot_is_exit_three(self, capsys):
+        assert multi_llm.main(["--review-plan", "p.md"]) == 3
+        assert "is not a mode" in capsys.readouterr().err
+
+    def test_extra_positional_is_exit_three(self, capsys):
+        assert multi_llm.main(["review-plan", "a.md", "b.md"]) == 3
+        assert "positional" in capsys.readouterr().err
+
+    def test_init_takes_no_positional(self, capsys):
+        assert multi_llm.main(["init", "plans/x.md"]) == 3
+        capsys.readouterr()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["review-plan", "p.md", "--yes", "--interactive"],
+            ["review-plan", "p.md", "--non-interactive", "-i"],
+            ["review-code", "p.md", "-y", "--interactive"],
+            ["implement", "p.md", "--yes", "--force-strategy", "pause-and-ask"],
+            ["implement", "p.md", "--yes", "--force-strategy=pause-and-ask"],
+        ],
+    )
+    def test_contradictory_flags_are_exit_three(self, argv, capsys):
+        assert multi_llm.main(argv) == 3
+        err = capsys.readouterr().err
+        assert "contradictory" in err or "forbids" in err
+
+    def test_unavailable_modes_are_exit_three(self, capsys):
+        for mode in ("generate-tasks", "full", "install-host", "uninstall-host"):
+            args = ["p.md"] if mode in ("generate-tasks", "full") else ["codex"]
+            assert multi_llm.main([mode, *args]) == 3, mode
+            assert "not yet available" in capsys.readouterr().err
+
+    # -- alias table ----------------------------------------------------
+    @pytest.mark.parametrize(
+        "alias,expected",
+        [("review", "review-plan"), ("code-review", "review-code"),
+         ("tasks", "generate-tasks")],
+    )
+    def test_aliases_dispatch_to_the_canonical_mode(self, alias, expected,
+                                                    monkeypatch, capsys):
+        seen = {}
+
+        def fake_load(module_path, attr):
+            seen["module"] = module_path
+            return lambda argv: 0
+
+        monkeypatch.setattr(multi_llm, "_load_target", fake_load)
+        exit_code = multi_llm.main([alias, "p.md"])
+        result = cli_common.parse_result_line(capsys.readouterr().out)
+        assert result["mode"] == expected
+        if expected == "generate-tasks":       # still an honest gap
+            assert exit_code == 3
+        else:
+            assert exit_code == 0
+            assert seen["module"] == mode_table.resolve(expected).target_module
+
+    # -- positional normalization ---------------------------------------
+    def test_plan_positional_becomes_plan_file(self, monkeypatch, capsys):
+        captured = {}
+
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        assert multi_llm.main(["review-plan", "plans/a plan.md", "--quick"]) == 0
+        capsys.readouterr()
+        assert captured["argv"] == ["--plan-file", "plans/a plan.md", "--quick"]
+
+    def test_status_injects_the_status_flag(self, monkeypatch, capsys):
+        captured = {}
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        assert multi_llm.main(["status", "plans/a.md"]) == 0
+        capsys.readouterr()
+        assert captured["argv"] == ["--status", "--plan-file", "plans/a.md"]
+
+    def test_short_ask_question_stays_on_argv(self, monkeypatch, capsys):
+        captured = {}
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        assert multi_llm.main(["ask", "plans/a.md", "Is the rollback ok?"]) == 0
+        capsys.readouterr()
+        assert captured["argv"] == [
+            "--plan-file", "plans/a.md", "--question", "Is the rollback ok?",
+        ]
+
+    def test_long_ask_question_falls_back_to_question_file(self, monkeypatch,
+                                                           capsys):
+        question = "why? " * 2000
+        assert len(question) > multi_llm.MAX_ARGV_QUESTION_CHARS
+        captured = {}
+
+        def fake_main(argv):
+            captured["argv"] = list(argv)
+            path = Path(argv[argv.index("--question-file") + 1])
+            captured["content"] = path.read_text(encoding="utf-8")
+            captured["existed"] = path.exists()
+            captured["path"] = path
+            return 0
+
+        monkeypatch.setattr(multi_llm, "_load_target", lambda m, a: fake_main)
+        assert multi_llm.main(["ask", "plans/a.md", question]) == 0
+        capsys.readouterr()
+        assert "--question" not in captured["argv"]
+        assert "--question-file" in captured["argv"]
+        assert captured["content"] == question
+        assert captured["existed"]
+        # The dispatcher owns the temp file's whole lifetime.
+        assert not captured["path"].exists()
+
+    # -- pass-through ---------------------------------------------------
+    def test_flags_are_forwarded_verbatim_as_a_list(self, monkeypatch, capsys):
+        captured = {}
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        argv = [
+            "review-code", "plans/my plan.md", "--models", "cursor-agent:auto",
+            "gemini:gemini-2.5-flash", "--base-ref", "HEAD~1",
+            "--host", "codex", "--internal-validation",
+        ]
+        assert multi_llm.main(argv) == 0
+        capsys.readouterr()
+        assert captured["argv"] == ["--plan-file", "plans/my plan.md", *argv[2:]]
+
+    def test_printed_follow_up_round_trips_through_the_dispatcher(self, monkeypatch,
+                                                                capsys):
+        """The command the orchestrators print is one the dispatcher accepts.
+
+        Closes the loop between printer and parser: a follow-up that no longer
+        parses is the exact failure the resolved-path change could introduce, and
+        nothing else in the suite compares the two ends.
+        """
+        plan = "/tmp/a plan with spaces.md"
+        command = cli_common.reaggregate_command("review-code", plan)
+        argv = shlex.split(command)
+        # Drop `uv run --project <dir> -- python <dir>/multi_llm.py`.
+        residual = argv[argv.index("--") + 3:]
+        captured = {}
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        assert multi_llm.main(residual) == 0
+        capsys.readouterr()
+        assert captured["argv"] == ["--plan-file", plan, "--reaggregate"]
+        assert captured["module"] == "code_review_orchestrator"
+
+    def test_no_subprocess_on_the_dispatch_path(self):
+        source = (SKILL_ROOT / "multi_llm.py").read_text(encoding="utf-8")
+        code = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "import subprocess" not in code and "subprocess." not in code, (
+            "dispatch is in-process by design: a subprocess per mode pays a "
+            "second uv resolution, turns a self-contained continuation back "
+            "into a re-exec and reintroduces argv quoting and signal plumbing."
+        )
+
+    # -- exit codes -----------------------------------------------------
+    @pytest.mark.parametrize("code", [0, 1, 2, 3, 7])
+    def test_target_exit_codes_are_not_remapped(self, code, monkeypatch, capsys):
+        monkeypatch.setattr(
+            multi_llm, "_load_target", lambda m, a: lambda argv: code
+        )
+        assert multi_llm.main(["review-plan", "p.md"]) == code
+        assert cli_common.parse_result_line(capsys.readouterr().out)["exit"] == code
+
+    def test_target_system_exit_is_honoured(self, monkeypatch, capsys):
+        def raiser(argv):
+            raise SystemExit(2)
+
+        monkeypatch.setattr(multi_llm, "_load_target", lambda m, a: raiser)
+        assert multi_llm.main(["review-plan", "p.md"]) == 2
+        result = cli_common.parse_result_line(capsys.readouterr().out)
+        assert result["exit"] == 2
+        assert result["state"] == "nothing-to-do"
+
+    # -- MULTI_LLM_RESULT ----------------------------------------------
+    def test_result_line_is_last_and_parseable_on_success(self, monkeypatch,
+                                                          capsys):
+        def target(argv):
+            print("human readable progress")
+            cli_common.record_artifact("/tmp/a plan/review-plan/grouped.json")
+            return 0
+
+        monkeypatch.setattr(multi_llm, "_load_target", lambda m, a: target)
+        assert multi_llm.main(["review-plan", "p.md"]) == 0
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert lines[-1].startswith(cli_common.RESULT_MARKER)
+        assert sum(l.startswith(cli_common.RESULT_MARKER) for l in lines) == 1
+        payload = cli_common.parse_result_line(out)
+        assert payload == {
+            "mode": "review-plan",
+            "phase": "review-plan",
+            "state": "done",
+            "exit": 0,
+            "artifacts": ["/tmp/a plan/review-plan/grouped.json"],
+            "next": None,
+        }
+
+    def test_result_line_is_present_and_parseable_on_a_crash(self, monkeypatch,
+                                                             capsys):
+        def boom(argv):
+            print("partial output")
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(multi_llm, "_load_target", lambda m, a: boom)
+        assert multi_llm.main(["review-code", "p.md"]) == 1
+        captured = capsys.readouterr()
+        payload = cli_common.parse_result_line(captured.out)
+        assert payload["exit"] == 1
+        assert payload["state"] == "error"
+        assert payload["mode"] == "review-code"
+        assert payload["phase"] == "code-review"
+        assert captured.out.strip().splitlines()[-1].startswith(
+            cli_common.RESULT_MARKER
+        )
+        assert "kaboom" in captured.err, "the traceback belongs on stderr"
+
+    def test_result_keys_are_exactly_the_contract(self, monkeypatch, capsys):
+        monkeypatch.setattr(multi_llm, "_load_target", lambda m, a: lambda argv: 0)
+        multi_llm.main(["ask", "p.md", "q?"])
+        payload = cli_common.parse_result_line(capsys.readouterr().out)
+        assert list(payload) == [
+            "mode", "phase", "state", "exit", "artifacts", "next",
+        ]
+
+    def test_every_invocation_emits_exactly_one_result_line(self, capsys):
+        for argv in ([], ["--help"], ["bogus"], ["util", "--help"],
+                     ["review-plan", "a.md", "b.md"]):
+            multi_llm.main(list(argv))
+            out = capsys.readouterr().out
+            assert sum(
+                l.startswith(cli_common.RESULT_MARKER) for l in out.splitlines()
+            ) == 1, argv
+
+    # -- util namespace -------------------------------------------------
+    def test_util_help_lists_every_command(self, capsys):
+        assert multi_llm.main(["util", "--help"]) == 0
+        out = capsys.readouterr().out
+        for name in multi_llm.UTIL_COMMANDS:
+            assert name in out
+
+    def test_unknown_util_command_is_exit_three(self, capsys):
+        assert multi_llm.main(["util", "nope"]) == 3
+        assert "unknown util command" in capsys.readouterr().err
+
+    def test_util_routes_in_process_to_the_script(self, tmp_path, capsys):
+        state = tmp_path / "state.json"
+        state.write_text(json.dumps({"metrics": {}}), encoding="utf-8")
+        assert multi_llm.main([
+            "util", "metrics", "start", "--state-file", str(state),
+            "--phase", "review-plan", "--total-batches", "3",
+        ]) == 0
+        capsys.readouterr()
+        assert "metrics" in json.loads(state.read_text(encoding="utf-8"))
+
+
+class TestCrossCuttingFlagsAreShared:
+    """The cross-cutting flags exist on the direct surface too, unchanged."""
+
+    #: The orchestrators whose parser is reachable as ``parse_args(argv)``.
+    #: ``check_workflow_prerequisites`` builds its parser inside ``main()``, so the
+    #: dedicated test below drives its CLI surface instead.
+    DIRECT_PARSERS = [
+        "review_plan_orchestrator", "review_tasks_orchestrator",
+        "code_review_orchestrator", "ask_orchestrator",
+        "implement_orchestrator",
+    ]
+
+    @pytest.mark.parametrize("module", DIRECT_PARSERS)
+    def test_direct_invocation_accepts_the_shared_flags(self, module):
+        import importlib
+
+        mod = importlib.import_module(module)
+        argv = ["--plan-file", "p.md", "--host", "codex", "--detach",
+                "--exec-subagents", "--yes"]
+        if module == "ask_orchestrator":
+            argv += ["--question", "q"]
+        args = mod.parse_args(argv)
+        assert args.host == "codex"
+        assert args.detach is True
+        assert args.exec_subagents is True
+        assert args.yes is True
+
+    @pytest.mark.parametrize("module", DIRECT_PARSERS)
+    def test_interactive_keeps_its_short_flag_and_semantics(self, module):
+        import importlib
+
+        mod = importlib.import_module(module)
+        for spelling in (["--interactive"], ["-i"]):
+            args = mod.parse_args(["--plan-file", "p.md", *spelling]
+                                  + (["--question", "q"] if module == "ask_orchestrator" else []))
+            assert args.interactive is True
+
+    def test_prerequisites_script_accepts_the_shared_flags(self, tmp_path, capsys):
+        """Its parser is built inside ``main()``, so drive it through the mode.
+
+        Also covers the `status` row of the dispatch table end-to-end: the
+        dispatcher injects `--status` and forwards the cross-cutting flags to the
+        same script a direct invocation would reach.
+        """
+        plan = tmp_path / "a plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        exit_code = multi_llm.main([
+            "status", str(plan), "--host", "codex", "--yes", "--detach",
+            "--exec-subagents",
+        ])
+        out = capsys.readouterr().out
+        assert exit_code == 0, out
+        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0]
+        assert json.loads(body)["phases"]
+        assert list(json.loads(body)["phases"]) == list(
+            mode_table.PREREQUISITE_PHASES
+        )
+
+    def test_apply_parsers_keep_yes_and_its_short_flag(self):
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+
+        for spelling in ("--yes", "-y", "--non-interactive"):
+            args = ApplySuggestionsOrchestrator.parse_args(
+                ["--plan-file", "p.md", spelling]
+            )
+            assert args.yes is True
+
+    def test_parent_parser_defines_each_flag_once(self):
+        parent = cli_common.build_parent_parser()
+        options = [o for action in parent._actions for o in action.option_strings]
+        assert len(options) == len(set(options)), options
+        assert {"--host", "--yes", "-y", "--non-interactive", "--interactive",
+                "-i", "--detach", "--exec-subagents"} <= set(options)
+
+    def test_skill_dir_preserves_symlinks(self):
+        """``abspath``, never ``realpath``: resolving would rewrite a plugin
+        invocation into a checkout path the user never named."""
+        source = (SKILL_ROOT / "utils" / "cli_common.py").read_text(encoding="utf-8")
+        assert "os.path.abspath" in source
+        assert "os.path.realpath" not in source
+        assert ".resolve()" not in source
+        assert cli_common.skill_dir().is_absolute()
+        assert cli_common.skill_dir() == Path(
+            os.path.abspath(str(SKILL_ROOT / "utils" / "..")))

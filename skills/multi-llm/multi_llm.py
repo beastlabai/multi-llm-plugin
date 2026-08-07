@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""multi_llm.py — the single entry point for every multi-llm mode.
+
+    uv run --project <skill-dir> -- python <skill-dir>/multi_llm.py <mode> [args]
+
+A host shim resolves *one* path, once, and routes nothing itself.
+
+Grammar (one line, no shell preprocessing)::
+
+    multi_llm.py <mode> [<positional>…] [--host <id>] [mode flags…]
+
+* ``<mode>`` is a bare word and must be ``argv[1]``; unknown or missing is exit 3
+  listing the valid modes. Users still type ``--review-plan``; the shim maps
+  flag → mode word through the closed table in ``modes.py``, so this script never
+  has to disambiguate a mode flag from an option.
+* **Positionals are normalized into the flags the target already parses** — plan
+  modes take ``<plan>`` → ``--plan-file``; ``ask`` takes ``<plan> <question>`` →
+  ``--plan-file`` + ``--question`` (falling back to ``--question-file``, written
+  *here* and never by the driving agent, when the question outgrows the argv
+  budget); ``install-host`` takes ``<host>``; ``init`` takes none. An extra
+  positional is exit 3, never silently dropped.
+* **Everything after the positionals is forwarded verbatim** to that mode's own
+  argparse parser, which stays the single source of truth for its options.
+  ``multi_llm.py <mode> --help`` prints that parser's help.
+* **Dispatch is in-process**, never ``subprocess``: the target's
+  ``main(argv) -> int`` is imported lazily and called, so one ``uv`` resolution
+  covers the whole invocation, a plan path containing a space survives by
+  construction (the hand-off is a Python list — ``shlex`` never runs on this
+  path), stream setup happens once, and foreground Ctrl-C reaches the code that
+  owns the phase dir with no forwarding layer.
+* **Exit codes are uniform and never remapped**: 0 done, 1 unexpected error,
+  2 nothing to do / phase already complete, 3 needs a human. The only codes this
+  script invents are the 3s it raises for an unknown mode, a bad positional or a
+  rejected flag combination.
+* **Exactly one machine-readable last stdout line per invocation** —
+  ``MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}``
+  — emitted even on a crash, so the contract holds for a host that cannot parse
+  prose or is tailing a detached log. ``next`` is ``null`` whenever no follow-up
+  is owed, which is the normal case.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+# Absolute, symlinks preserved — see utils/cli_common.py for why never realpath.
+sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent))
+
+import modes as mode_table
+from utils.cli_common import (
+    EXIT_ERROR,
+    EXIT_NEEDS_HUMAN,
+    EXIT_OK,
+    INTERNAL_FLAG_PREFIX,
+    ResultContext,
+    activate_result,
+    deactivate_result,
+    flag_present,
+    flag_value,
+    render_instruction_text,
+    skill_dir,
+)
+from utils.stream_bootstrap import bootstrap_streams
+
+#: Above this many characters the ``ask`` question is handed over as a file
+#: instead of an argv value. Well under the tightest real ceiling (Windows caps a
+#: whole command line at 32767 chars; POSIX caps a single argument at 128 KiB),
+#: because the same normalization feeds the detached-worker re-exec later.
+MAX_ARGV_QUESTION_CHARS = 4096
+
+#: The hidden re-entry flags this script reserves under the ``--internal-*``
+#: prefix. Excluded from ``--help``, never rendered into a follow-up command or a
+#: ``MULTI_LLM_RESULT.next`` value (see ``ResultContext.set_next``), and not part
+#: of the compatibility surface. Targets own further ``--internal-*`` names of
+#: their own (e.g. ``--internal-revalidation``), which is why the dispatcher
+#: forwards the prefix rather than validating against this list.
+INTERNAL_FLAGS: Tuple[str, ...] = tuple(
+    INTERNAL_FLAG_PREFIX + name for name in ("reaggregate", "consolidate", "worker")
+)
+
+
+# ---------------------------------------------------------------------------
+# The `util` namespace
+# ---------------------------------------------------------------------------
+# Utility scripts the instruction layer used to shell out to directly, routed the
+# same in-process ``main(argv)`` way as the modes with flags forwarded verbatim to
+# each script's existing parser. This is what makes "one substitution site per
+# command" true rather than aspirational.
+#
+# `util` is NOT a user-facing surface: it is excluded from `argument-hint` and
+# from `--help`'s mode list, documented only under `multi_llm.py util --help`,
+# and — like `--internal-*` — never rendered into a MULTI_LLM_RESULT.next value.
+UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
+    "metrics": ("utils.metrics", "main", "Record/report per-subagent metrics in state.json."),
+    "prior-changes": ("utils.prior_changes", "main", "Read, append to or clear the prior-batch change log."),
+    "report": ("utils.html_report_generator", "main", "Regenerate an HTML review report with decisions overlaid."),
+    "decisions": ("display_decisions", "main", "Print the decision summary from an orchestrator output file."),
+    "update-tasks": ("update_plan_tasks", "main", "Write generated tasks into a plan's Tasks section."),
+    "prereq": ("check_workflow_prerequisites", "main", "Check, skip or report a workflow phase's prerequisites."),
+    "backup": ("utils.backup", "main", "Back up a file before it is modified."),
+    "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
+}
+
+
+class DispatchError(Exception):
+    """A dispatcher-owned failure that maps to a fixed exit code."""
+
+    def __init__(self, message: str, exit_code: int = EXIT_NEEDS_HUMAN):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+# ---------------------------------------------------------------------------
+# Help rendering (from modes.py — never a hand-maintained second list)
+# ---------------------------------------------------------------------------
+
+def render_help() -> str:
+    lines = [
+        "usage: multi_llm.py <mode> [<positional>...] [--host <id>] [mode flags...]",
+        "",
+        "Run a multi-llm workflow phase. The mode is a bare word and must come first;",
+        "every flag after it is forwarded verbatim to that mode's own parser, so",
+        "`multi_llm.py <mode> --help` prints the authoritative flag list.",
+        "",
+        "modes:",
+    ]
+    width = max(len(m.name) for m in mode_table.MODES)
+    for mode in mode_table.MODES:
+        positionals = " ".join(mode.positionals)
+        head = f"  {mode.name.ljust(width)}  {positionals}".rstrip()
+        lines.append(f"{head.ljust(width + 22)}{mode.summary}")
+        if mode.unavailable:
+            lines.append(f"  {''.ljust(width)}  ({mode.unavailable.format(mode=mode.name)})")
+    lines += [
+        "",
+        "aliases:",
+    ]
+    for alias, target in sorted(mode_table.ALIASES.items()):
+        lines.append(f"  {alias} -> {target}")
+    lines += [
+        "",
+        "cross-cutting flags (accepted by every mode, and by each orchestrator",
+        "directly): --host ID, --yes/-y/--non-interactive, --interactive/-i,",
+        "--detach, --exec-subagents.",
+        "",
+        "exit codes: 0 done | 1 unexpected error | 2 nothing to do / phase already",
+        "complete | 3 needs a human.",
+        "",
+        "Every invocation ends with one machine-readable line:",
+        '  MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[...],"next":...}',
+        "",
+        "Utility scripts live under a separate namespace: `multi_llm.py util --help`.",
+    ]
+    return "\n".join(lines)
+
+
+def render_util_help() -> str:
+    lines = [
+        "usage: multi_llm.py util <command> [flags...]",
+        "",
+        "Utility scripts, routed in-process with flags forwarded verbatim to each",
+        "script's own parser. Not a user-facing surface: `util` never appears in the",
+        "skill's argument-hint, in `multi_llm.py --help`'s mode list, or in a",
+        "MULTI_LLM_RESULT.next value.",
+        "",
+        "commands:",
+    ]
+    width = max(len(name) for name in UTIL_COMMANDS)
+    for name, (_module, _attr, summary) in UTIL_COMMANDS.items():
+        lines.append(f"  {name.ljust(width)}  {summary}")
+    lines += [
+        "",
+        "`util instructions <mode>` prints instructions/<mode>.md with every",
+        "skill-dir placeholder replaced by the running skill dir, so the text a host",
+        "agent reads contains no unexpanded token.",
+    ]
+    return "\n".join(lines)
+
+
+def _unknown_mode_message(word: str) -> str:
+    return (
+        f"ERROR: unknown mode '{word}'.\n"
+        f"Valid modes: {', '.join(mode_table.mode_names())}\n"
+        f"Aliases: "
+        + ", ".join(f"{a}={t}" for a, t in sorted(mode_table.ALIASES.items()))
+        + "\nRun `multi_llm.py --help` for the full grammar."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Grammar
+# ---------------------------------------------------------------------------
+
+def _split_positionals(rest: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """Leading bare words are positionals; everything from the first flag on is
+    forwarded verbatim.
+
+    Deliberately not argparse: ``parse_known_args`` can reorder or swallow the
+    residual argv, and the residual has to reach the target's own parser exactly
+    as the user typed it.
+    """
+    index = 0
+    while index < len(rest) and not rest[index].startswith("-"):
+        index += 1
+    return list(rest[:index]), list(rest[index:])
+
+
+def _normalize_positionals(
+    mode: "mode_table.Mode",
+    positionals: Sequence[str],
+    cleanup: List[Path],
+) -> List[str]:
+    """Turn a mode's positionals into the flags its target already parses."""
+    if len(positionals) > len(mode.positionals):
+        expected = " ".join(mode.positionals) or "(none)"
+        raise DispatchError(
+            f"ERROR: mode '{mode.name}' takes {len(mode.positionals)} positional "
+            f"argument(s) {expected}, got {len(positionals)}: "
+            f"{' '.join(positionals)}\n"
+            "Flags must follow the positionals; an extra positional is never "
+            "silently dropped."
+        )
+
+    normalized: List[str] = []
+    for kind, value in zip(mode.positionals, positionals):
+        if kind == mode_table.POS_PLAN:
+            normalized += ["--plan-file", value]
+        elif kind == mode_table.POS_QUESTION:
+            normalized += _question_flags(value, cleanup)
+        elif kind == mode_table.POS_HOST:
+            # Forwarded verbatim as a positional: the install-host parser (and
+            # with it the host-id vocabulary) is owned by the install design.
+            normalized += [value]
+        else:  # pragma: no cover - guarded by the table
+            raise DispatchError(f"ERROR: unhandled positional kind {kind!r}")
+    return normalized
+
+
+def _question_flags(question: str, cleanup: List[Path]) -> List[str]:
+    """``--question`` for a short question, else a dispatcher-written file.
+
+    ``ask_orchestrator.py`` already accepts ``--question-file``; writing it here
+    keeps user-controlled free text off every command line, and keeps the
+    decision out of the driving agent's hands.
+    """
+    if len(question) <= MAX_ARGV_QUESTION_CHARS:
+        return ["--question", question]
+    handle, path = tempfile.mkstemp(prefix="multi_llm_question_", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write(question)
+    cleanup.append(Path(path))
+    return ["--question-file", path]
+
+
+def _reject_incompatible_flags(mode: "mode_table.Mode", argv: Sequence[str]) -> None:
+    """Reject contradictory combinations at parse time, never by precedence.
+
+    Enforced here — before any phase dir is touched — because the alternative is
+    each mode guessing which flag wins.
+    """
+    unattended = flag_present(argv, "--yes", "-y", "--non-interactive")
+    if unattended and flag_present(argv, "--interactive", "-i"):
+        raise DispatchError(
+            "ERROR: --yes (or --non-interactive) and --interactive are "
+            "contradictory: one forbids prompting, the other forces it. "
+            "Pass exactly one."
+        )
+    if unattended and flag_value(argv, "--force-strategy") == "pause-and-ask":
+        raise DispatchError(
+            "ERROR: --force-strategy pause-and-ask requires a human at the "
+            "per-task gate, which --yes forbids. Pass a non-interactive "
+            "strategy (e.g. skip-dependents) or drop --yes."
+        )
+    # HOOK (owned by later design items, deliberately not invented here):
+    #   * --detach with the foreground-only gates
+    #   * --exec-subagents on a host whose capability entry has no
+    #     executor-capable runner
+    # Both flags are accepted and stored today (see cli_common.build_parent_parser);
+    # their rejection rules land with the changes that give them behaviour.
+    _reject_capability_conflicts(mode, argv)
+
+
+def _reject_capability_conflicts(mode: "mode_table.Mode", argv: Sequence[str]) -> None:
+    """Placeholder for the --detach / --exec-subagents rejection rules.
+
+    Intentionally empty: inventing their semantics here would pre-empt the
+    designs that own them, and a wrong guess is worse than a missing check.
+    """
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+def _load_target(module_path: str, attr: str) -> Callable[[Sequence[str]], int]:
+    """Import a dispatch target lazily and return its ``main``.
+
+    Import must be side-effect free: every target keeps argparse and all work
+    inside ``main(argv)`` so two targets can safely run inside one interpreter
+    (see tests/test_instruction_portability.py).
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+    target = getattr(module, attr, None)
+    if target is None:  # pragma: no cover - guarded by the table + tests
+        raise DispatchError(
+            f"ERROR: {module_path} has no '{attr}' entry point.",
+            exit_code=EXIT_ERROR,
+        )
+    return target
+
+
+def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) -> int:
+    """Call ``main(argv)``, awaiting it when the target is async."""
+    import asyncio
+    import inspect
+
+    if inspect.iscoroutinefunction(target):
+        result = asyncio.run(target(list(argv)))
+    else:
+        result = target(list(argv))
+    return EXIT_OK if result is None else int(result)
+
+
+def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
+    mode = mode_table.resolve(word)
+    if mode is None:
+        raise DispatchError(_unknown_mode_message(word))
+
+    ctx.mode = mode.name
+    ctx.phase = mode.phase
+
+    if mode.unavailable:
+        if flag_present(rest, "--help", "-h"):
+            print(f"{mode.name}: {mode.summary}")
+            print(f"  {mode.unavailable.format(mode=mode.name)}")
+            return EXIT_OK
+        raise DispatchError(
+            f"ERROR: mode '{mode.name}' is {mode.unavailable.format(mode=mode.name)}."
+        )
+
+    assert mode.target_module is not None  # every available mode has a target
+    cleanup: List[Path] = []
+    try:
+        positionals, flags = _split_positionals(rest)
+        if flag_present(flags, "--help", "-h"):
+            # Forward to the target's own parser: it is the source of truth.
+            return _call_target(
+                _load_target(mode.target_module, mode.target_attr), list(flags)
+            )
+        _reject_incompatible_flags(mode, flags)
+        argv = (
+            list(mode.injected_flags)
+            + _normalize_positionals(mode, positionals, cleanup)
+            + list(flags)
+        )
+        return _call_target(
+            _load_target(mode.target_module, mode.target_attr), argv
+        )
+    finally:
+        for path in cleanup:
+            try:
+                path.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+
+def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
+    ctx.mode = mode_table.UTIL_NAMESPACE
+    if not rest or rest[0] in ("--help", "-h"):
+        print(render_util_help())
+        return EXIT_OK
+    name, args = rest[0], list(rest[1:])
+    if name not in UTIL_COMMANDS:
+        raise DispatchError(
+            f"ERROR: unknown util command '{name}'.\n"
+            f"Valid commands: {', '.join(UTIL_COMMANDS)}\n"
+            "Run `multi_llm.py util --help` for details."
+        )
+    ctx.mode = f"{mode_table.UTIL_NAMESPACE} {name}"
+    if name == "instructions":
+        return _run_util_instructions(args, ctx)
+    module_path, attr, _summary = UTIL_COMMANDS[name]
+    assert module_path is not None
+    return _call_target(_load_target(module_path, attr), args)
+
+
+def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
+    """Serve a mode's core instruction file with every placeholder resolved.
+
+    The instruction markdown is static and no installer rewrites it, so a host
+    that reads the file directly would have to apply the skill-dir binding by
+    hand — an instruction-following step across a 5k-line corpus. Serving the
+    rendered text from ``__file__`` removes that step and cannot go stale.
+    """
+    if not args or args[0] in ("--help", "-h"):
+        served = [m.name for m in mode_table.MODES if m.instruction_file]
+        print("usage: multi_llm.py util instructions <mode>")
+        print(f"modes with a core instruction file: {', '.join(served)}")
+        return EXIT_OK
+    if len(args) > 1:
+        raise DispatchError(
+            "ERROR: `util instructions` takes exactly one mode word, got: "
+            + " ".join(args)
+        )
+    word = args[0]
+    mode = mode_table.resolve(word)
+    if mode is None:
+        raise DispatchError(_unknown_mode_message(word))
+    relative = mode_table.instruction_path(mode.name)
+    if relative is None:
+        raise DispatchError(
+            f"ERROR: mode '{mode.name}' has no core instruction file; it is "
+            "driven entirely by the dispatcher."
+        )
+    path = skill_dir() / relative
+    if not path.exists():
+        raise DispatchError(
+            f"ERROR: core instruction file missing: {path}\n"
+            "The plugin install looks corrupt or partial; reinstall the skill.",
+            exit_code=EXIT_ERROR,
+        )
+    sys.stdout.write(
+        render_instruction_text(path.read_text(encoding="utf-8"), skill_dir())
+    )
+    ctx.add_artifact(path)
+    return EXIT_OK
+
+
+def _dispatch(argv: Sequence[str], ctx: ResultContext) -> int:
+    if not argv:
+        raise DispatchError(
+            "ERROR: no mode given. The mode is a bare word and must be the first "
+            f"argument.\nValid modes: {', '.join(mode_table.mode_names())}\n"
+            "Run `multi_llm.py --help` for the full grammar."
+        )
+    word = argv[0]
+    if word in ("--help", "-h", "help"):
+        print(render_help())
+        return EXIT_OK
+    if word == mode_table.UTIL_NAMESPACE:
+        return _run_util(argv[1:], ctx)
+    if word.startswith("-"):
+        raise DispatchError(
+            f"ERROR: '{word}' is not a mode. The mode is a bare word and must be "
+            "the first argument (e.g. `multi_llm.py review-plan plans/x.md "
+            f"{word}`).\n" + _unknown_mode_message(word)
+        )
+    return _run_mode(word, argv[1:], ctx)
+
+
+def _exit_code_of(exc: SystemExit) -> int:
+    """A target's ``sys.exit`` is its return value; never remap 0/1/2/3."""
+    code = exc.code
+    if code is None:
+        return EXIT_OK
+    if isinstance(code, int):
+        return code
+    print(str(code), file=sys.stderr)
+    return EXIT_ERROR
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Line buffering + UTF-8/replace stream encoding, once per invocation: there
+    # is exactly one process per invocation, so this covers every mode and every
+    # in-process continuation.
+    bootstrap_streams()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    ctx = activate_result(ResultContext())
+    try:
+        try:
+            exit_code = _dispatch(argv, ctx)
+        except DispatchError as exc:
+            print(str(exc), file=sys.stderr)
+            exit_code = exc.exit_code
+        except SystemExit as exc:
+            exit_code = _exit_code_of(exc)
+        except KeyboardInterrupt:
+            print("\nInterrupted.", file=sys.stderr)
+            exit_code = EXIT_ERROR
+        except Exception:
+            # The machine-readable contract has to hold on a crash too, so the
+            # traceback goes to stderr and the result line is still the last
+            # stdout line before this returns 1.
+            traceback.print_exc()
+            exit_code = EXIT_ERROR
+        ctx.emit(exit_code)
+        return exit_code
+    finally:
+        deactivate_result()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

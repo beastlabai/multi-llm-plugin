@@ -16,9 +16,13 @@ from typing import Any, Dict, List, Optional
 try:
     from .llm_client import invoke_for_json
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+    from .cli_common import reaggregate_command_for_script as build_reaggregate_command
 except ImportError:
     from utils.llm_client import invoke_for_json
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+    from utils.cli_common import (
+        reaggregate_command_for_script as build_reaggregate_command,
+    )
 
 
 # Error type constants - ALWAYS use these constants, never raw strings
@@ -951,11 +955,12 @@ def prepare_batched_validation_tasks(
 
     stats = estimate_validation_batching_stats(groups, max_per_batch)
 
-    # Build reaggregate command hint
-    reaggregate_command = (
-        f'uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/{orchestrator}" '
-        f'--plan-file "{plan_file}" --reaggregate'
-    )
+    # Build the reaggregate command hint. Fully resolved from __file__ — a
+    # literal skill-dir placeholder no shell expands is the bug — and routed
+    # through the single entry point so the instruction layer and printed
+    # follow-ups name one script. Still `uv run …`-prefixed, so Claude Code's
+    # Bash(uv:*) allow rule keeps matching.
+    reaggregate_command = build_reaggregate_command(orchestrator, plan_file)
 
     result = {
         "batches": batch_tasks,
