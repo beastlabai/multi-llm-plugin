@@ -54,6 +54,11 @@ class Mode:
             ``argument-hint`` as ``--<name>``.
         is_workflow_phase: True for the eight phases
             ``check_workflow_prerequisites.py`` gates on.
+        supports_detach: True for the modes ``--detach`` covers. Today that is
+            the fan-out modes, the only ones that can outlive a host's shell cap;
+            the executor-backed modes join them when the executor makes them
+            long-running. A mode with ``False`` **rejects** ``--detach`` with exit
+            3 rather than accepting a flag that silently does nothing.
         injected_flags: Flags the dispatcher prepends before the user's, because
             the mode is a thin view over a more general script.
         unavailable: When set, the mode is dispatchable but exits 3 with this
@@ -70,6 +75,7 @@ class Mode:
     instruction_file: Optional[str] = None
     user_facing: bool = True
     is_workflow_phase: bool = False
+    supports_detach: bool = False
     injected_flags: Tuple[str, ...] = ()
     unavailable: Optional[str] = None
 
@@ -114,6 +120,7 @@ MODES: Tuple[Mode, ...] = (
         phase="review-plan",
         instruction_file="review-plan.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="apply-suggestions",
@@ -141,6 +148,7 @@ MODES: Tuple[Mode, ...] = (
         phase="review-tasks",
         instruction_file="review-tasks.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="apply-task-suggestions",
@@ -168,6 +176,7 @@ MODES: Tuple[Mode, ...] = (
         phase="code-review",
         instruction_file="review-code.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="apply-code-fixes",
@@ -192,14 +201,22 @@ MODES: Tuple[Mode, ...] = (
         target_module="ask_orchestrator",
         phase="ask",
         instruction_file="ask.md",
+        supports_detach=True,
     ),
     Mode(
         name="status",
         positionals=(POS_PLAN,),
-        summary="Report which workflow phases are complete for a plan.",
-        target_module="check_workflow_prerequisites",
+        summary="Report workflow phases (state.json) and detached runs "
+                "({phase}/.status.json).",
+        # Two views over two files behind one command word. The predecessor was
+        # an instruction-only mode word whose markdown wrapper shelled out to
+        # `check_workflow_prerequisites.py --status`; that function survives as
+        # the workflow view's implementation (still directly callable, still
+        # byte-identical under `--view workflow --json`), but the mode itself is
+        # Python now, because a detached run with no command to poll it is
+        # unusable.
+        target_module="utils.run_status",
         instruction_file=None,
-        injected_flags=("--status",),
     ),
     Mode(
         name="init",
@@ -233,7 +250,36 @@ ALIASES: Dict[str, str] = {
     "review": "review-plan",
     "code-review": "review-code",
     "tasks": "generate-tasks",
+    # Stopping a detached run has to be discoverable, so the verb is an alias
+    # like any other — the only one that expands to a mode word *plus a flag*
+    # (see ALIAS_FLAGS). Aliases are a human convenience: generated shims always
+    # emit the `status … --abort` spelling so their text stays on one surface.
+    "abort": "status",
+    "cancel": "status",
+    "stop": "status",
 }
+
+
+# The flags an alias contributes on top of its target mode, prepended before the
+# user's own. Carried here so `--help` renders the expansion and nothing else
+# re-derives it.
+ALIAS_FLAGS: Dict[str, Tuple[str, ...]] = {
+    "abort": ("--abort",),
+    "cancel": ("--abort",),
+    "stop": ("--abort",),
+}
+
+
+def alias_flags(word: str) -> Tuple[str, ...]:
+    """Flags the dispatcher must inject for *word*, if it is a flag-bearing alias."""
+    return ALIAS_FLAGS.get(word, ())
+
+
+def alias_expansion(word: str) -> str:
+    """How `--help` spells an alias: ``abort -> status --abort``."""
+    target = ALIASES[word]
+    extra = " ".join(ALIAS_FLAGS.get(word, ()))
+    return f"{target} {extra}".rstrip()
 
 
 # The `util` namespace is a mode word for routing purposes but is deliberately
@@ -294,6 +340,34 @@ def instruction_path(word: str) -> Optional[str]:
 PREREQUISITE_PHASES: Tuple[str, ...] = tuple(
     m.phase for m in MODES if m.is_workflow_phase and m.phase
 )
+
+
+#: The modes ``--detach`` covers, in table order. One owner: the dispatcher's
+#: rejection, ``utils/detach.py``'s guard and every error message read this.
+DETACH_MODES: Tuple[str, ...] = tuple(m.name for m in MODES if m.supports_detach)
+
+
+def phase_names() -> Tuple[str, ...]:
+    """Every phase name any mode owns, in table order (includes ``ask``)."""
+    seen: Dict[str, None] = {}
+    for mode in MODES:
+        if mode.phase:
+            seen.setdefault(mode.phase, None)
+    return tuple(seen)
+
+
+def phase_from_selector(word: str) -> Optional[str]:
+    """Resolve a ``--phase``/``--mode`` value to a phase name, or ``None``.
+
+    Accepts either vocabulary, because the two differ for exactly one mode
+    (``review-code`` → phase ``code-review``) and a caller should not have to know
+    which one a given flag wanted. The resolution lives here so ``status``'s
+    ``--phase`` selector and ``check_workflow_prerequisites.py``'s ``--mode``
+    choices cannot drift apart.
+    """
+    if word in phase_names():
+        return word
+    return phase_for(word)
 
 
 # The non-mode part of `argument-hint` — everything after the mode alternation.

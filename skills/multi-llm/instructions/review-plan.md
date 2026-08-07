@@ -154,7 +154,7 @@ Items with `needs-human-decision` status are included in the report for the user
    2. Based on `state` field, determine progress:
       - `models_running` → check which `{model}.json` files exist in `{plan}/review-plan/` (those models completed)
       - `models_complete` / `grouping_complete` → check for `grouped.json`, `validation_tasks.json`
-      - `validation_pending` → orchestrator completed normally; proceed to validation using `validation_tasks_path` and `reaggregate_command` from the status file
+      - `validation_pending` → orchestrator completed normally; proceed to validation using `validation_tasks_path` from the status file, then reaggregate with the `reaggregate_command` inside that tasks file. The status file records the mode + plan path (`reaggregate_mode`, `plan_file`) rather than a resolved command, so a plugin update cannot leave a stale skill-dir path behind; `multi_llm.py status <plan> --view run` prints the command resolved against the running skill dir.
       - `complete` → report results
    3. If no `.status.json` → fall back to existing file-based resume detection (step 3)
    4. **Use AskUserQuestion** to inform the user:

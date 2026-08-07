@@ -1,5 +1,6 @@
 usage: apply_suggestions_orchestrator.py [-h] [--host ID] [--yes]
                                          [--interactive] [--detach]
+                                         [--if-not-running] [--max-detached N]
                                          [--exec-subagents] --plan-file
                                          PLAN_FILE [--skip-human-review]
                                          [--min-priority {low,medium,high}]
@@ -101,8 +102,15 @@ cross-cutting options:
                         config and flags. Confirms bulk approval operations.
   --interactive, -i     Force interactive model selection (ignores YAML
                         defaults)
-  --detach              Reserved: run the phase detached and poll its status
-                        file (accepted and recorded; not yet implemented).
+  --detach              Run the phase in a self-daemonized process (fan-out
+                        modes only) and return immediately with its log path
+                        and a status command to poll. Implies --yes. Never
+                        combine with a host's own background primitive.
+  --if-not-running      With --detach: if a run for this phase is already in
+                        flight, print its run_id/log/status command and exit 0
+                        instead of failing.
+  --max-detached N      Ceiling on concurrent detached runs for this project
+                        (default 4, or $MULTI_LLM_MAX_DETACHED).
   --exec-subagents      Reserved: run materialized subagent prompts through
                         the provider executor (accepted and recorded; not yet
                         implemented).

@@ -20,12 +20,19 @@ import json
 import os
 import re
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .cli_common import record_next
+from . import detach as _detach
+from . import status_file as _status_file
+from .cli_common import (
+    dispatcher_command,
+    durable_reaggregate_fields,
+    invocation,
+    modes_table as _modes,
+    record_next,
+)
 from .output_handler import sanitize_prefix, get_phase_dir
 from .prompt_loader import load_prompt
 from .interactive import resolve_models
@@ -88,44 +95,76 @@ MAX_LOGGED_PROMPT_LENGTH = 5000
 # ---------------------------------------------------------------------------
 # Status file helpers
 # ---------------------------------------------------------------------------
+# The implementations moved to utils/status_file.py — unchanged semantics (same
+# atomic temp+rename, same best-effort swallow, same special-cased merge, now
+# extended to the reserved `run`/`progress` objects a detached run writes). They
+# are re-exported here, and from review_plan_orchestrator as
+# `_write_status`/`_update_status`, because this module is the status file's
+# documented owner and every existing caller and test names it through one of
+# those two paths.
+#
+# Why they live in their own module at all: `multi_llm.py status` must be a
+# sub-second command (hosts with a 2-minute shell cap poll it in a loop), and
+# importing this module pulls in the provider client, the HTML report generator
+# and the validation stack.
 
-def write_status(phase_dir: str, data: dict) -> None:
-    """Write a .status.json checkpoint file atomically. Best-effort."""
-    temp_path = None
-    status_path = os.path.join(phase_dir, ".status.json")
-    try:
-        data["updated_at"] = datetime.now().isoformat()
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=phase_dir, suffix='.tmp', prefix='.status_'
+write_status = _status_file.write_status
+update_status = _status_file.update_status
+
+
+def maybe_detach(
+    *,
+    args: argparse.Namespace,
+    mode: str,
+    phase_dir: str,
+    plan_file: str,
+    phase: Optional[str] = None,
+    ask_slug: Optional[str] = None,
+    model_specs: Optional[List[str]] = None,
+) -> Optional[int]:
+    """The one detach boundary a fan-out phase crosses.
+
+    Returns ``None`` to keep running in this process (the ordinary foreground run,
+    and also the detached worker once it owns the phase dir) or an exit code the
+    caller must return immediately (the invoker, after forking; or a launch
+    failure).
+    """
+    if getattr(args, "internal_worker", False):
+        try:
+            _detach.handle_phase_detach(
+                args=args, mode=mode, argv=[], phase_dir=phase_dir,
+                plan_file=plan_file, phase=phase, ask_slug=ask_slug,
+            )
+        except _detach.DetachError as exc:
+            print(str(exc), file=sys.stderr)
+            return exc.exit_code
+        return None
+    if not getattr(args, "detach", False):
+        return None
+
+    record = invocation()
+    if not record or record.get("mode") != mode:
+        # The child re-executes `uv run … multi_llm.py <mode> …`, rebuilt from the
+        # dispatcher's normalized argv (never a remembered sys.argv). A direct
+        # `python <orchestrator>.py --detach` has no such argv to rebuild from, and
+        # guessing one from the parsed namespace would silently drop flags.
+        print(
+            "ERROR: --detach must be invoked through multi_llm.py — the detached "
+            "child re-executes the dispatcher under the same `uv run --project` "
+            "wrapping, which a direct orchestrator invocation cannot reconstruct."
+            f"\n       Run: {dispatcher_command(mode, plan_file, '--detach')}",
+            file=sys.stderr,
         )
-        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_path, status_path)
-    except Exception:
-        try:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
-        except Exception:
-            pass
-
-
-def update_status(phase_dir: str, updates: dict) -> None:
-    """Merge updates into existing .status.json. Best-effort."""
-    status_path = os.path.join(phase_dir, ".status.json")
+        return 3
     try:
-        existing = {}
-        if os.path.exists(status_path):
-            with open(status_path, 'r', encoding='utf-8') as f:
-                existing = json.load(f)
-        if "output_files" in updates and "output_files" in existing:
-            existing["output_files"].update(updates.pop("output_files"))
-        existing.update(updates)
-        write_status(phase_dir, existing)
-    except Exception:
-        try:
-            write_status(phase_dir, updates)
-        except Exception:
-            pass
+        return _detach.handle_phase_detach(
+            args=args, mode=mode, argv=record["argv"], phase_dir=phase_dir,
+            plan_file=plan_file, phase=phase, ask_slug=ask_slug,
+            model_specs=model_specs,
+        )
+    except _detach.DetachError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1063,17 @@ def aggregate_results(
     except Exception as e:
         print(f"Warning: Failed to generate HTML report: {e}")
 
+    # A detached run's caller never saw this stdout, so success has to hand back
+    # paths rather than a search: `status` on a `done` run prints these and
+    # repeats them in MULTI_LLM_RESULT.artifacts. A no-op in the foreground, which
+    # is what keeps a non-detached .status.json byte-for-byte what it was.
+    _detach.record_output_files(
+        phase_dir,
+        report=report_path,
+        report_html=os.path.join(phase_dir, "report.html"),
+        grouped=os.path.join(phase_dir, "grouped.json"),
+    )
+
     return report_path
 
 
@@ -1687,6 +1737,26 @@ async def run_review_orchestration(
     print(f"Max parallel: {args.max_parallel}")
     print("")
 
+    # --- the detach boundary -------------------------------------------------
+    # Everything above ran in the foreground on purpose: arguments and flag
+    # compatibility, the plan file and prior-phase inputs, provider/model
+    # resolution, the completed-phase guard, output-dir creation and the write
+    # probe. Detaching before them would bury an ordinary startup failure (a
+    # typo'd flag, an unconfigured provider) inside orchestrator-run.log,
+    # reachable only by polling `status` and finding `failed` seconds later. So
+    # the fork happens here, once nothing knowable is left unchecked — and
+    # nothing below this line runs in the invoker.
+    outcome = maybe_detach(
+        args=args,
+        mode=_modes().mode_for_script(orchestrator_script) or phase_name,
+        phase_dir=phase_dir,
+        plan_file=plan_path,
+        phase=phase_name,
+        model_specs=model_specs,
+    )
+    if outcome is not None:
+        sys.exit(outcome)
+
     write_status(phase_dir, {
         "phase": phase_name,
         "state": "models_running",
@@ -1694,6 +1764,9 @@ async def run_review_orchestration(
         "models_requested": list(model_specs),
         "error": None,
     })
+    _detach.report_progress(
+        phase_dir, step="fanout", models_total=len(model_specs), models_done=0
+    )
 
     # Run all models
     results = await run_all_models(
@@ -1732,6 +1805,12 @@ async def run_review_orchestration(
         "models_completed": [m for m in model_specs if m not in failed_models],
         "models_failed": failed_models,
     })
+    _detach.report_progress(
+        phase_dir,
+        step="grouping",
+        models_total=len(model_specs),
+        models_done=len(model_specs) - len(failed_models),
+    )
 
     # Group similar suggestions
     all_suggestions = []
@@ -1827,12 +1906,20 @@ async def run_review_orchestration(
                 print(f"  {batched_tasks.get('reaggregate_command', '')}")
                 record_next(batched_tasks.get('reaggregate_command') or None)
 
+                # The follow-up command is persisted in its **durable, rebindable**
+                # form (mode word + plan path), never as the resolved
+                # skill-dir-absolute string the same run prints: the Claude plugin
+                # cache is keyed by commit hash, so a stored absolute command
+                # points at a directory that no longer exists after any plugin
+                # update. `status` (and utils/detach.resolved_reaggregate_command)
+                # rebuild it at read time from the *running* skill dir.
                 update_status(phase_dir, {
                     "state": "validation_pending",
                     "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
                     "validation_tasks_path": validation_tasks_path,
-                    "reaggregate_command": batched_tasks.get("reaggregate_command", ""),
+                    **durable_reaggregate_fields(orchestrator_script, plan_path),
                 })
+                _detach.report_progress(phase_dir, step="validation_pending")
 
                 return  # Exit early - Claude Code handles validation
         else:

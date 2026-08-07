@@ -60,7 +60,9 @@ from utils.provider_registry import (
 from utils.json_extractor import sanitize_model_name
 from utils.llm_client import invoke_with_provider
 from utils.git_utils import get_project_root
+from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
+    maybe_detach,
     read_plan,
     run_models_concurrent,
     update_status,
@@ -729,6 +731,23 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("Rerun-all: re-asking all models (ignoring existing answer files)")
     print("")
 
+    # --- the detach boundary -------------------------------------------------
+    # `ask` runs live at {plan}/ask/<slug>-<hash8>/, so the run this fork owns is
+    # this question's dir — which is also why `status` needs `--question`/`--run-id`
+    # to pick one. Everything above (question resolution, the collision/resume
+    # guard, model resolution, plan hashing) stays in the foreground.
+    detach_outcome = maybe_detach(
+        args=args,
+        mode="ask",
+        phase_dir=question_dir,
+        plan_file=plan_path,
+        phase="ask",
+        ask_slug=slug,
+        model_specs=model_specs,
+    )
+    if detach_outcome is not None:
+        sys.exit(detach_outcome)
+
     write_status(question_dir, {
         "phase": "ask",
         "state": "models_running",
@@ -739,6 +758,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
         "plan_hash": plan_hash,
         "answers_md": os.path.join(question_dir, "answers.md"),
     })
+    report_progress(
+        question_dir, step="fanout",
+        models_total=len(model_specs), models_done=0,
+    )
 
     def skip_existing_answer(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
@@ -859,6 +882,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
         state = "partial"
     else:
         state = "failed"
+
+    # A detached ask hands its answers back through `status`, not through a
+    # stdout nobody read (no-op in the foreground).
+    record_output_files(question_dir, answers=answers_md)
+    report_progress(
+        question_dir, step="complete", models_total=len(model_specs),
+        models_done=len(completed),
+    )
 
     update_status(question_dir, {
         "state": state,

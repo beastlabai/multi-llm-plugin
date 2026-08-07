@@ -59,9 +59,11 @@ from utils.cli_common import (
     INTERNAL_FLAG_PREFIX,
     ResultContext,
     activate_result,
+    clear_invocation,
     deactivate_result,
     flag_present,
     flag_value,
+    record_invocation,
     render_instruction_text,
     skill_dir,
 )
@@ -103,6 +105,7 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "update-tasks": ("update_plan_tasks", "main", "Write generated tasks into a plan's Tasks section."),
     "prereq": ("check_workflow_prerequisites", "main", "Check, skip or report a workflow phase's prerequisites."),
     "backup": ("utils.backup", "main", "Back up a file before it is modified."),
+    "runs": ("utils.run_registry", "main", "List (or --sweep) this project's detached runs."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 
@@ -140,13 +143,19 @@ def render_help() -> str:
         "",
         "aliases:",
     ]
-    for alias, target in sorted(mode_table.ALIASES.items()):
-        lines.append(f"  {alias} -> {target}")
+    for alias in sorted(mode_table.ALIASES):
+        lines.append(f"  {alias} -> {mode_table.alias_expansion(alias)}")
     lines += [
         "",
         "cross-cutting flags (accepted by every mode, and by each orchestrator",
         "directly): --host ID, --yes/-y/--non-interactive, --interactive/-i,",
-        "--detach, --exec-subagents.",
+        "--detach, --if-not-running, --max-detached N, --exec-subagents.",
+        "",
+        "--detach self-daemonizes the long-running modes "
+        f"({', '.join(mode_table.DETACH_MODES)}):",
+        "it implies --yes, returns immediately with a log path plus a status",
+        "command, and is stopped only by `status <plan> --abort`. Never wrap it in",
+        "a host background primitive — pick one mechanism.",
         "",
         "exit codes: 0 done | 1 unexpected error | 2 nothing to do / phase already",
         "complete | 3 needs a human.",
@@ -276,22 +285,67 @@ def _reject_incompatible_flags(mode: "mode_table.Mode", argv: Sequence[str]) -> 
             "per-task gate, which --yes forbids. Pass a non-interactive "
             "strategy (e.g. skip-dependents) or drop --yes."
         )
-    # HOOK (owned by later design items, deliberately not invented here):
-    #   * --detach with the foreground-only gates
-    #   * --exec-subagents on a host whose capability entry has no
-    #     executor-capable runner
-    # Both flags are accepted and stored today (see cli_common.build_parent_parser);
-    # their rejection rules land with the changes that give them behaviour.
+    # `--detach`'s own gates; `--exec-subagents`' host-capability rejection is
+    # still owned by the capability-matrix design and deliberately absent.
     _reject_capability_conflicts(mode, argv)
 
 
 def _reject_capability_conflicts(mode: "mode_table.Mode", argv: Sequence[str]) -> None:
-    """Placeholder for the --detach / --exec-subagents rejection rules.
+    """The foreground-only gates ``--detach`` is incompatible with.
 
-    Intentionally empty: inventing their semantics here would pre-empt the
-    designs that own them, and a wrong guess is worse than a missing check.
+    A detached worker has ``stdin`` at ``DEVNULL`` and no channel back to the
+    host, so anything that would raise a question is a contradiction — and it is
+    rejected **at parse time, in the foreground invoker, before the process
+    daemonizes**, so the user sees it on their own terminal instead of finding it
+    in a log by polling. ``--detach`` therefore implies ``--yes`` (every decision
+    point auto-resolves from the documented defaults and the resolution is
+    recorded in ``.status.json``), and any flag whose resolution needs a human is
+    exit 3.
+
+    ``--exec-subagents`` has no rejection rule yet: which hosts have an
+    executor-capable runner is the capability matrix's to say, and guessing here
+    would pre-empt it.
     """
+    if not flag_present(argv, "--detach"):
+        return None
+    if flag_present(argv, "--interactive", "-i"):
+        raise DispatchError(
+            "ERROR: --detach and --interactive are contradictory: a detached run "
+            "has no terminal to prompt on (stdin is /dev/null and there is no "
+            "channel back to the host), so --detach implies --yes. Pass exactly "
+            "one."
+        )
+    if flag_value(argv, "--force-strategy") == "pause-and-ask":
+        raise DispatchError(
+            "ERROR: --force-strategy pause-and-ask requires a human at the "
+            "per-task gate, which --detach forbids (it implies --yes). Pass a "
+            "non-interactive strategy (e.g. skip-dependents) or drop --detach."
+        )
+    if not mode.supports_detach:
+        # A flag that silently does nothing is worse than a refusal: the caller
+        # would poll `status` forever for a run that was never detached.
+        raise DispatchError(
+            f"ERROR: --detach is not available for mode '{mode.name}'.\n"
+            "       It covers the long-running fan-out modes today: "
+            f"{', '.join(mode_table.DETACH_MODES)}.\n"
+            "       Run this mode in the foreground (it emits task JSON and "
+            "exits in seconds) or under your host's own background mechanism."
+        )
     return None
+
+
+def _apply_flag_implications(argv: List[str]) -> List[str]:
+    """Write ``--detach``'s implications out explicitly rather than leaving them.
+
+    The detached child's argv is rebuilt from the invoker's, so an implication
+    that stayed implicit would have to be re-derived in a second place. Making it
+    explicit here means the worker's recorded argv says exactly what it ran with.
+    """
+    if flag_present(argv, "--detach") and not flag_present(
+        argv, "--yes", "-y", "--non-interactive"
+    ):
+        argv = list(argv) + ["--yes"]
+    return argv
 
 
 # ---------------------------------------------------------------------------
@@ -358,9 +412,14 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         _reject_incompatible_flags(mode, flags)
         argv = (
             list(mode.injected_flags)
+            + list(mode_table.alias_flags(word))
             + _normalize_positionals(mode, positionals, cleanup)
             + list(flags)
         )
+        argv = _apply_flag_implications(argv)
+        # What a detached child re-executes: the mode word plus this normalized
+        # argv, never a remembered sys.argv (see utils/detach.build_child_command).
+        record_invocation(mode.name, argv)
         return _call_target(
             _load_target(mode.target_module, mode.target_attr), argv
         )
@@ -474,6 +533,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     ctx = activate_result(ResultContext())
+    crash: Optional[str] = None
+    exit_code = EXIT_ERROR
     try:
         try:
             exit_code = _dispatch(argv, ctx)
@@ -490,11 +551,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # traceback goes to stderr and the result line is still the last
             # stdout line before this returns 1.
             traceback.print_exc()
+            crash = _crash_summary()
             exit_code = EXIT_ERROR
         ctx.emit(exit_code)
         return exit_code
     finally:
+        # If this process is a detached worker, it is the only thing that can
+        # ever observe its own exit status (after the double-spawn nothing is its
+        # parent), so it records its own outcome before exiting. A no-op in every
+        # other invocation.
+        _close_detached_run(exit_code, crash)
         deactivate_result()
+        clear_invocation()
+
+
+def _crash_summary(limit: int = 2000) -> str:
+    """Message + traceback tail, for ``run.error`` on a crashed detached run."""
+    text = traceback.format_exc()
+    return text[-limit:]
+
+
+def _close_detached_run(exit_code: Optional[int], error: Optional[str]) -> None:
+    """Write the terminal ``run`` record when this process owns a detached run."""
+    detach = sys.modules.get("utils.detach")
+    if detach is None:
+        return  # nothing detached ran; do not pay the import
+    try:
+        detach.finish_active_run(exit_code, error=error)
+    except Exception:  # pragma: no cover - close-out must never mask the result
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

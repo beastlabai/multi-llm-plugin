@@ -914,12 +914,33 @@ class TestDispatcherGrammar:
         capsys.readouterr()
         assert captured["argv"] == ["--plan-file", "plans/a plan.md", "--quick"]
 
-    def test_status_injects_the_status_flag(self, monkeypatch, capsys):
+    def test_status_dispatches_to_the_two_view_command(self, monkeypatch, capsys):
+        """`status` is a real command now, not a `--status` injection.
+
+        The instruction-only mode is retired: the plan positional is normalized
+        the same way every plan mode's is, and nothing is injected — the views
+        (`--view workflow|run|all`) replace the old flag.
+        """
         captured = {}
         monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
         assert multi_llm.main(["status", "plans/a.md"]) == 0
         capsys.readouterr()
-        assert captured["argv"] == ["--status", "--plan-file", "plans/a.md"]
+        assert captured["argv"] == ["--plan-file", "plans/a.md"]
+        assert captured["module"] == "utils.run_status"
+        assert mode_table.resolve("status").injected_flags == ()
+
+    @pytest.mark.parametrize("alias", ["abort", "cancel", "stop"])
+    def test_abort_alias_expands_to_status_plus_a_flag(self, alias, monkeypatch,
+                                                      capsys):
+        """The one alias that carries a flag, and the table owns the expansion."""
+        captured = {}
+        monkeypatch.setattr(multi_llm, "_load_target", _capturing_target(captured))
+        assert multi_llm.main([alias, "plans/a.md"]) == 0
+        capsys.readouterr()
+        assert captured["argv"] == ["--abort", "--plan-file", "plans/a.md"]
+        assert captured["module"] == "utils.run_status"
+        assert mode_table.alias_expansion(alias) == "status --abort"
+        assert f"{alias} -> status --abort" in multi_llm.render_help()
 
     def test_short_ask_question_stays_on_argv(self, monkeypatch, capsys):
         captured = {}
@@ -1136,18 +1157,18 @@ class TestCrossCuttingFlagsAreShared:
                                   + (["--question", "q"] if module == "ask_orchestrator" else []))
             assert args.interactive is True
 
-    def test_prerequisites_script_accepts_the_shared_flags(self, tmp_path, capsys):
-        """Its parser is built inside ``main()``, so drive it through the mode.
+    def test_status_mode_accepts_the_shared_flags(self, tmp_path, capsys):
+        """The `status` row of the dispatch table, end-to-end.
 
-        Also covers the `status` row of the dispatch table end-to-end: the
-        dispatcher injects `--status` and forwards the cross-cutting flags to the
-        same script a direct invocation would reach.
+        Its parser is built inside ``main()``, so drive it through the mode. The
+        workflow view is the retired ``--status`` mode's own implementation, so its
+        JSON (and its exit 0) survive for a caller that never detaches.
         """
         plan = tmp_path / "a plan.md"
         plan.write_text("# plan\n", encoding="utf-8")
         exit_code = multi_llm.main([
-            "status", str(plan), "--host", "codex", "--yes", "--detach",
-            "--exec-subagents",
+            "status", str(plan), "--view", "workflow", "--json",
+            "--host", "codex", "--yes", "--exec-subagents",
         ])
         out = capsys.readouterr().out
         assert exit_code == 0, out
@@ -1156,6 +1177,26 @@ class TestCrossCuttingFlagsAreShared:
         assert list(json.loads(body)["phases"]) == list(
             mode_table.PREREQUISITE_PHASES
         )
+
+    def test_prerequisites_script_still_accepts_the_shared_flags(self, tmp_path,
+                                                                capsys):
+        """`check_workflow_prerequisites.py --status` is untouched by the move.
+
+        It survives as the workflow view's implementation and stays directly
+        callable — same flags, same JSON, same exit code.
+        """
+        import check_workflow_prerequisites as prereq
+
+        plan = tmp_path / "a plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            prereq.main([
+                "--plan-file", str(plan), "--status", "--host", "codex",
+                "--yes", "--detach", "--exec-subagents",
+            ])
+        assert excinfo.value.code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert list(payload["phases"]) == list(mode_table.PREREQUISITE_PHASES)
 
     def test_apply_parsers_keep_yes_and_its_short_flag(self):
         from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
