@@ -16,13 +16,13 @@ registry. Models can be specified as 'provider:model' or bare 'model' names
 
 Usage:
     # Use YAML defaults (no prompting if defaults.models is set)
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks plans/my-plan.md
 
     # Override defaults with specific models
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
     # Force interactive selection even if defaults exist
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md --interactive
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks plans/my-plan.md --interactive
 """
 
 import argparse
@@ -36,7 +36,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser
+from utils.cli_common import build_parent_parser, dispatcher_prefix
 from utils.prompt_loader import load_prompt
 from utils.provider_registry import get_all_model_specs
 from utils.review_orchestrator_base import (
@@ -72,6 +72,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     except Exception as e:
         available_models = [f"(config error: {type(e).__name__} - check providers.yaml)"]
 
+    # Printed commands, so resolved from `__file__` and never a skill-dir
+    # placeholder (see review_plan_orchestrator.parse_args for why).
+    run = dispatcher_prefix()
     parser = argparse.ArgumentParser(
         description="Review generated implementation tasks against the original plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -89,13 +92,13 @@ Model selection priority:
 
 Examples:
   # Use YAML defaults (no prompting)
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md
+  {run} review-tasks plans/my-plan.md
 
   # Specify models explicitly
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+  {run} review-tasks plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
   # Force interactive selection
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_tasks_orchestrator.py" --plan-file plans/my-plan.md --interactive
+  {run} review-tasks plans/my-plan.md --interactive
         """
     )
 

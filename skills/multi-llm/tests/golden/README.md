@@ -26,6 +26,19 @@ remain identical after refactor.
 - `apply_code_fixes_help.txt`
 - `apply_task_suggestions_help.txt`
 
+**These are normalized, not raw captures.** Since D1 each parser's `epilog`
+prints its example commands with the skill dir *resolved from `__file__`* (no
+`${CLAUDE_SKILL_DIR}` — no shell but Claude Code's expands it, so on Codex or
+OpenCode a copied example would die before Python started). A raw capture would
+therefore bake the capturing machine's absolute path into a checked-in fixture,
+so `capture_baselines.normalize_skill_dir` rewrites it back to the `{SKILL_DIR}`
+template token. Compare against live `--help` by rendering the fixture forward
+with the skill's own renderer — one round-trip, no second normalization rule:
+
+```python
+cli_common.render_instruction_text(golden_text, cli_common.skill_dir())
+```
+
 ### `--dry-run` output
 Console output (stdout + stderr) from running each orchestrator with `--dry-run`
 against representative test fixtures. Captures batch summaries, filtering

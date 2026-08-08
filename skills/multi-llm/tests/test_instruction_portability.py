@@ -631,6 +631,211 @@ class TestPrintedFollowUps:
         )
 
 
+# ---------------------------------------------------------------------------
+# Rule 5b: `--help` is stdout too
+# ---------------------------------------------------------------------------
+#
+# Rule 5 covers the three *follow-up* print sites. `--help` is the other stdout
+# surface that ships commands to a user, and argparse writes its `epilog` there
+# verbatim — so an epilog example carrying a skill-dir placeholder hands a Codex
+# or OpenCode user a command that dies with
+# `${CLAUDE_SKILL_DIR}: No such file or directory` before Python ever starts (no
+# shell but Claude Code's expands that variable, and *nothing* expands the brace
+# token). That makes D1's acceptance row — "a stdout scan across every mode finds
+# no ${CLAUDE_SKILL_DIR} and no {SKILL_DIR}" — an assertion about the help surface
+# as well, and the scan below is parametrized over every mode word, every `util`
+# subcommand and every orchestrator's own parser so a new epilog cannot be added
+# unguarded.
+
+def _dispatcher_help_argv():
+    """Every ``--help`` stdout surface reachable through the dispatcher."""
+    argvs = [["--help"], ["util", "--help"]]
+    argvs += [[mode.name, "--help"] for mode in mode_table.MODES]
+    argvs += [["util", name, "--help"] for name in multi_llm.UTIL_COMMANDS]
+    return argvs
+
+
+def _orchestrator_parse_args():
+    """``(script, callable)`` for every ``*_orchestrator.py``'s own parser.
+
+    Discovered rather than listed, and asserted exhaustive over the scripts on
+    disk (``test_every_orchestrator_parser_is_covered``), so a new orchestrator
+    joins this scan without an edit here. Two shapes exist: a module-level
+    ``parse_args`` (the review/ask/implement family) and a ``parse_args``
+    classmethod on the ``ApplyOrchestratorBase`` subclass (the apply family).
+    """
+    import importlib
+    import inspect
+
+    found = []
+    for path in sorted(SKILL_ROOT.glob("*_orchestrator.py")):
+        module = importlib.import_module(path.stem)
+        target = getattr(module, "parse_args", None)
+        if target is None:
+            for _name, obj in vars(module).items():
+                if inspect.isclass(obj) and obj.__module__ == module.__name__:
+                    candidate = getattr(obj, "parse_args", None)
+                    if candidate is not None:
+                        target = candidate
+                        break
+        assert target is not None, (
+            f"{path.name} exposes no parse_args, so its --help epilog cannot be "
+            "scanned for an unexpanded placeholder"
+        )
+        found.append((path.name, target))
+    return found
+
+
+#: Computed at import so the parametrization ids name the surface under test.
+DISPATCHER_HELP_ARGV = _dispatcher_help_argv()
+
+
+def _help_body(out: str) -> str:
+    """Captured stdout minus the terminal ``MULTI_LLM_RESULT`` line."""
+    return out.rsplit(cli_common.RESULT_MARKER, 1)[0]
+
+
+def _assert_help_is_clean(where: str, text: str, base: str) -> int:
+    """The help-surface assertions. Returns the command-unit count it checked."""
+    for token in ("${CLAUDE_SKILL_DIR}", "{SKILL_DIR}", "$SKILL_DIR",
+                  "${SKILL_DIR}", "$MULTI_LLM_SKILL_DIR"):
+        assert token not in text, (
+            f"{where}: --help is stdout, and {token} reaches the user unexpanded "
+            "on every host but Claude Code. Interpolate "
+            "`cli_common.dispatcher_prefix()` into the epilog instead."
+        )
+    units = list(_command_units(text))
+    for line_no, command in units:
+        _assert_command_is_clean(f"{where} (help line {line_no})", command, base)
+        assert "_orchestrator.py" not in command, (
+            f"{where}: a printed example must name the single entry point "
+            f"(`multi_llm.py <mode>`), never a second, unadvertised one:\n"
+            f"  {command[:200]}"
+        )
+        argv = shlex.split(command)
+        script = argv[argv.index("--") + 2]
+        assert script == str(Path(base) / "multi_llm.py"), (
+            f"{where}: the script slot must be the resolved dispatcher path, "
+            f"got {script!r}"
+        )
+        word = argv[argv.index("--") + 3]
+        assert (
+            word == mode_table.UTIL_NAMESPACE
+            or mode_table.resolve(word) is not None
+        ), (
+            f"{where}: '{word}' follows multi_llm.py in a printed example but is "
+            "neither a mode word nor the util namespace, so the example does not "
+            "run"
+        )
+    return len(units)
+
+
+class TestHelpSurfaceIsResolved:
+    """Rule 5b: no ``--help`` surface ships an unexpanded skill-dir placeholder.
+
+    Everything runs under a fixture skill dir whose every segment carries a
+    space, so a quoting bug cannot hide behind a space-free path — the same
+    fixture rules 3-5 use.
+    """
+
+    @pytest.fixture
+    def fixture_skill_dir(self, tmp_path, monkeypatch):
+        base = tmp_path / "multi llm fixture" / "skill dir"
+        base.mkdir(parents=True)
+        (base / "multi_llm.py").write_text("# fixture\n", encoding="utf-8")
+        monkeypatch.setattr(cli_common, "_SKILL_DIR", base)
+        return base
+
+    def test_the_help_surface_is_not_vacuous(self):
+        """Every mode word and every util command is actually reached."""
+        flattened = {" ".join(argv) for argv in DISPATCHER_HELP_ARGV}
+        for mode in mode_table.MODES:
+            assert f"{mode.name} --help" in flattened, mode.name
+        for name in multi_llm.UTIL_COMMANDS:
+            assert f"util {name} --help" in flattened, name
+
+    @pytest.mark.parametrize(
+        "argv", DISPATCHER_HELP_ARGV, ids=lambda argv: " ".join(argv)
+    )
+    def test_dispatcher_help_is_resolved(self, argv, fixture_skill_dir, capsys):
+        exit_code = multi_llm.main(list(argv))
+        out = capsys.readouterr().out
+        assert exit_code == 0, out
+        _assert_help_is_clean(
+            f"multi_llm.py {' '.join(argv)}", _help_body(out),
+            str(fixture_skill_dir),
+        )
+
+    @pytest.mark.parametrize(
+        "script,parse", _orchestrator_parse_args(), ids=lambda v: getattr(v, "__name__", v)
+    )
+    def test_direct_parser_help_is_resolved(self, script, parse,
+                                            fixture_skill_dir, capsys):
+        """The direct surface too: same parser, same epilog, same stdout."""
+        with pytest.raises(SystemExit) as excinfo:
+            parse(["--help"])
+        assert excinfo.value.code == 0
+        _assert_help_is_clean(script, capsys.readouterr().out,
+                              str(fixture_skill_dir))
+
+    def test_every_orchestrator_parser_is_covered(self):
+        scripts = {p.name for p in SKILL_ROOT.glob("*_orchestrator.py")}
+        assert {name for name, _parse in _orchestrator_parse_args()} == scripts
+
+    def test_the_scan_finds_real_commands(self, fixture_skill_dir, capsys):
+        """A guard against an over-narrow ``_command_units``.
+
+        Without it, a regex that stopped matching would turn every assertion
+        above into a no-op that scanned an empty list.
+        """
+        total = 0
+        for argv in DISPATCHER_HELP_ARGV:
+            assert multi_llm.main(list(argv)) == 0
+            total += len(list(_command_units(_help_body(capsys.readouterr().out))))
+        assert total >= 20, (
+            f"only {total} uv command units found across every --help surface; "
+            "the epilog examples went missing rather than being resolved"
+        )
+
+    def test_epilog_examples_survive_a_space_in_the_skill_dir(self,
+                                                             fixture_skill_dir,
+                                                             capsys):
+        """The concrete failure the fixture exists for, asserted end to end."""
+        assert multi_llm.main(["review-plan", "--help"]) == 0
+        body = _help_body(capsys.readouterr().out)
+        commands = [command for _line, command in _command_units(body)]
+        assert commands, body
+        for command in commands:
+            argv = shlex.split(command)
+            assert argv[argv.index("--project") + 1] == str(fixture_skill_dir)
+            assert " " in str(fixture_skill_dir)
+
+    def test_a_placeholder_in_an_epilog_would_fail(self, fixture_skill_dir):
+        """The assertion fires on the shape this change deleted."""
+        base = str(fixture_skill_dir)
+        with pytest.raises(AssertionError):
+            _assert_help_is_clean(
+                "synthetic",
+                'Example:\n  uv run --project "${CLAUDE_SKILL_DIR}" -- python '
+                '"${CLAUDE_SKILL_DIR}/multi_llm.py" review-plan p.md\n',
+                base,
+            )
+        with pytest.raises(AssertionError):
+            _assert_help_is_clean(
+                "synthetic",
+                f'Example:\n  uv run --project {base} -- python '
+                f'"{base}/multi_llm.py" review-plan p.md\n',
+                base,
+            )
+        with pytest.raises(AssertionError):
+            _assert_help_is_clean(
+                "synthetic",
+                f'Example:\n  uv run --project "{base}" -- python '
+                f'"{base}/review_plan_orchestrator.py" --plan-file p.md\n',
+                base,
+            )
+
+
 class TestNegativeSpellings:
     """Rule 6: the illegal spellings stay illegal."""
 

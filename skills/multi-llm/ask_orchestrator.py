@@ -47,7 +47,11 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser, dispatcher_command
+from utils.cli_common import (
+    build_parent_parser,
+    dispatcher_command,
+    dispatcher_prefix,
+)
 from utils.output_handler import get_phase_dir, slugify_question
 from utils.prompt_loader import load_prompt
 from utils.interactive import resolve_models
@@ -551,6 +555,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     except Exception as e:
         available_models = [f"(config error: {type(e).__name__} - check providers.yaml)"]
 
+    # Printed commands, so resolved from `__file__` and never a skill-dir
+    # placeholder (see review_plan_orchestrator.parse_args for why).
+    run = dispatcher_prefix()
     parser = argparse.ArgumentParser(
         description="Ask each configured LLM a free-text question about a plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -560,12 +567,12 @@ Available models (provider:model format):
   {', '.join(available_models[:10])}{'...' if len(available_models) > 10 else ''}
 
 Examples:
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py" \\
-    --plan-file plans/my-plan.md --question "Is the rollback strategy sufficient?"
+  {run} \\
+    ask plans/my-plan.md "Is the rollback strategy sufficient?"
 
   # Question passed via a temp file (no question bytes transit the shell):
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/ask_orchestrator.py" \\
-    --plan-file plans/my-plan.md --question-file /tmp/q.txt --quick
+  {run} \\
+    ask plans/my-plan.md --question-file /tmp/q.txt --quick
         """,
     )
 

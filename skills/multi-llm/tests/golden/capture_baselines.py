@@ -641,6 +641,47 @@ def run_orchestrator(script_name, plan_file, *extra_args, timeout=30):
     )
 
 
+#: The portable stand-in for the skill dir inside a checked-in fixture.
+#:
+#: Since D1 the orchestrators resolve the skill dir from ``__file__`` and print it
+#: absolutely — including in their argparse ``epilog``, which argparse writes to
+#: stdout — so a raw ``--help`` capture would bake *this machine's* path into a
+#: fixture other checkouts then diff against. Normalizing it back to the
+#: ``{SKILL_DIR}`` template token keeps the fixture machine-independent and makes
+#: the comparison one ``cli_common.render_instruction_text(golden, skill_dir())``
+#: round-trip: the renderer the skill already uses in the other direction, rather
+#: than a second normalization rule that could drift from it.
+SKILL_DIR_TOKEN = "{SKILL_DIR}"
+
+
+def normalize_skill_dir(text):
+    """Rewrite every resolved skill-dir path in *text* to ``{SKILL_DIR}``."""
+    resolved = str(SKILL_DIR)
+    out = text.replace(resolved, SKILL_DIR_TOKEN)
+    # The same path as a Windows capture would spell it.
+    return out.replace(resolved.replace("/", "\\"), SKILL_DIR_TOKEN)
+
+
+def capture_help(script_name, golden_name, timeout=30):
+    """Save ``<script> --help`` as a machine-independent golden fixture.
+
+    ``--help`` is captured without ``--plan-file``: argparse prints help and exits
+    before it enforces a required argument, so this is the parser's own text and
+    nothing else.
+    """
+    result = subprocess.run(
+        [sys.executable, str(SKILL_DIR / script_name), "--help"],
+        cwd=str(SKILL_DIR),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        print(f"  WARNING: {script_name} --help exited {result.returncode}")
+    save_golden(golden_name, normalize_skill_dir(result.stdout))
+
+
 def save_golden(name, content, is_json=False):
     """Save content to a golden file."""
     filepath = GOLDEN_DIR / name
@@ -754,6 +795,11 @@ def main():
     # -------------------------------------------------------------------
     print("\n--- apply_suggestions_orchestrator ---")
 
+    # --help first: it needs no fixture, and its epilog is the one place a
+    # resolved skill-dir path reaches a checked-in fixture (see
+    # normalize_skill_dir).
+    capture_help("apply_suggestions_orchestrator.py", "apply_suggestions_help.txt")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         plan_file = setup_apply_suggestions_fixtures(tmp_dir)
@@ -800,6 +846,11 @@ def main():
     # -------------------------------------------------------------------
     print("\n--- apply_code_fixes_orchestrator ---")
 
+    # --help first: it needs no fixture, and its epilog is the one place a
+    # resolved skill-dir path reaches a checked-in fixture (see
+    # normalize_skill_dir).
+    capture_help("apply_code_fixes_orchestrator.py", "apply_code_fixes_help.txt")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         plan_file = setup_apply_code_fixes_fixtures(tmp_dir)
@@ -845,6 +896,11 @@ def main():
     # 3. apply_task_suggestions_orchestrator
     # -------------------------------------------------------------------
     print("\n--- apply_task_suggestions_orchestrator ---")
+
+    # --help first: it needs no fixture, and its epilog is the one place a
+    # resolved skill-dir path reaches a checked-in fixture (see
+    # normalize_skill_dir).
+    capture_help("apply_task_suggestions_orchestrator.py", "apply_task_suggestions_help.txt")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)

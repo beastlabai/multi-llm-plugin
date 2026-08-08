@@ -7,7 +7,7 @@ the list of suggestions that should be applied. The actual application
 is handled by Claude Code using Task subagents sequentially.
 
 Usage:
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md [options]
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions plans/my-plan.md [options]
 """
 
 import json
@@ -26,6 +26,7 @@ from utils.apply_orchestrator_base import (
     OrchestratorError,
     build_common_arg_parser,
 )
+from utils.cli_common import dispatcher_prefix
 from utils.apply_output_helpers import (
     build_skipped_output,
     emit_json_output,
@@ -77,27 +78,30 @@ class ApplySuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Suggest
     @classmethod
     def parse_args(cls, argv=None):
         """Build and parse CLI arguments for apply-suggestions."""
+        # Printed commands, so resolved from `__file__` and never a skill-dir
+        # placeholder (see review_plan_orchestrator.parse_args for why).
+        run = dispatcher_prefix()
         parser = build_common_arg_parser(
             description="Prepare validated suggestions for application to a plan",
-            epilog="""
+            epilog=f"""
 This orchestrator outputs a JSON list of suggestions to apply.
 The actual application is handled by Claude Code using Task subagents.
 
 Example:
-  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md
+  {run} apply-suggestions plans/my-plan.md
 
 Bulk Approval Examples:
   # Auto-approve all LOW importance items
-  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --approve-all-low
+  {run} apply-suggestions plans/my-plan.md --approve-all-low
 
   # Auto-approve items with validation failures (parsing errors, timeouts)
-  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --approve-validation-failed
+  {run} apply-suggestions plans/my-plan.md --approve-validation-failed
 
   # Skip all items requiring human review
-  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --skip-all-human
+  {run} apply-suggestions plans/my-plan.md --skip-all-human
 
   # Re-run validation on failed items with a different model
-  uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
+  {run} apply-suggestions plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
         """,
             include_revalidation=True,
             include_output_format=True,
