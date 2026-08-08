@@ -223,8 +223,17 @@ plans/todo/my-feature/ask/<question-slug>-<hash8>/
 
 ## Exit Status
 
-- **Exit 1** when zero models succeed (all failed); `answers.md` and
-  `.status.json` are still written (with a `## Failed Models` section) so the
-  failure is diagnosable.
-- **Exit 0** on partial success (≥ 1 model answered), with the `## Failed Models`
-  section enumerating the failures.
+`ask` reaches only three D6 decision sites — the uv preflight (row 1), model
+selection (row 2) and partial results (row 3) — and every one of them resolves
+without a question, so this mode is unattended on every host:
+
+- **Exit 3** when zero models succeed (all failed): there is nothing to
+  aggregate, so this is "needs a human", not a generic error. The retry command
+  is named on stdout, and `answers.md` / `.status.json` are still written (with a
+  `## Failed Models` section) so the failure is diagnosable.
+- **Exit 0** on partial success (≥ 1 model answered): `[PARTIAL_RESULTS: <model>,…]`
+  on stdout, `MULTI_LLM_RESULT.state: "partial"`, and the `## Failed Models`
+  section enumerating the failures. A partial answer set is usable output, so it
+  is deliberately never exit 3 (D6 row 3).
+- **Exit 3** when models cannot be resolved (no `--models`, no `--quick`, no
+  `defaults.models`) — never a rendered picker (D6 row 2).

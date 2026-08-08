@@ -29,13 +29,39 @@ By default, full mode still stops to ask you a few questions (model selection, `
 
 | Phase | Default (interactive) | With `--yes` |
 |-------|----------------------|--------------|
-| Model selection (Phase 1 & 5) | Prompts if no models given | Never prompts — uses `--models` if given, else `--quick` if given, else `providers.yaml` defaults |
-| Phase 2 Apply Suggestions | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` (Claude decides every item; no confirmation) |
-| Phase 3b Review Tasks | Prompts "review the tasks?" | Runs review-tasks **automatically** (no prompt) |
+| uv preflight (every phase) | Offers to install uv | Prints `hosts/uv-missing.txt` and **exits 3** — never installs, never asks (row 1) |
+| Model selection (Phase 1 & 5) | Prompts if no models given | Never prompts — uses `--models` if given, else `--quick` if given, else `providers.yaml` `defaults.models`; **exit 3** if nothing resolves (row 2) |
+| Partial fan-out results (Phase 1 & 5) | Asks partial / resume / rerun-all | Resumes the missing models once (`--force`), then reaggregates: `[PARTIAL_RESULTS: …]`, `state: "partial"`, exit 0. Zero results → exit 3 (row 3) |
+| Consolidation (after Phase 1) | Asks "run consolidation?" | Auto-runs once on `[CONSOLIDATION_RECOMMENDED]` (row 4) |
+| Phase 2 Apply Suggestions | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` (Claude decides every item; no confirmation) — rows 10/11 |
+| Phase 3 Generate Tasks gate | Asks apply-first / skip / cancel | **Auto-runs the missing apply phase once, then re-checks** — satisfied, not bypassed. Still unmet → exit 3 (rows 5/6, D6a) |
+| Phase 3b Review Tasks | Prompts "review the tasks?" | Runs review-tasks **automatically** (no prompt) — row 12 |
 | Phase 3c Apply Task Suggestions | `--no-confirm` already | Adds `--claude-decide` (Claude decides every item) |
+| Phase 4 unapplied task suggestions | Asks "apply them first?" | Skipped, and the phase is *recorded* skipped (row 7) |
+| Phase 4 human tasks | Asks which strategy, then pauses per task | Strategy resolves to `skip-dependents`; the per-task pause is unreachable (rows 8/9) |
 | Phase 6 Apply Code Fixes | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` |
+| A phase **fails** | Asks retry / run-manually / cancel | **exit 3** naming the failed phase and its `--resume` re-invocation (row 14) |
 
 `--yes` is the umbrella switch; the narrower flags (`--quick`, `--claude-decide`, `--no-confirm`) keep their individual meanings and can still be passed on their own. Throughout the steps below, **"if `--yes` was specified"** means apply the row above for that phase. If `--yes` is NOT set, follow the interactive behavior as written.
+
+**`--yes` never implies `--skip-prerequisites`.** Consent to run unattended is not
+consent to stale input: the prerequisite gates are *satisfied* (by auto-running
+the missing apply phase) or they fail closed. `--skip-prerequisites` is a separate
+flag the user types, and every use of it is recorded in `state.json`.
+
+Two rows never appear in this workflow, and the table says so rather than
+leaving it inferred: **row 13** (`review-tasks` against a plan with no task list)
+is structurally unreachable here, because phase order guarantees tasks exist
+before Phase 3b; and **row 15** (a decision flag that arrives empty or
+unrecognized — `--models ""`, `--human-task <id>=`, an unknown
+`--force-strategy`) is rejected at parse time with exit 3 before any phase starts,
+so no phase ever sees a half-answered gate.
+
+**Unattended is a flag, never a detected condition** (D6b). Nothing in this
+workflow inspects whether it has a TTY, whether `CI` is set, or whether the host
+passed `--print`: the same argv produces the same phases in a terminal and in a
+pipe. `--interactive` is the only way to get a gate rendered, and `--yes`
+together with `--interactive` is exit 3 at parse time — never a precedence rule.
 
 ---
 
@@ -110,7 +136,7 @@ This phase applies validated suggestions sequentially:
 - Load validation results from Phase 1
 - Filter to valid suggestions (HIGH/MEDIUM importance)
 - Apply each suggestion one at a time using Task subagents
-- Handle needs-human-decision items via AskUserQuestion (or, under `--yes`, via Claude's autonomous "Let Claude Decide" judgment — no prompts)
+- Handle needs-human-decision items via AskUserQuestion (or, under `--yes`, via the judged/deferred path — rows 10/11: `--yes` sets `--claude-decide` itself, and the no-selection confirmation is bypassed, so no item and no missing selection file can block)
 - Generate applied suggestions report
 
 Wait for completion, then proceed to Phase 3.
@@ -119,7 +145,7 @@ Wait for completion, then proceed to Phase 3.
 
 **Context isolation**: This phase does extensive codebase exploration that would bloat the main context. Delegate it to a Task subagent so the main workflow context stays lean for Phase 4 (Implement).
 
-**Note**: In full workflow mode, Phase 2 already handled suggestions, so the prerequisite check (Step 0 of generate-tasks) is skipped. The subagent also cannot use AskUserQuestion, so no interactive prompts are included.
+**Note**: In full workflow mode, Phase 2 already handled suggestions, so the generate-tasks prerequisite (Step 0 of generate-tasks) is *satisfied* rather than skipped — which is why rows 5/6 never render here. If Phase 2 did not run or left the gate unmet, `--yes` auto-runs the missing apply phase **once** and re-checks; a still-unmet re-check stops the workflow with exit 3 rather than generating tasks from unapplied review output. The subagent has no user channel at all, so no interactive prompt is ever included in its instructions.
 
 Spawn a single Task subagent:
 
@@ -203,7 +229,13 @@ Where `{PLAN_PATH_ABSOLUTE}` is the OS-native absolute path to the plan file —
 **Error handling**: After the subagent completes:
 
 1. **Verify success**: Read the plan file and check for the `<!-- TASKS_FILE: ... -->` marker
-2. **If the subagent failed**: Report the error and ask the user whether to:
+2. **If the subagent failed under `--yes`** (D6 row 14): stop with exit **3**,
+   naming the failed phase and the re-invocation that continues from it —
+   `<dispatcher> full <plan> --yes --resume`. Do not retry the subagent, and do
+   not fall back to running generate-tasks in the main context: an unattended
+   crash is a terminal condition, and silently switching strategy is how a
+   headless run ends up with a half-populated plan nobody reviewed.
+3. **If the subagent failed without `--yes`**: Report the error and ask the user whether to:
    - Retry (spawn another subagent)
    - Run generate-tasks manually in main context (fallback: load `${CLAUDE_SKILL_DIR}/instructions/generate-tasks.md` and execute)
    - Cancel the full workflow
@@ -214,17 +246,15 @@ Wait for completion, then proceed to Phase 3b.
 
 After task generation completes successfully, determine whether to run the review-tasks phase.
 
-**`--yes` / `--non-interactive` mode**: Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
+**`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
 
-**No-TTY automation without `--yes`**: When running in a non-interactive context (no TTY) and `--yes` was NOT passed, skip `review-tasks` by default without prompting. To opt in during such runs, the user must pass `--review-tasks` (or `--yes`) explicitly on the CLI. If skipping without prompt, run:
+**There is no TTY-sniffing branch.** "Not asked" is decided by the shim's baked
+`--yes` plus the user-typed `--review-tasks` opt-in — never by `isatty()`, `CI`
+or a `--print` flag (D6b). Without `--yes`, `--review-tasks` is the explicit flag
+that opts in; declining still records the skip through
+`check_workflow_prerequisites.py --skip --mode review-tasks` exactly as below.
 
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks --skip --reason "Non-interactive mode: skipped by default"
-```
-
-Then proceed directly to Phase 3c.
-
-**Interactive mode (no `--yes`)**: Use AskUserQuestion to prompt:
+**Interactive mode (no `--yes`, no `--review-tasks`)**: Use AskUserQuestion to prompt:
 
 > "Would you like to review the generated tasks with multiple LLMs before implementation?"
 
@@ -336,7 +366,7 @@ This phase:
 - Loads validated code-review findings from Phase 5
 - Filters to valid findings (HIGH/MEDIUM importance)
 - Applies each fix to the code one at a time using Task subagents
-- Handles `needs-human-decision` items via AskUserQuestion (or, under `--yes`, via Claude's autonomous "Let Claude Decide" judgment — no prompts)
+- Handles `needs-human-decision` items via AskUserQuestion (or, under `--yes`, via the judged/deferred path — rows 10/11, no prompt and no `confirmation_needed` payload)
 - Generates an applied code fixes report and overlays decisions onto `{plan}/code-review/report.html`
 
 Follow the full apply-code-fixes instruction file to process batches, generate the summary report, and mark the phase completed. Wait for completion, then proceed to the report.
@@ -413,11 +443,11 @@ After all phases complete, provide a comprehensive summary:
 ## Critical Rules for Full Mode
 
 1. **Sequential Execution**: Each phase MUST complete before the next begins
-2. **Error Handling**: If a phase fails, report the error and ask user whether to continue. Under `--yes`, "ask whether to continue" still applies for hard failures — `--yes` suppresses *workflow decision* prompts (model choice, human-decision items, review-tasks opt-in), not crash recovery.
+2. **Error Handling** (D6 row 14): If a phase fails **without `--yes`**, report the error and ask the user whether to continue. **Under `--yes` a hard failure is a terminal condition, not a question**: stop with exit **3**, name the failed phase and print its `--resume` re-invocation. This is the one site where `--yes` used to fall back to "ask whether to continue", i.e. a guaranteed headless hang on exactly the path a headless run is most likely to take. `--resume` is how a human continues; no flag makes a hard failure proceed.
 3. **State Preservation**: Each phase's state is preserved for the next phase
 4. **Same Models**: Use the same model selection for both review-plan and review-code phases
 5. **Apply Sequential**: In Phases 2, 3c, and 6, process items ONE AT A TIME to avoid conflicts
-6. **`--yes` is all-or-nothing for prompts**: When `--yes` / `--non-interactive` is set, NO AskUserQuestion may be issued for normal workflow decisions in any phase — resolve models non-interactively, pass `--claude-decide --no-confirm` to every apply phase, and run review-tasks automatically. See the Non-Interactive Mode table above.
+6. **`--yes` is all-or-nothing for prompts**: When `--yes` / `--non-interactive` is set, **NO AskUserQuestion may be issued anywhere, for any reason** — not for a workflow decision, not for a crash, not for a prerequisite gate. Every decision point has exactly one of three endings: a documented default that is applied *and recorded* (`[AUTO_RESOLVED] <site>: <decision>`), exit **3** with the re-invocation named, or a flag the user typed. "Ask in free text" is not a fourth ending. See the Non-Interactive Mode table above for the per-site resolution.
 
 ## Planned Features (Not Yet Implemented)
 

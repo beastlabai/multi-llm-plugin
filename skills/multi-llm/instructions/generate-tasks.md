@@ -200,13 +200,46 @@ Before generating tasks, check if there are unapplied suggestions from plan revi
 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode generate-tasks
 ```
 
-Parse the JSON output. If `prerequisites_met` is `false`:
+Parse the JSON output (stdout is pure JSON; the human-readable
+`[PREREQUISITE_*]` block goes to stderr and is repeated as `message`). If
+`prerequisites_met` is `false`:
 
-1. Use **AskUserQuestion** with the provided `prompt` content:
+**This gate is never auto-skipped, and `--yes` alone does not skip it** (D6a).
+Tasks generated from a plan whose HIGH-importance review suggestions were never
+applied silently poison every downstream phase, and a warning printed into a
+headless log nobody reads *is* that failure mode. Nothing has been produced at
+this point — no tasks in the plan file, no phase dir, no `state.json` mutation —
+so there is no half-generated artifact to clean up.
+
+- **With `--yes` (or `--non-interactive`), standalone**: the check has already
+  exited **3** with one message naming *both* fixes. Print it verbatim and stop:
+
+  ```
+  [PREREQUISITE_UNMET] generate-tasks: 7 HIGH / 3 MEDIUM suggestions in
+  /abs/plans/x/review-plan/validation.json have not been applied.
+    1) Apply them first — <dispatcher> apply-suggestions /abs/plans/x.md --yes
+       then re-run      — <dispatcher> generate-tasks /abs/plans/x.md --yes
+    2) Proceed on unapplied review output (recorded) —
+       <dispatcher> generate-tasks /abs/plans/x.md --yes --skip-prerequisites
+  ```
+
+- **With `--skip-prerequisites`**: loud but non-fatal. The check prints
+  `[PREREQUISITE_SKIPPED] generate-tasks: <n> unapplied apply-suggestions
+  suggestions (reason: explicit --skip-prerequisites)`, records the skip in
+  `state.json` through the same `--skip --reason` path, and exits with this
+  mode's normal code. This is the only path on which tasks may be built from
+  unapplied review output, and it is always attributable afterwards (`status`,
+  the implementation summary and any later review all see it).
+- **Inside `--full` with `--yes`**: the workflow **auto-runs the missing apply
+  phase once and re-checks** — the gate is satisfied, not bypassed. If the apply
+  phase exits non-zero, or the re-check still reports the prerequisite unmet, the
+  workflow stops there with exit **3**; the auto-run is attempted at most once
+  per phase per run and never becomes a retry loop.
+- **Without `--yes`**, use **AskUserQuestion** with the provided `prompt` content:
    - Question: Use `prompt.question`
    - Options: Map `prompt.options` to AskUserQuestion format
 
-2. Handle the user's response:
+  Then handle the user's response:
    - **"Apply suggestions first"**: Stop and instruct the user to run in order:
      1. `/multi-llm:multi-llm --apply-suggestions $PLAN_PATH`
      2. `/clear`
@@ -216,7 +249,10 @@ Parse the JSON output. If `prerequisites_met` is `false`:
    - **"Skip suggestions, proceed"**: Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip` to mark as skipped, then continue
    - **"Cancel"**: Stop and inform the user that generate-tasks was cancelled
 
-If `prerequisites_met` is `true`, proceed with task generation.
+If `prerequisites_met` is `true`, proceed with task generation. A prerequisite
+that was met *because an earlier phase recorded a skip* surfaces as one
+`[PREREQUISITE_SKIPPED_UPSTREAM …]` line quoting the recorded reason; the run
+proceeds, because consent was already given explicitly.
 
 ---
 

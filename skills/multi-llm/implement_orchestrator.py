@@ -38,10 +38,24 @@ from utils import (
     get_current_head,
 )
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser
+from utils.cli_common import EXIT_NEEDS_HUMAN, build_parent_parser
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
-from check_workflow_prerequisites import check_apply_task_suggestions_prerequisite
+from utils import unattended as unattended_mod
+from utils.unattended import (
+    HUMAN_TASK_STRATEGIES,
+    UNATTENDED_HUMAN_TASK_STRATEGY,
+    NeedsHuman,
+    parse_human_task_decisions,
+)
+from check_workflow_prerequisites import (
+    SKIPPED_MARKER,
+    SKIP_PREREQUISITES_REASON,
+    build_unmet_message,
+    check_apply_task_suggestions_prerequisite,
+    record_prerequisite_skip,
+    upstream_skip_notices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +89,46 @@ def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
         }
     except (json.JSONDecodeError, OSError):
         return {"met": True, "reason": "Could not read validation"}
+
+
+def resolve_human_task_strategy(
+    state,
+    human_task_ids: List[str],
+    *,
+    force_strategy: Optional[str],
+    unattended: bool,
+    resume: bool,
+) -> Optional[str]:
+    """Resolve D6 row 8 — how tasks needing a human are handled.
+
+    Resolution order, unchanged from ``instructions/implement.md`` except that the
+    fourth rung is no longer a prompt:
+
+    1. ``--force-strategy`` — an explicit flag always wins.
+    2. ``--resume`` with a saved ``human_task_strategy`` in ``state.json``.
+    3. ``--yes`` → :data:`UNATTENDED_HUMAN_TASK_STRATEGY` (``skip-dependents``).
+       An unattended run cannot perform manual steps, so code tasks depending on
+       them cannot be assumed valid — ``skip-continue`` would run them anyway.
+    4. Neither → ``None``: the driving agent renders the gate (attended only).
+
+    Whatever is resolved is persisted exactly as ``--force-strategy`` does, so
+    ``--resume`` stays stable and never re-asks.
+    """
+    if not human_task_ids:
+        return None
+    strategy: Optional[str] = None
+    if force_strategy:
+        strategy = force_strategy
+    elif resume and state.get("human_task_strategy"):
+        strategy = state.get("human_task_strategy")
+    elif unattended:
+        strategy = UNATTENDED_HUMAN_TASK_STRATEGY
+    if strategy is None:
+        return None
+    if state.get("human_task_strategy") != strategy:
+        state.set("human_task_strategy", strategy)
+        state.save()
+    return strategy
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -117,6 +171,37 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         '--dry-run',
         action='store_true',
         help='Show task summary without writing output file'
+    )
+
+    # --- D5a decision flags (the non-interactive answer to D6 rows 7, 8, 9) ---
+    # Documented in instructions/implement.md long before this parser accepted
+    # them: the strategy prompt and the per-task pause were markdown-only, which
+    # meant the *only* way to answer them was to be a human at a terminal. Every
+    # gate now has a flag whose values enumerate exactly the options the question
+    # rendered — `choices` validates them, and an empty/unknown value is exit 3.
+    parser.add_argument(
+        '--no-confirm',
+        action='store_true',
+        help='Skip the task-suggestion advisory prompt (D6 row 7): record '
+             'apply-task-suggestions as skipped and proceed. Implied by --yes.'
+    )
+    parser.add_argument(
+        '--force-strategy',
+        choices=list(HUMAN_TASK_STRATEGIES),
+        default=None,
+        help='Answer the human-task strategy gate (D6 row 8) without a prompt '
+             'and persist it to state.json, so --resume stays stable. Under '
+             '--yes the default is skip-dependents; pause-and-ask together with '
+             '--yes is exit 3.'
+    )
+    parser.add_argument(
+        '--human-task',
+        action='append',
+        default=None,
+        metavar='ID=done|skip',
+        help='Answer one human task (D6 row 9), repeatable: --human-task '
+             'T004=done. Turns the pause-and-ask pause into a process boundary '
+             'instead of a blocked stdin.'
     )
 
     return parser.parse_args(argv)
@@ -532,6 +617,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     bootstrap_streams()
     args = parse_args(argv)
 
+    # D6b: unattended is a *flag*, never a runtime guess — nothing here sniffs a
+    # TTY, `CI` or a `--print` flag to decide it.
+    unattended = bool(getattr(args, "yes", False))
+
+    # D6 rows 9/15: validate the per-task answers before anything is read, so an
+    # empty or unrecognized value is exit 3 at parse time rather than a silent
+    # default halfway through a batch.
+    try:
+        human_task_decisions = parse_human_task_decisions(args.human_task)
+    except NeedsHuman as exc:
+        return unattended_mod.fail_closed(exc.message, site_id=exc.site)
+    if unattended and args.force_strategy == "pause-and-ask":
+        # The dispatcher already rejects this combination at parse time; this is
+        # the same refusal for a direct invocation, so neither route can hang.
+        return unattended_mod.fail_closed(
+            "ERROR: --force-strategy pause-and-ask requires a human at the "
+            "per-task gate, which --yes forbids. Pass a non-interactive strategy "
+            f"(e.g. {UNATTENDED_HUMAN_TASK_STRATEGY}) or drop --yes.",
+            site_id=unattended_mod.row(9).site_id,
+        )
+
     # Validate plan file (resolve to absolute path first to handle
     # uv --directory which changes the working directory)
     plan_path = Path(args.plan_file).resolve()
@@ -562,18 +668,56 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Check prerequisites
     plan_dir = get_output_dir(plan_path)
 
-    # Check for unapplied suggestions
+    # A recorded upstream `--skip-prerequisites` is reported once and never
+    # re-litigated: consent was already given explicitly, and re-asking would make
+    # the recorded skip meaningless (D6a).
+    for notice in upstream_skip_notices(state):
+        print(notice)
+
+    # Check for unapplied suggestions (D6 row 6). Three endings, no fourth:
+    #   --skip-prerequisites  -> loud, recorded, proceed
+    #   --yes                 -> exit 3, one message naming both fixes
+    #   neither               -> today's [PREREQUISITE_CHECK] payload, exit 0
+    # Nothing has been produced at this point: no phase dir, no tasks, no
+    # state.json mutation, so an unmet gate leaves no half-generated artifact.
     apply_check = check_apply_suggestions_prerequisite(state, plan_dir)
     if not apply_check["met"]:
-        prereq_info = {
-            "marker": "PREREQUISITE_CHECK",
+        missing = [{
             "phase": "apply-suggestions",
             "reason": apply_check["reason"],
-            "valid_count": apply_check.get("valid_count", 0)
-        }
-        print(f"[PREREQUISITE_CHECK]")
-        print(json.dumps(prereq_info, indent=2))
-        sys.exit(0)
+            "valid_count": apply_check.get("valid_count", 0),
+            "importance_breakdown": apply_check.get("importance_breakdown", {}),
+        }]
+        if args.skip_prerequisites:
+            record_prerequisite_skip(
+                state, "apply-suggestions", reason=SKIP_PREREQUISITES_REASON
+            )
+            print(
+                f"{SKIPPED_MARKER} implement: "
+                f"{apply_check.get('valid_count', 0)} unapplied apply-suggestions "
+                f"suggestions (reason: {SKIP_PREREQUISITES_REASON})"
+            )
+        elif unattended:
+            print(build_unmet_message("implement", plan_path, plan_dir, missing))
+            unattended_mod.mark_needs_human("implement")
+            print(json.dumps({
+                "marker": "PREREQUISITE_UNMET",
+                "mode": "implement",
+                "state": "needs-human",
+                "exit": EXIT_NEEDS_HUMAN,
+                "missing": missing,
+            }, indent=2))
+            sys.exit(EXIT_NEEDS_HUMAN)
+        else:
+            prereq_info = {
+                "marker": "PREREQUISITE_CHECK",
+                "phase": "apply-suggestions",
+                "reason": apply_check["reason"],
+                "valid_count": apply_check.get("valid_count", 0)
+            }
+            print(f"[PREREQUISITE_CHECK]")
+            print(json.dumps(prereq_info, indent=2))
+            sys.exit(0)
 
     # Check for unapplied task suggestions (soft advisory — does NOT block)
     task_suggestions_check = check_apply_task_suggestions_prerequisite(state, plan_dir)
@@ -588,6 +732,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[TASK_SUGGESTIONS_ADVISORY]")
         print(json.dumps(advisory_info, indent=2))
         # NOTE: Does NOT exit — this is advisory only, implementation proceeds
+        # D6 row 7: under --yes / --no-confirm the advisory resolves to "skip",
+        # and the phase is *recorded* skipped here rather than left for the agent
+        # to remember — an auto-selection nobody can see afterwards is
+        # indistinguishable from a silent degradation.
+        if unattended or args.no_confirm:
+            record_prerequisite_skip(
+                state,
+                "apply-task-suggestions",
+                reason="auto-skipped by --yes/--no-confirm (D6 row 7)",
+            )
+            unattended_mod.record_resolution(
+                str(plan_dir / "implement"),
+                unattended_mod.row(7).site_id,
+                "skipped; apply-task-suggestions recorded as skipped",
+            )
 
     # Check if generate-tasks phase has been completed
     if not state.is_phase_completed("generate-tasks"):
@@ -636,6 +795,51 @@ def main(argv: Optional[List[str]] = None) -> int:
             if task_id in decomposer.tasks:
                 decomposer.update_task_status(task_id, TaskStatus(status))
         print("Restored previous session state")
+
+    # --- D6 rows 8 and 9: resolve and record, never prompt ------------------
+    human_task_ids = [
+        task.id for task in decomposer.tasks.values()
+        if getattr(task, "executor_role", "") == "human"
+    ]
+    human_task_strategy = resolve_human_task_strategy(
+        state,
+        human_task_ids,
+        force_strategy=args.force_strategy,
+        unattended=unattended,
+        resume=args.resume,
+    )
+    if human_task_ids and human_task_strategy and unattended and not args.force_strategy:
+        unattended_mod.record_resolution(
+            str(get_phase_dir(plan_path, "implement")),
+            unattended_mod.row(8).site_id,
+            f"{human_task_strategy} for {len(human_task_ids)} human task(s)",
+        )
+    if human_task_decisions:
+        # Row 9's answer channel: a per-task decision arrives as a flag, is
+        # recorded in state.json, and is handed to the driving agent in the task
+        # JSON so the pause is a process boundary rather than a blocked stdin.
+        unknown = [tid for tid in human_task_decisions if tid not in decomposer.tasks]
+        if unknown:
+            return unattended_mod.fail_closed(
+                "ERROR: --human-task names task(s) that are not in this plan: "
+                f"{', '.join(sorted(unknown))}.\n"
+                f"       Human tasks in this plan: "
+                f"{', '.join(human_task_ids) or 'none'}",
+                site_id=unattended_mod.row(9).site_id,
+            )
+        not_human = [tid for tid in human_task_decisions if tid not in human_task_ids]
+        if not_human:
+            return unattended_mod.fail_closed(
+                "ERROR: --human-task only answers tasks with executor_role "
+                f"'human'; these are code tasks: {', '.join(sorted(not_human))}.",
+                site_id=unattended_mod.row(9).site_id,
+            )
+        recorded = dict(state.get("human_task_decisions") or {})
+        recorded.update(human_task_decisions)
+        state.set("human_task_decisions", recorded)
+        state.save()
+        for task_id, action in sorted(human_task_decisions.items()):
+            print(f"[HUMAN_TASK_ANSWERED] {task_id}={action}")
 
     # If specific task requested
     if args.task:
@@ -694,6 +898,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             "pending_tasks": pending_count,
             "batches": output_batches
         }
+
+    # The resolved answers travel with the tasks, so the invoker copies a
+    # decision instead of composing one (D5a).
+    if human_task_ids:
+        output_data["human_tasks"] = list(human_task_ids)
+        output_data["human_task_strategy"] = human_task_strategy
+        if human_task_decisions:
+            output_data["human_task_decisions"] = dict(
+                state.get("human_task_decisions") or {}
+            )
 
     # Dry run - just print summary
     if args.dry_run:

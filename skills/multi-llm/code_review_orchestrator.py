@@ -73,6 +73,8 @@ from utils.subagent_tasks import (
     write_salvage_task_file,
 )
 from utils.interactive import resolve_models
+from utils import unattended as unattended_mod
+from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
     parse_model_spec,
@@ -1404,6 +1406,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Handle model selection using the priority-based resolver
     # Priority: CLI --models > --interactive flag > --quick flag > YAML defaults > Interactive selection
+    # D6 row 2: under --yes the ladder stops at defaults.models and an
+    # unresolvable set is exit 3 — never a rendered multi-select.
+    unattended = bool(getattr(args, "yes", False))
     try:
         model_specs = resolve_models(
             cli_models=args.models,
@@ -1411,9 +1416,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             quick=args.quick,
             mode='code-review',  # Mode-specific defaults from providers.yaml
             anchor=str(plan_path),  # per-project config discovery follows the plan-derived root
+            unattended=unattended,
         )
+    except NeedsHuman as e:
+        sys.exit(unattended_mod.fail_closed(e.message, site_id=e.site))
     except RuntimeError as e:
-        # TTY error from interactive selection
         print(f"ERROR: {e}")
         available = get_all_model_specs()
         print(f"Use --models flag. Available: {', '.join(available[:5])}...")

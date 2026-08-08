@@ -111,17 +111,25 @@ Items with `needs-human-decision` status are included in the report for the user
 0. **Check `uv` is available** (BEFORE the first `uv run` command)
 
    Every command below runs through `uv run`. Follow
-   `references/uv-check.md`: run `command -v uv`; if missing, check
-   `~/.local/bin/uv` / `~/.cargo/bin/uv` and use the absolute path, otherwise
-   use AskUserQuestion to offer installing uv (official installer or package
-   manager). If the user declines, abort this mode — do not fall back to bare
-   `python`.
+   `references/uv-check.md`: run `command -v uv`; if missing, check the seven
+   documented install locations and use the absolute path. If uv is truly
+   absent, print `hosts/uv-missing.txt` verbatim and **stop with exit 3** — never
+   offer to install it, never ask, and never fall back to bare `python`
+   (D6 row 1).
 
 1. **Validate plan file exists**
 
 2. **Model selection:**
    - If models provided in args (e.g., `/multi-llm:multi-llm plans/foo.md gpt-5.2 gemini-3-pro`): use those directly
-   - If NO models provided: Claude MUST use AskUserQuestion to prompt user for model selection
+   - **With `--yes` (or `--non-interactive`)**: never ask. Pass no model flag at
+     all and let the orchestrator resolve `defaults.models` from the config
+     layering; it prints the resolved set as
+     `[AUTO_RESOLVED] model-selection: defaults.models: …`. If nothing resolves
+     (no `--models`, no `--quick`, no `defaults.models`, or every default
+     provider unavailable) the orchestrator exits **3** naming the flags that
+     answer it — that is the whole resolution, so do not substitute a question
+     for it (D6 row 2).
+   - If NO models provided and NOT `--yes`: Claude MUST use AskUserQuestion to prompt user for model selection
      - Present available models from `providers.yaml` (multi-select)
      - Then run orchestrator with `--models <selected>`
 
@@ -157,7 +165,16 @@ Items with `needs-human-decision` status are included in the report for the user
       - `validation_pending` → orchestrator completed normally; proceed to validation using `validation_tasks_path` from the status file, then reaggregate with the `reaggregate_command` inside that tasks file. The status file records the mode + plan path (`reaggregate_mode`, `plan_file`) rather than a resolved command, so a plugin update cannot leave a stale skill-dir path behind; `multi_llm.py status <plan> --view run` prints the command resolved against the running skill dir.
       - `complete` → report results
    3. If no `.status.json` → fall back to existing file-based resume detection (step 3)
-   4. **Use AskUserQuestion** to inform the user:
+   4. **With `--yes` (or `--non-interactive`): always resume, never ask** (D6
+      row 3). Re-run only the missing models with `--force`; never `--rerun-all`
+      (it discards work that succeeded). If a model fails a second time in the
+      same run, reaggregate with what exists: the orchestrator prints
+      `[PARTIAL_RESULTS: <model>,…]`, lists the failed models in the report and
+      `.status.json`, sets `MULTI_LLM_RESULT.state: "partial"` and exits **0** —
+      a partial aggregate is usable output. The one exception: if *no* model
+      produced a result there is nothing to aggregate, so it exits **3** naming
+      the retry command.
+   5. Without `--yes`, **use AskUserQuestion** to inform the user:
       - Which models completed successfully
       - Which models failed or were interrupted
       - Options: (a) Proceed with partial results (`--reaggregate`), (b) Resume — re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
@@ -266,9 +283,17 @@ Items with `needs-human-decision` status are included in the report for the user
 
    If **not present**, skip this step entirely.
 
-   If **present**, inform the user of the group count and ask whether they want to run consolidation (use AskUserQuestion). If the user declines, skip this step.
+   If **present** with `--yes` (or `--non-interactive`): **auto-run consolidation
+   once, no prompt** (D6 row 4). There is no second threshold to apply here — the
+   orchestrator only emits the marker at `CONSOLIDATION_RECOMMENDED_THRESHOLD`
+   (15 valid groups, tunable with `--consolidation-threshold`), so the marker's
+   presence *is* the decision. If consolidation itself fails, keep the
+   unconsolidated results, warn, and continue — a failed optional pass is not a
+   failed phase.
 
-   If the user agrees:
+   If **present** without `--yes`, inform the user of the group count and ask whether they want to run consolidation (use AskUserQuestion). If the user declines, skip this step.
+
+   If consolidation is to run (auto or agreed):
 
    **a) Run the consolidation orchestrator:**
 

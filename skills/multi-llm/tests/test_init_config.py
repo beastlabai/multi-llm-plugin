@@ -596,7 +596,10 @@ class TestRemovalRegression:
         ):
             assert not hasattr(interactive, name), f"{name} should be removed"
         # The runtime cascade sentinel + helpers are KEPT.
-        for name in ("UNAVAILABLE", "select_multi", "resolve_models", "is_tty"):
+        # `is_tty` joined the removed list in D6b: interactivity is requested
+        # (a user-typed --interactive), never detected.
+        assert not hasattr(interactive, "is_tty")
+        for name in ("UNAVAILABLE", "select_multi", "resolve_models"):
             assert hasattr(interactive, name)
 
     def test_removed_listing_helpers_absent(self):

@@ -41,12 +41,12 @@ Claude Code, a plain terminal, or CI.
 0. **Check `uv` is available** (BEFORE the scaffolder command)
 
    The scaffolder runs through `uv run`. Follow `references/uv-check.md`: run
-   `command -v uv`; if missing, check `~/.local/bin/uv` / `~/.cargo/bin/uv` and
-   use the absolute path, otherwise use AskUserQuestion to offer installing uv
-   (official installer or package manager). If the user declines, abort — do
-   not fall back to bare `python`. This is the one exception to `--init` being
-   zero-prompt: it only fires when the Python runtime manager itself is absent,
-   never during provider detection.
+   `command -v uv`; if missing, check the seven documented install locations and
+   use the absolute path. If uv is truly absent, print `hosts/uv-missing.txt`
+   verbatim and **stop with exit 3** — never offer to install it, never ask, and
+   never fall back to bare `python` (D6 row 1). `--init` therefore stays
+   zero-prompt on every path: a missing runtime manager is a fail-closed gate,
+   not a question.
 
 1. **Map flags.** Pass through any `--dir`, `--force`, `--gitignore` the user
    supplied. Use `--template-only` only when the user explicitly wants the

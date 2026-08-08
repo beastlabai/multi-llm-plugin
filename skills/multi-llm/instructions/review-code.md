@@ -124,19 +124,29 @@ Items with `needs-human-decision` status are included in the report for the user
 0. **Check `uv` is available** (BEFORE the first `uv run` command)
 
    Every command below runs through `uv run`. Follow
-   `references/uv-check.md`: run `command -v uv`; if missing, check
-   `~/.local/bin/uv` / `~/.cargo/bin/uv` and use the absolute path, otherwise
-   use AskUserQuestion to offer installing uv (official installer or package
-   manager). If the user declines, abort this mode — do not fall back to bare
-   `python`.
+   `references/uv-check.md`: run `command -v uv`; if missing, check the seven
+   documented install locations and use the absolute path. If uv is truly
+   absent, print `hosts/uv-missing.txt` verbatim and **stop with exit 3** — never
+   offer to install it, never ask, and never fall back to bare `python`
+   (D6 row 1).
 
 1. **Validate plan file exists**
 
 2. **Model selection:**
    - If `--models` provided in args: use those directly
-   - If NO models provided: Claude MUST use AskUserQuestion to prompt user for model selection
+   - **With `--yes` (or `--non-interactive`)**: never ask. Pass no model flag and
+     let the orchestrator resolve `defaults.models` from the config layering
+     (it prints `[AUTO_RESOLVED] model-selection: …`). If nothing resolves, it
+     exits **3** naming the flags that answer the gate — do not substitute a
+     question (D6 row 2). `--interactive` with `--yes` is exit 3 at parse time.
+   - If NO models provided and NOT `--yes`: Claude MUST use AskUserQuestion to prompt user for model selection
      - Present available models from `providers.yaml` (multi-select)
      - Then run orchestrator with `--models <selected>`
+   - **Partial results** (D6 row 3): under `--yes`, a model that produced nothing
+     is re-run once via `--force` and never with `--rerun-all`; a second failure
+     is reported as `[PARTIAL_RESULTS: <model>,…]` with
+     `MULTI_LLM_RESULT.state: "partial"` and exit **0**. Zero results is exit
+     **3** naming the retry command.
 
 3. **Determine base-ref (handled automatically by orchestrator):**
    - If `--base-ref` provided in CLI: it will be used

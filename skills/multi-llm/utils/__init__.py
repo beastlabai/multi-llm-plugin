@@ -146,7 +146,7 @@ from .report_parser import (
 )
 
 from .interactive import (
-    is_tty,
+    NoDecisionChannel,
     select_models_interactive,
     select_models_two_step,
     resolve_models,
@@ -311,7 +311,7 @@ __all__ = [
     "load_consolidated_html_selections",
     "merge_consolidated_selections",
     # interactive
-    "is_tty",
+    "NoDecisionChannel",
     "select_models_interactive",
     "select_models_two_step",
     "resolve_models",

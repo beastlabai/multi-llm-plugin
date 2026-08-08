@@ -1,21 +1,63 @@
 #!/usr/bin/env python3
-"""Check workflow prerequisites before proceeding to next phase."""
+"""Check workflow prerequisites before proceeding to next phase.
+
+This script owns D6 rows **5** (the generate-tasks gate), **6** (the implement
+gate) and **13** (``review-tasks`` against a plan with no task list). It is the
+only owner: the gate logic is not reimplemented in markdown and no thin
+orchestrator wraps it, because the *check* was already a script.
+
+D6a — consent to run unattended is not consent to stale input. Tasks generated
+from, or an implementation run against, a plan whose HIGH-importance review
+suggestions were never applied silently poisons every downstream phase, and a
+warning printed into a headless log nobody reads *is* that failure mode. So
+``--yes`` alone never skips these gates:
+
+* **Inside the full workflow** — :func:`ensure_prerequisites` auto-runs the
+  missing apply phase **once**, then re-checks. The gate is *satisfied*, not
+  bypassed; a second unmet re-check is exit 3, never a retry loop.
+* **Standalone** — exit 3 with one message naming both fixes (apply first, or
+  re-run with ``--skip-prerequisites``), absolute paths, D5a-shaped commands.
+* **``--skip-prerequisites``** — a separate, explicit flag ``--yes`` never
+  implies. Loud but non-fatal: it prints ``[PREREQUISITE_SKIPPED]``, records the
+  skip through the same ``--skip``/``--reason`` state path, and is therefore
+  always attributable afterwards (``status``, the implementation summary and any
+  later review can all see it).
+
+**Nothing is produced before the gate**: rows 5/6 are preflight, so an unmet
+prerequisite writes no tasks into the plan file, no phase dir and no
+``state.json`` mutation — there is no "generated but not applied" middle state to
+clean up.
+
+Streams: **stdout stays pure JSON** in every path (its callers ``json.loads`` the
+whole of it, and ``status --view workflow`` is byte-identical to
+``--status --json``); the human-readable ``[PREREQUISITE_*]`` blocks go to stderr
+and travel inside the JSON as ``message``. The orchestrators that already print
+prose markers on stdout (``implement_orchestrator.py``) print theirs there.
+"""
 
 import argparse
 import json
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 # Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser
+from utils.cli_common import (
+    EXIT_NEEDS_HUMAN,
+    EXIT_OK,
+    build_parent_parser,
+    dispatcher_command,
+)
 
 # One table owns the phase vocabulary: the dispatcher resolves a `--mode`/
 # `--phase` word against the same rows (`modes.py`), so `review-code` (the mode
 # word) and `code-review` (the phase name) can never drift apart per host.
 from modes import PREREQUISITE_PHASES
+from utils import unattended as unattended_mod
 from utils.state_manager import StateManager
 from utils.output_handler import get_output_dir
 
@@ -262,6 +304,303 @@ def build_prompt(mode: str, missing: list) -> dict:
     return None
 
 
+# ---------------------------------------------------------------------------
+# D6a — the gates, and the three branches they resolve to
+# ---------------------------------------------------------------------------
+
+UNMET_MARKER = "[PREREQUISITE_UNMET]"
+SKIPPED_MARKER = "[PREREQUISITE_SKIPPED]"
+SKIPPED_UPSTREAM_MARKER = "[PREREQUISITE_SKIPPED_UPSTREAM"
+
+#: The reason string recorded for an explicit ``--skip-prerequisites``. Quoted
+#: verbatim by the downstream ``[PREREQUISITE_SKIPPED_UPSTREAM …]`` notice, so a
+#: later phase can say *why* it is building on unapplied review output.
+SKIP_PREREQUISITES_REASON = "explicit --skip-prerequisites"
+
+#: The prerequisites ``--skip-prerequisites`` may skip: the ones whose output is
+#: *advice* (review suggestions someone chose not to apply). A missing
+#: ``generate-tasks`` is not skippable — a plan with no task list has nothing to
+#: implement or review, which is row 13's "not a repair this mode may make".
+SKIPPABLE_PREREQUISITES: Tuple[str, ...] = (
+    "apply-suggestions", "apply-task-suggestions",
+)
+
+#: Mode -> the D6 row it is gated by, so one table owns the mapping.
+GATE_ROW: Dict[str, int] = {
+    "generate-tasks": 5,
+    "implement": 6,
+    "review-tasks": 13,
+}
+
+
+def collect_missing(state: StateManager, plan_dir: Path, mode: str) -> List[dict]:
+    """Every unmet hard prerequisite of *mode*, in workflow order."""
+    missing: List[dict] = []
+    for required_phase in PHASE_PREREQUISITES.get(mode, []):
+        # Use specialized check for apply-suggestions (has detailed suggestion counting)
+        if required_phase == "apply-suggestions":
+            apply_check = check_apply_suggestions_prerequisite(state, plan_dir)
+            if not apply_check["met"]:
+                missing.append({
+                    "phase": "apply-suggestions",
+                    "reason": apply_check["reason"],
+                    "valid_count": apply_check.get("valid_count", 0),
+                    "importance_breakdown": apply_check.get("importance_breakdown", {}),
+                })
+        else:
+            # Use generic state-based check for other phases
+            phase_check = check_phase_prerequisite(state, required_phase)
+            if not phase_check["met"]:
+                missing.append({
+                    "phase": required_phase,
+                    "reason": phase_check["reason"],
+                })
+    return missing
+
+
+def _breakdown_text(entry: dict) -> str:
+    """``7 HIGH / 3 MEDIUM`` from an importance breakdown, else a plain count."""
+    breakdown = entry.get("importance_breakdown") or {}
+    parts = [
+        f"{breakdown[level]} {level}"
+        for level in ("HIGH", "MEDIUM", "LOW")
+        if breakdown.get(level, 0) > 0
+    ]
+    if parts:
+        return " / ".join(parts)
+    count = entry.get("valid_count") or entry.get("actionable_count") or 0
+    return f"{count}" if count else "unapplied"
+
+
+def build_unmet_message(
+    mode: str, plan_path: Path, plan_dir: Path, missing: Sequence[dict]
+) -> str:
+    """The one blocking message, both fixes named, absolute paths, D5a commands.
+
+    This is a *blocking* message, not a warning: a warning in a headless log
+    nobody reads is the failure mode, not the mitigation.
+    """
+    plan_abs = str(Path(plan_path).resolve())
+    lines: List[str] = []
+    for entry in missing:
+        phase = entry.get("phase", "")
+        if phase == "generate-tasks":
+            # Row 13 (and implement's tasks prerequisite): the answer is
+            # out-of-band — generate the tasks, then re-run. There is no
+            # `--skip-prerequisites` option here on purpose.
+            lines += [
+                f"{UNMET_MARKER} {mode}: no task list has been generated for "
+                f"{plan_abs}.",
+                "  1) Generate the tasks first — "
+                + dispatcher_command("generate-tasks", plan_abs, "--yes"),
+                "     then re-run              — "
+                + dispatcher_command(mode, plan_abs, "--yes"),
+            ]
+            continue
+        source = str((Path(plan_dir) / "review-plan" / "validation.json").resolve()) \
+            if phase == "apply-suggestions" \
+            else str((Path(plan_dir) / "review-tasks" / "validation.json").resolve())
+        lines += [
+            f"{UNMET_MARKER} {mode}: {_breakdown_text(entry)} suggestions in "
+            f"{source} have not been applied.",
+            "  1) Apply them first — "
+            + dispatcher_command(phase, plan_abs, "--yes"),
+            "     then re-run      — "
+            + dispatcher_command(mode, plan_abs, "--yes"),
+            "  2) Proceed on unapplied review output (recorded) —",
+            "     "
+            + dispatcher_command(mode, plan_abs, "--yes", "--skip-prerequisites"),
+        ]
+    return "\n".join(lines)
+
+
+def upstream_skip_notices(state: StateManager) -> List[str]:
+    """``[PREREQUISITE_SKIPPED_UPSTREAM …]`` lines for skips already recorded.
+
+    A mode gates on **its own** prerequisite only. It does not re-litigate how the
+    artifact it consumes was produced: if an earlier phase ran under
+    ``--skip-prerequisites``, consent was already given explicitly, and re-asking
+    would make the recorded skip meaningless. So the recorded skip surfaces as a
+    single line quoting the reason, and the run proceeds.
+    """
+    notices: List[str] = []
+    for phase in SKIPPABLE_PREREQUISITES:
+        if not state.is_phase_skipped(phase):
+            continue
+        reason = state.get_phase_skip_reason(phase) or ""
+        if SKIP_PREREQUISITES_REASON not in reason:
+            continue
+        notices.append(f"{SKIPPED_UPSTREAM_MARKER} {phase}: {reason}]")
+    return notices
+
+
+def record_prerequisite_skip(
+    state: StateManager, phase: str, *, reason: str
+) -> None:
+    """Mark *phase* skipped through the same state path ``--skip`` uses."""
+    state.mark_phase_skipped(phase, reason=reason)
+    state.save()
+
+
+@dataclass
+class PrereqOutcome:
+    """What :func:`ensure_prerequisites` decided.
+
+    Attributes:
+        met: True when the mode may proceed.
+        exit_code: 0 when it may proceed, 3 when a human is needed. Never 2 —
+            "needs a human" and "already done" must stay distinguishable.
+        missing: The unmet prerequisite entries (empty when met).
+        message: The verbatim ``[PREREQUISITE_UNMET]`` block, when blocking.
+        auto_ran: Phases whose apply step this call ran (at most one per phase
+            per run).
+        skipped: Phases recorded as skipped by ``--skip-prerequisites``.
+        notices: ``[PREREQUISITE_SKIPPED*]`` lines the caller should print.
+    """
+
+    met: bool
+    exit_code: int = EXIT_OK
+    missing: List[dict] = field(default_factory=list)
+    message: Optional[str] = None
+    auto_ran: Tuple[str, ...] = ()
+    skipped: Tuple[str, ...] = ()
+    notices: List[str] = field(default_factory=list)
+
+
+def ensure_prerequisites(
+    plan_file,
+    mode: str,
+    *,
+    unattended: bool = False,
+    in_workflow: bool = False,
+    skip_prerequisites: bool = False,
+    apply_runner: Optional[Callable[[str], int]] = None,
+    state: Optional[StateManager] = None,
+) -> PrereqOutcome:
+    """Resolve rows 5/6/13 for *mode* without ever rendering a question.
+
+    The three D6a branches, in the order they are tried:
+
+    1. ``--skip-prerequisites`` — record the skip through the existing ``--skip``
+       path, emit ``[PREREQUISITE_SKIPPED]``, proceed with the mode's normal exit
+       code. The only path on which an artifact may be built from unapplied
+       review output, and always attributable afterwards.
+    2. *Inside the workflow* (``in_workflow`` with an ``apply_runner``) — run the
+       missing apply phase **once**, then re-check. If the apply phase exits
+       non-zero, or exits 0 but the re-check still reports the prerequisite unmet
+       (e.g. items left ``needs-human-decision`` that ``--claude-decide`` could
+       not resolve), stop with exit 3 naming the unresolved items. The auto-run is
+       attempted at most once per phase per run: a second unmet re-check is exit
+       3, not a retry.
+    3. Otherwise — exit 3 (unattended) or the legacy prompt payload (attended,
+       where a rendered gate is still legal).
+
+    ``apply_runner`` is injected because applying suggestions needs the driving
+    agent's subagent channel (``apply_suggestions_orchestrator.py`` emits
+    instructions rather than editing the plan itself). It is called as
+    ``apply_runner(phase) -> exit_code``. **Callable, not yet called**: the Phase-3
+    full-workflow orchestrator is its intended caller; with no runner supplied,
+    ``in_workflow`` behaves exactly like standalone, so nothing can silently
+    proceed on stale input.
+
+    Never mutates state on the blocking path (rows 5/6 are preflight), and never
+    prints: the caller owns its own streams.
+    """
+    plan_path = Path(plan_file).resolve()
+    plan_dir = get_output_dir(plan_path)
+    state = state if state is not None else StateManager(plan_path)
+
+    missing = collect_missing(state, plan_dir, mode)
+    notices = upstream_skip_notices(state)
+    if not missing:
+        return PrereqOutcome(met=True, notices=notices)
+
+    if skip_prerequisites:
+        unskippable = [
+            m["phase"] for m in missing
+            if m.get("phase") not in SKIPPABLE_PREREQUISITES
+        ]
+        if unskippable:
+            return PrereqOutcome(
+                met=False,
+                exit_code=EXIT_NEEDS_HUMAN,
+                missing=missing,
+                message=(
+                    f"ERROR: --skip-prerequisites cannot skip "
+                    f"{', '.join(unskippable)} for {mode}: that phase's output is "
+                    "the input, not advice about it.\n"
+                    + build_unmet_message(mode, plan_path, plan_dir, missing)
+                ),
+                notices=notices,
+            )
+        skipped: List[str] = []
+        for entry in missing:
+            phase = entry["phase"]
+            record_prerequisite_skip(state, phase, reason=SKIP_PREREQUISITES_REASON)
+            skipped.append(phase)
+            notices.append(
+                f"{SKIPPED_MARKER} {mode}: {_breakdown_text(entry)} unapplied "
+                f"{phase} suggestions (reason: {SKIP_PREREQUISITES_REASON})"
+            )
+        return PrereqOutcome(
+            met=True, missing=[], skipped=tuple(skipped), notices=notices
+        )
+
+    if in_workflow and apply_runner is not None:
+        auto_ran: List[str] = []
+        for entry in missing:
+            phase = entry["phase"]
+            if phase not in SKIPPABLE_PREREQUISITES:
+                continue
+            code = apply_runner(phase)
+            auto_ran.append(phase)
+            if code != EXIT_OK:
+                return PrereqOutcome(
+                    met=False,
+                    exit_code=EXIT_NEEDS_HUMAN,
+                    missing=missing,
+                    message=(
+                        f"{UNMET_MARKER} {mode}: the auto-run of {phase} exited "
+                        f"{code}, so the prerequisite is still unmet and nothing "
+                        "downstream ran.\n"
+                        + build_unmet_message(mode, plan_path, plan_dir, missing)
+                    ),
+                    auto_ran=tuple(auto_ran),
+                    notices=notices,
+                )
+        # One re-check, never a loop.
+        state = StateManager(plan_path)
+        remaining = collect_missing(state, plan_dir, mode)
+        if not remaining:
+            return PrereqOutcome(
+                met=True, auto_ran=tuple(auto_ran),
+                notices=upstream_skip_notices(state),
+            )
+        return PrereqOutcome(
+            met=False,
+            exit_code=EXIT_NEEDS_HUMAN,
+            missing=remaining,
+            message=(
+                f"{UNMET_MARKER} {mode}: the apply phase ran once and the "
+                "re-check still reports the prerequisite unmet "
+                f"({'; '.join(m.get('reason', '') for m in remaining)}). "
+                "Stopping here rather than retrying.\n"
+                + build_unmet_message(mode, plan_path, plan_dir, remaining)
+            ),
+            auto_ran=tuple(auto_ran),
+            notices=notices,
+        )
+
+    message = build_unmet_message(mode, plan_path, plan_dir, missing)
+    return PrereqOutcome(
+        met=False,
+        exit_code=EXIT_NEEDS_HUMAN if unattended else EXIT_OK,
+        missing=missing,
+        message=message,
+        notices=notices,
+    )
+
+
 def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) -> dict:
     """Get current workflow state for all phases."""
     ALL_PHASES = list(PREREQUISITE_PHASES)
@@ -387,8 +726,7 @@ def main(argv=None) -> int:
             print(f"ERROR: Plan file not found: {plan_path}")
             sys.exit(1)
         state = StateManager(plan_path)
-        state.mark_phase_skipped(args.mode, reason=args.reason)
-        state.save()
+        record_prerequisite_skip(state, args.mode, reason=args.reason)
         result = {
             "skipped": True,
             "mode": args.mode,
@@ -409,30 +747,18 @@ def main(argv=None) -> int:
     plan_dir = get_output_dir(plan_path)
     state = StateManager(plan_path)
 
-    missing = []
-
-    # Get required phases for this mode
-    required_phases = PHASE_PREREQUISITES.get(args.mode, [])
-
-    for required_phase in required_phases:
-        # Use specialized check for apply-suggestions (has detailed suggestion counting)
-        if required_phase == "apply-suggestions":
-            apply_check = check_apply_suggestions_prerequisite(state, plan_dir)
-            if not apply_check["met"]:
-                missing.append({
-                    "phase": "apply-suggestions",
-                    "reason": apply_check["reason"],
-                    "valid_count": apply_check.get("valid_count", 0),
-                    "importance_breakdown": apply_check.get("importance_breakdown", {})
-                })
-        else:
-            # Use generic state-based check for other phases
-            phase_check = check_phase_prerequisite(state, required_phase)
-            if not phase_check["met"]:
-                missing.append({
-                    "phase": required_phase,
-                    "reason": phase_check["reason"]
-                })
+    # D6a. `--yes` decides how an unmet gate *ends* (exit 3 instead of a rendered
+    # question); `--skip-prerequisites` is the separate, explicit escape `--yes`
+    # never implies. Attended runs keep today's payload byte-for-byte.
+    unattended = bool(getattr(args, "yes", False))
+    outcome = ensure_prerequisites(
+        plan_path,
+        args.mode,
+        unattended=unattended,
+        skip_prerequisites=bool(getattr(args, "skip_prerequisites", False)),
+        state=state,
+    )
+    missing = outcome.missing
 
     # Build result — compute prerequisites_met from hard prerequisites only
     result = {
@@ -440,6 +766,25 @@ def main(argv=None) -> int:
         "mode": args.mode,
         "missing": missing
     }
+    if outcome.skipped:
+        result["skipped_prerequisites"] = list(outcome.skipped)
+        result["skip_reason"] = SKIP_PREREQUISITES_REASON
+    if outcome.notices:
+        result["notices"] = list(outcome.notices)
+        for notice in outcome.notices:
+            print(notice, file=sys.stderr)
+    if outcome.message is not None:
+        # stdout stays pure JSON for every caller that json.loads() it; the
+        # verbatim block goes to stderr and travels here as `message`.
+        result["message"] = outcome.message
+        result["gate_row"] = GATE_ROW.get(args.mode)
+        print(outcome.message, file=sys.stderr)
+    if outcome.exit_code == EXIT_NEEDS_HUMAN:
+        result["state"] = "needs-human"
+        result["exit"] = EXIT_NEEDS_HUMAN
+        unattended_mod.mark_needs_human(args.mode)
+        print(json.dumps(result, indent=2))
+        return EXIT_NEEDS_HUMAN
 
     # For implement mode, also check for unapplied task suggestions (soft advisory)
     # apply-task-suggestions is NOT a hard prerequisite for implement, but we
@@ -464,14 +809,31 @@ def main(argv=None) -> int:
     # Check hard prerequisites first; only fall back to advisory prompt if no
     # hard prerequisite prompt exists. Advisory prompts are tagged so callers
     # can distinguish them from blocking prerequisite prompts.
-    prompt = build_prompt(args.mode, missing)
-    if prompt:
-        result["prompt"] = prompt
-    elif advisories:
-        advisory_prompt = build_prompt(args.mode, advisories)
-        if advisory_prompt:
-            advisory_prompt["advisory"] = True
-            result["prompt"] = advisory_prompt
+    #
+    # D6b: under `--yes` **no prompt object is emitted at all** — not an empty
+    # one, not a "resolved" one. A payload the caller could render is a question
+    # waiting to happen, so the resolution travels as `resolution` instead. Row 7
+    # (the task-suggestion advisory) auto-resolves to "skip, phase recorded
+    # skipped"; the recording belongs to the phase that owns it
+    # (`implement_orchestrator.py`), not to this read-only check.
+    if unattended:
+        resolutions = []
+        if advisories:
+            resolutions.append({
+                "site": unattended_mod.row(7).site_id,
+                "decision": "skip the task-suggestion advisory and proceed",
+            })
+        if resolutions:
+            result["resolutions"] = resolutions
+    else:
+        prompt = build_prompt(args.mode, missing)
+        if prompt:
+            result["prompt"] = prompt
+        elif advisories:
+            advisory_prompt = build_prompt(args.mode, advisories)
+            if advisory_prompt:
+                advisory_prompt["advisory"] = True
+                result["prompt"] = advisory_prompt
 
     print(json.dumps(result, indent=2))
     return 0
