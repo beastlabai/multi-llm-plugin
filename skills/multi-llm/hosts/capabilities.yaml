@@ -39,6 +39,11 @@ hosts:
     # shim-correctness test asserts SKILL.md's three hand-written verb sentences are
     # byte-identical to what the renderer emits for this entry.
     shim: {template: null, installed: SKILL.md, format: markdown+frontmatter}
+    # Rationale: this host's mandatory manifest is 23 lines on its own (a long
+    # `description`, the rendered `argument-hint`, and 18 `allowed-tools` grants
+    # that cannot be shortened without losing a permission). The shim *body* — what
+    # the ~100-line budget is actually about — is 84 lines.
+    shim_max_lines: 110
     installable: false
     install_paths:
       project: [".claude/skills/multi-llm"]
@@ -81,6 +86,7 @@ hosts:
     timeout_override: {frontmatter: none, env: none, config: none}
     provenance:
       shim: documented
+      shim_max_lines: verified      # counted on the file in the repo
       installable: verified
       install_paths: documented
       reload: documented

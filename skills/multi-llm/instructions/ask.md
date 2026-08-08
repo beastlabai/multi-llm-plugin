@@ -52,8 +52,10 @@ Parsing examples (each `<question>` is exactly one quoted argv element):
 - `/multi-llm:multi-llm --ask plans/x.md ""`
   → **error** (empty question) with the usage hint.
 
-This is the **same exact rule** stated in SKILL.md's Mode Detection Logic, so the
-two layers cannot diverge.
+This is the **same exact rule** every host shim states as its argument
+convention, so the two layers cannot diverge — and the dispatcher enforces it
+independently: an extra positional, or a question that arrives empty, is exit 3
+with the offending token named.
 
 ## Step-by-Step Execution
 
@@ -125,7 +127,7 @@ two layers cannot diverge.
    `answers.md` path from the log file
    (`{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log`, final line, or the
    path `status` printed), then read `answers.md` and present a brief summary per
-   model plus the output file path, following the skill's standard Summary Format.
+   model plus the output file path, following `references/summary-format.md`.
 
 ## Output Files
 

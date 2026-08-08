@@ -208,14 +208,20 @@ PLACEHOLDER_MANIFEST = {
     "references/human-decision-batch.md": (0, 0),
     "references/resume-detection.md": (0, 0),
     "references/salvage-handling.md": (0, 0),
+    # Moved out of the Claude Code shim in the D5c cutover: what a run reports is
+    # workflow prose, identical on every host, so it belongs in the core.
+    "references/summary-format.md": (0, 0),
     # 1 -> 0: the illustrative `uv run --project "<dir>" -- python …` fragment was
     # not a command anyone runs, and a token outside the invariant prefix is a
     # failure by rule 1.
     "references/uv-check.md": (0, 0),
     "references/wave-batching.md": (0, 0),
-    # 7 -> 12: the read step became a dispatcher command (`util instructions`),
-    # which carries the prefix twice, and step 2 names it again.
-    "SKILL.md": (12, 0),
+    # 7 -> 12 when the read step became a dispatcher command; 12 -> 8 with the
+    # cutover, which slimmed the shim to its host-specific contract (the mode list,
+    # the provider-config prose, the critical rules and the argv-scanning shell
+    # preamble all left). Still non-zero, and permanently so: this file *is* the
+    # Claude Code shim.
+    "SKILL.md": (8, 0),
 }
 
 #: The one file allowed to keep ``${CLAUDE_SKILL_DIR}``: it *is* the Claude Code
