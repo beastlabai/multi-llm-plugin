@@ -813,6 +813,26 @@ def _detect_version(
     return version
 
 
+def _host_ceiling() -> Optional[int]:
+    """This host's ``max_concurrent_subagents``, or ``None`` if it cannot be read.
+
+    Deliberately non-fatal: the ceiling is a *bound*, and a partial install that
+    cannot answer must not turn a dispatch into a hard failure — the driver and
+    provider legs of the minimum still apply.
+    """
+    try:
+        from . import host_capabilities as caps
+    except ImportError:  # pragma: no cover - direct script runs
+        try:
+            import host_capabilities as caps  # type: ignore
+        except ImportError:
+            return None
+    try:
+        return caps.max_concurrent_subagents(caps.resolve_host_id())
+    except Exception:  # pragma: no cover - unknown host / missing data
+        return None
+
+
 def effective_ceiling(
     runners: Sequence[str],
     *,
@@ -827,10 +847,13 @@ def effective_ceiling(
     both say *which* ceiling bound the batch.
 
     Args:
-        host_max: The host's ``max_concurrent_subagents`` from
-            ``hosts/capabilities.yaml`` (D5b). ``None`` until that data ships —
-            the seam is this parameter, not a second code path.
+        host_max: The host's ``max_concurrent_subagents``. ``None`` means "look it
+            up from ``hosts/capabilities.yaml`` for the host this invocation
+            declared" (D5b) — the seam is this parameter, not a second code path,
+            and a caller that already knows the number still passes it directly.
     """
+    if host_max is None:
+        host_max = _host_ceiling()
     driver_gate = get_max_concurrent_subagents(anchor=anchor)
     provider_limits: Dict[str, Optional[int]] = {}
     for spec in dict.fromkeys(runners):

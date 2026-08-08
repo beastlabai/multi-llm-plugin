@@ -312,6 +312,30 @@ def _question_flags(question: str, cleanup: List[Path]) -> List[str]:
     return ["--question-file", path]
 
 
+def _host_capabilities():
+    """Import the capability reader lazily (one yaml parse, only when needed)."""
+    from utils import host_capabilities
+
+    return host_capabilities
+
+
+def resolve_host(argv: Sequence[str]) -> str:
+    """The host id this invocation runs under: ``--host`` → env → ``claude-code``.
+
+    An omitted flag resolves to the reference host, so a command that predates the
+    capability data behaves exactly as it did. Never sniffed: a host is *declared*
+    (by the shim that baked the flag in, or by the user), never guessed from the
+    environment.
+    """
+    return _host_capabilities().resolve_host_id(argv)
+
+
+def _validate_host(argv: Sequence[str]) -> None:
+    """An unknown ``--host`` is exit 3 before anything is created (D5b)."""
+    caps = _host_capabilities()
+    caps.entry(caps.resolve_host_id(argv))
+
+
 def _reject_incompatible_flags(mode: "mode_table.Mode", argv: Sequence[str]) -> None:
     """Reject contradictory combinations at parse time, never by precedence.
 
@@ -331,8 +355,6 @@ def _reject_incompatible_flags(mode: "mode_table.Mode", argv: Sequence[str]) -> 
             "per-task gate, which --yes forbids. Pass a non-interactive "
             "strategy (e.g. skip-dependents) or drop --yes."
         )
-    # `--detach`'s own gates; `--exec-subagents`' host-capability rejection is
-    # still owned by the capability-matrix design and deliberately absent.
     _reject_capability_conflicts(mode, argv)
 
 
@@ -348,10 +370,13 @@ def _reject_capability_conflicts(mode: "mode_table.Mode", argv: Sequence[str]) -
     recorded in ``.status.json``), and any flag whose resolution needs a human is
     exit 3.
 
-    ``--exec-subagents`` has no rejection rule yet: which hosts have an
-    executor-capable runner is the capability matrix's to say, and guessing here
-    would pre-empt it.
+    ``--exec-subagents`` is rejected the same way, from the capability data rather
+    than from a guess here: a host whose entry declares no executor-capable runner
+    (D3e's ``agent-readonly``/``agent-write`` profiles) would otherwise accept the
+    flag, stop at a dispatch marker and wait for a subagent nobody starts.
     """
+    if flag_present(argv, "--exec-subagents"):
+        _host_capabilities().require_executor_runner(resolve_host(argv))
     if not flag_present(argv, "--detach"):
         return None
     if flag_present(argv, "--interactive", "-i"):
@@ -455,6 +480,10 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
             return _call_target(
                 _load_target(mode.target_module, mode.target_attr), list(flags)
             )
+        # The host id first: every rejection below may consult its capability
+        # entry, and an unknown id must fail as itself rather than as a confusing
+        # consequence.
+        _validate_host(flags)
         _reject_incompatible_flags(mode, flags)
         # D6 row 15 then row 1, both before anything is created: an empty or
         # unrecognized decision value and a missing `uv` are the two failures a

@@ -1,0 +1,220 @@
+# Host capability data (D5b) — one entry per host id, validated against
+# schemas/host_capabilities.schema.json.
+#
+# WHAT THIS FILE IS. The verb -> mechanism map the host-neutral instruction core
+# defers to. The core says *spawn subagents* / *ask the user* / *run detached*; the
+# three fields `subagents`, `ask` and `detach` say what each one resolves to for a
+# given host. That resolution is paid **once**, when a shim is rendered, and never
+# per run by an agent.
+#
+# WHAT THIS FILE IS NOT. It is not on any agent read path. It is consumed by
+# `multi_llm.py`, by `install-host`, by `hosts/render_capabilities.py` and by the
+# tests. No instruction file and no shim ever tells an agent to open it or to open
+# `references/host-capabilities.md` — the shim's baked sentence *is* the answer this
+# matrix would have given. An agent reasoning over a capability table mid-workflow
+# would be a worse instruction-following failure mode than the one this design
+# removes.
+#
+# PROVENANCE IS LOAD-BEARING. Host docs churn faster than this design does, so
+# every value carries a provenance: `verified` (a recorded live smoke observed it),
+# `documented` (host docs only) or `unknown` (the shipping default). **A
+# `documented`-only value never selects the non-conservative path.** Concretely,
+# today: Codex and OpenCode are `subagents: executor` because spawn-from-exec is
+# unconfirmed, and `detach: python`/`required` rather than trusting a raised command
+# timeout. Promoting either is a one-line edit here, not a shim rewrite — but only
+# once a smoke run has recorded it.
+#
+# Every cell below is *documentation, not measurement*: nothing here has been run.
+# That is why the conservative resolution is what executes.
+
+version: 1
+
+hosts:
+
+  claude-code:
+    # The reference host. There is deliberately no hosts/claude-code/shim.md.tmpl:
+    # Claude Code loads a skill from <skill-root>/SKILL.md and nowhere else, so a
+    # copy under hosts/ could only be dead text or a duplicate to keep in sync.
+    # `installable: false` -> `install-host claude-code` is --check-only, and the
+    # shim-correctness test asserts SKILL.md's three hand-written verb sentences are
+    # byte-identical to what the renderer emits for this entry.
+    shim: {template: null, installed: SKILL.md, format: markdown+frontmatter}
+    installable: false
+    install_paths:
+      project: [".claude/skills/multi-llm"]
+      global: ["$HOME/.claude/skills/multi-llm"]
+      legacy: []
+    reload: none
+    arguments: placeholder            # $ARGUMENTS / ${CLAUDE_SKILL_DIR}
+    multi_turn: true
+    subagents: native
+    ask: structured
+    detach: native
+    native_tool:
+      subagents: Task
+      ask: AskUserQuestion
+      detach: run_in_background
+    default_subagent_runner: "claude-code:sonnet"
+    # subagents: native, so the tier -> model map lives here rather than in
+    # providers.yaml driver.subagent_runner{,_cheap} (D2e).
+    subagent_tiers: {full: sonnet, cheap: haiku}
+    runners:
+      claude-code: {bundled: true, needs_auth: false, login_cmd: "",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+      cursor-agent: {bundled: false, needs_auth: true,
+                     login_cmd: "cursor-agent login",
+                     profiles: [generate], usage: none}
+    # In-session native dispatch: no process of ours sits between parent and child,
+    # so there is nothing to strip and nothing to neutralize.
+    nested_exec: {spawn: allowed, network: allowed, credentials: allowed,
+                  notes: "Native subagents run in-session; the executor is not on
+                    the default path for this host."}
+    # Audited and non-empty: these are the variables Claude Code injects, which a
+    # dispatched third-party runner must not inherit. Literal names only — a
+    # wildcard would strip the runner's own credentials along with the guard.
+    env_guards:
+      guards: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+      session_scoped: ["CLAUDE_SESSION_ID", "CLAUDE_SKILL_DIR"]
+      passthrough: ["ANTHROPIC_API_KEY"]
+    max_concurrent_subagents: 10
+    timeout_ceiling_s: 600            # Bash tool hard cap, silently clamped above
+    timeout_override: {frontmatter: none, env: none, config: none}
+    provenance:
+      shim: documented
+      installable: verified
+      install_paths: documented
+      reload: documented
+      arguments: verified
+      multi_turn: verified
+      subagents: verified
+      ask: verified
+      detach: verified
+      native_tool: verified
+      default_subagent_runner: verified
+      subagent_tiers: verified
+      runners: documented
+      nested_exec: documented
+      env_guards: documented
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: documented
+      timeout_override: documented
+
+  codex:
+    # Same skills format *on paper* — the claim is a hypothesis, not a premise, so
+    # shim/arguments/install_paths all stay `documented` until the spike runs.
+    shim: {template: hosts/codex/shim.md.tmpl, installed: SKILL.md,
+           format: markdown+frontmatter}
+    installable: true
+    install_paths:
+      project: [".codex/skills/multi-llm"]
+      global: ["$HOME/.codex/skills/multi-llm"]
+      legacy: ["$HOME/.codex/prompts"]
+    reload: new-session
+    arguments: placeholder
+    multi_turn: true
+    subagents: executor              # agents are GA in the TUI; spawn-from-exec is
+                                     # unconfirmed, and the failure is
+                                     # silent-then-fatal, so the exec profile is
+                                     # `executor` until a recorded run says
+                                     # otherwise. native_tool names the tool for
+                                     # documentation, not for dispatch.
+    ask: free-text                   # request_user_input is Plan-Mode-only
+    detach: python
+    native_tool:
+      subagents: agent
+    default_subagent_runner: "codex:gpt-5.2-codex"
+    subagent_tiers: null             # forbidden to carry a map: subagents != native
+    runners:
+      codex: {bundled: true, needs_auth: false, login_cmd: "",
+              profiles: [generate, agent-readonly, agent-write], usage: full}
+      claude-code: {bundled: false, needs_auth: true, login_cmd: "claude login",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+    nested_exec: {spawn: unknown, network: unknown, credentials: unknown,
+                  notes: "Filled by the Phase 3 nested-exec smoke: --exec-subagents
+                    launched from inside `codex exec`'s own sandboxed shell, for
+                    both the same-host runner and a third-party one."}
+    # Empty because the env diff has not run yet, not because the host is clean —
+    # which is what provenance: unknown records.
+    env_guards: {guards: [], session_scoped: [], passthrough: []}
+    max_concurrent_subagents: 4
+    timeout_ceiling_s: 0             # 0 = no documented cap on `codex exec`
+    timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    provenance:
+      shim: documented
+      installable: documented
+      install_paths: documented
+      reload: documented
+      arguments: documented
+      multi_turn: documented
+      subagents: documented
+      ask: documented
+      detach: documented
+      native_tool: documented
+      default_subagent_runner: documented
+      subagent_tiers: documented
+      runners: documented
+      nested_exec: unknown
+      env_guards: unknown
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: unknown
+      timeout_override: unknown
+
+  opencode:
+    # commands/ is PLURAL — the singular command/ path is simply not scanned.
+    shim: {template: hosts/opencode/shim.md.tmpl,
+           installed: commands/multi-llm.md, format: markdown+frontmatter}
+    installable: true
+    install_paths:
+      project: [".opencode/commands"]
+      global: ["$XDG_CONFIG_HOME/opencode/commands", "$HOME/.config/opencode/commands"]
+      legacy: [".opencode/command"]
+    reload: new-session
+    arguments: placeholder           # $ARGUMENTS / $1
+    multi_turn: false
+    subagents: executor              # `mode: subagent` dispatch is documented only;
+                                     # dispatch is instructed in the command body,
+                                     # never via frontmatter `subtask:` (which the
+                                     # parser accepts and then ignores).
+    ask: free-text                   # the `question` tool is unreliable headless
+    detach: required                 # the ~120 s bash cap is documented, not
+                                     # measured, and every fan-out mode runs far
+                                     # longer than it — so no foreground fan-out
+                                     # path is offered at all.
+    native_tool:
+      subagents: task
+    default_subagent_runner: "opencode:opencode/sonnet"
+    subagent_tiers: null
+    runners:
+      opencode: {bundled: true, needs_auth: false, login_cmd: "",
+                 profiles: [generate, agent-readonly, agent-write], usage: full}
+      claude-code: {bundled: false, needs_auth: true, login_cmd: "claude login",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+    nested_exec: {spawn: unknown, network: unknown, credentials: unknown,
+                  notes: "Filled by the Phase 3 nested-exec smoke from inside
+                    `opencode run`."}
+    env_guards: {guards: [], session_scoped: [], passthrough: []}
+    max_concurrent_subagents: 4
+    timeout_ceiling_s: 120           # documented default bash timeout
+    # No `timeout` field exists in the V2 command contract, so the ceiling moves
+    # only through the environment/config surface — and the installer only ever
+    # writes through a non-`none` channel.
+    timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    provenance:
+      shim: documented
+      installable: documented
+      install_paths: documented
+      reload: documented
+      arguments: documented
+      multi_turn: documented
+      subagents: documented
+      ask: documented
+      detach: documented
+      native_tool: documented
+      default_subagent_runner: documented
+      subagent_tiers: documented
+      runners: documented
+      nested_exec: unknown
+      env_guards: unknown
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: documented
+      timeout_override: unknown
