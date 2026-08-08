@@ -887,7 +887,14 @@ class TestTaskProcessing:
                 output=str(output_path),
                 resume=False,
                 task="T001",
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -920,7 +927,14 @@ class TestTaskProcessing:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -949,7 +963,14 @@ class TestTaskProcessing:
                 output="/tmp/output.json",
                 resume=False,
                 task="T999",  # Non-existent task
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             with pytest.raises(SystemExit):
@@ -1021,7 +1042,14 @@ class TestStateManagement:
                 output=str(output_path),
                 resume=True,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1058,7 +1086,14 @@ class TestStateManagement:
                 output=str(temp_dir / "output.json"),
                 resume=True,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1138,7 +1173,14 @@ class TestDryRunOutput:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=True
+                dry_run=True,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             with pytest.raises(SystemExit) as exc_info:
@@ -1162,7 +1204,14 @@ class TestDryRunOutput:
                 output=str(temp_dir / "output.json"),
                 resume=False,
                 task=None,
-                dry_run=True
+                dry_run=True,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1195,7 +1244,14 @@ class TestImplementationSummary:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1220,7 +1276,14 @@ class TestPlanWithoutTasks:
                 output=str(temp_dir / "output.json"),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             with pytest.raises(SystemExit):
@@ -1253,7 +1316,14 @@ class TestExternalTasksFile:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1284,7 +1354,14 @@ class TestOutputFormat:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1318,7 +1395,14 @@ class TestOutputFormat:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1353,7 +1437,14 @@ class TestOutputFormat:
                 output=str(output_path),
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             main()
@@ -1379,7 +1470,14 @@ class TestPlanFileValidation:
                 output="/tmp/output.json",
                 resume=False,
                 task=None,
-                dry_run=False
+                dry_run=False,
+                # Declared explicitly: MagicMock auto-creates unknown
+                # attributes as TRUTHY mocks, which would silently turn
+                # --exec-subagents and --detach on for this test.
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
             )
 
             with pytest.raises(SystemExit):

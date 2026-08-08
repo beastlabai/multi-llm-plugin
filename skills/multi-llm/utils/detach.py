@@ -112,11 +112,12 @@ HANDSHAKE_TIMEOUT_ENV = "MULTI_LLM_HANDSHAKE_TIMEOUT_S"
 #: host that installs ``uv`` somewhere unusual should not have to patch code.
 UV_ENV = "MULTI_LLM_UV"
 
-#: The modes ``--detach`` covers today: the fan-out modes, which are the only
-#: long-running ones until the subagent executor lands. The executor-backed modes
-#: (``implement``, the apply phases, ``generate-tasks``, ``full``) take ``--detach``
-#: in the change that makes them long-running; until then passing it there is a
-#: loud exit 3 rather than a flag that silently does nothing.
+#: The modes ``--detach`` covers: the fan-out modes plus the executor-backed write
+#: modes (``implement``, the three apply phases, ``generate-tasks``, ``full``),
+#: which became long-running when the write executor landed — a phase that
+#: schedules N batches through real agent CLIs outlives a host's shell cap exactly
+#: as a fan-out does. A mode outside this set still gets a loud exit 3 rather than
+#: a flag that silently does nothing.
 #:
 #: Read from the mode table, never re-listed: ``supports_detach`` is a column on
 #: the row, so adding the flag to a mode stays a one-line change there.

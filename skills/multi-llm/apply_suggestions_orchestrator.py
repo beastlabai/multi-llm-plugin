@@ -67,6 +67,8 @@ class ApplySuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Suggest
     supports_skip_flag = True
     marks_phase_completed = True
     guard_double_nesting = False
+    # One shared artifact (the plan), so batches are strictly sequential (D3h).
+    write_kind = "apply_suggestions"
 
     # ----------------------------------------------------------------
     # Argument parser

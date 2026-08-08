@@ -269,6 +269,54 @@ json.dump(state, state_file)
 ```
 This ensures `--resume` can recover the strategy without re-prompting.
 
+#### 4b. The Python write executor: `--exec-subagents` (an alternative to steps 5-10)
+
+Steps 5 through 10 below are the **native-subagent** path: this agent walks the
+batches, spawns a Task subagent per task, updates state, records metrics, finalizes
+tracking, writes the implementation summary and inserts the plan-side reference.
+
+A host with no native subagent tool runs the *same* loop in Python. Add
+`--exec-subagents` to the step-2 invocation and the phase schedules itself in one
+process:
+
+- batches in ascending `batch_index`, with each batch's snapshot/diff verification
+  completed and recorded **before** the next is dispatched (a partial application is
+  never compounded by a concurrent one);
+- tasks inside a batch dispatched together only when all three of `can_parallelize`,
+  `driver.max_concurrent_write_subagents > 1` (default **1**) and a dispatch-time
+  check that their declared file sets are pairwise disjoint agree — a task declaring
+  no file set runs alone;
+- the human-task strategy resolved **once** from `--force-strategy`, the value
+  persisted in `state.json` on a resume, or `--yes`'s `skip-dependents` default, then
+  applied as a graph walk: `skip-dependents` propagates transitively over
+  `depends_on`, `skip-continue` records a dependency override per unblocked task,
+  and `pause-and-ask` exits 3 naming both `--human-task <id>=done|skip`
+  re-invocations rather than blocking on a stdin nobody is on;
+- `prior_changes.py append`, `metrics.py record` and `update_task_status` per task;
+- and finalization — `metrics.py finish`, `mark_phase_completed`,
+  `finalize_tracking.py`, the implementation summary (including its
+  `## Manual Tasks (Deferred)`, `## Dependency Override Warnings` and `## Cancelled`
+  sections) and `insert_implementation_summary_reference` — as part of the loop's
+  contract. A run that dispatched every batch and produced none of those is a
+  **failed** run, not a partial one.
+
+Do **not** combine the two: with `--exec-subagents` the phase finishes in that one
+invocation and there is no batch left for this agent to run.
+
+On a stop: a partial application halts at the batch boundary, keeps every pre-batch
+snapshot under `{phase}/pre_batch/{task_id}/`, leaves the phase **not** completed,
+and exits 3 naming the exact re-invocation plus the rollback command
+(`multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>`, which refuses a
+file that changed after the run unless `--force`). `--resume` then re-dispatches only
+the unfinished batches, replaying the prior-changes log from disk so the resumed
+batch sees the context an uninterrupted run would have.
+
+`--dry-run-subagents` renders every command, applies every admission and policy
+check, writes `{phase}/subagent_dry_run.json` and starts no child.
+`--detach` self-daemonizes the phase and reports per-task progress in
+`{phase}/.status.json` under `progress.write_subagents`; never combine it with a
+host's own background primitive (on Claude Code use `run_in_background`).
+
 5. **Execute batches sequentially (batches have dependencies):**
 
    Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:

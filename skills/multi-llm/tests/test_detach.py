@@ -653,16 +653,18 @@ class TestDetachGates:
             "the invocation record is cleared when the dispatcher returns"
         )
 
-    @pytest.mark.parametrize("mode", ["implement", "apply-suggestions",
-                                      "apply-code-fixes", "status", "init"])
+    @pytest.mark.parametrize("mode", ["status", "init"])
     def test_detach_on_a_mode_that_does_not_support_it_yet(self, mode, tmp_path,
                                                            capsys):
         """A loud exit 3 at the dispatcher, never a flag that does nothing.
 
         The mode table owns which modes take the flag (``supports_detach``), so
-        the rejection cannot drift from the list the message prints.
+        the rejection cannot drift from the list the message prints. The
+        executor-backed modes left this list when the write executor made them
+        long-running; what remains are the modes that finish in milliseconds
+        (``status``, ``init``) or install a shim.
         """
-        args = ["p.md"] if mode != "init" else []
+        args = [] if mode == "init" else ["p.md"]
         assert multi_llm.main([mode, *args, "--detach"]) == 3
         err = capsys.readouterr().err
         assert "not available for mode" in err
@@ -679,10 +681,40 @@ class TestDetachGates:
         with pytest.raises(detach.DetachError) as exc:
             detach.handle_phase_detach(
                 args=argparse.Namespace(detach=True, internal_worker=False),
-                mode="implement", argv=[], phase_dir=str(tmp_path),
+                mode="status", argv=[], phase_dir=str(tmp_path),
                 plan_file=str(plan),
             )
         assert exc.value.exit_code == 3
+
+    def test_every_executor_backed_mode_accepts_detach(self):
+        """Task 6: the write modes became long-running, so they take the flag.
+
+        ``generate-tasks`` and ``full`` are in the set because their detach
+        plumbing is real; their own ``unavailable`` exit 3 still fires first, so
+        neither pretends the mode works (see
+        ``test_an_unavailable_mode_still_exits_3_under_detach``).
+        """
+        for mode in ("implement", "apply-suggestions", "apply-task-suggestions",
+                     "apply-code-fixes", "generate-tasks", "full"):
+            assert mode_table.resolve(mode).supports_detach, mode
+            assert detach.mode_supports_detach(mode), mode
+
+    @pytest.mark.parametrize("mode", ["generate-tasks", "full"])
+    def test_an_unavailable_mode_still_exits_3_under_detach(self, mode, tmp_path,
+                                                            capsys):
+        """Registering detach support is not claiming the mode runs.
+
+        These two have no orchestrator until Phase 3. ``--detach`` is accepted at
+        the flag gate (so the boundary a shim sees is stable) and the mode's own
+        "not yet available on this host" refusal is what the caller gets — never a
+        detached child polling a phase that will never start.
+        """
+        plan = _plan(tmp_path)
+        assert multi_llm.main([mode, str(plan), "--detach"]) == 3
+        out = capsys.readouterr()
+        combined = out.out + out.err
+        assert "not yet available on this host" in combined
+        assert "not available for mode" not in combined
 
     def test_direct_orchestrator_invocation_refuses_to_detach(self, tmp_path,
                                                               capsys):
@@ -1320,9 +1352,19 @@ class TestPollLoopContract:
             detach.HEARTBEAT_STALE_AFTER_S / detach.HEARTBEAT_INTERVAL_S == 6
         )
 
-    def test_detach_modes_are_the_fan_out_modes(self):
-        assert detach.DETACH_MODES == ("review-plan", "review-tasks",
-                                       "review-code", "ask")
+    def test_detach_modes_are_the_long_running_modes(self):
+        """The fan-out modes plus the executor-backed write modes (task 6).
+
+        Pinned as a literal so *adding* a mode to the set is a deliberate edit
+        here, not a side effect of a table change: a mode that takes ``--detach``
+        without being long-running gives a caller a run to poll that finished
+        before the poll loop started.
+        """
+        assert detach.DETACH_MODES == (
+            "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
+            "apply-task-suggestions", "implement", "review-code",
+            "apply-code-fixes", "full", "ask",
+        )
         for mode in detach.DETACH_MODES:
             assert mode_table.resolve(mode) is not None
 

@@ -34,8 +34,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
-from utils.providers.base import PROFILE_AGENT_READONLY, ProfileUnsupported  # noqa: E402
+from utils.providers.base import (  # noqa: E402
+    PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
+    ProfileUnsupported,
+)
 from utils.subagent_tasks import (  # noqa: E402
+    READ_KINDS,
+    WRITE_KINDS,
     build_inputs,
     make_task,
     make_task_file,
@@ -307,9 +313,17 @@ class TestOutputContainment:
 class TestReadOnlyProfile:
     """Every read/analyze kind runs `agent-readonly`, derived from the kind."""
 
-    @pytest.mark.parametrize("kind", sorted(executor.PROFILE_BY_KIND))
-    def test_every_dispatched_kind_is_read_only(self, kind):
+    @pytest.mark.parametrize("kind", sorted(READ_KINDS))
+    def test_every_read_kind_is_read_only(self, kind):
         assert executor.profile_for_kind(kind) == PROFILE_AGENT_READONLY
+
+    @pytest.mark.parametrize("kind", sorted(WRITE_KINDS))
+    def test_every_write_kind_is_agent_write(self, kind):
+        """And nothing else is: the map is the closed kind -> profile table."""
+        assert executor.profile_for_kind(kind) == PROFILE_AGENT_WRITE
+
+    def test_the_profile_map_covers_exactly_the_known_kinds(self):
+        assert set(executor.PROFILE_BY_KIND) == set(READ_KINDS) | set(WRITE_KINDS)
 
     def test_an_unknown_kind_is_refused(self):
         with pytest.raises(executor.ExecutorError):
@@ -1645,6 +1659,71 @@ class TestDriverConfig:
         """, monkeypatch)
         assert registry.get_subagent_runner("cheap") == "codex:gpt-5.5"
 
+    # -- the write-path keys (task 6) ------------------------------------
+
+    def test_the_write_concurrency_key_defaults_to_one(self):
+        base = registry.load_base_config()
+        assert base["driver"]["max_concurrent_write_subagents"] == 1
+        assert registry.DRIVER_FALLBACKS["max_concurrent_write_subagents"] == 1
+        assert registry.get_max_concurrent_write_subagents() == 1
+        # And it is a SEPARATE key from the read gate, which stays at 4.
+        assert registry.get_max_concurrent_subagents() == 4
+
+    def test_the_write_concurrency_key_is_overridable(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path, "driver:\n  max_concurrent_write_subagents: 3\n", monkeypatch
+        )
+        assert registry.get_max_concurrent_write_subagents() == 3
+        assert registry.get_max_concurrent_subagents() == 4
+
+    def test_a_bad_write_concurrency_value_fails_fast(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path, "driver:\n  max_concurrent_write_subagents: 0\n", monkeypatch
+        )
+        with pytest.raises(registry.ConfigError) as excinfo:
+            registry.load_config()
+        assert "positive integer" in str(excinfo.value)
+
+    def test_the_shipped_write_policy_denies_what_a_code_batch_never_touches(self):
+        policy = registry.get_write_paths()
+        assert policy["allow"] == ["**"]
+        for pattern in (".git/**", ".multi-llm/**", "**/.env", "**/*.pem",
+                        "**/.ssh/**", "**/node_modules/**"):
+            assert pattern in policy["deny"], pattern
+
+    def test_write_paths_merges_per_key_rather_than_denying_everything(
+        self, tmp_path, monkeypatch
+    ):
+        """Setting only `deny` must not leave `allow` empty (i.e. deny-all)."""
+        self._write(tmp_path, """
+            driver:
+              write_paths:
+                deny:
+                  - 'secrets/**'
+        """, monkeypatch)
+        policy = registry.get_write_paths()
+        assert policy["deny"] == ["secrets/**"]
+        assert policy["allow"] == ["**"]
+
+    @pytest.mark.parametrize("body,needle", [
+        ("driver:\n  write_paths: nope\n", "mapping with"),
+        ("driver:\n  write_paths:\n    allowed:\n      - '**'\n", "Known keys: allow, deny"),
+        ("driver:\n  write_paths:\n    allow: '**'\n", "list of non-empty glob"),
+        ("driver:\n  write_paths:\n    deny:\n      - ''\n", "list of non-empty glob"),
+    ])
+    def test_a_bad_write_policy_fails_fast_at_load_time(
+        self, tmp_path, monkeypatch, body, needle
+    ):
+        self._write(tmp_path, body, monkeypatch)
+        with pytest.raises(registry.ConfigError) as excinfo:
+            registry.load_config()
+        assert needle in str(excinfo.value)
+
+    def test_the_write_keys_are_in_the_closed_key_set(self):
+        assert "max_concurrent_write_subagents" in registry.DRIVER_KEYS
+        assert "write_paths" in registry.DRIVER_KEYS
+        assert set(registry.DRIVER_FALLBACKS) == set(registry.DRIVER_KEYS)
+
     def test_provenance_names_the_layer_that_supplied_the_value(
         self, tmp_path, monkeypatch
     ):
@@ -1686,6 +1765,14 @@ class TestDriverConfig:
         text = init_config.build_template_text()
         assert "# driver:" in text
         assert "#   subagent_runner: claude-code:sonnet" in text
+        # The write-path keys are mirrored too, including the nested policy — a
+        # scalar-only renderer would silently drop `write_paths` and leave users
+        # reconstructing it from prose.
+        assert "#   max_concurrent_write_subagents: 1" in text
+        assert "#   write_paths:" in text
+        assert "#     allow:" in text
+        assert "#       - '**'" in text
+        assert "#       - .git/**" in text
         import yaml
 
         parsed = yaml.safe_load(text)
@@ -1708,11 +1795,20 @@ class TestProviderCapabilityDeclarations:
                 f"agent_profiles declares agent-readonly={declares}"
             )
 
-    def test_no_adapter_claims_agent_write_yet(self):
-        """The write profile lands with the write executor, not before."""
+    def test_only_the_three_runner_adapters_claim_agent_write(self):
+        """The write profile is exactly the three adapters that implement it.
+
+        Pinned as a set rather than "at least these": an adapter that gains
+        ``agent-write`` becomes eligible to be handed pre-approved edit access to a
+        user's repository, so widening this is a deliberate review decision.
+        """
+        writers = {
+            name for name, provider in registry._PROVIDERS.items()
+            if "agent-write" in provider.agent_profiles
+        }
+        assert writers == {"claude-code", "codex", "opencode"}
         for name, provider in registry._PROVIDERS.items():
-            assert "agent-write" not in provider.agent_profiles, name
-            assert provider.supports_file_edits is False, name
+            assert provider.supports_file_edits is (name in writers), name
 
     def test_declared_usage_matches_an_implemented_extractor(self):
         from utils.providers.base import LLMProvider

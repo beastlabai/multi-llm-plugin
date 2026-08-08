@@ -612,6 +612,91 @@ def format_batches_for_output(
     return output_batches
 
 
+def run_implement_write_phase(
+    args: argparse.Namespace,
+    *,
+    plan_path: Path,
+    state: StateManager,
+    output_data: Dict[str, Any],
+    human_task_strategy: Optional[str],
+    human_task_decisions: Dict[str, str],
+) -> Optional[int]:
+    """Schedule the implement batches through the write executor, or decline (D3n).
+
+    Returns ``None`` when neither ``--exec-subagents`` nor
+    ``--dry-run-subagents`` was passed, so the caller falls through to today's
+    "emit task JSON, let the driving agent run it" path unchanged. That is the
+    additivity guarantee: with the flag off, nothing in this function runs.
+
+    When it does run it owns the whole phase: ``batch_index`` ordering with
+    verification gating the next dispatch, the resolved human-task strategy, the
+    per-batch snapshot/classify/append/record cycle, and finalization
+    (``mark_phase_completed`` + ``finalize_tracking`` + the implementation summary
+    + the plan-side reference). Its exit code is the phase's.
+    """
+    if not (getattr(args, "exec_subagents", False)
+            or getattr(args, "dry_run_subagents", False)):
+        return None
+
+    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.review_orchestrator_base import maybe_detach
+    from utils.write_phase_bridge import (
+        materialize_write_tasks,
+        write_task_file_for_phase,
+    )
+
+    phase_dir = str(get_phase_dir(plan_path, "implement"))
+    Path(phase_dir).mkdir(parents=True, exist_ok=True)
+    plan_file = str(plan_path.absolute())
+
+    # The detach boundary (D4): after every pre-flight — plan loaded, prerequisites
+    # gated, tasks decomposed, human-task strategy resolved, phase dir created — and
+    # before any child is dispatched, so a bad flag fails on the caller's terminal
+    # with no child and no log.
+    if getattr(args, "detach", False) or getattr(args, "internal_worker", False):
+        detached = maybe_detach(
+            args=args, mode="implement", phase_dir=phase_dir,
+            plan_file=plan_file, phase="implement",
+        )
+        if detached is not None:
+            return detached
+
+    tasks = materialize_write_tasks(
+        kind="implement",
+        batches=output_data.get("batches") or [],
+        phase_dir=phase_dir,
+        plan_file=plan_file,
+    )
+    task_file = write_task_file_for_phase(
+        kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
+    )
+    print(f"[write-subagents] materialized {len(tasks)} implement task(s): {task_file}")
+
+    scheduler = WriteBatchScheduler(
+        tasks=tasks,
+        phase_dir=phase_dir,
+        kind="implement",
+        output_dir=str(get_output_dir(plan_path)),
+        state=state,
+        plan_file=plan_file,
+        summary_file=output_data.get("summary_file"),
+        summary_file_relative=output_data.get("summary_file_relative"),
+        anchor=plan_file,
+        resume=bool(getattr(args, "resume", False)),
+        dry_run=bool(getattr(args, "dry_run_subagents", False)),
+        human_task_strategy=human_task_strategy,
+        human_task_decisions=human_task_decisions,
+    )
+    result = scheduler.run()
+    for line in result.messages:
+        print(line, file=sys.stderr if result.exit_code else sys.stdout)
+    if result.report_path:
+        print(f"[write-subagents] report: {result.report_path}")
+    if result.summary_file:
+        print(f"[write-subagents] implementation summary: {result.summary_file}")
+    return result.exit_code
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     bootstrap_streams()
@@ -934,6 +1019,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_temp_dir_gitignore(output_path.parent)
     output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
+
+    # --- the write executor (D3n): schedule the batches in this process --------
+    # Strictly additive: with neither flag set this returns None and everything
+    # below is byte-for-byte the native path that shipped before the executor.
+    scheduled = run_implement_write_phase(
+        args,
+        plan_path=plan_path,
+        state=state,
+        output_data=output_data,
+        human_task_strategy=human_task_strategy,
+        human_task_decisions=dict(state.get("human_task_decisions") or {}),
+    )
+    if scheduled is not None:
+        return scheduled
 
     # Print summary
     print("\n" + "=" * 60)

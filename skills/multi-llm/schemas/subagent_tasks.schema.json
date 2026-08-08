@@ -41,7 +41,11 @@
         "consolidation",
         "salvage",
         "human_decision_judge",
-        "task_generation"
+        "task_generation",
+        "apply_suggestions",
+        "apply_task_suggestions",
+        "apply_code_fixes",
+        "implement"
       ]
     },
     "inputs": {
@@ -152,7 +156,48 @@
         "suggestion_id": {"type": "string", "minLength": 1},
         "model": {"type": "string"},
         "phase": {"type": "string"},
-        "repo_root": {"type": "string"}
+        "repo_root": {"type": "string"},
+        "declared_files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "WRITE kinds only. The file set this batch declares it will touch, repo-root-relative. Drives D3h's pairwise-disjoint co-scheduling admission and D3l's pre-dispatch write-policy check; an EMPTY list means 'undeclared', which runs the task alone rather than being treated as 'touches nothing'."
+        },
+        "snapshot_files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "WRITE kinds only. Files the executor snapshots under {phase}/pre_batch/{task_id}/ before dispatch, so the post-run byte comparison (D3g) and `util restore-batch` (D3l) have a rollback point. Defaults to declared_files when absent."
+        },
+        "expected_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "WRITE kinds only. The suggestion/group/task ids this batch is supposed to apply. D3g spot-checks that THESE landed rather than merely that bytes moved: a result reporting only some of them with a non-empty diff is a partial application, not a success."
+        },
+        "prior_changes_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "WRITE kinds only. The stable `--id` for `prior_changes.py append` (suggestion/group/section/task key — never the loop index), so a re-dispatched batch appends once."
+        },
+        "can_parallelize": {
+          "type": "boolean",
+          "description": "WRITE kinds only. The batcher's opinion that this task may run beside its batch siblings. Necessary but not sufficient: driver.max_concurrent_write_subagents > 1 and the disjointness check must also agree (D3h)."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "WRITE kinds only (implement). Task ids this task depends on; the human-task strategies walk these edges (D3n)."
+        },
+        "is_human": {
+          "type": "boolean",
+          "description": "WRITE kinds only. Mirror of `executor_role == \"human\"` for readers that predate D2h. The schema requires the two to agree."
+        },
+        "file_key": {
+          "type": "string",
+          "description": "WRITE kinds only (apply_code_fixes). The file a code-fix batch is partitioned by (utils/code_fix_batcher.py). Provenance for the declared file set, never a second source of truth."
+        },
+        "task_title": {
+          "type": "string",
+          "description": "WRITE kinds only. Human-readable label for logs, metrics and the implementation summary."
+        }
       },
       "allOf": [
         {
@@ -206,6 +251,36 @@
               "context_mode": {"enum": ["inline", "workspace-read"]}
             }
           }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "apply_suggestions",
+                  "apply_task_suggestions",
+                  "apply_code_fixes",
+                  "implement"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": ["batch_index", "declared_files", "prior_changes_id"],
+            "properties": {
+              "capability_tier": {"const": "full"},
+              "context_mode": {"const": "workspace-read"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["is_human"], "properties": {"is_human": {"const": true}}},
+          "then": {"properties": {"executor_role": {"const": "human"}}}
+        },
+        {
+          "if": {"required": ["is_human"], "properties": {"is_human": {"const": false}}},
+          "then": {"properties": {"executor_role": {"const": "agent"}}}
         },
         {
           "if": {"required": ["executor_role"], "properties": {"executor_role": {"const": "human"}}},

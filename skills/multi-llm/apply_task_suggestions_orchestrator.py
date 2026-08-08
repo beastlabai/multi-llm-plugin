@@ -64,10 +64,16 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
     supports_skip_flag = True
     marks_phase_completed = False
     guard_double_nesting = False
+    # One shared artifact (the tasks file), so batches are strictly sequential.
+    write_kind = "apply_task_suggestions"
 
     # Instance state populated by pre_validate_hook
     tasks_file: str = ""
     tasks_content: str = ""
+
+    def write_phase_artifact(self) -> str:
+        """The tasks file, not the plan: that is what these batches edit (D3h)."""
+        return self.tasks_file or self.plan_path
 
     # ----------------------------------------------------------------
     # Argument parser

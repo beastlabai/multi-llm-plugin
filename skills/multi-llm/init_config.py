@@ -387,9 +387,34 @@ def _emit_driver_block(driver_cfg: dict) -> "list[str]":
     """
     out = ["# driver:"]
     for key, val in (driver_cfg or {}).items():
+        if isinstance(val, dict):
+            # `write_paths:` — a mapping of glob lists (D3l). Rendered nested so
+            # uncommenting the stanza yields the same policy the base ships,
+            # rather than a scalar a user has to reconstruct from the docs.
+            out.append(f"#   {key}:")
+            for sub_key, sub_val in val.items():
+                if isinstance(sub_val, list):
+                    out.append(f"#     {sub_key}:")
+                    out.extend(f"#       - {_yaml_item(item)}" for item in sub_val)
+                else:
+                    out.append(f"#     {sub_key}: {_yaml_scalar(sub_val)}")
+            continue
         rendered = "null" if val is None else _yaml_scalar(val)
         out.append(f"#   {key}: {rendered}")
     return out
+
+
+def _yaml_item(val) -> str:
+    """Render a list item, quoting the glob forms YAML would otherwise misread.
+
+    A bare ``**`` or a leading ``*`` starts a YAML alias, so those items are
+    single-quoted — matching how the base file spells them, which is what keeps
+    the byte-diff parity test meaningful rather than merely passing.
+    """
+    text = _yaml_scalar(val)
+    if text[:1] in ("*", "&", "!", "%", "@", "`", "?", "|", ">", "{", "[", "'", '"', "#"):
+        return "'" + text.replace("'", "''") + "'"
+    return text
 
 
 def _emit_defaults_items(specs: "list[str]") -> "list[str]":

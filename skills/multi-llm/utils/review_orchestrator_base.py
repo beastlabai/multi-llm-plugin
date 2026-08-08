@@ -292,6 +292,15 @@ def dispatch_salvage_tasks(
     """
     if not exec_subagents_requested(args):
         return []
+    if getattr(args, "dry_run_subagents", False):
+        # D3l: "start no child" has no exception for salvage. Salvage is the one
+        # non-fatal dispatch, which is precisely why it would be the easiest place
+        # for a dry run to quietly spawn something.
+        print(
+            "[dry-run-subagents] skipping salvage dispatch: no child is started "
+            "under this flag, so no model result is repaired."
+        )
+        return []
     import glob as glob_module
 
     from .subagent_executor import ExecutorError, run_task_file
@@ -1571,7 +1580,11 @@ async def reaggregate_from_existing_files(
     # `subagent_batch_report` is executor bookkeeping (D3i), not a model
     # result: it lives in the phase dir and MUST be excluded or the glob
     # below would parse it as a suggestion list and crash reaggregate.
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report']
+    # `subagent_dry_run` is the same hazard from --dry-run-subagents (D3l), which
+    # writes into THIS dir on a read phase; `write_batch_report`/`write_tasks` are
+    # the write scheduler's, which normally land in an apply/implement dir but are
+    # listed here so a shared or hand-copied phase dir cannot resurrect the bug.
+    exclude_patterns = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report', 'subagent_dry_run', 'write_batch_report', 'write_tasks']
     result_files = [
         f for f in all_files
         if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude_patterns)

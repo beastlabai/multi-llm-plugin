@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "write_batch_result.schema.json",
+  "title": "Write-batch result (D3g)",
+  "description": "The JSON a write subagent prints on stdout for an apply-* or implement batch. It is the batch's `output_path` (apply_batch_N.json / implement_batch_N.json), validated exactly like a validation result before anything is written — a runner that returns prose fails the task instead of being counted as applied (D3f). It is NOT the verdict: the executor's own pre-batch snapshot / post-run byte comparison decides applied vs. clean failure vs. partial application, and `summary` is the field `prior_changes.py append` takes its one-liner from, which is why it is part of the contract rather than a nicety.",
+  "type": "object",
+  "required": ["status", "summary"],
+  "additionalProperties": true,
+  "properties": {
+    "status": {
+      "enum": ["applied", "no-op", "failed"],
+      "description": "The runner's own claim. `applied` = it edited files; `no-op` = nothing needed changing (already applied by a prior batch); `failed` = it could not apply the batch. Never the verdict on its own: a claim of `applied` with an empty snapshot diff is a clean failure, and a claim of `failed` with a non-empty diff is a partial application."
+    },
+    "ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The suggestion/group/task ids this batch actually applied. Compared against the task's `expected_ids` so 'some of them landed' is detected as a partial application rather than read as success."
+    },
+    "files_touched": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The files the runner says it edited, repo-root-relative. Cross-checked against the observed diff; the observed set — not this one — is what the write policy is enforced against post-run."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "One line, <= 200 chars. Goes verbatim into `prior_changes.py append --summary`, which is why the contract requires it: the injected prior-batch context must come from a structured field, never from compressing a chat reply."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional free-text detail for the batch report and the implementation summary. Never parsed."
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional runner-reported usage. Absent means NOT REPORTED, never zero (D3j); the executor records duration itself either way and never derives token counts."
+    }
+  }
+}

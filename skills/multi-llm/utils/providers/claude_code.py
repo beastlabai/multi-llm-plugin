@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..json_extractor import extract_json_from_text
 from .base import (
     PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
     USAGE_FULL,
     LLMProvider,
@@ -37,6 +38,33 @@ READONLY_DENIED_TOOLS = (
     "Task",
 )
 
+# The `agent-write` tool policy (D3g/D3l). `--permission-mode acceptEdits` is
+# Claude Code's own pre-approval for edits (documented in `claude --help`,
+# verified against 2.1.224); it is NOT a sandbox, which is exactly why the
+# executor layers the `driver.write_paths` policy and the pre-batch snapshot on
+# top of it (D3l: the runner's mechanism is the preventive control, the policy is
+# the detective second layer).
+#
+# `Task` stays denied on this profile too: a nested subagent would run outside
+# every ceiling the executor computed (D3c `nested_exec`) and its writes would
+# not appear in this dispatch's audit record. `Bash` IS allowed — an implement
+# batch legitimately runs a formatter or a test — and that is precisely the hole
+# the post-run policy recomputation exists to catch.
+WRITE_ALLOWED_TOOLS = (
+    "Read",
+    "Grep",
+    "Glob",
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+    "Bash",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+)
+WRITE_DENIED_TOOLS = ("Task",)
+
 
 class ClaudeCodeProvider(LLMProvider):
     """Provider for Claude Code CLI tool.
@@ -62,11 +90,12 @@ class ClaudeCodeProvider(LLMProvider):
     # existing invocations are byte-identical.
     supported_prompt_transports = ("argv", "stdin")
 
-    # Subagent-runner declarations (D3e/D3j/D3m). `agent-write` is deliberately
-    # absent: the edit-capable invocation lands with the write executor, and
-    # declaring it here before it exists would make the CI cross-check pass on a
-    # capability that does not work.
-    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    # Subagent-runner declarations (D3e/D3j/D3m). `agent-write` is the
+    # `--permission-mode acceptEdits` invocation below; `supports_file_edits`
+    # tracks it so `tests/test_providers.py` can cross-check the declaration
+    # against the implemented branch in both directions.
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
+    supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
     version_cmd = ("claude", "--version")
@@ -142,7 +171,26 @@ class ClaudeCodeProvider(LLMProvider):
         one. Writes are refused by Claude Code's own permission mechanism, not by
         anything this repo enforces after the fact, which is what makes it safe
         to hand an untrusted (plan/diff/review) prompt to.
+
+        ``agent-write`` swaps that policy for the edit-capable one and adds
+        ``--permission-mode acceptEdits``, which is what makes a headless apply /
+        implement batch possible at all. It is deliberately **not** a
+        ``--dangerously-skip-permissions``-class bypass: the executor pins ``cwd``
+        to the resolved repo root (D3h), enforces ``driver.write_paths`` on both
+        sides of the run and snapshots every file the batch may touch (D3l).
         """
+        if profile == PROFILE_AGENT_WRITE:
+            cmd = self.build_command(prompt, model)
+            return [
+                *cmd[:-1],
+                "--permission-mode",
+                "acceptEdits",
+                "--allowed-tools",
+                ",".join(WRITE_ALLOWED_TOOLS),
+                "--disallowed-tools",
+                ",".join(WRITE_DENIED_TOOLS),
+                cmd[-1],
+            ]
         if profile != PROFILE_AGENT_READONLY:
             return super().build_agent_command(prompt, model, profile)
         cmd = self.build_command(prompt, model)

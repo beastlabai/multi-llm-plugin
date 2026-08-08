@@ -114,6 +114,8 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "update-tasks": ("update_plan_tasks", "main", "Write generated tasks into a plan's Tasks section."),
     "prereq": ("check_workflow_prerequisites", "main", "Check, skip or report a workflow phase's prerequisites."),
     "backup": ("utils.backup", "main", "Back up a file before it is modified."),
+    "restore-batch": ("utils.restore_batch", "main",
+                      "Restore a failed write batch from its pre-batch snapshot."),
     "runs": ("utils.run_registry", "main", "List (or --sweep) this project's detached runs."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }

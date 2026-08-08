@@ -31,6 +31,23 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
         read-only sentinel test can prove a runner that ignores its profile is
         detectable (a genuinely read-only runner never sets this).
+    MOCK_LLM_EDITS: JSON list of ``{path, mode: create|patch|delete, content}``
+        applied **relative to the invocation cwd** before the mock prints its
+        result. This is the write path (D3g): it is what makes the four outcomes
+        the executor must distinguish constructible —
+          * a real edit + ``status: applied``      -> applied
+          * no edit  + ``status: applied``         -> clean failure
+          * a partial edit + ``status: failed``    -> partial application
+          * ``MOCK_LLM_PROSE=1``                   -> schema rejection
+        An entry resolving outside the invocation cwd is a **test-authoring error**
+        the mock rejects loudly (exit 9): the sandbox assertions must never be
+        satisfied by a mock that simply could not escape.
+    MOCK_LLM_WRITE_RESULT: JSON object the mock prints as the D3g batch result
+        (``status``/``ids``/``files_touched``/``summary``/``notes``). Defaults are
+        derived from MOCK_LLM_EDITS so the common case needs only that.
+    MOCK_LLM_PROSE: When "1", print prose instead of result JSON — the negative
+        case for "a runner that returns prose fails the task instead of being
+        counted as applied".
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -256,6 +273,119 @@ def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# The write path (D3g): real edits under cwd, then the batch result JSON
+# ---------------------------------------------------------------------------
+
+EXIT_TEST_AUTHORING_ERROR = 9
+
+
+def apply_mock_edits() -> List[Dict[str, Any]]:
+    """Apply ``MOCK_LLM_EDITS`` relative to the invocation cwd, before answering.
+
+    Returns the list of applied entries (empty when the variable is unset), so the
+    default batch result can name the files it actually touched.
+
+    An entry that resolves outside the invocation cwd exits **9** rather than being
+    clamped: the executor's containment and sandbox assertions must be satisfied by
+    a mock that genuinely *could* have escaped and was stopped, never by one that
+    was structurally incapable of it. Exit 9 is distinct from every provider-failure
+    code so a test-authoring mistake cannot masquerade as a runner error.
+    """
+    raw = os.environ.get("MOCK_LLM_EDITS")
+    if not raw:
+        return []
+    try:
+        edits = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"MOCK EDITS ERROR: MOCK_LLM_EDITS is not JSON ({exc})", file=sys.stderr)
+        sys.exit(EXIT_TEST_AUTHORING_ERROR)
+    if not isinstance(edits, list):
+        print("MOCK EDITS ERROR: MOCK_LLM_EDITS must be a JSON list", file=sys.stderr)
+        sys.exit(EXIT_TEST_AUTHORING_ERROR)
+
+    cwd = Path.cwd().resolve()
+    applied: List[Dict[str, Any]] = []
+    for entry in edits:
+        if not isinstance(entry, dict) or not entry.get("path"):
+            print(
+                f"MOCK EDITS ERROR: each entry needs a `path`; got {entry!r}",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_TEST_AUTHORING_ERROR)
+        target = Path(entry["path"])
+        if not target.is_absolute():
+            target = cwd / target
+        resolved = target.resolve()
+        try:
+            inside = resolved.is_relative_to(cwd)
+        except AttributeError:  # pragma: no cover - Python < 3.9
+            inside = os.path.commonpath([str(resolved), str(cwd)]) == str(cwd)
+        if not inside:
+            print(
+                f"MOCK EDITS ERROR: {entry['path']!r} resolves to {resolved}, "
+                f"outside the invocation cwd {cwd}. That is a test-authoring "
+                f"error: the write-containment assertions must be satisfied by a "
+                f"mock that could have escaped, not by one that could not.",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_TEST_AUTHORING_ERROR)
+
+        mode = str(entry.get("mode") or "patch")
+        if mode == "delete":
+            try:
+                resolved.unlink()
+            except FileNotFoundError:
+                pass
+        elif mode == "create":
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(str(entry.get("content") or ""), encoding="utf-8")
+        elif mode == "patch":
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            existing = (
+                resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
+            )
+            resolved.write_text(
+                existing + str(entry.get("content") or ""), encoding="utf-8"
+            )
+        else:
+            print(
+                f"MOCK EDITS ERROR: unknown mode {mode!r} (create|patch|delete)",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_TEST_AUTHORING_ERROR)
+        applied.append({
+            "path": os.path.relpath(str(resolved), str(cwd)).replace(os.sep, "/"),
+            "mode": mode,
+        })
+    return applied
+
+
+def write_batch_result(applied: List[Dict[str, Any]]) -> str:
+    """The D3g batch result JSON this invocation prints on stdout.
+
+    ``MOCK_LLM_WRITE_RESULT`` wins entirely (so a test can claim ``applied`` while
+    editing nothing, or ``failed`` while editing something); otherwise the shape is
+    derived from what was actually edited. Usage fields appear **only** when the
+    scenario sets them, which is what gives the "no fabricated token counts"
+    assertion a negative case.
+    """
+    override = os.environ.get("MOCK_LLM_WRITE_RESULT")
+    if override:
+        return override
+    touched = [entry["path"] for entry in applied if entry["mode"] != "delete"]
+    touched += [entry["path"] for entry in applied if entry["mode"] == "delete"]
+    return json.dumps({
+        "status": "applied" if applied else "no-op",
+        "ids": [],
+        "files_touched": touched,
+        "summary": (
+            f"edited {len(touched)} file(s): {', '.join(touched)}"[:200]
+            if touched else "nothing needed changing"
+        ),
+    })
+
+
 def get_response_content(prompt: str) -> str:
     """Determine response content based on environment and prompt.
 
@@ -368,6 +498,11 @@ def log_call(provider: str, args: List[str], prompt: str) -> None:
         "argv": sys.argv,
         "args": args,
         "prompt": prompt,
+        # The assertion surface for D3e/D3h: `cwd` proves the executor pinned the
+        # resolved repo root rather than inheriting one, and `prompt_transport`
+        # proves a large prompt actually left argv rather than merely fitting.
+        "cwd": os.getcwd(),
+        "prompt_transport": "argv" if prompt in args else "stdin",
         "env": {
             k: v for k, v in os.environ.items()
             if k.startswith("MOCK_LLM_") or k == "MULTI_LLM_TEST_MODE"
@@ -654,6 +789,12 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
                             default=None)
         parser.add_argument("--disallowed-tools", "--disallowedTools",
                             dest="disallowed_tools", default=None)
+        # The `agent-write` profile's pre-approval (D3g). Accepting it here is what
+        # keeps an edit-capable dispatch from degrading into an argparse exit-2
+        # that looks like a provider failure. `--dangerously-skip-permissions` is
+        # deliberately NOT accepted: no profile may emit it, so a regression that
+        # introduces it fails loudly here.
+        parser.add_argument("--permission-mode", dest="permission_mode", default=None)
         parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         return args, args.prompt
@@ -751,6 +892,25 @@ def main() -> int:
 
     # Log the call (always, regardless of mode)
     log_call(provider, sys.argv[1:], prompt)
+
+    # The write path (D3g): edits land BEFORE the result is printed, so the
+    # executor's post-run snapshot comparison sees exactly what a real
+    # edit-capable dispatch would have left behind.
+    applied_edits = apply_mock_edits()
+    if applied_edits or os.environ.get("MOCK_LLM_WRITE_RESULT") or os.environ.get(
+        "MOCK_LLM_PROSE"
+    ):
+        if os.environ.get("MOCK_LLM_PROSE") == "1":
+            # The schema-rejection case: a runner that narrates instead of
+            # answering must fail the task, never be counted as applied.
+            content = (
+                "I went ahead and made the changes you asked for. Everything "
+                "looks good now! Let me know if you want anything else."
+            )
+        else:
+            content = write_batch_result(applied_edits)
+        print(format_output(provider, content))
+        return 0
 
     # Check for simulated failures (legacy)
     if os.environ.get("MOCK_LLM_FAIL") == "1":

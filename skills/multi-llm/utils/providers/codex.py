@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..json_extractor import extract_json_from_text
 from .base import (
     PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
     USAGE_FULL,
     LLMProvider,
@@ -41,7 +42,8 @@ class CodexProvider(LLMProvider):
     # three documented sandbox policies (`codex exec --help`, verified against
     # codex-cli 0.146.0), so the read-only profile is the CLI's own sandbox
     # rather than anything this repo enforces afterwards.
-    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
+    supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
     version_cmd = ("codex", "--version")
@@ -103,7 +105,21 @@ class CodexProvider(LLMProvider):
         ``generate`` path hardcodes) for ``--sandbox read-only``: codex refuses
         model-generated writes itself, so a prompt-injected validator cannot edit
         the repository while pretending to score suggestions.
+
+        ``agent-write`` keeps ``--sandbox workspace-write`` — codex's own
+        documented write policy, rooted at the process ``cwd``, which the executor
+        pins to the resolved repo root (D3h). It is deliberately **not**
+        ``--dangerously-bypass-approvals-and-sandbox`` (nor the older
+        ``--yolo``): a runner with no honored write sandbox is refused for
+        ``agent-write``, so fabricating a bypass here would delete the very
+        boundary that makes the profile eligible. Network access is left at
+        codex's own workspace-write default rather than being widened here.
         """
+        if profile == PROFILE_AGENT_WRITE:
+            # Identical to `build_command`, which already names the sandbox
+            # explicitly: codex's no-flag default is trust-dependent, so the flag
+            # is the policy statement, and restating it would be the only change.
+            return self.build_command(prompt, model)
         if profile != PROFILE_AGENT_READONLY:
             return super().build_agent_command(prompt, model, profile)
         cmd = self.build_command(prompt, model)
