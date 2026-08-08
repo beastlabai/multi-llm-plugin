@@ -33,7 +33,7 @@ driving agent re-implements.
    (`task_generation_result.json` under the phase dir) and re-invoke the mode with
    `--reaggregate` — the one follow-up command the orchestrator prints. The
    subagent **only prints**; the invoker persists. There is no temp file, no
-   `Write`-tool step and no second git-root resolution anywhere in this flow.
+   agent-side file write and no second git-root resolution anywhere in this flow.
 
 4. **Validation happens before anything touches the plan**: the document is checked
    against `schemas/generated_tasks.schema.json` plus the semantic rules

@@ -48,7 +48,7 @@ The orchestrator groups related fixes by file for efficient processing:
 
 ### Subagent Routing
 
-All fix batches use `executor_role: "agent"` — a code review never emits a manual step. (Batches also carry the Claude-Code-only `subagent_type` for hosts whose native Task tool requires that parameter; no reader branches on it.)
+All fix batches use `executor_role: "agent"` — a code review never emits a manual step. (Batches also carry an optional host-specific subagent-type hint for hosts whose own subagent mechanism requires one; no reader branches on it.)
 
 ### Efficiency Gains
 
@@ -64,7 +64,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
    - Only process fixes with `status: "valid"`
    - Exclude issues marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related fixes by file location
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
+4. **Handle Human Decisions**: For `needs-human-decision` items, **ask the user** — each rendered question also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
 5. **Batch Application**: Process each batch with a specialist subagent:
    - Run the batch as a subagent (every batch is `executor_role: "agent"`)
    - Wait for completion before moving to the next batch
@@ -126,7 +126,7 @@ When validation failed due to parsing errors or timeouts, you can retry:
 - `--revalidate-all-human`: Also re-validate all `needs-human-decision` items
 - `--internal-revalidation`: Run revalidation inside the orchestrator (legacy mode)
 
-**Note**: By default, revalidation is delegated to a Claude Code subagent. Use `--internal-revalidation` to run revalidation inside the orchestrator (legacy mode).
+**Note**: By default, revalidation is delegated to a subagent. Use `--internal-revalidation` to run revalidation inside the orchestrator (legacy mode).
 
 ### Resume/State Options
 
@@ -164,12 +164,12 @@ If not found, inform user to run `--review-code` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" [options]
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" [options]
 ```
 
 **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
-**IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
+**IMPORTANT**: Run this command in the foreground — do **not** run it detached. The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
 
 The orchestrator will:
 1. Load validation results and grouped issues
@@ -177,7 +177,7 @@ The orchestrator will:
 3. Group fixes into efficient batches by file
 4. Determine appropriate subagent type for each batch
 5. Write output to `{plan}/apply-fixes/orchestrator_output.json`
-6. Exit - Claude Code handles the actual application
+6. Exit — the driving agent handles the actual application
 
 ### 2a. Handle No-Selections Confirmation
 
@@ -191,7 +191,7 @@ passed.
 
 If present (attended runs only):
 1. Display the warning message to the user
-2. Use AskUserQuestion:
+2. **Ask the user**:
    > "No user selections were found (no user_selections.json, consolidated_user_selections.json, or report.md edits detected). This will apply ALL {item_count} valid fixes. Continue?"
    > Options: "Yes, apply all" / "No, I need to make my selections first"
 3. If user confirms: Re-run the orchestrator with `--no-confirm` appended
@@ -204,14 +204,14 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which fixes will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" --plan-file "$PLAN_PATH" --phase apply-code-fixes
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-code-fixes
 ```
 
 This prints a formatted summary with each fix's title and status. Display this output to the user before proceeding.
 
 ### 4. Read the Orchestrator Output
 
-Use the **Read tool** to load `{plan}/apply-fixes/orchestrator_output.json`.
+Read `{plan}/apply-fixes/orchestrator_output.json`.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
 - `batches`: Array of batch objects, each with `prompt`, `file_key`, `executor_role`, `fixes`
@@ -221,11 +221,11 @@ Extract the following key fields directly from the Read output (do NOT use Bash/
 
 ### 5. Process Batches Sequentially
 
-Use the batch data already loaded from the Read tool in step 4. Do NOT use Bash/python to re-parse or extract fields from the JSON file.
+Use the batch data already loaded in step 4. Do NOT use Bash/python to re-parse or extract fields from the JSON file.
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
   --state-file "$STATE_FILE" --phase "apply-code-fixes" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -234,7 +234,7 @@ Where `{total_batches}` is the length of the `batches` array.
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
 this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
-Task subagent, diffs against the snapshot and appends to the prior-changes log.
+subagent, diffs against the snapshot and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -261,7 +261,8 @@ Three flags belong to that path and are worth knowing even on this one:
   command to poll. Per-batch progress lands in `{phase}/.status.json` under
   `progress.write_subagents`, so an unattended write run is observable with no chat
   context at all. Never combine it with a host's own background primitive: on Claude
-  Code use `run_in_background` and never pass `--detach`.
+  host resolves *run detached* to its own background mechanism uses that
+  mechanism and never passes `--detach`.
 - Rollback, when a batch half-applies —
   `multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>` (also
   `--all-failed`), invoked through the dispatcher the same way every other mode is.
@@ -272,11 +273,11 @@ Three flags belong to that path and are worth knowing even on this one:
   reverts itself: the run exits 3 naming this command, because an automatic revert
   would destroy the half-applied state a human needs to inspect.
 
-For each batch (index N, starting at 1) returned by the orchestrator, Claude MUST:
+For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" read \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
      --output-dir "{plan}/apply-fixes"
    ```
    Capture stdout as `prior_changes_text`.
@@ -302,7 +303,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" append \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}/apply-fixes" \
      --id "{file_key}" --phase "apply-fixes" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
@@ -317,19 +318,19 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 8. **Log the result** - Track success/failure for the summary
 9. **Record metrics** — Run:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
      --label "Batch {N} ({file_key})" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
 
-**CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple Task subagents simultaneously.
+**CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple subagents simultaneously.
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "apply-code-fixes"
 ```
 
@@ -372,7 +373,7 @@ After all batches are processed, create `{prefix}_applied_fixes.md`:
 - Fixes applied: N
 - Fixes skipped: N
 - Human decisions made: N
-- Decided by Claude: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
+- Decided by the judge subagent: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
 - Typecheck status: pass/fail
 
 ## Batching Efficiency
@@ -424,14 +425,14 @@ Fixes whose decision was offloaded to Claude — via `--claude-decide`, the batc
 
    Generate resource usage:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "apply-code-fixes"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/code-review/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/html_report_generator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/code-review" \
      --state-file "$STATE_FILE" \
@@ -548,7 +549,7 @@ The orchestrator outputs JSON with batches:
 ```
 User: /multi-llm:multi-llm --apply-code-fixes plans/my-feature.md
 
-Claude:
+Agent:
 1. Checks for prerequisite files - found
 2. Runs orchestrator to get batched fixes
 3. Gets 8 valid fixes in 4 batches, 2 needs-human-decision
@@ -567,7 +568,7 @@ For each batch (sequentially):
 - Logs results
 
 For needs-human-decision items:
-- Uses AskUserQuestion to get user decision
+- Asks the user for a decision
 - Applies or skips based on response
 
 4. Runs verification: pnpm typecheck && pnpm lint:fix
@@ -662,7 +663,7 @@ Fix 2: [What was changed]
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **DELEGATE EVERY BATCH**: Every batch is `executor_role: "agent"` — run it as a subagent, never inline
 3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
-4. **NEVER IMPLEMENT MANUALLY**: Always use Task tool with the appropriate subagent type
+4. **NEVER IMPLEMENT MANUALLY**: always **spawn subagents** to do the work
 5. **TRACK EVERYTHING**: Log every applied/skipped fix for the report
 6. **SECURITY IS ISOLATED**: Security and HIGH importance fixes are always in their own batch
 7. **VERIFY AFTER FIXES**: Run typecheck after applying all fixes
@@ -675,7 +676,7 @@ Fix 2: [What was changed]
 To process fixes one-at-a-time (legacy mode):
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" --no-batch
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -733,13 +734,13 @@ If validation produces many `validation_failed` items due to parsing errors or t
 
 ```bash
 # Option 1: Re-run validation with a different model
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --revalidate \
   --revalidate-model cursor-agent:opus
 
 # Option 2: Bulk approve validation failures (if you trust the fixes)
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --approve-validation-failed
 ```
@@ -799,12 +800,12 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --fresh
 ```

@@ -62,9 +62,9 @@ With batching, 10 suggestions might become 3-4 batches:
    - Only process suggestions with `status: "valid"`
    - Exclude suggestions marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related suggestions into batches
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one item's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every item up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those suggestions to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
+4. **Handle Human Decisions**: For `needs-human-decision` items, **ask the user** — each rendered question also offers a per-item **Let Claude decide** option that offloads just that one item's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every item up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those suggestions to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
 5. **Batch Application**: Process each batch with a single subagent:
-   - Spawn a Task subagent with the batch prompt
+   - Spawn a subagent with the batch prompt
    - Wait for completion before moving to the next batch
    - This prevents conflicts from concurrent edits
 6. **Generate Report**: Create `{prefix}_applied_suggestions.md` with results
@@ -121,7 +121,7 @@ When validation failed due to parsing errors or timeouts, you can retry:
 - `--revalidate-model MODEL`: Use a different model for retry (e.g., `cursor-agent:opus`)
 - `--revalidate-all-human`: Also re-validate all `needs-human-decision` items
 
-**Note**: By default, revalidation is delegated to a Claude Code subagent. Use `--internal-revalidation` to run revalidation inside the orchestrator (legacy mode).
+**Note**: By default, revalidation is delegated to a subagent. Use `--internal-revalidation` to run revalidation inside the orchestrator (legacy mode).
 
 ### Resume/State Options
 
@@ -159,19 +159,19 @@ If not found, inform user to run `--review-plan` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" [options]
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" [options]
 ```
 
 **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
-**IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
+**IMPORTANT**: Run this command in the foreground — do **not** run it detached. The orchestrator runs quickly — it only generates batch JSON, it does not apply changes — so 10 minutes is far more than enough.
 
 The orchestrator will:
 1. Load validation results and grouped suggestions
 2. Filter to only `valid` suggestions
 3. Group suggestions into efficient batches
 4. Write output to `{plan}/apply-suggestions/orchestrator_output.json`
-5. Exit - Claude Code handles the actual application
+5. Exit — the driving agent handles the actual application
 
 ### 2a. Handle No-Selections Confirmation
 
@@ -185,7 +185,7 @@ passed.
 
 If present (attended runs only):
 1. Display the warning message to the user
-2. Use AskUserQuestion:
+2. **Ask the user**:
    > "No user selections were found (no user_selections.json, consolidated_user_selections.json, or report.md edits detected). This will apply ALL {item_count} valid items. Continue?"
    > Options: "Yes, apply all" / "No, I need to make my selections first"
 3. If user confirms: Re-run the orchestrator with `--no-confirm` appended
@@ -198,14 +198,14 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which suggestions will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/display_decisions.py" --plan-file "$PLAN_PATH" --phase apply-suggestions
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-suggestions
 ```
 
 This prints a formatted summary with each suggestion's title and status. Display this output to the user before proceeding.
 
 ### 4. Read the Orchestrator Output
 
-Use the **Read tool** to load `{plan}/apply-suggestions/orchestrator_output.json`.
+Read `{plan}/apply-suggestions/orchestrator_output.json`.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
 - `batches`: Array of batch objects, each with `prompt`, `section_key`, `suggestions`
@@ -215,11 +215,11 @@ Extract the following key fields directly from the Read output (do NOT use Bash/
 
 ### 5. Process Batches Sequentially
 
-Use the batch data already loaded from the Read tool in step 4. Do NOT use Bash/python to re-parse or extract fields from the JSON file.
+Use the batch data already loaded in step 4. Do NOT use Bash/python to re-parse or extract fields from the JSON file.
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
   --state-file "$STATE_FILE" --phase "apply-suggestions" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -228,7 +228,7 @@ Where `{total_batches}` is the length of the `batches` array.
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
 this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
-Task subagent, diffs against the snapshot and appends to the prior-changes log.
+subagent, diffs against the snapshot and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -255,7 +255,8 @@ Three flags belong to that path and are worth knowing even on this one:
   command to poll. Per-batch progress lands in `{phase}/.status.json` under
   `progress.write_subagents`, so an unattended write run is observable with no chat
   context at all. Never combine it with a host's own background primitive: on Claude
-  Code use `run_in_background` and never pass `--detach`.
+  host resolves *run detached* to its own background mechanism uses that
+  mechanism and never passes `--detach`.
 - Rollback, when a batch half-applies —
   `multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>` (also
   `--all-failed`), invoked through the dispatcher the same way every other mode is.
@@ -266,11 +267,11 @@ Three flags belong to that path and are worth knowing even on this one:
   reverts itself: the run exits 3 naming this command, because an automatic revert
   would destroy the half-applied state a human needs to inspect.
 
-For each batch (index N, starting at 1) returned by the orchestrator, Claude MUST:
+For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" read \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
      --output-dir "{plan}/apply-suggestions"
    ```
    Capture stdout as `prior_changes_text`.
@@ -287,15 +288,15 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
    ```
    The snapshot path is `{project_root}/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`, where `{project_root}` is the output of the command above and `{plan_stem}` is the plan filename without extension.
 
-   Also resolve the **plan file's absolute path** now — call it `{plan_abs}`. The plan argument is commonly relative (e.g. `plans/my-feature.md`), but harness Read/Write tools require OS-native absolute paths, so a relative path cannot be handed to them directly. If the plan path is already absolute, use it as-is; otherwise join `{project_root}` with the relative plan path (e.g. `{project_root}/plans/my-feature.md`).
+   Also resolve the **plan file's absolute path** now — call it `{plan_abs}`. The plan argument is commonly relative (e.g. `plans/my-feature.md`), but a host's file-reading and file-writing tools require OS-native absolute paths, so a relative path cannot be handed to them directly. If the plan path is already absolute, use it as-is; otherwise join `{project_root}` with the relative plan path (e.g. `{project_root}/plans/my-feature.md`).
 
    **Shell variables do NOT survive between Bash calls** — each Bash invocation is a fresh process, so do not stash these values in variables like `PROJECT_ROOT` or `BATCH_SNAPSHOT` for later steps. Note the concrete absolute snapshot path and `{plan_abs}` now and substitute them literally wherever later steps reference them.
 
-   Capture the snapshot with harness tools, not Bash: **Read** `{plan_abs}` with the Read tool, then **Write** its exact content to the snapshot path with the Write tool (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`; the Write tool creates parent directories automatically, so no mkdir step and no Bash copy command is needed). If `{project_root}/.multi-llm/tmp/.gitignore` does not exist yet, also Write it with content `*` so the temp dir ignores itself.
+   Capture the snapshot with your host's file tools, not Bash: read `{plan_abs}`, then write its exact content to the snapshot path (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`; a host file-write that creates parent directories needs no mkdir step and no Bash copy command). If `{project_root}/.multi-llm/tmp/.gitignore` does not exist yet, also write it with content `*` so the temp dir ignores itself.
 
    Keep the concrete absolute snapshot path and `{plan_abs}` for step 6.
 
-4. **Spawn a Task subagent** using the substituted prompt
+4. **Spawn a subagent** using the substituted prompt
    - Use `general-purpose` subagent type
    - The prompt already contains all suggestions and instructions
 5. **Wait for completion** - Do NOT parallelize batch processing
@@ -327,7 +328,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 
 8. **Append to prior changes (only after verification)** — This step runs **only** after step 6 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/prior_changes.py" append \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}/apply-suggestions" \
      --id "{suggestion_id}" --phase "apply-suggestions" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
@@ -342,19 +343,19 @@ For each batch (index N, starting at 1) returned by the orchestrator, Claude MUS
 9. **Log the result** - Track success/failure for the summary
 10. **Record metrics** — Run:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-suggestions" \
      --label "Batch {N} ({section_key})" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
 
-**CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple Task subagents simultaneously.
+**CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple subagents simultaneously.
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "apply-suggestions"
 ```
 
@@ -383,7 +384,7 @@ After all batches are processed, create `{prefix}_applied_suggestions.md`:
 - Suggestions applied: N
 - Suggestions skipped: N
 - Human decisions made: N
-- Decided by Claude: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
+- Decided by the judge subagent: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
 
 ## Batching Efficiency
 - Total suggestions: N
@@ -428,14 +429,14 @@ Items whose decision was offloaded to Claude — via `--claude-decide`, the batc
 
    Generate resource usage:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "apply-suggestions"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/review-plan/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/html_report_generator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/review-plan" \
      --state-file "$STATE_FILE" \
@@ -528,7 +529,7 @@ The orchestrator outputs JSON with batches:
 ```
 User: /multi-llm:multi-llm --apply-suggestions plans/my-feature.md
 
-Claude:
+Agent:
 1. Checks for prerequisite files - found
 2. Runs orchestrator to get batched suggestions
 3. Gets 8 valid suggestions in 3 batches, 2 needs-human-decision
@@ -541,12 +542,12 @@ Claude:
 
 For each batch (sequentially):
 - Reads current plan
-- Spawns Task subagent with batch.prompt
+- Spawns one subagent with batch.prompt
 - Waits for completion
 - Logs results
 
 For needs-human-decision items:
-- Uses AskUserQuestion to get user decision
+- Asks the user for a decision
 - Applies or skips based on response
 
 4. Generates summary report
@@ -635,7 +636,7 @@ Suggestion N: Already addressed by prior changes - skipped
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **ALWAYS READ FIRST**: Read the plan before each batch to get latest state
 3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
-4. **USE SUBAGENTS**: Always use Task tool with `general-purpose` type
+4. **USE SUBAGENTS**: always **spawn subagents** to do the work
 5. **PRESERVE BACKUP**: The original plan backup from review-plan should not be overwritten
 6. **TRACK EVERYTHING**: Log every applied/skipped suggestion for the report
 7. **DELETIONS ARE ISOLATED**: Deletion suggestions are always in their own batch
@@ -647,7 +648,7 @@ Suggestion N: Already addressed by prior changes - skipped
 To process suggestions one-at-a-time (legacy mode):
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-batch
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -665,13 +666,13 @@ If validation produces many `validation_failed` items due to parsing errors or t
 
 ```bash
 # Option 1: Re-run validation with a different model
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions \
   --plan-file "$PLAN_PATH" \
   --revalidate \
   --revalidate-model cursor-agent:opus
 
 # Option 2: Bulk approve validation failures (if you trust the suggestions)
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions \
   --plan-file "$PLAN_PATH" \
   --approve-validation-failed
 ```
@@ -695,7 +696,7 @@ The `revalidation_tasks.json` file uses a reference-based format (small metadata
   "grouped_file": "{plan}/review-plan/grouped.json",
   "plan_file": "/absolute/path/to/plan.md",
   "item_indices": [0, 2, 5],
-  "reaggregate_command": "uv run ... apply_suggestions_orchestrator.py ..."
+  "reaggregate_command": "uv run ... multi_llm.py apply-suggestions ... --reaggregate"
 }
 ```
 
@@ -706,8 +707,7 @@ If `[REVALIDATION_PENDING]` marker is present:
 2. Spawn a single revalidation subagent that reads source files directly:
 
    ```
-   Task tool call:
-     subagent_type: general-purpose
+   Spawn one subagent with:
      description: "Revalidate failed suggestions"
      prompt: |
        Revalidate suggestion groups that previously failed validation.
@@ -726,7 +726,7 @@ If `[REVALIDATION_PENDING]` marker is present:
        - "invalid": False positive, not applicable
        - "needs-human-decision": Requires human judgment
 
-       Use the Write tool (not Bash) to save results to: {output_path from batches[N]}
+       Write the results (with your host's file-write, not Bash) to: {output_path from batches[N]}
 
        Output format:
        {
@@ -755,7 +755,7 @@ If `[REVALIDATION_BATCHES_PENDING]` marker is present:
 
 For each batch in `batches` array, spawn a Task agent using the same prompt template above, but with that batch's `group_indices` and `output_path`.
 
-**Run all batches in parallel** (single message with multiple Task tool calls).
+**Run all batches in parallel** (one batch of parallel subagent spawns).
 
 **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
@@ -771,12 +771,12 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions \
   --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions \
   --plan-file "$PLAN_PATH" \
   --fresh
 ```

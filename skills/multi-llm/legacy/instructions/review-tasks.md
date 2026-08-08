@@ -1,0 +1,301 @@
+# Review Tasks Mode Instructions
+
+Reviews generated implementation tasks using multiple LLMs, with plan coverage analysis as the primary concern.
+
+## Usage
+
+```bash
+/multi-llm:multi-llm --review-tasks <plan_path> [model1 model2 ...] [--quick] [--interactive]
+```
+
+## Process
+
+1. **Prerequisite Check**: Verify that `generate-tasks` phase is complete
+2. **Model Selection**: Models provided as args, `--quick` for quick_models, `defaults.models` under `--yes` (never a prompt), or interactive selection via AskUserQuestion
+3. **Run Reviews**: Execute the orchestrator with selected models
+4. **Post-processing**: Group findings, validate (valid/invalid/needs-human-decision), handle human decisions
+5. **Generate Report**: Create `report.html` with all findings
+
+## Output Files
+
+```
+plans/todo/my-feature/                           # Output folder
+├── state.json                                   # Session state (plan-local)
+├── tasks/
+│   └── tasks.md                                 # Generated tasks (input for this phase)
+└── review-tasks/                                # Review tasks phase outputs
+    ├── report.html                              # Interactive HTML report
+    ├── report.md                                # Markdown review report
+    ├── grouped.json                             # Grouped findings
+    ├── validation.json                          # Validation results
+    ├── {model}.json                             # Per-model results
+    ├── log_{model}.txt                          # Agent output logs
+    ├── error_{model}.log                        # Error logs (if failed)
+    └── salvage_{model}.json                     # Salvage requests (if JSON parse failed)
+```
+
+## Options
+
+- `--skip-validation`: Skip the LLM validation step (faster but no false-positive filtering)
+- `--validation-model <model>`: Model to use for validation (default: "auto")
+- `--quick` / `-q`: Use quick_models from providers.yaml for lightweight reviews (2 models)
+- `--interactive` / `-i`: Force interactive model selection even when models are provided
+
+## Validation Statuses
+
+- **valid** (checkmark): Finding is real and should be addressed
+- **invalid** (x): False positive, can be ignored
+- **needs-human-decision** (?): Requires human judgment
+
+When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--claude-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
+
+---
+
+## Step-by-Step Execution
+
+### 0. Check Prerequisites
+
+Before reviewing tasks, verify that `generate-tasks` has been completed:
+
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks
+```
+
+Parse the JSON output (stdout is always pure JSON; the human-readable
+`[PREREQUISITE_*]` block goes to stderr and is repeated in the JSON as
+`message`). If `prerequisites_met` is `false`:
+
+- **With `--yes` (or `--non-interactive`)**: the check has already exited **3**
+  with the block below on stderr — a plan with no task list has nothing to
+  review, and generating tasks is not a repair this mode may make (unlike the
+  generate-tasks/implement gates, where the missing phase is the *prerequisite*
+  rather than the subject). Print the block and stop; do not ask, and do not run
+  `generate-tasks` yourself. `--skip-prerequisites` is deliberately refused here
+  (D6 row 13).
+
+  ```
+  [PREREQUISITE_UNMET] review-tasks: no task list has been generated for /abs/plan.md.
+    1) Generate the tasks first — <dispatcher> generate-tasks /abs/plan.md --yes
+       then re-run              — <dispatcher> review-tasks /abs/plan.md --yes
+  ```
+
+  Structurally unreachable inside `--full`, where phase order guarantees tasks
+  exist.
+- Without `--yes`, use **AskUserQuestion** to inform the user that `generate-tasks` must run first.
+- Options:
+  - **"Run generate-tasks first"**: Stop and instruct the user to run:
+    1. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
+    2. `/clear`
+    3. `/multi-llm:multi-llm --review-tasks $PLAN_PATH`
+
+    **Do NOT** proceed further. Stop execution after displaying this message.
+  - **"Cancel"**: Stop and inform the user that review-tasks was cancelled.
+
+If `prerequisites_met` is `true`, proceed to step 1.
+
+Also verify the tasks file exists: check for `<!-- TASKS_FILE: ... -->` marker in the plan file, then confirm the referenced tasks file is present. If not found, stop and instruct the user to run `--generate-tasks` first.
+
+---
+
+### 1. Model Selection
+
+- If models provided in args (e.g., `/multi-llm:multi-llm --review-tasks plans/foo.md gpt-5.2 gemini-3-pro`): use those directly
+- If `--quick` flag is set: use `quick_models` from `providers.yaml`
+- **With `--yes` (or `--non-interactive`)**: never ask. Pass no model flag and
+  let the orchestrator resolve `defaults.models`; it prints
+  `[AUTO_RESOLVED] model-selection: …`, and exits **3** naming the answering
+  flags if nothing resolves (D6 row 2). `--interactive` together with `--yes` is
+  rejected at parse time with exit 3, never silently downgraded.
+- If `--interactive` flag is set OR no models provided (and NOT `--yes`): Claude MUST use AskUserQuestion to prompt user for model selection
+  - Present available models from `providers.yaml` (multi-select)
+  - Then run orchestrator with `--models <selected>`
+
+### 2. Resume Detection (check BEFORE running orchestrator)
+
+Check for existing output to avoid expensive duplicate runs. Follow the detection cases in `references/resume-detection.md`, using `{plan}/review-tasks/` as the phase directory.
+
+**Note**: The orchestrator guards against re-runs (exits with code 2 if phase is already marked complete in state.json). Use `--force` to override. This instruction-level resume detection is the FIRST line of defense; the orchestrator guard is backup protection.
+
+### 3. Run the Orchestrator (DETACHED)
+
+A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
+
+```bash
+PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --models <selected> \
+  > "{plan}/review-tasks/orchestrator-run.log" 2>&1
+```
+
+**IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
+
+Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-tasks/orchestrator-run.log`**, not from terminal stdout.
+
+**Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
+
+### 4. Interrupted-run Recovery (conditional -- only if the background run was interrupted or the log shows no completion markers)
+
+If the detached orchestrator was interrupted or `{plan}/review-tasks/orchestrator-run.log` shows neither a validation marker nor a clean completion:
+
+1. Read `{plan}/review-tasks/.status.json`
+2. Based on `state` field: `models_running` -> check which `{model}.json` files exist; `models_complete`/`grouping_complete` -> check for `grouped.json`, `validation_tasks.json`; `validation_pending` -> proceed to validation; `complete` -> report results
+3. If no `.status.json` -> fall back to file-based resume detection (step 2)
+4. **With `--yes`: always resume, never ask** (D6 row 3) -- re-run only the
+   missing models with `--force`, never `--rerun-all`. A model that fails twice in
+   one run is reported, not retried again: `[PARTIAL_RESULTS: <model>,...]`,
+   `MULTI_LLM_RESULT.state: "partial"`, exit **0**. Zero results is exit **3**
+   naming the retry command.
+5. Without `--yes`, **use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
+
+### 5. Salvage Handling (Post-Orchestrator)
+
+After the background task completes, check the log file `{plan}/review-tasks/orchestrator-run.log` for `[SALVAGE_NEEDED]` markers. Follow the salvage process in `references/salvage-handling.md`.
+
+The reaggregation command for this mode is:
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --reaggregate
+```
+
+### 6. Validation Handling (Post-Orchestrator)
+
+After the background task completes, check the log file `{plan}/review-tasks/orchestrator-run.log` for validation markers.
+
+#### The task file
+
+`validation_tasks.json` carries `tasks_schema_version: 2` and one complete task
+per batch under `batches` — each with `prompt`, `output_name`, the derived
+`output_path`, `result_channel: file`, `context_mode: inline`,
+`capability_tier`, `executor_role` and `task_id`. The context excerpt and this
+batch's records travel **inside** `prompt`, so no subagent has to open a file.
+
+**For each task in the file, run `task.prompt` as a subagent, then write the JSON
+it returns to `task.output_path`.** That is the whole contract — do not assemble
+a prompt, and do not tell the subagent to write the file itself.
+
+A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+`inputs` hashes no longer match their sources, is refused with exit 3: re-run the
+phase with `--force` to re-materialize it.
+
+#### Single Batch: `[VALIDATION_PENDING]`
+
+If `[VALIDATION_PENDING]` marker is present:
+1. Read `validation_tasks.json` from `{plan}/review-tasks/`
+2. Run the single task's `prompt` as a subagent and write its JSON reply to that
+   task's `output_path`
+3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+
+#### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
+
+If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
+1. Read `validation_tasks.json` once from `{plan}/review-tasks/`
+2. Count the number of batches as `{total_batches}` and mark the phase start:
+   ```bash
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+     --state-file "$STATE_FILE" --phase "review-tasks" --total-batches {total_batches}
+   ```
+3. Choose a strategy:
+
+**Strategy A: Direct parallel spawning (at most 4 batches)**
+
+For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
+
+**Run all batches in parallel** (single message with multiple Task tool calls).
+
+**Strategy B: Wave-based parallel spawning (> 4 batches)**
+
+Follow the wave-based spawning strategy in `references/wave-batching.md`.
+
+3. After ALL batches complete, run reaggregation using `reaggregate_command`
+
+#### Reaggregation (After Validation)
+
+After validation completes, run the `reaggregate_command` from validation_tasks.json:
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+  --plan-file "$PLAN_PATH" --reaggregate
+```
+
+**CRITICAL**: Do NOT report results to the user until reaggregation is complete.
+
+### 7. Report Results
+
+Report all generated files in `{plan}/review-tasks/`:
+- `report.html` - Interactive HTML report
+- `report.md` - Markdown review report
+- `grouped.json` - Grouped findings
+- `validation.json` - Validation results
+
+**Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+  --state-file "$STATE_FILE" --phase "review-tasks" \
+  --label "Validation batch {N}" --subagent-type "general-purpose" \
+  --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
+  --total-batches {total_batches} --batch-index {N}
+```
+Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+
+After all batches and reaggregation finish, mark the phase finish:
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+  --state-file "$STATE_FILE" --phase "review-tasks"
+```
+
+Optionally generate and include resource usage report:
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report --state-file "$STATE_FILE" --phase "review-tasks"
+```
+
+#### High-Volume Results (>25 groups)
+
+If the review produces more than 25 finding groups, note to the user: *Consider using importance filtering (`--approve-importance LOW`) to auto-approve low-importance findings and focus review on HIGH and MEDIUM items.* This guidance is informational only -- do not prompt interactively for filtering options.
+
+#### Applying Findings
+
+Findings from task review can be applied automatically or manually:
+
+> **Next step:** `/multi-llm:multi-llm --apply-task-suggestions $PLAN_PATH`
+
+The `--apply-task-suggestions` phase reads the validated findings and user selections, then uses subagents to update `tasks.md` automatically (additions, modifications, deletions, and clarifications).
+
+**Manual application (alternative):** If you prefer to apply findings by hand, review the report and update `tasks.md` directly:
+- **Add missing tasks**: If plan coverage gaps are identified, add new tasks to `tasks.md`
+- **Fix dependencies**: Update `depends_on` arrays if dependency issues are found
+- **Refine descriptions**: Improve task descriptions where ambiguity or incompleteness was flagged
+- **Split/merge tasks**: Restructure tasks if granularity issues were identified
+
+#### HIGH-Importance Plan Coverage Findings
+
+For findings with **HIGH importance** and type `plan_coverage` (missing plan sections not covered by any task), provide actionable next steps:
+
+1. **Re-run `--generate-tasks`**: If multiple plan sections are uncovered, regenerate tasks:
+   ```
+   /multi-llm:multi-llm --generate-tasks $PLAN_PATH --force
+   ```
+   Review the new task list to confirm coverage.
+
+2. **Manual patching**: For 1-2 missing items, manually add tasks to `tasks.md` following the existing `### Task T0XX:` format with dependencies, files, complexity, description, and acceptance criteria.
+
+3. **Proceed anyway**: If the uncovered sections are intentionally deferred or out of scope, document the decision in the plan file as a "Deferred Items" section and proceed to `--implement`.
+
+**Note**: The `--review-tasks` phase is optional. Users can proceed directly to `--implement` after `--generate-tasks` if they prefer to skip task review.
+
+---
+
+## Example Execution
+
+```
+User: /multi-llm:multi-llm --review-tasks plans/my-feature.md
+
+Claude:
+1. Checks prerequisites: generate-tasks is complete
+2. No models in args -> AskUserQuestion for model selection
+3. User selects: gpt-5.2, gemini-3-pro
+4. Runs orchestrator with --models gpt-5.2 gemini-3-pro
+5. Orchestrator outputs [VALIDATION_BATCHES_PENDING] (8 groups -> 2 batches)
+6. Reads validation_tasks.json, Strategy A (2 batches): spawns 2 parallel subagents
+7. Subagents write validation_batch_0.json, validation_batch_1.json
+8. Runs reaggregation
+9. Reports: 8 findings, 5 valid, 2 invalid, 1 needs-human-decision
+   "Next step: /multi-llm:multi-llm --apply-task-suggestions plans/my-feature.md"
+```

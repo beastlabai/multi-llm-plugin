@@ -11,7 +11,7 @@ Reviews generated implementation tasks using multiple LLMs, with plan coverage a
 ## Process
 
 1. **Prerequisite Check**: Verify that `generate-tasks` phase is complete
-2. **Model Selection**: Models provided as args, `--quick` for quick_models, `defaults.models` under `--yes` (never a prompt), or interactive selection via AskUserQuestion
+2. **Model Selection**: Models provided as args, `--quick` for quick_models, `defaults.models` under `--yes` (never a prompt), or an interactive selection where the user is asked
 3. **Run Reviews**: Execute the orchestrator with selected models
 4. **Post-processing**: Group findings, validate (valid/invalid/needs-human-decision), handle human decisions
 5. **Generate Report**: Create `report.html` with all findings
@@ -47,7 +47,7 @@ plans/todo/my-feature/                           # Output folder
 - **invalid** (x): False positive, can be ignored
 - **needs-human-decision** (?): Requires human judgment
 
-When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--claude-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
+When items have `needs-human-decision` status, **ask the user** how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--claude-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
 
 ---
 
@@ -58,7 +58,7 @@ When items have `needs-human-decision` status, Claude should use `AskUserQuestio
 Before reviewing tasks, verify that `generate-tasks` has been completed:
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prereq --plan-file "$PLAN_PATH" --mode review-tasks
 ```
 
 Parse the JSON output (stdout is always pure JSON; the human-readable
@@ -81,7 +81,7 @@ Parse the JSON output (stdout is always pure JSON; the human-readable
 
   Structurally unreachable inside `--full`, where phase order guarantees tasks
   exist.
-- Without `--yes`, use **AskUserQuestion** to inform the user that `generate-tasks` must run first.
+- Without `--yes`, **ask the user**, telling them that `generate-tasks` must run first.
 - Options:
   - **"Run generate-tasks first"**: Stop and instruct the user to run:
     1. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
@@ -106,7 +106,7 @@ Also verify the tasks file exists: check for `<!-- TASKS_FILE: ... -->` marker i
   `[AUTO_RESOLVED] model-selection: …`, and exits **3** naming the answering
   flags if nothing resolves (D6 row 2). `--interactive` together with `--yes` is
   rejected at parse time with exit 3, never silently downgraded.
-- If `--interactive` flag is set OR no models provided (and NOT `--yes`): Claude MUST use AskUserQuestion to prompt user for model selection
+- If `--interactive` flag is set OR no models provided (and NOT `--yes`): **ask the user** to select models
   - Present available models from `providers.yaml` (multi-select)
   - Then run orchestrator with `--models <selected>`
 
@@ -118,17 +118,17 @@ Check for existing output to avoid expensive duplicate runs. Follow the detectio
 
 ### 3. Run the Orchestrator (DETACHED)
 
-A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
+A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
 
 ```bash
-PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --models <selected> \
   > "{plan}/review-tasks/orchestrator-run.log" 2>&1
 ```
 
 **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
-Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-tasks/orchestrator-run.log`**, not from terminal stdout.
+**Run detached.** A detached run is not subject to your host's shell-command cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-tasks/orchestrator-run.log`**, not from terminal stdout.
 
 **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
 
@@ -144,7 +144,7 @@ If the detached orchestrator was interrupted or `{plan}/review-tasks/orchestrato
    one run is reported, not retried again: `[PARTIAL_RESULTS: <model>,...]`,
    `MULTI_LLM_RESULT.state: "partial"`, exit **0**. Zero results is exit **3**
    naming the retry command.
-5. Without `--yes`, **use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
+5. Without `--yes`, **ask the user**, showing which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
 
 ### 5. Salvage Handling (Post-Orchestrator)
 
@@ -152,7 +152,7 @@ After the background task completes, check the log file `{plan}/review-tasks/orc
 
 The reaggregation command for this mode is:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --reaggregate
 ```
 
@@ -190,7 +190,7 @@ If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
 1. Read `validation_tasks.json` once from `{plan}/review-tasks/`
 2. Count the number of batches as `{total_batches}` and mark the phase start:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "review-tasks" --total-batches {total_batches}
    ```
 3. Choose a strategy:
@@ -199,7 +199,7 @@ If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
 
 For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
-**Run all batches in parallel** (single message with multiple Task tool calls).
+**Run all batches in parallel** (one batch of parallel subagent spawns).
 
 **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
@@ -211,7 +211,7 @@ Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
 After validation completes, run the `reaggregate_command` from validation_tasks.json:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_tasks_orchestrator.py" \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --reaggregate
 ```
 
@@ -227,23 +227,23 @@ Report all generated files in `{plan}/review-tasks/`:
 
 **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
   --state-file "$STATE_FILE" --phase "review-tasks" \
   --label "Validation batch {N}" --subagent-type "general-purpose" \
   --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
   --total-batches {total_batches} --batch-index {N}
 ```
-Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
 After all batches and reaggregation finish, mark the phase finish:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 Optionally generate and include resource usage report:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report --state-file "$STATE_FILE" --phase "review-tasks"
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 #### High-Volume Results (>25 groups)
@@ -287,9 +287,9 @@ For findings with **HIGH importance** and type `plan_coverage` (missing plan sec
 ```
 User: /multi-llm:multi-llm --review-tasks plans/my-feature.md
 
-Claude:
+Agent:
 1. Checks prerequisites: generate-tasks is complete
-2. No models in args -> AskUserQuestion for model selection
+2. No models in args -> ask the user to select models
 3. User selects: gpt-5.2, gemini-3-pro
 4. Runs orchestrator with --models gpt-5.2 gemini-3-pro
 5. Orchestrator outputs [VALIDATION_BATCHES_PENDING] (8 groups -> 2 batches)

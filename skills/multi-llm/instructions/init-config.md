@@ -19,7 +19,7 @@ that belong to the detected providers — their full `providers:` sub-blocks
 `defaults.quick_models` candidate entries whose provider is detected, and
 `default_provider`. Undetected providers stay commented. There are **no prompts**
 and **no model-listing subprocess calls**, so it behaves identically inside
-Claude Code, a plain terminal, or CI.
+any host, a plain terminal, or CI.
 
 ## Usage
 
@@ -36,7 +36,7 @@ Claude Code, a plain terminal, or CI.
 | `--gitignore` | Also append `.multi-llm/` to the repo's `.gitignore` (idempotent) so the override stays developer-local and untracked. Default: leave it trackable (commit it for a team-wide standard). |
 | `--template-only` | Skip detection entirely; write the pristine inert template verbatim (every provider left commented) for hand-editing. |
 
-## Process (Claude Code executes these steps)
+## Process (the driving agent executes these steps)
 
 0. **Check `uv` is available** (BEFORE the scaffolder command)
 
@@ -54,11 +54,11 @@ Claude Code, a plain terminal, or CI.
    detect anything"). A bare `--init` runs auto-detection — no routing question
    is needed because nothing prompts.
 
-2. **Run the scaffolder.** Substitute `${CLAUDE_SKILL_DIR}` with the absolute
-   skill-directory path (per the SKILL.md path-resolution rules), then run:
+2. **Run the scaffolder.** The command below arrives with the skill directory
+   already substituted, so run it as written:
 
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/init_config.py" [--dir PATH] [--force] [--gitignore] [--template-only]
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" init [--dir PATH] [--force] [--gitignore] [--template-only]
    ```
 
 3. **Report the result.** Print the path the script wrote and its git-tracking

@@ -37,14 +37,23 @@ argument-hint: [--review-plan|--apply-suggestions|--generate-tasks|--review-task
 > SKILL.md before you read it, so every command and path shown below is already
 > fully resolved — run them as written.
 >
-> The mode instruction files you open with the Read tool, and any "run this
-> next" commands the orchestrators print to stdout, are **not** pre-expanded:
-> they still contain the literal placeholder `CLAUDE_SKILL_DIR` (written as the
-> shell-style variable `${...}`). Whenever you encounter that placeholder in a
-> file you read or in script output, substitute the absolute skill-directory
-> path shown above before running the command or reading the file. The shell
-> does **not** export this variable, so never run a command that still contains
-> an unexpanded `CLAUDE_SKILL_DIR`.
+> **The mode instruction core arrives already resolved.** Load it with
+>
+> ```bash
+> uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode>
+> ```
+>
+> which prints `instructions/<mode>.md` with every skill-dir placeholder replaced
+> by the running skill directory — so the text you read carries no unexpanded
+> token and nothing is left for you to substitute. Reading
+> `${CLAUDE_SKILL_DIR}/instructions/<mode>.md` off disk is the documented
+> *fallback*. Every command in that file is written against a brace-delimited
+> **template placeholder** for the skill directory — not shell syntax, and no
+> shell expands it — so if you read the file directly, substitute the absolute
+> path above for that placeholder before running anything from it.
+>
+> The same applies to any "run this next" command an orchestrator prints: those
+> are printed fully resolved, so run them exactly as printed.
 >
 > **Always double-quote the substituted skill path in shell commands** — write
 > `--project "${CLAUDE_SKILL_DIR}"` and `"${CLAUDE_SKILL_DIR}/script.py"`, never
@@ -286,6 +295,17 @@ These rules exist for specific technical reasons. Violating them causes failures
 
 4. **Plan-local state** — State is stored in `{plan}/state.json`, not in `${CLAUDE_SKILL_DIR}/state/`. This keeps state portable and scoped to each plan.
 
+## Capability verbs
+
+The shared instruction core is host-neutral: it names three **capability verbs**
+and never a tool. Exactly three exist, and this shim answers each one with a single
+concrete mechanism — so nothing is left for you to decide mid-run, and there is no
+capability table to consult:
+
+- **Spawn subagents** — call your host's own subagent tool `Task`: pass `task.prompt` verbatim, take the role from `task.subagent_type` when your tool needs one, and write the JSON it returns to `task.output_path`. Never pass `--exec-subagents` on this host.
+- **Ask the user** — call your host's own structured question tool `AskUserQuestion`, then copy the selected option's command verbatim. Never compose a flag from the user's words.
+- **Run detached** — use your host's own background mechanism `run_in_background`, redirecting stdout and stderr to the phase dir's `orchestrator-run.log`. Never pass `--detach` on this host.
+
 ## Execution Instructions
 
 **CRITICAL**: Before executing any mode, Claude MUST:
@@ -301,9 +321,10 @@ These rules exist for specific technical reasons. Violating them causes failures
    - `--full`: full workflow mode
    - `--init`: init-config mode (no plan path)
 
-2. **Load the mode-specific instructions** using the Read tool:
-   ```
-   ${CLAUDE_SKILL_DIR}/instructions/{mode}.md
+2. **Load the mode-specific instructions** with the dispatcher (pre-substituted;
+   reading `${CLAUDE_SKILL_DIR}/instructions/{mode}.md` off disk is the fallback):
+   ```bash
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions {mode}
    ```
 
    Where `{mode}` is one of:
