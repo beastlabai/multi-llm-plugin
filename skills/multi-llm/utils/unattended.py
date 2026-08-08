@@ -508,6 +508,243 @@ def parse_human_task_decisions(values: Optional[Iterable[str]]) -> Dict[str, str
 
 
 # ---------------------------------------------------------------------------
+# D5d — the interactive inventory, per `ask` class
+# ---------------------------------------------------------------------------
+# D6 makes every gate answerable unattended, D6b makes unattended the default and
+# D5a fixes the answer channel. What none of them states is *which* decision points
+# a non-Claude host may render, in what order, and what happens to the ones that
+# cannot be rendered at all — leaving "interactive parity" an open-ended promise the
+# first user to type `--interactive` discovers empirically. So the inventory is
+# closed, it lives next to the rows it indexes, and it is the same list the renderer
+# below reads.
+
+#: The three `ask` values in `hosts/capabilities.yaml`. Closed; a fourth would be a
+#: schema change, not a new branch here.
+ASK_STRUCTURED = "structured"
+ASK_FREE_TEXT = "free-text"
+ASK_NONE = "none"
+ASK_CLASSES: Tuple[str, ...] = (ASK_STRUCTURED, ASK_FREE_TEXT, ASK_NONE)
+
+
+@dataclass(frozen=True)
+class InventoryRow:
+    """What each `ask` class renders for one decision site.
+
+    Attributes:
+        rows: D6 row numbers this entry covers (5 and 6 share one line, being the
+            same gate with a different mode word).
+        site_id: The D6 site this indexes.
+        options: How many options the block renders, in D5a's "Options as
+            rendered" order. ``None`` means the count is data-dependent (one block
+            per item or per paused task) rather than fixed.
+        structured: One line describing the `ask: structured` presentation.
+        free_text: One line describing the `ask: free-text` presentation. Rendered
+            **only** under `--interactive`.
+        unattended: What an `ask: none` host (and every headless run) does instead.
+        renderable: False for the fail-closed rows, which no class may render — a
+            host that turns one into a question has reintroduced the hang.
+    """
+
+    rows: Tuple[int, ...]
+    site_id: str
+    options: Optional[int]
+    structured: str
+    free_text: str
+    unattended: str
+    renderable: bool = True
+
+
+INVENTORY: Tuple[InventoryRow, ...] = (
+    InventoryRow(
+        rows=(2,), site_id="model-selection", options=None,
+        structured="multi-select ask over the configured models",
+        free_text="numbered block: the resolved `defaults.models`, each named set "
+                  "in `providers.yaml`, and a final `--models a,b,c` re-invocation "
+                  "to edit",
+        unattended="`defaults.models`; `--interactive` is exit 3",
+    ),
+    InventoryRow(
+        rows=(3,), site_id="partial-results-recovery", options=3,
+        structured="3-option ask",
+        free_text="numbered block, 3 options",
+        unattended="the `--yes` default: resume the missing models",
+    ),
+    InventoryRow(
+        rows=(4,), site_id="consolidation-offer", options=2,
+        structured="2-option ask",
+        free_text="numbered block, 2 options",
+        unattended="auto-run once on the marker",
+    ),
+    InventoryRow(
+        rows=(5, 6), site_id="generate-tasks-prerequisite", options=3,
+        structured="3-option ask",
+        free_text="numbered block = D6a's `[PREREQUISITE_UNMET]` text verbatim",
+        unattended="auto-run the apply phase, else exit 3",
+    ),
+    InventoryRow(
+        rows=(7,), site_id="task-suggestion-advisory", options=2,
+        structured="2-option ask",
+        free_text="numbered block, 2 options",
+        unattended="skip; the phase is recorded skipped",
+    ),
+    InventoryRow(
+        rows=(8,), site_id="human-task-strategy", options=4,
+        structured="4-option ask",
+        free_text="numbered block, 4 options",
+        unattended="`skip-dependents`",
+    ),
+    InventoryRow(
+        rows=(9,), site_id="human-task-pause", options=3,
+        structured="one ask per paused task",
+        free_text="one numbered block per paused task, answered by "
+                  "`--human-task <id>=done|skip`",
+        unattended="unreachable under `--yes`",
+    ),
+    InventoryRow(
+        rows=(10,), site_id="needs-human-decision", options=None,
+        structured="per-item ask, or the batched approve-all / skip-all / "
+                   "review-each UI",
+        free_text="one numbered block per item (no 4-option cap — that was the "
+                  "structured tool's)",
+        unattended="`--claude-decide --no-confirm`; the report is printed and "
+                   "nothing is asked",
+    ),
+    InventoryRow(
+        rows=(11,), site_id="no-selections-confirmation", options=2,
+        structured="2-option ask",
+        free_text="numbered block, 2 options",
+        unattended="`--no-confirm`; every valid item is applied",
+    ),
+    InventoryRow(
+        rows=(12,), site_id="review-tasks-continuation", options=2,
+        structured="2-option ask",
+        free_text="numbered block, 2 options",
+        unattended="run review-tasks",
+    ),
+    # Struck out on purpose: D6's disposition table makes these fail closed, so no
+    # `ask` class renders them. Exit 3 with the fix named is the whole behavior.
+    InventoryRow(
+        rows=(13,), site_id="no-tasks-to-review", options=None,
+        structured="never rendered", free_text="never rendered",
+        unattended="exit 3 printing both out-of-band commands", renderable=False,
+    ),
+    InventoryRow(
+        rows=(14,), site_id="phase-failure-recovery", options=None,
+        structured="never rendered", free_text="never rendered",
+        unattended="exit 3 naming the phase and its `--resume` re-invocation",
+        renderable=False,
+    ),
+    InventoryRow(
+        rows=(15,), site_id="empty-or-ambiguous-selection", options=None,
+        structured="never rendered", free_text="never rendered",
+        unattended="exit 3 at parse time", renderable=False,
+    ),
+)
+
+_INVENTORY_BY_SITE: Dict[str, InventoryRow] = {r.site_id: r for r in INVENTORY}
+
+
+def inventory_row(site_id: str) -> InventoryRow:
+    return _INVENTORY_BY_SITE[site_id]
+
+
+def renderable_sites() -> Tuple[str, ...]:
+    """The sites an interactive host may render, in D6 row order."""
+    return tuple(r.site_id for r in INVENTORY if r.renderable)
+
+
+def presentation(site_id: str, ask_class: str) -> str:
+    """The one-line description of what *ask_class* renders for *site_id*."""
+    if ask_class not in ASK_CLASSES:
+        raise KeyError(
+            f"unknown ask class {ask_class!r}; the vocabulary is closed at "
+            f"{ASK_CLASSES}"
+        )
+    entry = inventory_row(site_id)
+    return {
+        ASK_STRUCTURED: entry.structured,
+        ASK_FREE_TEXT: entry.free_text,
+        ASK_NONE: entry.unattended,
+    }[ask_class]
+
+
+# ---------------------------------------------------------------------------
+# D5a/D5d — one renderer, two presentations
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DecisionOption:
+    """One rendered option: a label and the command that enacts it.
+
+    ``command`` is the payload. A structured host feeds these to its ask tool and a
+    free-text host prints them, but in both cases what gets copied is the command on
+    the selected line — so a mis-numbered reply cannot silently enact a different
+    action, and the driving agent never maps prose to a flag value.
+
+    ``command`` is ``None`` for an option that is enacted by *not* re-invoking
+    (D5a's "skip = simply do not re-invoke"), which is the one case where there is
+    nothing to copy.
+    """
+
+    label: str
+    command: Optional[str]
+    is_default: bool = False
+
+
+#: The suffix marking the option a `--yes` run would have selected. Display only.
+DEFAULT_SUFFIX = " (default)"
+
+
+def render_option_block(
+    site_id: str,
+    options: Sequence[DecisionOption],
+    *,
+    prompt: Optional[str] = None,
+) -> str:
+    """The numbered option block, identical for both presentations (D5d).
+
+    Numbering is Python's and stable: options are numbered from 1 in the order the
+    caller supplied (D5a's "Options as rendered" column), the `--yes` option is
+    suffixed ``(default)``, and the driving agent may not renumber, re-order, merge,
+    drop or add options.
+    """
+    entry = inventory_row(site_id)
+    if not entry.renderable:
+        raise NeedsHuman(
+            f"ERROR: decision site '{site_id}' is fail-closed (D6 row "
+            f"{entry.rows[0]}) and is never rendered as a question on any host. "
+            "The behavior is exit 3 with the fix named.",
+            site=site_id,
+        )
+    if not options:
+        raise NeedsHuman(
+            f"ERROR: decision site '{site_id}' rendered zero options. An empty "
+            "option list is never a default (D6 row 15).",
+            site=site_id,
+        )
+    lines: List[str] = []
+    if prompt:
+        lines.append(prompt)
+        lines.append("")
+    for index, option in enumerate(options, start=1):
+        suffix = DEFAULT_SUFFIX if option.is_default else ""
+        tail = f" — {option.command}" if option.command else " — do not re-invoke"
+        lines.append(f"{index}) {option.label}{suffix}{tail}")
+    lines.append("")
+    lines.append(
+        "Copy exactly one option's command verbatim. Do not compose flags, do not "
+        "paraphrase, and do not edit run state directly. A reply that selects zero "
+        "or more than one option re-renders this block unchanged."
+    )
+    return "\n".join(lines)
+
+
+def option_commands(options: Sequence[DecisionOption]) -> List[Optional[str]]:
+    """The option payloads, in order — what both presentations resolve to."""
+    return [option.command for option in options]
+
+
+# ---------------------------------------------------------------------------
 # Row 1 / D6c layer 3 — the uv backstop
 # ---------------------------------------------------------------------------
 

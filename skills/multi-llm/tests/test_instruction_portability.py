@@ -193,6 +193,18 @@ PLACEHOLDER_MANIFEST = {
     "instructions/review-code.md": (0, 24),
     "instructions/review-plan.md": (0, 26),
     "instructions/review-tasks.md": (0, 16),
+    # The shared shim partials (D5). Authored once, interpolated into every
+    # rendered shim by `install-host`, and still counted against each shim's
+    # rendered line budget because an agent reads them. `poll-loop.md` carries the
+    # one `status` command; `uv-preflight.md` names no path at all — its message
+    # arrives through the `{{uv_missing_text}}` slot, so the wording stays
+    # single-sourced in hosts/uv-missing.txt.
+    "hosts/snippets/poll-loop.md": (0, 2),
+    "hosts/snippets/uv-preflight.md": (0, 0),
+    # Generated from hosts/capabilities.yaml (D5b). Carries host tool names by
+    # design — it is human documentation of the matrix — and therefore no
+    # skill-dir placeholder of either spelling.
+    "references/host-capabilities.md": (0, 0),
     "references/human-decision-batch.md": (0, 0),
     "references/resume-detection.md": (0, 0),
     "references/salvage-handling.md": (0, 0),
