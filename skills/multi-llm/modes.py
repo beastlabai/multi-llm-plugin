@@ -66,6 +66,14 @@ class Mode:
             registered for is the one that actually runs.
         injected_flags: Flags the dispatcher prepends before the user's, because
             the mode is a thin view over a more general script.
+        requires_uv: Whether the dispatcher runs D6c's layer-3 ``uv`` backstop
+            before dispatching. True for every mode that *does* work, because a
+            missing ``uv`` means nothing can run. False for exactly the two
+            install modes: ``install-host --check`` **is** layer 1 of the same
+            bootstrap and reports a missing ``uv`` as one of its five assertions,
+            so failing at the backstop would replace a five-row prerequisite
+            report with a one-line refusal — and ``uninstall-host`` has to work on
+            a machine whose ``uv`` is already gone.
         unavailable: When set, the mode is dispatchable but exits 3 with this
             reason instead of running. Keeps the boundary a shim sees stable
             while the implementation is still a markdown sequence.
@@ -82,6 +90,7 @@ class Mode:
     is_workflow_phase: bool = False
     supports_detach: bool = False
     injected_flags: Tuple[str, ...] = ()
+    requires_uv: bool = True
     unavailable: Optional[str] = None
 
 
@@ -99,12 +108,10 @@ class Mode:
 #
 # `generate-tasks` and `full` used to sit here: both are now Python
 # (`generate_tasks_orchestrator.py`, `full_workflow_orchestrator.py`), so the two
-# instruction-only rows are gone and their markdown is narrative only.
-#
-# TODO(install-host/uninstall-host): owned by the install-lifecycle design (D7 /
-#   D7b of plans/host-harness-portability.md) — shim rendering, --check,
-#   idempotency, rollback. Until then the dispatcher exits 3 rather than
-#   pretending the mode does something.
+# instruction-only rows are gone and their markdown is narrative only. So did
+# `install-host`/`uninstall-host`, until `utils/host_install.py` landed the D7
+# install contract; **no mode is unavailable today**, and the constant survives as
+# the documented shape of an honest gap rather than as a live reason string.
 NOT_YET_AVAILABLE = "not yet available"
 
 
@@ -242,15 +249,19 @@ MODES: Tuple[Mode, ...] = (
         name="install-host",
         positionals=(POS_HOST,),
         summary="Install this skill's entry shim into another coding harness.",
+        target_module="utils.host_install",
+        target_attr="main",
         user_facing=False,
-        unavailable=NOT_YET_AVAILABLE,
+        requires_uv=False,
     ),
     Mode(
         name="uninstall-host",
         positionals=(POS_HOST,),
         summary="Remove a previously installed host shim.",
+        target_module="utils.host_install",
+        target_attr="uninstall_main",
         user_facing=False,
-        unavailable=NOT_YET_AVAILABLE,
+        requires_uv=False,
     ),
 )
 

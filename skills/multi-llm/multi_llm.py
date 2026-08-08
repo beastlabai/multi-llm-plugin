@@ -489,7 +489,13 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # unrecognized decision value and a missing `uv` are the two failures a
         # mode must never discover halfway through a phase dir.
         validate_decision_flags(flags)
-        require_uv()
+        if mode.requires_uv:
+            # The two install modes opt out (modes.py): `install-host --check` is
+            # layer 1 of the same uv bootstrap and reports a miss as one of its
+            # five assertions, and `uninstall-host` must work on a machine whose
+            # uv is already gone. Every other mode fails here, before anything is
+            # created.
+            require_uv()
         argv = (
             list(mode.injected_flags)
             + list(mode_table.alias_flags(word))
