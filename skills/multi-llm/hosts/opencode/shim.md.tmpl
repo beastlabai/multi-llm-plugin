@@ -1,0 +1,98 @@
+---
+description: "Orchestrate plan reviews, task generation, implementation and code reviews across several LLM CLIs in parallel, or ask every model one free-text question about a plan. Triggers: review my plan, multi-llm, run a code review, generate tasks from a plan, implement this plan, ask the models about my plan."
+---
+
+# Multi-LLM — OpenCode entry shim
+
+Rendered for this machine by `install-host`: every path below is already absolute,
+so run the commands as written and **keep the double quotes** (a path may contain
+spaces). The workflow itself lives in the shared host-neutral core, loaded in
+step 3 — never re-derived here. Everything is driven from this command body: no
+frontmatter key delegates any of it.
+
+## 1. Check `uv`, before the first `uv run`
+
+Every command below runs through `uv run`, so a missing `uv` fails the shell with
+`uv: command not found` (exit 127) before any Python that could explain it runs.
+Probe once, as a single standalone command:
+
+```bash
+command -v uv
+```
+
+A printed path means proceed. Otherwise check the locations a fresh shell may not
+have on `PATH` yet, reading **stdout, not the exit status** (this `ls` exits
+non-zero whenever any candidate is missing, which is the normal case):
+
+```bash
+ls "$HOME/.local/bin/uv" "$HOME/.local/bin/uv.exe" "$HOME/.cargo/bin/uv" "$HOME/.cargo/bin/uv.exe" /opt/homebrew/bin/uv /usr/local/bin/uv /opt/local/bin/uv 2>/dev/null
+```
+
+If uv is genuinely absent, print the install message verbatim — its wording lives
+in exactly one place, `hosts/uv-missing.txt` — and **stop with exit 3**: never
+install it, never ask, and never fall back to bare `python`.
+
+```bash
+cat "{{uv_missing_file}}"
+```
+
+## 2. Map the argument text to a mode word
+
+The text typed after the command name is the argument string. Flags in it are
+position-independent, and the mode flag is the mode word without its `--`
+(`--review-code` → `review-code`, `--full` → `full`, and so on). **No mode flag
+means `review-plan`.** The first positional is the plan path; for `--ask` the next
+single quoted argument is the question, and `--init` takes no plan path. Everything
+else passes through verbatim — never add a flag the user did not type, never
+re-join an unquoted multi-word question, and never infer a plan path from the
+conversation. A missing plan path or an empty question is an error: say so and stop.
+
+## 3. Load the mode's core instructions, then execute them step by step
+
+```bash
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util instructions <mode>
+```
+
+That prints the core with every skill-dir placeholder already substituted.
+
+## 4. Capability verbs — how this host answers each one
+
+The core names three capability verbs and never a tool. These are their one
+concrete resolution here, so nothing is left to decide mid-run:
+
+- {{spawn_subagents}}
+- {{ask_user}}
+- {{run_detached}}
+
+## 5. The one dispatcher command
+
+Every mode is this single command, with `--host opencode` and `--yes` baked in:
+
+```bash
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host opencode --yes [flags…]
+```
+
+Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete,
+`3` needs a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read
+`state`, `artifacts` and `next` from it rather than mining the transcript, and run
+`next` verbatim when it is not `null`.
+
+Every fan-out mode runs with `--detach` here, then polls — one call per turn,
+reading the **exit code** (`0` finished, `2` still running, `3` needs a human, `1`
+unreadable) and never spelling the wait as a sleep inside the same command, which
+would run straight back into this host's shell-command cap:
+
+```bash
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan-path>" --view run --wait
+```
+
+## 6. Examples
+
+```text
+/multi-llm plans/my-feature.md                       # review-plan (the default)
+/multi-llm --full plans/my-feature.md                # the whole workflow
+/multi-llm --ask "plans/my plan.md" "Is the rollback strategy sufficient?"
+```
+
+Providers and models come from the skill's own `providers.yaml`, with a
+per-repository override written by `--init`; the README has the rest.

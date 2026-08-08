@@ -5,9 +5,11 @@ The per-host live smokes are `-m live` and therefore local-only, so on their own
 nothing would catch a shim regression or host-doc drift between releases. These
 assertions read the shim *files* and are parametrized over every shipped shim, so a
 shim broken by a host-doc edit, a capability-data change or an orchestrator rename
-fails CI. Today the only shipped shim is the reference host's `SKILL.md`; the
-per-host `.tmpl` files are the install design's to add, and the parametrization
-picks them up with no edit here.
+fails CI. Shipped today: the reference host's hand-authored `SKILL.md` plus the
+per-host `.tmpl` templates, each rendered through `install-host`'s own renderer so
+this guard and the installer cannot disagree about what a rendered shim is.
+`tests/test_install_host.py` re-runs every assertion below over the *installed*
+files as well.
 
 The assertions, per shim:
 
@@ -78,23 +80,20 @@ SHIMS = _shipped_shims()
 SHIM_IDS = [host_id for host_id, _ in SHIMS]
 
 
-def _rendered(path: Path, base: str = FIXTURE_SKILL_DIR) -> str:
-    """The shim as an agent reads it: skill dir substituted, snippets inlined.
+def _rendered(host_id: str, path: Path, base: str = FIXTURE_SKILL_DIR) -> str:
+    """The shim as an agent reads it: every slot filled, skill dir substituted.
 
-    ``install-host`` does this for real; here it is done the same way so the
-    assertions run against what an agent actually sees, not what the `.tmpl`
-    happens to contain.
+    Rendered by ``install-host``'s **own** renderer (``utils/host_install.render``)
+    against a fixture skill dir, so this guard and the installer cannot disagree
+    about what a rendered shim is. The one shim nobody installs (the reference
+    host's hand-authored ``SKILL.md``) goes through the same call: it simply carries
+    no slot to fill.
     """
-    from utils.cli_common import render_instruction_text
+    from utils import host_install
 
-    text = path.read_text(encoding="utf-8")
-    for snippet in sorted((SKILL_ROOT / "hosts" / "snippets").glob("*.md")):
-        token = "{{" + snippet.stem.replace("-", "_") + "}}"
-        if token in text:
-            text = text.replace(token, snippet.read_text(encoding="utf-8"))
-    uv_text = (SKILL_ROOT / "hosts" / "uv-missing.txt").read_text(encoding="utf-8")
-    text = text.replace("{{uv_missing_text}}", uv_text)
-    return render_instruction_text(text, base)
+    return host_install.render(
+        host_id, skill=base, template=path.read_text(encoding="utf-8")
+    )
 
 
 def _effective_cap(host_id: str) -> int:
@@ -136,9 +135,11 @@ class TestShim:
         Claude Code's `SKILL.md` is ``installable: false``, so its sentences are
         hand-written — and they are compared, byte for byte, against what the
         renderer would emit for the ``claude-code`` entry. Without this the
-        reference host is the one host free to drift from the data.
+        reference host is the one host free to drift from the data. An installable
+        host's template carries the three verb *slots* instead and is asserted on
+        the render, which is the same comparison one substitution later.
         """
-        text = path.read_text(encoding="utf-8")
+        text = _rendered(host_id, path)
         for verb, sentence in zip(caps.VERBS, caps.verb_sentences(host_id)):
             assert sentence in text, (
                 f"{path.name}: the *{caps.VERB_WORDING[verb]}* sentence is not "
@@ -149,7 +150,7 @@ class TestShim:
             )
 
     def test_each_verb_is_resolved_exactly_once(self, host_id, path):
-        text = path.read_text(encoding="utf-8")
+        text = _rendered(host_id, path)
         for verb, sentence in zip(caps.VERBS, caps.verb_sentences(host_id)):
             assert text.count(sentence) == 1, (
                 f"{path.name}: the *{caps.VERB_WORDING[verb]}* resolution appears "
@@ -157,7 +158,7 @@ class TestShim:
             )
 
     def test_no_slot_is_left_unfilled(self, host_id, path):
-        rendered = _rendered(path)
+        rendered = _rendered(host_id, path)
         for slot in caps.VERB_SLOTS.values():
             assert slot not in rendered, f"{path.name}: unfilled slot {slot}"
 
@@ -236,7 +237,11 @@ class TestShim:
 
     def test_every_example_command_parses_into_a_real_mode(self, host_id, path):
         text = path.read_text(encoding="utf-8")
-        examples = re.findall(r"^/multi-llm:multi-llm\s+(.*)$", text, re.M)
+        # Both spellings: the reference host's commands are namespaced
+        # `plugin:skill`, an installed host's command is named by the file the
+        # installer wrote (`/multi-llm`). The host's invocation syntax is a host
+        # fact; what this asserts is that the arguments resolve to a real mode.
+        examples = re.findall(r"^/multi-llm(?::multi-llm)?\s+(.*)$", text, re.M)
         assert examples, f"{path.name} shows no worked example"
         for example in examples:
             argv = shlex.split(example.split("#", 1)[0].strip())
@@ -259,7 +264,7 @@ class TestShim:
 
     # -- skill-dir resolution -------------------------------------------
     def test_the_skill_dir_resolves_absolute_even_with_a_space(self, host_id, path):
-        rendered = _rendered(path)
+        rendered = _rendered(host_id, path)
         for placeholder in PLACEHOLDERS:
             assert placeholder not in rendered, (
                 f"{path.name}: {placeholder} survived rendering"
@@ -282,7 +287,7 @@ class TestShim:
 
     # -- the uv preflight ------------------------------------------------
     def test_the_uv_probe_precedes_the_first_uv_run(self, host_id, path):
-        rendered = _rendered(path)
+        rendered = _rendered(host_id, path)
         probe = rendered.find("command -v uv")
         assert probe >= 0, f"{path.name} carries no uv probe"
         first_run = min(
@@ -299,7 +304,7 @@ class TestShim:
     def test_the_install_text_is_single_sourced(self, host_id, path):
         """Either the message is interpolated, or the shim names its file."""
         text = path.read_text(encoding="utf-8")
-        rendered = _rendered(path)
+        rendered = _rendered(host_id, path)
         uv_text = (SKILL_ROOT / "hosts" / "uv-missing.txt").read_text(
             encoding="utf-8"
         )
@@ -324,7 +329,7 @@ class TestShim:
         """
         offenders = []
         for line_no, line in enumerate(
-            _rendered(path).splitlines(), start=1
+            _rendered(host_id, path).splitlines(), start=1
         ):
             for match in re.finditer(r"\b([A-Z][A-Z0-9_]{2,})=", line):
                 name = match.group(1)
@@ -366,7 +371,7 @@ class TestShim:
 
     # -- the tripwire ----------------------------------------------------
     def test_the_rendered_shim_fits_its_effective_cap(self, host_id, path):
-        rendered = _rendered(path)
+        rendered = _rendered(host_id, path)
         cap = _effective_cap(host_id)
         count = len(rendered.splitlines())
         assert count <= cap, (
@@ -379,7 +384,7 @@ class TestShim:
 
     def test_the_body_fits_the_hundred_line_contract(self, host_id, path):
         """The budget is about instructions, not a host's mandatory manifest."""
-        count = len(_body(_rendered(path)).splitlines())
+        count = len(_body(_rendered(host_id, path)).splitlines())
         assert count <= DEFAULT_SHIM_MAX_LINES, (
             f"{path.name}'s body is {count} lines, over the "
             f"{DEFAULT_SHIM_MAX_LINES}-line contract even excluding frontmatter. "

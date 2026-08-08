@@ -193,14 +193,24 @@ PLACEHOLDER_MANIFEST = {
     "instructions/review-code.md": (0, 24),
     "instructions/review-plan.md": (0, 26),
     "instructions/review-tasks.md": (0, 16),
-    # The shared shim partials (D5). Authored once, interpolated into every
-    # rendered shim by `install-host`, and still counted against each shim's
-    # rendered line budget because an agent reads them. `poll-loop.md` carries the
-    # one `status` command; `uv-preflight.md` names no path at all — its message
-    # arrives through the `{{uv_missing_text}}` slot, so the wording stays
-    # single-sourced in hosts/uv-missing.txt.
+    # The shared shim partials (D5). Authored once, interpolated into a rendered
+    # shim by `install-host`, and still counted against that shim's rendered line
+    # budget because an agent reads them. `poll-loop.md` carries the one `status`
+    # command; `uv-preflight.md` names no path at all — its message arrives through
+    # the `{{uv_missing_text}}` slot, so the wording stays single-sourced in
+    # hosts/uv-missing.txt.
     "hosts/snippets/poll-loop.md": (0, 2),
     "hosts/snippets/uv-preflight.md": (0, 0),
+    # The per-host shim templates (D7 renders them; `install-host` bakes the
+    # prefix). Three commands each — `util instructions <mode>`, the one dispatcher
+    # command, and the `status … --view run --wait` poll — so six token sites, all
+    # inside the invariant prefix. The uv install message is *named*, not inlined:
+    # a shim prints `hosts/uv-missing.txt` (whose absolute path arrives through the
+    # `{{uv_missing_file}}` slot) exactly as the reference shim does, because
+    # inlining 31 lines of install text into a 100-line shim would spend a third of
+    # the budget on a message an agent reads once.
+    "hosts/codex/shim.md.tmpl": (0, 6),
+    "hosts/opencode/shim.md.tmpl": (0, 6),
     # Generated from hosts/capabilities.yaml (D5b). Carries host tool names by
     # design — it is human documentation of the matrix — and therefore no
     # skill-dir placeholder of either spelling.
@@ -1179,16 +1189,44 @@ class TestDispatcherGrammar:
         err = capsys.readouterr().err
         assert "contradictory" in err or "forbids" in err
 
-    def test_unavailable_modes_are_exit_three(self, capsys):
-        """Only the install modes are still an honest gap.
+    def test_no_mode_is_unavailable_any_more(self):
+        """The list is empty, and that is the point.
 
-        ``generate-tasks`` and ``full`` left this list when their orchestrators
-        landed: every mode word in the table now either runs or says why not, and
-        nothing in between.
+        ``generate-tasks`` and ``full`` left it when their orchestrators landed;
+        ``install-host``/``uninstall-host`` left it when the D7 install contract
+        did. Every mode word in the table now runs, so the dispatcher boundary a
+        shim sees is the real one everywhere.
         """
-        for mode in ("install-host", "uninstall-host"):
-            assert multi_llm.main([mode, "codex"]) == 3, mode
-            assert "not yet available" in capsys.readouterr().err
+        stubbed = [m.name for m in mode_table.MODES if m.unavailable]
+        assert not stubbed, stubbed
+        for mode in mode_table.MODES:
+            assert mode.target_module, mode.name
+
+    def test_the_install_modes_dispatch_to_the_installer(self, monkeypatch,
+                                                         capsys):
+        """Routed, not run: the real thing writes into a host config dir.
+
+        ``tests/test_install_host.py`` exercises the installer itself against a
+        temp ``$HOME``; here the only question is whether the two mode words reach
+        it with the host id forwarded as a positional.
+        """
+        seen = {}
+
+        def loader(module_path, attr):
+            def target(argv):
+                seen[attr] = (module_path, list(argv))
+                return 0
+
+            return target
+
+        monkeypatch.setattr(multi_llm, "_load_target", loader)
+        assert multi_llm.main(["install-host", "codex", "--check"]) == 0
+        assert multi_llm.main(["uninstall-host", "codex", "--dry-run"]) == 0
+        capsys.readouterr()
+        assert seen["main"] == ("utils.host_install", ["codex", "--check"])
+        assert seen["uninstall_main"] == (
+            "utils.host_install", ["codex", "--dry-run"]
+        )
 
     def test_no_workflow_mode_is_unavailable(self):
         for mode in mode_table.MODES:
