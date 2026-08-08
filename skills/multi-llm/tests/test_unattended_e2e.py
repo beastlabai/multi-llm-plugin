@@ -384,6 +384,58 @@ class TestGenerateTasksGateUnattended:
         assert result_of(completed)["exit"] == 3
 
 
+class TestGenerateTasksUnattended:
+    """The mode itself, not just its gate: one turn, one follow-up, no prompt."""
+
+    def test_yes_materializes_the_task_and_names_one_follow_up(
+        self, skill_runner, fixture_manager, mock_provider, tripwire
+    ):
+        _configure(skill_runner, mock_provider, "happy_path")
+        plan = fixture_manager.create_plan("unattended-generate", PLAN_CONTENT)
+        completed = run_unattended(
+            skill_runner, tripwire, "generate-tasks", str(plan.plan_path), "--yes",
+        )
+        assert completed.returncode == 0, completed.stdout[-3000:]
+        task_file = (
+            plan.output_dir / "generate-tasks" / "task_generation_tasks.json"
+        )
+        assert task_file.exists()
+        document = json.loads(task_file.read_text(encoding="utf-8"))
+        assert document["kind"] == "task_generation"
+        assert len(document["tasks"]) == 1
+        payload = result_of(completed)
+        assert payload["exit"] == 0
+        assert payload["next"].endswith("--reaggregate"), payload["next"]
+        # The deleted channel stays deleted, even under the real CLI.
+        assert not list(Path(plan.plan_path).parent.rglob("generated_tasks_*.json"))
+
+
+class TestFullWorkflowUnattended:
+    """`--full` under `--yes`: it runs, it prompts nothing, and it ends in D6's endings."""
+
+    def test_yes_runs_phase_one_then_stops_with_resume_named(
+        self, skill_runner, fixture_manager, mock_provider, tripwire
+    ):
+        _configure(skill_runner, mock_provider, "happy_path")
+        plan = fixture_manager.create_plan("unattended-full", PLAN_CONTENT)
+        completed = run_unattended(
+            skill_runner, tripwire,
+            "full", str(plan.plan_path), "--yes", "--models", "cursor-agent",
+            timeout=180,
+        )
+        # Phase 1 fanned out for real and then stopped for its validation batch:
+        # without `--exec-subagents` the phase does not record itself complete, so
+        # the workflow ends at row 14 rather than marching on.
+        assert_models_ran(skill_runner)
+        assert completed.returncode == 3, completed.stdout[-3000:]
+        assert "Phase 1: Review Plan did not complete" in completed.stderr
+        assert "--resume" in completed.stderr
+        payload = result_of(completed)
+        assert payload["mode"] == "full" and payload["exit"] == 3
+        assert payload["state"] == "needs-human"
+        assert payload["next"].endswith("--resume")
+
+
 class TestContradictionsAndEmptyAnswers:
     """Fail-closed rows reached the same way a host would reach them."""
 

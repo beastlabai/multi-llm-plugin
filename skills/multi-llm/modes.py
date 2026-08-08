@@ -60,10 +60,10 @@ class Mode:
             a write phase that schedules N batches through real agent CLIs outlives
             a host's shell cap exactly as a fan-out does. A mode with ``False``
             **rejects** ``--detach`` with exit 3 rather than accepting a flag that
-            silently does nothing. ``generate-tasks`` and ``full`` carry the column
-            because their detach support is real *plumbing*, while the modes
-            themselves are still ``unavailable`` — the ``unavailable`` exit-3 fires
-            first, so neither pretends to work.
+            silently does nothing. ``generate-tasks`` and ``full`` carried the
+            column before their orchestrators existed, so the gate a shim saw was
+            already the final one; now that both are Python, the detach path they
+            registered for is the one that actually runs.
         injected_flags: Flags the dispatcher prepends before the user's, because
             the mode is a thin view over a more general script.
         unavailable: When set, the mode is dispatchable but exits 3 with this
@@ -97,19 +97,14 @@ class Mode:
 # exists to delete. The dispatcher makes the "not yet here" call, so no shim
 # carries a host-specific fallback.
 #
-# TODO(generate-tasks): replace `unavailable` with
-#   target_module="generate_tasks_orchestrator" (gate -> decomposition ->
-#   update_plan_tasks) when that script lands.
-# TODO(full): replace with target_module="full_workflow_orchestrator" (a
-#   resumable state machine over the other modes on the same state.json).
+# `generate-tasks` and `full` used to sit here: both are now Python
+# (`generate_tasks_orchestrator.py`, `full_workflow_orchestrator.py`), so the two
+# instruction-only rows are gone and their markdown is narrative only.
+#
 # TODO(install-host/uninstall-host): owned by the install-lifecycle design (D7 /
 #   D7b of plans/host-harness-portability.md) — shim rendering, --check,
 #   idempotency, rollback. Until then the dispatcher exits 3 rather than
 #   pretending the mode does something.
-NOT_YET_ON_THIS_HOST = (
-    "not yet available on this host - run the instruction sequence instead "
-    "(multi_llm.py util instructions {mode})"
-)
 NOT_YET_AVAILABLE = "not yet available"
 
 
@@ -141,11 +136,11 @@ MODES: Tuple[Mode, ...] = (
         name="generate-tasks",
         positionals=(POS_PLAN,),
         summary="Decompose the plan into an implementable task list.",
+        target_module="generate_tasks_orchestrator",
         phase="generate-tasks",
         instruction_file="generate-tasks.md",
         is_workflow_phase=True,
         supports_detach=True,
-        unavailable=NOT_YET_ON_THIS_HOST,
     ),
     Mode(
         name="review-tasks",
@@ -201,9 +196,14 @@ MODES: Tuple[Mode, ...] = (
         name="full",
         positionals=(POS_PLAN,),
         summary="Run the whole plan-to-code workflow as one resumable sequence.",
+        target_module="full_workflow_orchestrator",
+        # `full` owns no *workflow* phase (every phase it runs records its own
+        # completion), but it does own a run dir: `--detach` needs somewhere for
+        # `.status.json`, the log and the lock, and `status --phase full` has to
+        # resolve through this same table rather than through a second vocabulary.
+        phase="full",
         instruction_file="full-workflow.md",
         supports_detach=True,
-        unavailable=NOT_YET_ON_THIS_HOST,
     ),
     Mode(
         name="ask",

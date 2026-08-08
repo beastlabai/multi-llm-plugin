@@ -515,6 +515,118 @@ class TaskDecomposer:
         }
 
 
+#: The id shape every generated task carries. Pinned by
+#: ``schemas/generated_tasks.schema.json`` too; restated here because the
+#: uniqueness rule below is meaningless without it and this module is the one that
+#: owns the *semantics* of a task graph.
+TASK_ID_PATTERN = re.compile(r"^T[0-9]{3}$")
+
+
+def validate_generated_tasks(tasks: List[Dict[str, Any]]) -> List[str]:
+    """The semantic rules a generated task list must satisfy, or why it does not.
+
+    JSON Schema pins the *shape* of ``task_generation_result.json``; these are the
+    four rules the *graph* has to satisfy for anything downstream to mean
+    anything, and they live here because this module owns task graphs (batching,
+    ready-set computation, dependency walks):
+
+    1. ids are unique and ``T###``;
+    2. every ``depends_on`` entry names an id declared in this same document;
+    3. the graph is acyclic — otherwise :meth:`TaskDecomposer.get_parallel_batches`
+       silently emits a final batch whose dependencies were never satisfied;
+    4. at least one task has an empty ``depends_on``, or nothing is ever ready to
+       start.
+
+    Run immediately after schema validation and before a byte reaches the plan: a
+    document failing either check is a ``schema_invalid`` failure (D3k rung 6) that
+    is never retried.
+
+    Args:
+        tasks: The ``tasks`` array of a task-generation document.
+
+    Returns:
+        Human-readable problems, empty when the list is valid.
+    """
+    problems: List[str] = []
+    if not isinstance(tasks, list) or not tasks:
+        return ["`tasks` must be a non-empty array"]
+
+    ids: List[str] = []
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            problems.append(f"tasks[{index}]: expected an object")
+            continue
+        task_id = task.get("id")
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.match(task_id):
+            problems.append(
+                f"tasks[{index}]: id {task_id!r} is not a zero-padded T### id"
+            )
+            continue
+        ids.append(task_id)
+    if problems:
+        return problems
+
+    seen: Set[str] = set()
+    duplicates: Set[str] = set()
+    for task_id in ids:
+        if task_id in seen:
+            duplicates.add(task_id)
+        seen.add(task_id)
+    if duplicates:
+        problems.append(f"duplicate task id(s): {', '.join(sorted(duplicates))}")
+
+    declared = set(ids)
+    edges: Dict[str, List[str]] = {}
+    for task in tasks:
+        task_id = str(task.get("id"))
+        depends_on = task.get("depends_on") or []
+        if not isinstance(depends_on, list):
+            problems.append(f"{task_id}: depends_on must be an array")
+            continue
+        unknown = [dep for dep in depends_on if dep not in declared]
+        if unknown:
+            problems.append(
+                f"{task_id}: depends_on names id(s) this document never declares: "
+                f"{', '.join(str(dep) for dep in unknown)}"
+            )
+        self_edge = [dep for dep in depends_on if dep == task_id]
+        if self_edge:
+            problems.append(f"{task_id}: depends on itself")
+        edges[task_id] = [dep for dep in depends_on if dep in declared]
+
+    if problems:
+        return problems
+
+    if not any(not edges.get(tid) for tid in ids):
+        problems.append(
+            "no task has an empty depends_on, so no task is ever ready to start"
+        )
+
+    # Kahn's algorithm over the declared edges: what is left when no node has an
+    # in-degree of zero is exactly the cycle.
+    in_degree = {tid: len(edges.get(tid, [])) for tid in ids}
+    dependents: Dict[str, List[str]] = {tid: [] for tid in ids}
+    for tid, deps in edges.items():
+        for dep in deps:
+            dependents[dep].append(tid)
+    queue = sorted(tid for tid, degree in in_degree.items() if degree == 0)
+    ordered = 0
+    while queue:
+        tid = queue.pop(0)
+        ordered += 1
+        for dependent in dependents[tid]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+        queue.sort()
+    if ordered != len(ids):
+        cyclic = sorted(tid for tid in ids if in_degree[tid] > 0)
+        problems.append(
+            "depends_on forms a cycle involving: " + ", ".join(cyclic)
+        )
+    return problems
+
+
 def decompose_plan_file(plan_path: Path) -> TaskDecomposer:
     """
     Convenience function to decompose a plan file.

@@ -161,10 +161,16 @@ PLACEHOLDER_MANIFEST = {
     "instructions/apply-task-suggestions.md": (26, 0),
     "instructions/ask.md": (4, 0),
     # 50 -> 48: D6 row 12 deleted the no-TTY branch, and with it the
-    # `check_workflow_prerequisites.py --skip` command it carried. A count that
-    # *drops* is the corpus shrinking as designed; only a rise is a regression.
-    "instructions/full-workflow.md": (48, 0),
-    "instructions/generate-tasks.md": (8, 0),
+    # `check_workflow_prerequisites.py --skip` command it carried. 48 -> 22: the
+    # Phase-3 sequencing (the inlined Task prompt, its Write-tool steps, the
+    # per-phase skip-recording commands and row 12's question) moved into
+    # `full_workflow_orchestrator.py`. A count that *drops* is the corpus shrinking
+    # as designed; only a rise is a regression.
+    "instructions/full-workflow.md": (36, 0),
+    # 8 -> 0: gate, materialization, dispatch, the in-process `update_plan_tasks`
+    # call and the TASKS_FILE verification are all Python now, so the file names no
+    # command at all.
+    "instructions/generate-tasks.md": (0, 0),
     "instructions/implement.md": (24, 0),
     "instructions/init-config.md": (3, 0),
     "instructions/review-code.md": (24, 0),
@@ -335,8 +341,9 @@ class TestPlaceholderManifest:
         }
         # Not an assertion that `remaining` is empty (the rewrite has not landed);
         # an assertion that the pinned total cannot silently grow.
-        # 238 -> 236 with D6 row 12's deleted no-TTY branch.
-        assert sum(remaining.values()) == 236, (
+        # 238 -> 236 with D6 row 12's deleted no-TTY branch; 236 -> 216 when the
+        # generate-tasks sequence and `--full`'s Phase 3 moved into Python.
+        assert sum(remaining.values()) == 216, (
             "the ${CLAUDE_SKILL_DIR} debt outside SKILL.md changed to "
             f"{sum(remaining.values())}. Lower it freely with the corpus "
             "rewrite; a rise means a new host-coupled site was added."
@@ -601,7 +608,6 @@ class TestNegativeSpellings:
             "instructions/apply-task-suggestions.md",
             "instructions/ask.md",
             "instructions/full-workflow.md",
-            "instructions/generate-tasks.md",
             "instructions/implement.md",
             "instructions/review-code.md",
             "instructions/review-plan.md",
@@ -880,10 +886,25 @@ class TestDispatcherGrammar:
         assert "contradictory" in err or "forbids" in err
 
     def test_unavailable_modes_are_exit_three(self, capsys):
-        for mode in ("generate-tasks", "full", "install-host", "uninstall-host"):
-            args = ["p.md"] if mode in ("generate-tasks", "full") else ["codex"]
-            assert multi_llm.main([mode, *args]) == 3, mode
+        """Only the install modes are still an honest gap.
+
+        ``generate-tasks`` and ``full`` left this list when their orchestrators
+        landed: every mode word in the table now either runs or says why not, and
+        nothing in between.
+        """
+        for mode in ("install-host", "uninstall-host"):
+            assert multi_llm.main([mode, "codex"]) == 3, mode
             assert "not yet available" in capsys.readouterr().err
+
+    def test_no_workflow_mode_is_unavailable(self):
+        for mode in mode_table.MODES:
+            if not mode.user_facing:
+                continue
+            assert mode.unavailable is None, (
+                f"user-facing mode '{mode.name}' is dispatchable but refuses to "
+                "run; the dispatcher boundary a shim sees must be the real one"
+            )
+            assert mode.target_module, mode.name
 
     # -- alias table ----------------------------------------------------
     @pytest.mark.parametrize(
@@ -903,11 +924,8 @@ class TestDispatcherGrammar:
         exit_code = multi_llm.main([alias, "p.md"])
         result = cli_common.parse_result_line(capsys.readouterr().out)
         assert result["mode"] == expected
-        if expected == "generate-tasks":       # still an honest gap
-            assert exit_code == 3
-        else:
-            assert exit_code == 0
-            assert seen["module"] == mode_table.resolve(expected).target_module
+        assert exit_code == 0
+        assert seen["module"] == mode_table.resolve(expected).target_module
 
     # -- positional normalization ---------------------------------------
     def test_plan_positional_becomes_plan_file(self, monkeypatch, capsys):

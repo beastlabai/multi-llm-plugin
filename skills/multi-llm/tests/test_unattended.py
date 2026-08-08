@@ -182,13 +182,9 @@ def _accepts(parser_name: str, flag: str) -> bool:
     return flag in _help_text(parser_name)
 
 
-PARSERS_WITHOUT_A_SCRIPT_YET = {
-    # `full`'s own parser does not exist yet (the mode is dispatchable but
-    # `unavailable` until the Phase-3 workflow orchestrator lands), so the
-    # dispatcher validates its decision flag instead — see
-    # TestRowsWithoutAParserYet.
-    "multi_llm.py",
-}
+#: Every row's flag is now owned by a real parser: `full`'s orchestrator landed
+#: with the Phase-3 sequencing, so nothing is validated by the dispatcher alone.
+PARSERS_WITHOUT_A_SCRIPT_YET: set = set()
 
 
 class TestDecisionInputContract:
@@ -241,18 +237,27 @@ class TestDecisionInputContract:
         )
 
 
-class TestRowsWithoutAParserYet:
-    """Row 12's mode (`full`) has no orchestrator yet, so the dispatcher owns it."""
+class TestFullWorkflowOwnsItsRows:
+    """Rows 12 and 14 belong to `full`, and `full` is now a real parser."""
 
     def test_review_tasks_flag_is_declared_for_full(self):
         spec = un.flag_spec("--review-tasks")
         assert spec is not None and spec.rows == (12,)
+        assert "full_workflow_orchestrator.py" in spec.parsers
 
-    def test_dispatcher_does_not_reject_the_flag_itself(self, capsys):
-        # `full` is still `unavailable`, so the exit 3 must be about the mode, not
-        # about an unrecognized decision flag.
-        assert multi_llm.main(["full", "p.md", "--yes", "--review-tasks"]) == 3
-        assert "not yet available" in capsys.readouterr().err
+    def test_resume_is_the_row_fourteen_re_invocation(self):
+        spec = un.flag_spec("--resume")
+        assert spec is not None and spec.rows == (14,)
+        assert "full_workflow_orchestrator.py" in spec.parsers
+
+    def test_the_mode_accepts_both_flags_and_reaches_the_plan_check(self, capsys):
+        # The exit 3 is about the missing plan, never about an unrecognized
+        # decision flag: the flags parse, so the workflow got as far as its
+        # pre-flight.
+        assert multi_llm.main(
+            ["full", "p.md", "--yes", "--review-tasks", "--resume"]
+        ) == 1
+        assert "Plan file not found" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

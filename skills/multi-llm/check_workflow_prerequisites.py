@@ -498,10 +498,12 @@ def ensure_prerequisites(
     ``apply_runner`` is injected because applying suggestions needs the driving
     agent's subagent channel (``apply_suggestions_orchestrator.py`` emits
     instructions rather than editing the plan itself). It is called as
-    ``apply_runner(phase) -> exit_code``. **Callable, not yet called**: the Phase-3
-    full-workflow orchestrator is its intended caller; with no runner supplied,
-    ``in_workflow`` behaves exactly like standalone, so nothing can silently
-    proceed on stale input.
+    ``apply_runner(phase) -> exit_code``. ``full_workflow_orchestrator.py`` is the
+    caller that supplies it (for row 5 through ``generate_tasks_orchestrator`` and
+    for row 6 before dispatching ``implement``), and it bounds the runner to one
+    auto-run per phase per *run* — this function bounds it to one per *call*. With
+    no runner supplied, ``in_workflow`` behaves exactly like standalone, so nothing
+    can silently proceed on stale input.
 
     Never mutates state on the blocking path (rows 5/6 are preflight), and never
     prints: the caller owns its own streams.
