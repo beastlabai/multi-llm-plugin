@@ -4,7 +4,21 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import (
+    PROFILE_AGENT_READONLY,
+    PROFILE_GENERATE,
+    USAGE_FULL,
+    LLMProvider,
+    split_reasoning_effort,
+)
+
+# OpenCode ships a built-in `plan` agent whose permission set denies every edit
+# tool ("Plan mode. Disallows all edit tools." — verified against the agent
+# table in the 1.18.x binary's embedded bundle, alongside `edit: {"*": "deny"}`).
+# `--agent` is a documented `opencode run` flag, so the read-only profile is
+# opencode's own permission mechanism rather than a convention this repo layers
+# on top.
+READONLY_AGENT = "plan"
 
 # Reasoning effort values accepted by `opencode run --variant` — the values are
 # provider-specific, so this is the practical union across providers
@@ -32,6 +46,14 @@ class OpenCodeProvider(LLMProvider):
     # given, so this adapter has a real non-argv transport (D2d). The fan-out
     # default stays "argv"; materialized prompts use stdin.
     supported_prompt_transports = ("argv", "stdin")
+
+    # Subagent-runner declarations (D3e/D3j/D3m).
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    supports_workspace_reads = True
+    usage_support = USAGE_FULL
+    version_cmd = ("opencode", "--version")
+    min_version = "1.17.15"
+    verified_version = "1.18.12"
 
     @property
     def name(self) -> str:
@@ -79,6 +101,88 @@ class OpenCodeProvider(LLMProvider):
             )
         cmd = self.build_command(prompt, model)
         return cmd[:-1], prompt
+
+    def build_agent_command(
+        self, prompt: str, model: str, profile: str = PROFILE_AGENT_READONLY
+    ) -> List[str]:
+        """Build ``opencode run`` under the read-only ``plan`` agent (D3e)."""
+        if profile != PROFILE_AGENT_READONLY:
+            return super().build_agent_command(prompt, model, profile)
+        cmd = self.build_command(prompt, model)
+        # `--agent` belongs to the `run` subcommand, so it goes after
+        # `["opencode", "run"]` — never before it.
+        return [*cmd[:2], "--agent", READONLY_AGENT, *cmd[2:]]
+
+    def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
+        """Sum per-step usage across the whole ``run --format json`` stream (D3j).
+
+        OpenCode emits one assistant message per step — dozens for a long run —
+        and the token counters live on each ``step_finish`` part
+        (``tokens: {input, output, reasoning, cache: {read, write}}`` plus
+        ``cost``, verified against the part schema in the 1.18.x bundle). Reading
+        the final message alone under-reports a multi-step run, which is the
+        specific bug this method exists to prevent, so every step is summed.
+        ``tool_uses`` is the count of ``tool_use`` events — a real tool count, not
+        an inference.
+        """
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        seen = {key: False for key in totals}
+        tool_uses = 0
+        saw_tool_event = False
+
+        def _num(value: Any) -> Optional[float]:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+            return None
+
+        for event in self._iter_events(stdout):
+            event_type = event.get("type")
+            if event_type == "tool_use":
+                saw_tool_event = True
+                tool_uses += 1
+                continue
+            if event_type != "step_finish":
+                continue
+            part = event.get("part")
+            if not isinstance(part, dict) or part.get("type") != "step-finish":
+                continue
+            cost = _num(part.get("cost"))
+            if cost is not None:
+                totals["cost_usd"] += cost
+                seen["cost_usd"] = True
+            tokens = part.get("tokens")
+            if not isinstance(tokens, dict):
+                continue
+            step_input = _num(tokens.get("input"))
+            if step_input is not None:
+                totals["input_tokens"] += step_input
+                seen["input_tokens"] = True
+            step_output = _num(tokens.get("output"))
+            step_reasoning = _num(tokens.get("reasoning")) or 0
+            if step_output is not None:
+                # opencode's own roll-up folds reasoning into output; mirror it.
+                totals["output_tokens"] += step_output + step_reasoning
+                seen["output_tokens"] = True
+            cache = tokens.get("cache")
+            if isinstance(cache, dict):
+                cache_read = _num(cache.get("read"))
+                if cache_read is not None:
+                    totals["cached_input_tokens"] += cache_read
+                    seen["cached_input_tokens"] = True
+
+        out: Dict[str, Any] = {
+            key: value for key, value in totals.items() if seen[key]
+        }
+        if "input_tokens" in out and "output_tokens" in out:
+            out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
+        if saw_tool_event:
+            out["tool_uses"] = tool_uses
+        return out or None
 
     @staticmethod
     def _iter_events(stdout: str):

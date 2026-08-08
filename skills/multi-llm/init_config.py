@@ -293,6 +293,20 @@ _DEFAULT_PROVIDER_COMMENTS = [
     "## is detected (inherits the base default).",
 ]
 
+_DRIVER_COMMENTS = [
+    "## --- driver -----------------------------------------------------------------",
+    "## How `--exec-subagents` dispatches materialized subagent prompts. Only",
+    "## consulted when the Python executor is the invoker — a host with native",
+    "## subagents (Claude Code, Cursor) never reads these on a default run, because",
+    "## the key configures the EXECUTOR's runner, not the session's model.",
+    "## NOT written by `--init`: uncomment a line to override it. The block merges",
+    "## key-by-key (set one field, inherit the rest), a BLANK value keeps the base,",
+    "## and an unknown key under `driver:` is REJECTED at load time rather than",
+    "## silently ignored. In a repo driven from several hosts, leaving",
+    "## `subagent_runner` unset is the healthy arrangement: each host then resolves",
+    "## its own CLI instead of one host's choice being pinned for all of them.",
+]
+
 _DEFAULTS_COMMENTS = [
     "## --- defaults ---------------------------------------------------------------",
 ]
@@ -360,6 +374,24 @@ def _emit_providers_block(providers_cfg: dict) -> "list[str]":
     return out
 
 
+def _emit_driver_block(driver_cfg: dict) -> "list[str]":
+    """Emit the base ``driver:`` block as fully-commented YAML lines (`# ` prefix).
+
+    Mirrors the live base values verbatim, so the CI byte-diff between this
+    generator and the shipped template fails whenever a base ``driver:`` default
+    changes without the template being regenerated — the same staleness guard the
+    ``providers:`` block already carries. The stanza sits between the
+    ``default_provider:`` and ``defaults:`` keys, where the auto-uncomment FSM's
+    section is ``None``, so the toggler passes it through verbatim and a plain
+    copy of the template stays inert.
+    """
+    out = ["# driver:"]
+    for key, val in (driver_cfg or {}).items():
+        rendered = "null" if val is None else _yaml_scalar(val)
+        out.append(f"#   {key}: {rendered}")
+    return out
+
+
 def _emit_defaults_items(specs: "list[str]") -> "list[str]":
     """Emit `defaults.*` candidate specs as commented list items (`#     - spec`)."""
     return [f"#     - {spec}" for spec in specs]
@@ -392,6 +424,9 @@ def build_template_text(base_config: "dict | None" = None) -> str:
     lines.append("")
     lines.extend(_DEFAULT_PROVIDER_COMMENTS)
     lines.append(f"# default_provider: {default_provider}")
+    lines.append("")
+    lines.extend(_DRIVER_COMMENTS)
+    lines.extend(_emit_driver_block(base.get("driver", {}) or {}))
     lines.append("")
     lines.append("")
     lines.extend(_DEFAULTS_COMMENTS)

@@ -294,6 +294,39 @@ providers:
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
 
+# ---------------------------------------------------------------------------
+# driver: how --exec-subagents dispatches materialized subagent prompts (D3)
+# ---------------------------------------------------------------------------
+# Only consulted when the Python executor is the invoker (`--exec-subagents`,
+# or a host whose capability entry has no native subagent tool). A host with
+# native subagents (Claude Code, Cursor) never reads these on a default run —
+# the key configures the *executor's* runner, not the session's model.
+#
+# Merge semantics are the ordinary three-layer chain: this base block is always
+# present and fully populated, an override layer merges key-by-key (so setting
+# `subagent_runner` alone inherits the rest), a blank value (`subagent_runner:`
+# → YAML None) is SKIPPED and keeps the base value, and unknown keys under
+# `driver:` are rejected at load time so a typo is never silently a no-op.
+# Leaving `subagent_runner` unset in a repo shared by several hosts is the
+# healthy arrangement: each host then resolves its own CLI.
+driver:
+  # Any provider:model spec with an implemented adapter. Validated at load time
+  # (parseable spec, known adapter, declares the profile the phase needs).
+  subagent_runner: claude-code:sonnet
+  # Used for tasks whose materialized `capability_tier` is `cheap`; falls back
+  # to `subagent_runner` when unset.
+  subagent_runner_cheap: claude-code:haiku
+  # User preference, not the effective limit: the executor takes the minimum of
+  # this, the runner provider's own `max_concurrent` above, and the host's
+  # documented ceiling.
+  max_concurrent_subagents: 4
+  # null = the runner provider's `default_timeout`. A positive integer overrides it.
+  subagent_timeout_s: null
+  # Re-dispatches for TRANSPORT-shaped failures only (timeout, no parsed text,
+  # parse_output failure). A result that parsed but failed schema validation is
+  # never retried — that is a deterministic disagreement a retry would launder.
+  subagent_retries: 1
+
 # Default models to use when no models are specified on CLI
 # If set, skips interactive selection and uses these models automatically
 # Use --interactive flag to override and force interactive selection

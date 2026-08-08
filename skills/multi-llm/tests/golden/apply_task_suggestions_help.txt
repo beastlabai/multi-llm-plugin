@@ -101,9 +101,12 @@ cross-cutting options:
                         instead of failing.
   --max-detached N      Ceiling on concurrent detached runs for this project
                         (default 4, or $MULTI_LLM_MAX_DETACHED).
-  --exec-subagents      Reserved: run materialized subagent prompts through
-                        the provider executor (accepted and recorded; not yet
-                        implemented).
+  --exec-subagents      Run materialized subagent prompts through the provider
+                        executor instead of a host's native subagent tool, and
+                        continue past each marker in the same process
+                        (read/analyze phases: validation, revalidation,
+                        consolidation, salvage, judging). Runner and limits
+                        come from providers.yaml `driver:`.
   --skip-prerequisites  Proceed even though a prerequisite phase's output was
                         never applied. Loud and recorded (the skip lands in
                         state.json and in every later report); never implied

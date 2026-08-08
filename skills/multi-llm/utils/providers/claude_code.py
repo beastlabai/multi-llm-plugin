@@ -5,11 +5,37 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import (
+    PROFILE_AGENT_READONLY,
+    PROFILE_GENERATE,
+    USAGE_FULL,
+    LLMProvider,
+    split_reasoning_effort,
+)
 
 # Reasoning effort values accepted by `claude --effort`
 # (verified live against claude 2.1.205).
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+# The `agent-readonly` tool policy (D3e). Both flags are documented in
+# `claude --help` (verified against 2.1.224) and take a comma- or
+# space-separated list; a single comma-joined argv element is used so no part of
+# the policy can be re-split by a shell.
+#
+# The allow-list is the positive half — only these tools may run — and the
+# deny-list is belt-and-braces for the edit-capable ones plus Bash, which would
+# otherwise be an unrestricted write primitive. Both are passed because an
+# allow-list alone is a *permission* statement, while the deny-list survives a
+# future default that widens the allowed set.
+READONLY_ALLOWED_TOOLS = ("Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite")
+READONLY_DENIED_TOOLS = (
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+    "Bash",
+    "Task",
+)
 
 
 class ClaudeCodeProvider(LLMProvider):
@@ -35,6 +61,17 @@ class ClaudeCodeProvider(LLMProvider):
     # the prompt budget entirely; the fan-out path's default stays "argv" so
     # existing invocations are byte-identical.
     supported_prompt_transports = ("argv", "stdin")
+
+    # Subagent-runner declarations (D3e/D3j/D3m). `agent-write` is deliberately
+    # absent: the edit-capable invocation lands with the write executor, and
+    # declaring it here before it exists would make the CI cross-check pass on a
+    # capability that does not work.
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    supports_workspace_reads = True
+    usage_support = USAGE_FULL
+    version_cmd = ("claude", "--version")
+    min_version = "2.0.0"
+    verified_version = "2.1.224"
 
     @property
     def name(self) -> str:
@@ -94,6 +131,66 @@ class ClaudeCodeProvider(LLMProvider):
             )
         cmd = self.build_command(prompt, model)
         return cmd[:-1], prompt
+
+    def build_agent_command(
+        self, prompt: str, model: str, profile: str = PROFILE_AGENT_READONLY
+    ) -> List[str]:
+        """Build an agentic ``claude -p`` invocation for ``profile`` (D3e).
+
+        ``agent-readonly`` is ``build_command`` plus an explicit tool policy:
+        an allow-list of read-only tools and a deny-list of every edit-capable
+        one. Writes are refused by Claude Code's own permission mechanism, not by
+        anything this repo enforces after the fact, which is what makes it safe
+        to hand an untrusted (plan/diff/review) prompt to.
+        """
+        if profile != PROFILE_AGENT_READONLY:
+            return super().build_agent_command(prompt, model, profile)
+        cmd = self.build_command(prompt, model)
+        # build_command appends the prompt last; splice the policy in before it.
+        return [
+            *cmd[:-1],
+            "--allowed-tools",
+            ",".join(READONLY_ALLOWED_TOOLS),
+            "--disallowed-tools",
+            ",".join(READONLY_DENIED_TOOLS),
+            cmd[-1],
+        ]
+
+    def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
+        """Recover usage from the ``--output-format json`` result envelope (D3j).
+
+        ``parse_output`` unwraps ``result`` and **discards the envelope**, which
+        is where ``usage`` and ``total_cost_usd`` live, so this captures it before
+        it is dropped. Fields are selected by name and omitted when absent — a
+        zero would read as a free run.
+        """
+        text = (stdout or "").strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            envelope = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(envelope, dict) or envelope.get("type") != "result":
+            return None
+
+        usage = envelope.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        out: Dict[str, Any] = {}
+
+        def _put(key: str, value: Any) -> None:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                out[key] = value
+
+        _put("input_tokens", usage.get("input_tokens"))
+        _put("output_tokens", usage.get("output_tokens"))
+        # Claude Code reports cache reads and cache writes separately; only the
+        # read half is "cached input".
+        _put("cached_input_tokens", usage.get("cache_read_input_tokens"))
+        _put("cost_usd", envelope.get("total_cost_usd"))
+        if "input_tokens" in out and "output_tokens" in out:
+            out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
+        return out or None
 
     def get_remove_env(self) -> List[str]:
         """Strip CLAUDECODE env var to bypass nested-session guard.
