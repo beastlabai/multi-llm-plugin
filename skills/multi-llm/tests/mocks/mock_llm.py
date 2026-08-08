@@ -258,6 +258,53 @@ def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
             ],
         })
 
+    if kind == "task_generation":
+        # The one kind whose context is the repository, so there are no ids in the
+        # prompt to echo — the marker is the prompt's own opening sentence, and the
+        # answer is a fixed two-task graph that satisfies both the schema and the
+        # semantic rules (unique T### ids, declared dependencies, acyclic, one
+        # dependency-free task). Deterministic on purpose: the executor leg and the
+        # native-invoker leg must persist byte-identical documents.
+        if "You are decomposing" not in prompt:
+            return None
+        return json.dumps({
+            "schema_version": "1.0",
+            "plan_preamble": (
+                "Simulated preamble: implement the plan in two steps, foundation "
+                "first, then the wiring that consumes it."
+            ),
+            "tasks": [
+                {
+                    "id": "T001",
+                    "title": "Create the foundation module",
+                    "description": "Add the module the plan names, exporting the "
+                                   "interface T002 consumes.",
+                    "depends_on": [],
+                    "files_to_create": ["src/foundation.py"],
+                    "files_to_modify": [],
+                    "acceptance_criteria": [
+                        "src/foundation.py exports the documented interface",
+                    ],
+                    "estimated_complexity": "low",
+                    "executor_role": "agent",
+                },
+                {
+                    "id": "T002",
+                    "title": "Wire the foundation into the entry point",
+                    "description": "Import T001's interface from the entry point "
+                                   "and call it where the plan says.",
+                    "depends_on": ["T001"],
+                    "files_to_create": [],
+                    "files_to_modify": ["src/main.py"],
+                    "acceptance_criteria": [
+                        "src/main.py calls the interface T001 exported",
+                    ],
+                    "estimated_complexity": "medium",
+                    "executor_role": "agent",
+                },
+            ],
+        })
+
     if kind == "salvage":
         if "JSON extraction specialist" not in prompt:
             return None

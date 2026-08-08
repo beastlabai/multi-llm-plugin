@@ -1,6 +1,8 @@
 # Generate Tasks Mode Instructions
 
-Generates detailed implementation tasks from a high-level plan. **Claude Code itself** analyzes the plan and codebase to create structured tasks.
+Generates detailed implementation tasks from a high-level plan. A **task-generation
+subagent** analyzes the plan *and the repository* and returns a structured task
+document; the orchestrator validates it and writes it into the plan.
 
 ## Usage
 
@@ -8,34 +10,42 @@ Generates detailed implementation tasks from a high-level plan. **Claude Code it
 /multi-llm:multi-llm --generate-tasks <plan_path>
 ```
 
-## Process (Claude Code executes these steps)
+## Process (the `generate-tasks` mode drives these steps)
 
-1. **Read the Plan**
-   - Use Read tool to load the plan file
-   - Identify: problem statement, proposed approach, any existing structure
+The sequencing lives in Python — this section is the narrative, not a script a
+driving agent re-implements.
 
-2. **Explore the Codebase**
-   - Use Glob to find relevant files mentioned in the plan
-   - Use Grep to search for related code patterns
-   - Use Read to understand existing implementations to integrate with
+1. **Check the prerequisite gate** — unapplied plan-review suggestions are never
+   silently ignored (D6a rows 5/6; details under Step-by-Step Execution below).
 
-3. **Generate Tasks**
-   - Break down the plan into 5-15 discrete tasks
-   - Each task should be completable in 15-60 minutes
-   - Identify dependencies between tasks
-   - Specify files to create/modify for each task
+2. **Materialize one `task_generation` task.** The prompt embeds the plan text,
+   names exactly one path (the pinned repository root) and carries the
+   task-authoring rules below verbatim. It is the one materialized kind whose
+   context is the **repository**, so it is `context_mode: workspace-read` and
+   requires a runner that can both read the workspace and run under the read-only
+   profile — a runner with neither is refused *before dispatch* with exit 3, because
+   a non-agentic runner does not fail on this prompt, it invents a task list from
+   the plan's prose.
 
-4. **Output Tasks as JSON**
-   - Generate JSON matching the schema below
-   - Write it with the **Write tool** (NOT Bash) to the workspace temp dir:
-     `{PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json`
-   - Use unique filename based on plan name to avoid conflicts (full details in Step-by-Step Execution step 5)
+3. **Dispatch it, either way.** With `--exec-subagents` the executor runs it and
+   persists the reply. On a host with its own subagent tool, run `task.prompt` as a
+   subagent, write the JSON it returns to the task's `output_path`
+   (`task_generation_result.json` under the phase dir) and re-invoke the mode with
+   `--reaggregate` — the one follow-up command the orchestrator prints. The
+   subagent **only prints**; the invoker persists. There is no temp file, no
+   `Write`-tool step and no second git-root resolution anywhere in this flow.
 
-5. **Update the Plan**
-   - Call the helper script to insert tasks into the plan:
-   ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" --plan-file "$PLAN_PATH" --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
-   ```
+4. **Validation happens before anything touches the plan**: the document is checked
+   against `schemas/generated_tasks.schema.json` plus the semantic rules
+   (unique `T###` ids, `depends_on` naming only declared ids, acyclic, at least one
+   dependency-free task). A failure is `schema_invalid` — deliberately **not**
+   retried — and nothing is written.
+
+5. **The plan is updated in-process**, then the *outcome* is verified rather than
+   the subagent's claim: a fresh `<!-- TASKS_FILE: … -->` marker, a rendered tasks
+   file that exists and parses, and a task count matching the document. If any of
+   those is missing, the plan and `state.json` are restored to their pre-run bytes
+   and the run exits 3.
 
 ## Task JSON Schema
 
@@ -192,17 +202,12 @@ When running `--implement`, the orchestrator checks if the plan has tasks:
 
 ## Step-by-Step Execution
 
-### 0. Check Prerequisites
+### 0. The Prerequisite Gate
 
-Before generating tasks, check if there are unapplied suggestions from plan review:
-
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode generate-tasks
-```
-
-Parse the JSON output (stdout is pure JSON; the human-readable
-`[PREREQUISITE_*]` block goes to stderr and is repeated as `message`). If
-`prerequisites_met` is `false`:
+The orchestrator's first step is the shared gate
+(`check_workflow_prerequisites.ensure_prerequisites`, D6a) — unapplied suggestions
+from plan review. Nothing is produced before it: no phase dir, no task file, no
+`state.json` mutation.
 
 **This gate is never auto-skipped, and `--yes` alone does not skip it** (D6a).
 Tasks generated from a plan whose HIGH-importance review suggestions were never
@@ -211,8 +216,7 @@ headless log nobody reads *is* that failure mode. Nothing has been produced at
 this point — no tasks in the plan file, no phase dir, no `state.json` mutation —
 so there is no half-generated artifact to clean up.
 
-- **With `--yes` (or `--non-interactive`), standalone**: the check has already
-  exited **3** with one message naming *both* fixes. Print it verbatim and stop:
+- **Standalone**: the mode exits **3** with one message naming *both* fixes:
 
   ```
   [PREREQUISITE_UNMET] generate-tasks: 7 HIGH / 3 MEDIUM suggestions in
@@ -222,6 +226,9 @@ so there is no half-generated artifact to clean up.
     2) Proceed on unapplied review output (recorded) —
        <dispatcher> generate-tasks /abs/plans/x.md --yes --skip-prerequisites
   ```
+
+  Both endings a question would have rendered are those two flags, so there is no
+  third one to ask about: an unmet gate is exit 3 whether or not `--yes` is set.
 
 - **With `--skip-prerequisites`**: loud but non-fatal. The check prints
   `[PREREQUISITE_SKIPPED] generate-tasks: <n> unapplied apply-suggestions
@@ -235,76 +242,34 @@ so there is no half-generated artifact to clean up.
   phase exits non-zero, or the re-check still reports the prerequisite unmet, the
   workflow stops there with exit **3**; the auto-run is attempted at most once
   per phase per run and never becomes a retry loop.
-- **Without `--yes`**, use **AskUserQuestion** with the provided `prompt` content:
-   - Question: Use `prompt.question`
-   - Options: Map `prompt.options` to AskUserQuestion format
 
-  Then handle the user's response:
-   - **"Apply suggestions first"**: Stop and instruct the user to run in order:
-     1. `/multi-llm:multi-llm --apply-suggestions $PLAN_PATH`
-     2. `/clear`
-     3. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
-
-     **Do NOT** proceed further. Stop execution after displaying this message.
-   - **"Skip suggestions, proceed"**: Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip` to mark as skipped, then continue
-   - **"Cancel"**: Stop and inform the user that generate-tasks was cancelled
-
-If `prerequisites_met` is `true`, proceed with task generation. A prerequisite
-that was met *because an earlier phase recorded a skip* surfaces as one
+When the gate is met, task generation proceeds. A prerequisite that was met
+*because an earlier phase recorded a skip* surfaces as one
 `[PREREQUISITE_SKIPPED_UPSTREAM …]` line quoting the recorded reason; the run
 proceeds, because consent was already given explicitly.
 
 ---
 
-1. **Validate plan file exists**
+### 1. Materialize, dispatch, consume
 
-2. **Read the plan file:**
-   ```
-   Use Read tool to load the plan content
-   ```
+The remaining steps are the orchestrator's, and they are described in Process
+above. What a host with a native subagent tool contributes is exactly one thing:
 
-3. **Explore the codebase to understand context:**
-   - Use Glob to find files matching patterns mentioned in the plan
-   - Use Grep to search for related code, patterns, or implementations
-   - Use Read to examine key files that will need modification
+- run the `prompt` of the single task in
+  `{plan}/generate-tasks/task_generation_tasks.json` as a subagent,
+- write the JSON object it prints to that task's `output_path`,
+- re-invoke the mode with `--reaggregate`.
 
-4. **Generate tasks based on your analysis:**
-   - Create 5-15 discrete implementation tasks
-   - Ensure first task has no dependencies
-   - Identify which files each task will modify/create
-   - Write descriptions covering what, how, and interface contracts (see Task Descriptions guidance above)
-   - Define specific, verifiable acceptance criteria for each task (see Acceptance Criteria guidance above)
+The subagent explores the repository from the one path the prompt names and prints
+one JSON document. It writes no file, runs no command, and is never handed an
+interactive prompt.
 
-5. **Write tasks JSON to a temporary file using the Write tool (NOT Bash):**
-   - Resolve the project root first: `PROJECT_ROOT=$(git rev-parse --show-toplevel)`.
-     If this fails or prints nothing, STOP with the error: "multi-llm requires
-     running inside a git repository." Never fall back to a relative path or `$PWD`.
-   - file_path: `{PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json`
-     (absolute path; the Write tool creates parent directories automatically —
-     no mkdir step. Use plan stem in filename to avoid conflicts if multiple
-     instances run.)
-   - content: the tasks JSON document
-   - If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also Write
-     it with content `*` so the temp dir ignores itself (run artifacts must never
-     appear in `git status`).
-   - Cleanup semantics: filenames are deterministic per plan, so each run simply
-     overwrites the previous run's file. No deletion step exists or is needed;
-     the user may delete `.multi-llm/tmp/` at any time — the next run recreates it.
+### 2. Reported on success
 
-6. **Run the update script:**
-   ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" --plan-file "$PLAN_PATH" --tasks-file "$PROJECT_ROOT/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
-   ```
-   Pass `$PLAN_PATH` as given — the script resolves it to an OS-native absolute
-   path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that
-   emits a POSIX `/c/...` path a native process cannot use).
-
-7. **Report results:**
-   - Path to generated tasks file (`{plan_subfolder}/{plan_stem}_tasks.md`)
-   - Number of tasks generated
-   - Summary of task dependencies
-   - Any warnings from validation
-   - Next step hint: "Run `/multi-llm:multi-llm --review-tasks $PLAN_PATH` to review tasks with multiple LLMs before implementation (optional)"
+- Path of the rendered tasks file (`{plan}/tasks/tasks.md`) and the plan's fresh
+  `<!-- TASKS_FILE: … -->` marker
+- Number of tasks generated and their dependencies
+- Next step hint: "Run `/multi-llm:multi-llm --review-tasks $PLAN_PATH` to review tasks with multiple LLMs before implementation (optional)"
 
 ---
 

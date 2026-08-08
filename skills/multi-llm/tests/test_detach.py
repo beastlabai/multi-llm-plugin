@@ -689,10 +689,10 @@ class TestDetachGates:
     def test_every_executor_backed_mode_accepts_detach(self):
         """Task 6: the write modes became long-running, so they take the flag.
 
-        ``generate-tasks`` and ``full`` are in the set because their detach
-        plumbing is real; their own ``unavailable`` exit 3 still fires first, so
-        neither pretends the mode works (see
-        ``test_an_unavailable_mode_still_exits_3_under_detach``).
+        ``generate-tasks`` and ``full`` were in the set before their orchestrators
+        existed, so the flag gate a shim saw was already the final one. Now that
+        both are Python, the plumbing they registered for is the plumbing that
+        runs (see ``test_the_registered_detach_path_really_launches``).
         """
         for mode in ("implement", "apply-suggestions", "apply-task-suggestions",
                      "apply-code-fixes", "generate-tasks", "full"):
@@ -700,21 +700,34 @@ class TestDetachGates:
             assert detach.mode_supports_detach(mode), mode
 
     @pytest.mark.parametrize("mode", ["generate-tasks", "full"])
-    def test_an_unavailable_mode_still_exits_3_under_detach(self, mode, tmp_path,
-                                                            capsys):
-        """Registering detach support is not claiming the mode runs.
+    def test_the_registered_detach_path_really_launches(self, mode, tmp_path,
+                                                       monkeypatch, capsys):
+        """The two Phase-3 modes cross the same boundary as every other mode.
 
-        These two have no orchestrator until Phase 3. ``--detach`` is accepted at
-        the flag gate (so the boundary a shim sees is stable) and the mode's own
-        "not yet available on this host" refusal is what the caller gets — never a
-        detached child polling a phase that will never start.
+        Their ``unavailable`` refusal used to fire first, so ``--detach`` was
+        registered plumbing that nothing exercised. With both modes implemented the
+        dispatcher must reach ``detach.launch`` with the mode word and the
+        normalized argv (``--yes`` written out), and the phase dir it hands over
+        must be the run dir that mode owns — not exit 3.
         """
+        launched = {}
+
+        def fake_launch(*, mode, argv, phase_dir, plan_file, args, **kwargs):
+            launched.update(
+                mode=mode, argv=list(argv), phase_dir=phase_dir,
+                plan_file=plan_file,
+            )
+            return 0
+
+        monkeypatch.setattr(detach, "launch", fake_launch)
         plan = _plan(tmp_path)
-        assert multi_llm.main([mode, str(plan), "--detach"]) == 3
-        out = capsys.readouterr()
-        combined = out.out + out.err
-        assert "not yet available on this host" in combined
-        assert "not available for mode" not in combined
+        assert multi_llm.main([mode, str(plan), "--detach"]) == 0
+        capsys.readouterr()
+        assert launched["mode"] == mode
+        assert "--yes" in launched["argv"], launched["argv"]
+        assert launched["plan_file"] == str(plan)
+        expected_phase = mode_table.resolve(mode).phase
+        assert Path(launched["phase_dir"]).name == expected_phase
 
     def test_direct_orchestrator_invocation_refuses_to_detach(self, tmp_path,
                                                               capsys):

@@ -21,7 +21,23 @@ Runs all modes in sequence for complete automation.
 
 ## How Full Mode Works
 
-Full mode orchestrates the entire workflow by loading and executing each phase's instructions in sequence. This provides end-to-end automation from plan review through implementation and code review.
+Full mode is a **resumable state machine in Python** over the modes above, on the
+same `state.json` every standalone invocation writes. This file is the narrative;
+the sequencing is not re-implemented by a driving agent.
+
+Three properties follow from that, and they are worth knowing before reading the
+per-phase sections:
+
+- **A phase counts as progress only when it recorded itself complete** (or
+  skipped). A phase that returns 0 without recording anything — the ordinary case
+  when it stopped at a `[…_PENDING]` marker for a host's own subagent tool to
+  continue — stops the workflow with exit **3** (row 14), naming that phase's own
+  follow-up command *and* the `--resume` re-invocation.
+- **Every phase boundary is a resume point.** `--resume` continues from the first
+  phase `state.json` does not record as completed or skipped; `--force` re-runs
+  phases that are already recorded.
+- **A skipped phase is recorded skipped**, never left pending, so `status` and
+  rerun logic never show an optional phase as perpetually outstanding.
 
 ## Non-Interactive Mode (`--yes` / `--non-interactive`)
 
@@ -143,104 +159,42 @@ Wait for completion, then proceed to Phase 3.
 
 ### 4. Execute Phase 3: Generate Tasks
 
-**Context isolation**: This phase does extensive codebase exploration that would bloat the main context. Delegate it to a Task subagent so the main workflow context stays lean for Phase 4 (Implement).
+Phase 3 is the `generate-tasks` mode, run in-process — the same code path
+`--generate-tasks` takes standalone, so there is one implementation and one prompt
+(see `instructions/generate-tasks.md`). The inlined Task prompt this section used to
+carry is gone: the prompt is materialized in Python, the reply is a document the
+invoker persists, and the temp-file channel it needed no longer exists.
 
-**Note**: In full workflow mode, Phase 2 already handled suggestions, so the generate-tasks prerequisite (Step 0 of generate-tasks) is *satisfied* rather than skipped — which is why rows 5/6 never render here. If Phase 2 did not run or left the gate unmet, `--yes` auto-runs the missing apply phase **once** and re-checks; a still-unmet re-check stops the workflow with exit 3 rather than generating tasks from unapplied review output. The subagent has no user channel at all, so no interactive prompt is ever included in its instructions.
+**Context isolation still holds, and for a better reason than before.** The phase's
+extensive repository exploration happens inside a *subagent* whose entire input is
+the materialized prompt, so the workflow's own context never sees it — on a host
+with a native subagent tool because the host spawns it, and under
+`--exec-subagents` because the executor spawns a provider CLI.
 
-Spawn a single Task subagent:
+**Note**: In full workflow mode, Phase 2 already handled suggestions, so the
+generate-tasks prerequisite (Step 0 of generate-tasks) is *satisfied* rather than
+skipped — which is why rows 5/6 never render here. If Phase 2 did not run or left
+the gate unmet, `--yes` auto-runs the missing apply phase **once** and re-checks; a
+still-unmet re-check stops the workflow with exit 3 rather than generating tasks
+from unapplied review output. The subagent has no user channel at all, so no
+interactive prompt is ever included in its instructions.
 
-```
-Task tool call:
-  subagent_type: general-purpose
-  description: "Generate implementation tasks from plan"
-  prompt: |
-    You are generating implementation tasks for a plan.
+**Verification is part of the phase, not of this narrative.** Success means the plan
+carries a fresh `<!-- TASKS_FILE: … -->` marker, the rendered tasks file exists and
+parses, and its task count matches the validated document — checked in Python, from
+the artifacts, under either invoker. Anything else restores the plan and stops.
 
-    **Plan file**: {PLAN_PATH_ABSOLUTE}
+**Error handling** (D6 row 14): a failed generation stops the workflow with exit
+**3**, naming the failed phase and the re-invocation that continues from it —
+`<dispatcher> full <plan> --yes --resume`. `--full` never proceeds past a failed
+generation: implementing against a plan with no tasks is the error `--implement`'s
+auto-detection already reports. There is no "retry, or run generate-tasks in the
+main context, or cancel" prompt any more — the middle option was never anything but
+"do it by hand in Claude Code", and silently switching strategy is how a headless
+run ends up with a half-populated plan nobody reviewed. Retry *is* the same
+re-invocation; cancelling is not re-invoking.
 
-    ## Steps
-
-    1. Read the plan file using the Read tool
-    2. Explore the codebase to understand context:
-       - Use Glob to find files matching patterns mentioned in the plan
-       - Use Grep to search for related code, patterns, or implementations
-       - Use Read to examine key files that will need modification
-    3. Generate 5-15 discrete implementation tasks:
-       - First task (T001) should be setup/foundation with no dependencies
-       - Each task should modify 1-5 files maximum
-       - Identify dependencies between tasks (use explicit depends_on arrays)
-       - Define clear acceptance criteria for each task
-       - Set appropriate executor_role:
-         - general-purpose: All implementation tasks (default)
-         - human: Manual steps requiring user action
-    4. Write the tasks JSON to a temporary file using the Write tool (NOT Bash):
-       - Resolve the project root first by running: git rev-parse --show-toplevel
-         (if this fails or prints nothing, STOP: multi-llm requires running inside
-         a git repository — never fall back to a relative path or $PWD).
-         The printed path is {PROJECT_ROOT} below. Shell variables do NOT survive
-         between Bash calls — substitute the concrete absolute path literally in
-         the Write tool's file_path, and re-resolve the root inside any later
-         Bash command that needs it (as step 5 does).
-       - file_path: {PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_{plan_stem}.json
-         (absolute path; the Write tool creates parent directories automatically —
-         no mkdir step. Use plan stem in filename to avoid conflicts if multiple
-         instances run; each run overwrites the previous file, no cleanup step.)
-       - content: a JSON document of this shape:
-         {
-           "plan_preamble": "3-5 sentences: overall goal, architecture, tech choices, conventions",
-           "tasks": [
-             {
-               "id": "T001",
-               "title": "Short title (5-10 words)",
-               "description": "Detailed description (2-5 sentences)",
-               "depends_on": [],
-               "files_to_modify": [],
-               "files_to_create": [],
-               "acceptance_criteria": [],
-               "estimated_complexity": "low|medium|high",
-               "executor_role": "agent"
-             }
-           ]
-         }
-       - If {PROJECT_ROOT}/.multi-llm/tmp/.gitignore does not exist yet, also
-         Write it with content `*` so the temp dir ignores itself
-    5. Run the update script. Root resolution and the update run in ONE single
-       Bash invocation — the git rev-parse from step 4 ran in a different
-       process, so its result must be recomputed here, not referenced.
-       Recompute it as an inline command substitution inside the --tasks-file
-       argument (not as a PROJECT_ROOT=... assignment prefix, which the
-       permission allowlist does not cover):
-       uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/update_plan_tasks.py" \
-         --plan-file "{PLAN_PATH_ABSOLUTE}" \
-         --tasks-file "$(git rev-parse --show-toplevel)/.multi-llm/tmp/generated_tasks_{plan_stem}.json"
-       (Step 4 already hard-stopped outside a git repository, so the
-       substitution cannot come back empty here — never retry with a guessed
-       path.)
-    6. Report: number of tasks generated, task IDs with titles, and the tasks file path.
-
-    ## Constraints
-    - Do NOT use AskUserQuestion — you are running as a subagent
-    - Do NOT skip codebase exploration — thorough analysis produces better tasks
-    - Do NOT run any prerequisite checks (Step 0) — already handled
-```
-
-Where `{PLAN_PATH_ABSOLUTE}` is the OS-native absolute path to the plan file — join the resolved project root (`git rev-parse --show-toplevel`) with the plan path relative to it. Do NOT compute it with `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that neither harness tools nor native processes can use. `{plan_stem}` is the plan filename without extension.
-
-**Error handling**: After the subagent completes:
-
-1. **Verify success**: Read the plan file and check for the `<!-- TASKS_FILE: ... -->` marker
-2. **If the subagent failed under `--yes`** (D6 row 14): stop with exit **3**,
-   naming the failed phase and the re-invocation that continues from it —
-   `<dispatcher> full <plan> --yes --resume`. Do not retry the subagent, and do
-   not fall back to running generate-tasks in the main context: an unattended
-   crash is a terminal condition, and silently switching strategy is how a
-   headless run ends up with a half-populated plan nobody reviewed.
-3. **If the subagent failed without `--yes`**: Report the error and ask the user whether to:
-   - Retry (spawn another subagent)
-   - Run generate-tasks manually in main context (fallback: load `${CLAUDE_SKILL_DIR}/instructions/generate-tasks.md` and execute)
-   - Cancel the full workflow
-
-Wait for completion, then proceed to Phase 3b.
+Then Phase 3b follows.
 
 ### 4b. Optional Phase 3b: Review Tasks
 
@@ -248,51 +202,34 @@ After task generation completes successfully, determine whether to run the revie
 
 **`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
 
-**There is no TTY-sniffing branch.** "Not asked" is decided by the shim's baked
-`--yes` plus the user-typed `--review-tasks` opt-in — never by `isatty()`, `CI`
-or a `--print` flag (D6b). Without `--yes`, `--review-tasks` is the explicit flag
-that opts in; declining still records the skip through
-`check_workflow_prerequisites.py --skip --mode review-tasks` exactly as below.
+**There is no TTY-sniffing branch, and there is no question.** "Not asked" is
+decided by the shim's baked `--yes` plus the user-typed `--review-tasks` opt-in —
+never by `isatty()`, `CI` or a `--print` flag (D6b). Row 12 has exactly two
+endings, both resolved in Python:
 
-**Interactive mode (no `--yes`, no `--review-tasks`)**: Use AskUserQuestion to prompt:
+- `--yes` **or** `--review-tasks` → the phase runs, with the models resolved in
+  Phase 1 (`instructions/review-tasks.md` is the narrative for what it does).
+- neither → the phase is **recorded skipped** through the same `--skip --reason`
+  state path (`reason: not requested (--review-tasks not passed)`), so `status`
+  output and rerun logic never show review-tasks as perpetually pending.
 
-> "Would you like to review the generated tasks with multiple LLMs before implementation?"
-
-- **Options**: "Yes, review tasks" / "No, proceed to implement"
-
-**If yes**: Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Use the same models selected in Phase 1. Wait for completion, then proceed to Phase 3c.
-
-**If no**: Mark the phase as skipped for workflow tracking so `--status` output and rerun logic never show review-tasks as perpetually pending:
-
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks --skip --reason "User declined"
-```
-
-Then proceed to Phase 3c.
+Then Phase 3c follows.
 
 ### 4c. Execute Phase 3c: Apply Task Suggestions
 
 After Phase 3b completes (or is skipped), determine whether to run the apply-task-suggestions phase. This phase applies validated findings from the task review to update the tasks file automatically.
 
-**Three-case conditional logic:**
+**Three-case conditional logic**, decided in Python from the *existing*
+prerequisite counter rather than re-derived per host:
 
-**(a) Review-tasks was skipped**: If Phase 3b was skipped (user declined or non-interactive mode), skip apply-task-suggestions as well. Record the skip:
+**(a) Review-tasks was skipped**: apply-task-suggestions is recorded skipped too
+(`reason: Skipped: review-tasks was not executed`), and Phase 4 follows.
 
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks was not executed"
-```
+**(b) Review-tasks ran but produced zero findings**: the counter over
+`{plan}/review-tasks/grouped.json` reports nothing actionable, so the phase is
+recorded skipped (`reason: Skipped: skipped (no findings)`), and Phase 4 follows.
 
-Then proceed directly to Phase 4.
-
-**(b) Review-tasks ran but produced zero findings**: Check `{plan}/review-tasks/grouped.json`. If the file exists but contains zero groups (empty `groups` array or all groups have zero valid suggestions), skip apply-task-suggestions:
-
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-task-suggestions --skip --reason "Skipped: review-tasks produced zero findings"
-```
-
-Then proceed directly to Phase 4.
-
-**(c) Review-tasks produced findings**: If `{plan}/review-tasks/grouped.json` contains valid findings, auto-run apply-task-suggestions:
+**(c) Review-tasks produced findings**: the phase runs —
 
 ```bash
 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-confirm
@@ -343,13 +280,10 @@ Wait for completion, then proceed to Phase 6.
 
 Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-code-fixes.md` and execute. This phase mirrors Phase 2 (Apply Suggestions), but applies the validated findings from the code review (Phase 5) to the **code** rather than the plan.
 
-**Conditional — skip if there is nothing to apply.** Check `{plan}/code-review/grouped.json`. If it does not exist, or contains zero groups / zero valid (HIGH/MEDIUM) findings, skip this phase:
-
-```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode apply-code-fixes --skip --reason "Skipped: code review produced zero actionable findings"
-```
-
-Then proceed to the report.
+**Conditional — skip if there is nothing to apply.** When
+`{plan}/code-review/grouped.json` is missing or carries no findings, the phase is
+recorded skipped (`reason: Skipped: code review produced zero actionable findings`)
+through the same `--skip --reason` state path, and the report follows.
 
 **Otherwise, run the apply-code-fixes orchestrator:**
 
