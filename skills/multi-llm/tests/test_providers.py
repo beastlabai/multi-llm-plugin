@@ -2582,6 +2582,38 @@ class TestSubagentRunnerDeclarations:
         assert "generate" in provider.agent_profiles
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_declared_write_profile_matches_supports_file_edits(self, name):
+        """`agent-write` and `supports_file_edits` are one fact, declared twice.
+
+        Both must agree AND the branch must actually render a command: an adapter
+        that declares the profile but falls through to the base raise would be
+        chosen as a write runner and fail on a user's repository, and one that
+        implements it without declaring it would be refused for work it can do.
+        """
+        from utils.provider_registry import _PROVIDERS
+        from utils.providers.base import PROFILE_AGENT_WRITE, ProfileUnsupported
+
+        provider = _PROVIDERS[name]
+        declares = PROFILE_AGENT_WRITE in provider.agent_profiles
+        assert declares == provider.supports_file_edits, (
+            f"{name}: agent_profiles declares agent-write={declares} but "
+            f"supports_file_edits={provider.supports_file_edits}"
+        )
+        if declares:
+            argv = provider.build_agent_command("p", "m", PROFILE_AGENT_WRITE)
+            assert argv and argv[-1] == "p"
+            # A non-argv transport is mandatory for the edit-capable invocation
+            # (task 6 / D2d): apply and implement prompts are the largest the
+            # skill builds.
+            stdin_argv, stdin_text = provider.build_agent_command_for_transport(
+                "p", "m", PROFILE_AGENT_WRITE, "stdin"
+            )
+            assert stdin_text == "p" and "p" not in stdin_argv
+        else:
+            with pytest.raises(ProfileUnsupported):
+                provider.build_agent_command("p", "m", PROFILE_AGENT_WRITE)
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_declared_usage_matches_an_implemented_extractor(self, name):
         from utils.provider_registry import _PROVIDERS
 

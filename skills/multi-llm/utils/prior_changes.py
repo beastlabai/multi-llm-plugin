@@ -45,6 +45,73 @@ def _load_entries(path: Path) -> list[dict]:
     return entries
 
 
+def render(output_dir: str) -> str:
+    """The prior-batch context block, exactly as `read` prints it.
+
+    Extracted from :func:`cmd_read` so the D3n write-batch scheduler can bind
+    ``{prior_changes_context}`` **in process**, per dispatch, without shelling out
+    to this script — and, more importantly, so both invokers substitute
+    byte-identical text. The log is always **replayed from disk** rather than
+    reconstructed from an in-memory list, which is what makes a resumed batch see
+    the same context an uninterrupted run would have.
+    """
+    entries = _load_entries(_jsonl_path(output_dir))
+    if not entries:
+        return DEFAULT_TEXT
+
+    total = len(entries)
+    tail = min(DEFAULT_TAIL, total)
+    output = ""
+    while tail > 0:
+        skipped = total - tail
+        visible = entries[total - tail:]
+
+        lines: list[str] = []
+        if skipped > 0:
+            lines.append(f"... and {skipped} earlier batches applied miscellaneous changes")
+
+        for i, entry in enumerate(visible, start=skipped + 1):
+            eid = entry.get("id", "?")
+            summary = entry.get("summary", "")
+            lines.append(f"{i}. **Batch {i}** ({eid}): {summary}")
+
+        output = "\n".join(lines)
+        if len(output) <= MAX_CHARS:
+            break
+        tail -= 1
+    return output
+
+
+def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
+    """Append one entry, skipping a duplicate ``(id, phase)``. True when written.
+
+    The in-process half of ``append``, for the same reason :func:`render` exists.
+    Idempotent on ``(id, phase)`` — which is why the write task carries a stable
+    ``prior_changes_id`` rather than a loop index: a re-dispatched batch must not
+    double its own summary into the context every later batch reads.
+    """
+    path = _jsonl_path(output_dir)
+    entries = _load_entries(path)
+    for entry in entries:
+        if entry.get("id") == entry_id and entry.get("phase") == phase:
+            return False
+    record = {
+        "id": entry_id,
+        "phase": phase,
+        "summary": summary,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return True
+
+
+def entries(output_dir: str) -> list[dict]:
+    """Every recorded entry, in order (resume replay, and the batch report)."""
+    return _load_entries(_jsonl_path(output_dir))
+
+
 def cmd_read(args: argparse.Namespace) -> None:
     entries = _load_entries(_jsonl_path(args.output_dir))
     if not entries:

@@ -293,8 +293,23 @@
 #   subagent_runner: claude-code:sonnet
 #   subagent_runner_cheap: claude-code:haiku
 #   max_concurrent_subagents: 4
+#   max_concurrent_write_subagents: 1
 #   subagent_timeout_s: null
 #   subagent_retries: 1
+#   write_paths:
+#     allow:
+#       - '**'
+#     deny:
+#       - .git/**
+#       - .multi-llm/**
+#       - '**/.env'
+#       - '**/.env.*'
+#       - '**/*.pem'
+#       - '**/id_rsa*'
+#       - '**/.ssh/**'
+#       - '**/.aws/**'
+#       - '**/.npmrc'
+#       - '**/node_modules/**'
 
 
 ## --- defaults ---------------------------------------------------------------

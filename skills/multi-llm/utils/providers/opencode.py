@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..json_extractor import extract_json_from_text
 from .base import (
     PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
     USAGE_FULL,
     LLMProvider,
@@ -19,6 +20,13 @@ from .base import (
 # opencode's own permission mechanism rather than a convention this repo layers
 # on top.
 READONLY_AGENT = "plan"
+
+# OpenCode's built-in edit-capable agent, the one `opencode run` uses when
+# `--agent` is omitted ("build" — the primary agent in the same embedded agent
+# table `plan` comes from). It is named EXPLICITLY on the `agent-write` profile
+# rather than relying on the default, so a future change to opencode's default
+# agent cannot silently move a write dispatch onto a different permission set.
+WRITE_AGENT = "build"
 
 # Reasoning effort values accepted by `opencode run --variant` — the values are
 # provider-specific, so this is the practical union across providers
@@ -48,7 +56,8 @@ class OpenCodeProvider(LLMProvider):
     supported_prompt_transports = ("argv", "stdin")
 
     # Subagent-runner declarations (D3e/D3j/D3m).
-    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
+    supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
     version_cmd = ("opencode", "--version")
@@ -105,7 +114,16 @@ class OpenCodeProvider(LLMProvider):
     def build_agent_command(
         self, prompt: str, model: str, profile: str = PROFILE_AGENT_READONLY
     ) -> List[str]:
-        """Build ``opencode run`` under the read-only ``plan`` agent (D3e)."""
+        """Build ``opencode run`` under the profile's own agent (D3e).
+
+        ``agent-readonly`` runs the built-in ``plan`` agent (every edit tool
+        denied); ``agent-write`` runs the built-in ``build`` agent, named
+        explicitly rather than inherited from opencode's default. Either way the
+        permission set is opencode's own, and ``cwd`` is pinned by the executor.
+        """
+        if profile == PROFILE_AGENT_WRITE:
+            cmd = self.build_command(prompt, model)
+            return [*cmd[:2], "--agent", WRITE_AGENT, *cmd[2:]]
         if profile != PROFILE_AGENT_READONLY:
             return super().build_agent_command(prompt, model, profile)
         cmd = self.build_command(prompt, model)

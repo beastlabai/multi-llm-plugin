@@ -479,6 +479,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # needs this (True); the suggestions and task-suggestions orchestrators
     # originally did not have this guard, so they set it to False.
     guard_double_nesting: bool = True
+    # The materialized write kind this phase's batches become under
+    # ``--exec-subagents`` (D3g/D3n). ``""`` means the phase has no write
+    # executor path and always emits task JSON for a native invoker.
+    write_kind: str = ""
 
     # ------------------------------------------------------------------
     # Subclass validation
@@ -1553,6 +1557,29 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             json.dump(output, f, indent=2)
         print(f"[OUTPUT_FILE] {output_path}", file=sys.stderr)
 
+        # Step 33a: the detach boundary (D4). It sits HERE — after every
+        # pre-flight (flags, inputs, loading, filtering, batching, phase-dir
+        # creation) and before the write executor can start a child — so a bad flag
+        # or an unresolvable runner fails on the caller's terminal with no child and
+        # no log. The write phases became long-running when the executor landed;
+        # before that, `--detach` on them was a loud exit 3 at the dispatcher.
+        detached = self.maybe_detach_write_phase()
+        if detached is not None:
+            return detached
+
+        # Step 33b: the write executor (D3n). Strictly additive — with neither
+        # `--exec-subagents` nor `--dry-run-subagents` this returns None and the
+        # rest of this method is byte-for-byte the native path. When it DOES run it
+        # owns phase completion too: the base's `mark_phase_completed` below is
+        # skipped, because a stopped batch loop must leave the phase incomplete.
+        scheduled = self.run_write_executor()
+        if scheduled is not None:
+            try:
+                self.print_text_summary(self.batches, output_path)
+            except Exception as e:  # noqa: BLE001 - summary is non-fatal
+                self.logger.warning("print_text_summary failed: %s", e)
+            return scheduled
+
         if self.marks_phase_completed and self.state is not None:
             self.state.mark_phase_completed(self.phase_name)
             self.state.save()
@@ -1570,6 +1597,161 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 35: Return exit code 0
         return 0
+
+    # ==================================================================
+    # The write executor (D3f/D3g/D3h/D3l/D3n)
+    # ==================================================================
+
+    def maybe_detach_write_phase(self) -> Optional[int]:
+        """The one detach boundary a write phase crosses (D4), or ``None``.
+
+        Returns ``None`` to keep running in this process — the ordinary foreground
+        run, and also the detached worker once it owns the phase dir — or an exit
+        code the caller must return immediately (the invoker, after forking).
+
+        Delegates to the *same* ``review_orchestrator_base.maybe_detach`` the
+        fan-out modes use: one spawn implementation, one handshake, one
+        ``.status.json`` claim, so a write run is observable through exactly the
+        same ``status`` command.
+        """
+        if not (getattr(self.args, "detach", False)
+                or getattr(self.args, "internal_worker", False)):
+            return None
+        from .review_orchestrator_base import maybe_detach
+
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        mode = self.confirmation_phase_name or self.phase_name
+        return maybe_detach(
+            args=self.args,
+            mode=mode,
+            phase_dir=phase_dir,
+            plan_file=self.plan_path,
+            phase=self.phase_name,
+        )
+
+    def write_phase_artifact(self) -> str:
+        """The shared artifact this phase's batches edit (D3h).
+
+        apply-suggestions and apply-task-suggestions each edit exactly ONE file, so
+        that file is what gets snapshotted, what the byte comparison decides on, and
+        why those phases are pinned to one concurrent write regardless of the driver
+        config. apply-code-fixes overrides this to nothing: its batches are
+        partitioned by ``file_key``, so the declared set is per-batch.
+        """
+        return self.plan_path
+
+    def run_write_executor(self) -> Optional[int]:
+        """Drive this phase's batches through the write scheduler, or decline.
+
+        Returns ``None`` — meaning "not requested, carry on natively" — unless
+        ``--exec-subagents`` or ``--dry-run-subagents`` was passed *and* the phase
+        declares a ``write_kind``. Otherwise returns the phase's exit code, which is
+        the scheduler's: 0 when every batch verified and finalization ran, 3 when
+        the loop stopped at a batch boundary or a human task needs an answer.
+        """
+        if not self.write_kind:
+            return None
+        if not (getattr(self.args, "exec_subagents", False)
+                or getattr(self.args, "dry_run_subagents", False)):
+            return None
+        if not self.batches:
+            return None
+
+        from .write_batch_scheduler import WriteBatchScheduler
+        from .write_phase_bridge import (
+            materialize_write_tasks,
+            write_task_file_for_phase,
+        )
+
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        grouped_file = os.path.join(self.out_dir, self.review_subdir, "grouped.json")
+        artifact = self.write_phase_artifact()
+        tasks = materialize_write_tasks(
+            kind=self.write_kind,
+            batches=[
+                batch if isinstance(batch, dict) else batch.to_dict()
+                for batch in self.batches
+            ],
+            phase_dir=phase_dir,
+            plan_file=self.plan_path,
+            tasks_file=artifact if artifact != self.plan_path else None,
+            grouped_file=grouped_file if os.path.exists(grouped_file) else None,
+        )
+        task_file = write_task_file_for_phase(
+            kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
+            plan_file=self.plan_path,
+            grouped_file=grouped_file if os.path.exists(grouped_file) else None,
+        )
+        print(
+            f"[write-subagents] materialized {len(tasks)} {self.phase_name} "
+            f"task(s): {task_file}"
+        )
+
+        # D3h: every executor-backed WRITE mode gets a dirty-tree baseline, not just
+        # `--implement`, and it is reported at start rather than silently absorbed
+        # into the run's diff.
+        self._record_pre_existing_changes()
+
+        scheduler = WriteBatchScheduler(
+            tasks=tasks,
+            phase_dir=phase_dir,
+            kind=self.write_kind,
+            output_dir=self.out_dir,
+            state=self.state,
+            plan_file=self.plan_path,
+            anchor=self.plan_path,
+            resume=True,
+            dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
+        )
+        result = scheduler.run()
+        for line in result.messages:
+            print(line, file=sys.stderr if result.exit_code else sys.stdout)
+        if result.report_path:
+            print(f"[write-subagents] report: {result.report_path}")
+        return result.exit_code
+
+    def _record_pre_existing_changes(self) -> None:
+        """Record the dirty-tree baseline for this write phase (D3h).
+
+        The same recording ``implement_orchestrator.record_pre_existing_changes``
+        does, extended to every executor-backed write mode so each has a baseline
+        the final diff can be isolated against — and reported at start, because a
+        dirty tree silently absorbed into a run's diff is how an unrelated edit gets
+        attributed to a batch.
+        """
+        if self.state is None:
+            return
+        try:
+            from .git_utils import get_modified_files, get_staged_files
+        except ImportError:  # pragma: no cover
+            from utils.git_utils import get_modified_files, get_staged_files
+        if self.state.get("pre_existing_changes") is not None:
+            existing = self.state.get("pre_existing_changes") or []
+            print(
+                f"[write-subagents] dirty-tree baseline already recorded "
+                f"({len(existing)} file(s))"
+            )
+            return
+        try:
+            pre_existing = sorted(
+                {f for f in get_modified_files() if f} | {f for f in get_staged_files() if f}
+            )
+        except Exception as exc:  # noqa: BLE001 - a baseline probe must not fail a run
+            print(f"[write-subagents] warning: could not record baseline: {exc}")
+            pre_existing = []
+        self.state.set("pre_existing_changes", list(pre_existing))
+        self.state.save()
+        if pre_existing:
+            print(
+                f"[write-subagents] dirty tree at start: {len(pre_existing)} "
+                f"uncommitted file(s) recorded as the baseline — they are NOT part "
+                f"of this run's changes: {', '.join(pre_existing[:10])}"
+                + (" …" if len(pre_existing) > 10 else "")
+            )
+        else:
+            print("[write-subagents] clean working tree at start")
 
     # ==================================================================
     # Abstract methods (subclass must implement)

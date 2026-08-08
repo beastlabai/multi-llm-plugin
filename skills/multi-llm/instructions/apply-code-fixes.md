@@ -230,6 +230,48 @@ uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metr
 ```
 Where `{total_batches}` is the length of the `batches` array.
 
+### The Python write executor: `--exec-subagents` (an alternative to this loop)
+
+Everything from here to the end of the batch loop is the **native-subagent** path:
+this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
+Task subagent, diffs against the snapshot and appends to the prior-changes log.
+
+A host with no native subagent tool runs the *same* loop in Python instead. Add
+`--exec-subagents` to the orchestrator invocation above and the phase schedules
+itself in one process: batches in ascending `batch_index`, each one's snapshot/diff
+classification completed and recorded **before** the next is dispatched, the
+prior-batch context bound late per dispatch (the literal `{prior_changes_context}`
+token never reaches a runner), `prior_changes.py append` and `metrics.py record`
+called per batch, and the phase marked completed only after every batch verified.
+The runner comes from `driver.subagent_runner` in `providers.yaml`; write
+concurrency comes from `driver.max_concurrent_write_subagents` (default **1**, and
+raise it above 1 only for this phase, whose batches are partitioned by file — and even then two batches co-schedule only when their declared file sets are provably disjoint).
+
+Do **not** combine the two: with `--exec-subagents` the phase finishes in that one
+invocation and there is no batch left for this agent to run.
+
+Three flags belong to that path and are worth knowing even on this one:
+
+- `--dry-run-subagents` — full preflight, **zero dispatch**. Renders the exact
+  command per batch, applies the invocation profile, the co-scheduling admission
+  check and the `driver.write_paths` policy, writes
+  `{phase}/subagent_dry_run.json` and exits 0 having started no child and changed
+  nothing else. The recommended first unattended run on a new host.
+- `--detach` — the phase self-daemonizes and returns a log path plus a `status`
+  command to poll. Per-batch progress lands in `{phase}/.status.json` under
+  `progress.write_subagents`, so an unattended write run is observable with no chat
+  context at all. Never combine it with a host's own background primitive: on Claude
+  Code use `run_in_background` and never pass `--detach`.
+- Rollback, when a batch half-applies —
+  `multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>` (also
+  `--all-failed`), invoked through the dispatcher the same way every other mode is.
+  It restores exactly the files `{phase}/subagent_audit.jsonl` recorded as touched,
+  from the pre-batch snapshot under `{phase}/pre_batch/{task_id}/`, and **refuses**
+  a file whose current hash no longer matches what the audit recorded at completion
+  (someone edited it since) unless `--force` is passed. A partial application never
+  reverts itself: the run exits 3 naming this command, because an automatic revert
+  would destroy the half-applied state a human needs to inspect.
+
 For each batch (index N, starting at 1) returned by the orchestrator, Claude MUST:
 
 1. **Read prior changes** — Run:

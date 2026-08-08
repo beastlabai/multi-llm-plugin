@@ -62,6 +62,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from .providers.base import (
         PROFILE_AGENT_READONLY,
+        PROFILE_AGENT_WRITE,
         ProfileUnsupported,
     )
     from .schema_validator import (
@@ -69,7 +70,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         validate_with_schema_file,
     )
     from .subagent_tasks import (
-        KINDS,
+        KINDS,  # noqa: F401 - re-exported for callers that read it off this module
+        READ_KINDS,
+        WRITE_KINDS,
         preferred_prompt_transport,
         refuse_reason,
         tasks_of,
@@ -89,6 +92,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils.providers.base import (
         PROFILE_AGENT_READONLY,
+        PROFILE_AGENT_WRITE,
         ProfileUnsupported,
     )
     from utils.schema_validator import (
@@ -96,7 +100,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         validate_with_schema_file,
     )
     from utils.subagent_tasks import (
-        KINDS,
+        KINDS,  # noqa: F401 - re-exported for callers that read it off this module
+        READ_KINDS,
+        WRITE_KINDS,
         preferred_prompt_transport,
         refuse_reason,
         tasks_of,
@@ -118,6 +124,14 @@ __all__ = [
     "STATUS_SPAWN_FAILED",
     "STATUS_AUTH_FAILED",
     "STATUS_INCOMPLETE",
+    "STATUS_PARTIAL",
+    "STATUS_POLICY_VIOLATION",
+    "WRITE_APPLIED",
+    "WRITE_CLEAN_FAILURE",
+    "WRITE_PARTIAL",
+    "WRITE_SCHEMA_REJECTED",
+    "WRITE_POLICY_VIOLATION",
+    "WRITE_STOP_OUTCOMES",
     "RUNG_BY_STATUS",
     "RETRYABLE_STATUSES",
     "FATAL_STATUSES",
@@ -142,6 +156,7 @@ __all__ = [
     "run_task_file",
     "simulate_native_invoker",
     "continue_past_marker",
+    "dry_run_report",
     "preflight_runner",
 ]
 
@@ -206,9 +221,38 @@ BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
 #: identically, so continuing would only burn the retry budget N times.
 FATAL_STATUSES = frozenset({STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED})
 
-#: Every read/analyze kind runs read-only. Derived from the kind by the executor
-#: (D3e), never read from the task JSON.
-PROFILE_BY_KIND = {kind: PROFILE_AGENT_READONLY for kind in KINDS}
+#: Not a dispatch outcome either: the two D3g **verification** failures. They have
+#: no D3k rung by design — the child ran, produced a schema-valid result and the
+#: transport worked; what failed is the executor's own byte comparison, so
+#: attaching a transport rung would be a category error (and would make a retry
+#: look reasonable, which it never is for a half-applied file).
+STATUS_PARTIAL = "partial_application"
+STATUS_POLICY_VIOLATION = "policy_violation"
+
+#: Every read/analyze kind runs read-only; every write kind runs ``agent-write``.
+#: Derived from the kind by the executor (D3e), never read from the task JSON —
+#: which is the whole point: a materialized prompt embeds untrusted plan/diff text
+#: and must not be able to request escalation.
+PROFILE_BY_KIND = {
+    **{kind: PROFILE_AGENT_READONLY for kind in READ_KINDS},
+    **{kind: PROFILE_AGENT_WRITE for kind in WRITE_KINDS},
+}
+
+#: The four D3g write outcomes, plus the D3l containment failure. Recorded on the
+#: outcome as its own axis rather than being folded into ``status``, because
+#: "applied" and "clean failure" are both successful *dispatches* that the loop
+#: continues past, while "partial application" and "policy violation" stop it.
+WRITE_APPLIED = "applied"
+WRITE_CLEAN_FAILURE = "clean-failure"
+WRITE_PARTIAL = "partial-application"
+WRITE_SCHEMA_REJECTED = "schema-rejection"
+WRITE_POLICY_VIOLATION = "policy-violation"
+
+#: Write outcomes that stop the batch loop at its boundary (D3g/D3n): the phase is
+#: not completed, snapshots stay in place, and the run exits 3 naming the restore
+#: command — under ``--yes`` too, since an unattended run may not decide that a
+#: half-applied plan file is acceptable.
+WRITE_STOP_OUTCOMES = frozenset({WRITE_PARTIAL, WRITE_POLICY_VIOLATION})
 
 #: Per-kind ``output_name`` patterns (D3f), so the reaggregation glob can never be
 #: fed a foreign file. ``salvage`` is the one kind whose output IS a model result
@@ -225,6 +269,13 @@ OUTPUT_NAME_PATTERN_BY_KIND = {
     "human_decision_judge": re.compile(r"^human_decision_batch_\d+\.json$"),
     "task_generation": re.compile(r"^task_generation_result\.json$"),
     "salvage": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.json$"),
+    # Write kinds (D3g): the batch result JSON. One distinct pattern per kind, so a
+    # hand-edited or regenerated task from one phase can never write into another
+    # phase's result set even when the phase dirs are siblings.
+    "apply_suggestions": re.compile(r"^apply_batch_\d+\.json$"),
+    "apply_task_suggestions": re.compile(r"^apply_task_batch_\d+\.json$"),
+    "apply_code_fixes": re.compile(r"^apply_fix_batch_\d+\.json$"),
+    "implement": re.compile(r"^implement_batch_\d+\.json$"),
 }
 
 #: Orchestrator-owned artifacts an executor write may never land on (D3f).
@@ -242,6 +293,14 @@ RESERVED_OUTPUT_NAMES = frozenset({
     ".status.json",
     "orchestrator-run.log",
     BATCH_REPORT_FILENAME,
+    # Write-path artifacts the executor owns (D3g/D3l). A subagent result landing
+    # on any of these would overwrite the very evidence the classification, the
+    # audit trail and `util restore-batch` depend on.
+    "orchestrator_output.json",
+    "subagent_audit.jsonl",
+    "subagent_dry_run.json",
+    "prior_changes.jsonl",
+    "write_batch_report.json",
 })
 
 #: Basename prefixes an executor write may never land on (a task file, a salvage
@@ -250,6 +309,11 @@ RESERVED_OUTPUT_PREFIXES = ("salvage_", "error_", "orchestrator-run.")
 
 #: Statuses mirrored into ``.status.json`` under ``progress`` (display only).
 _STATUS_MIRROR_KEY = "subagents"
+
+#: The token D3n substitutes late, per dispatch. Duplicated as a private constant
+#: rather than imported at module scope only to keep this module's import graph
+#: unchanged; ``tests/test_subagent_tasks.py`` pins the two spellings together.
+_PRIOR_CHANGES_TOKEN = "{prior_changes_context}"
 
 
 # ---------------------------------------------------------------------------
@@ -349,10 +413,28 @@ class TaskOutcome:
     usage: Optional[Dict[str, Any]] = None
     usage_reported: bool = False
     skipped: bool = False
+    #: D3g, write kinds only: which of the four outcomes the snapshot/diff
+    #: classification landed on. Its own axis rather than a status, because
+    #: `applied` and `clean-failure` are both dispatches the loop continues past.
+    write_outcome: Optional[str] = None
+    #: The files the post-run byte comparison actually observed as changed — the
+    #: set the write policy is enforced against, never the runner's own claim.
+    files_touched: List[str] = field(default_factory=list)
+    #: The `summary` line lifted from the batch result JSON, for the prior-changes
+    #: append. Never a compressed chat message.
+    summary: Optional[str] = None
+    #: Where this task's pre-batch snapshot lives, so an exit-3 message can name
+    #: the restore command instead of describing it.
+    snapshot_dir: Optional[str] = None
 
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK
+
+    @property
+    def stops_the_loop(self) -> bool:
+        """Whether this outcome forbids dispatching the next batch (D3g/D3n)."""
+        return self.write_outcome in WRITE_STOP_OUTCOMES
 
     @property
     def rung(self) -> Optional[int]:
@@ -380,6 +462,13 @@ class TaskOutcome:
             out["reason"] = self.reason
         if self.skipped:
             out["skipped"] = True
+        if self.write_outcome:
+            out["write_outcome"] = self.write_outcome
+            out["files_touched"] = list(self.files_touched)
+            if self.summary:
+                out["summary"] = self.summary
+            if self.snapshot_dir:
+                out["snapshot_dir"] = self.snapshot_dir
         if self.usage_reported:
             out["usage"] = dict(self.usage or {})
         else:
@@ -1074,6 +1163,11 @@ def validate_result(kind: str, data: Any) -> List[str]:
         return validate_with_schema_file(data, "generated_tasks.schema.json")
     if kind == "salvage":
         return _salvage_result_errors(data)
+    if kind in WRITE_KINDS:
+        # D3g's "the batch still returns JSON on stdout" made concrete: the same
+        # schema gate a validation result gets, so a runner that narrated its work
+        # in prose fails the task instead of being counted as applied.
+        return validate_with_schema_file(data, "write_batch_result.schema.json")
     return [f"unknown kind {kind!r}"]
 
 
@@ -1266,6 +1360,9 @@ def dispatch_task(
     retries: Optional[int] = None,
     timeout: Optional[int] = None,
     sleep: Optional[Callable[[float], None]] = None,
+    prompt: Optional[str] = None,
+    before_attempt: Optional[Callable[[Dict[str, Any]], None]] = None,
+    after_result: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -1279,6 +1376,25 @@ def dispatch_task(
     but failed schema validation is **never** retried: that is a deterministic
     disagreement a retry would only launder. A retried task keeps its ``task_id``,
     so the task-keyed result map and reaggregation are unaffected.
+
+    Args:
+        prompt: The prompt to dispatch, overriding ``task["prompt"]``. This is the
+            D3n seam: an apply prompt is complete except for
+            ``{prior_changes_context}``, whose value is a function of the batches
+            that already finished, so the scheduler substitutes it and hands the
+            *dispatched* prompt in here. The task JSON stays the immutable
+            hash-bound snapshot D2g made it — this never rewrites it.
+        before_attempt: Called once per attempt, immediately **before** the spawn,
+            with ``{task, profile, runner, cwd, attempt, argv, prompt}``. The write
+            path's pre-batch snapshot, its pre-dispatch write-policy check and its
+            ``dispatched`` audit line hang here. Raising :class:`ResultRejected`
+            refuses the task with nothing spawned (D3l).
+        after_result: Called **after** rung-6 validation passed and the result was
+            persisted, with ``{task, outcome, result, capture, ...}``. This is the
+            D3g seam: the snapshot/diff classification, the post-run policy
+            recomputation and the ``completed`` audit line. It mutates
+            ``outcome`` (``write_outcome``, ``files_touched``, ``summary``,
+            ``status``) — the model's claim is never the verdict.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -1318,9 +1434,21 @@ def dispatch_task(
         return outcome
     outcome.output_path = str(target)
 
-    prompt = task.get("prompt") or ""
+    prompt = (task.get("prompt") if prompt is None else prompt) or ""
     if not prompt.strip():
         outcome.reason = f"Task {task_id}: carries no prompt"
+        return outcome
+    # D3n: the literal token must never reach a runner. A write prompt that still
+    # carries it means the scheduler's late substitution did not run, which would
+    # silently drop every prior-batch summary — the exact context that keeps batch
+    # N from re-applying or contradicting batch N-1. Contract error, not a warning.
+    if kind in WRITE_KINDS and _PRIOR_CHANGES_TOKEN in prompt:
+        outcome.reason = (
+            f"Task {task_id}: the dispatched prompt still contains the literal "
+            f"{_PRIOR_CHANGES_TOKEN} token, so the prior-batch context was never "
+            f"substituted. A runner would receive the brace text and silently lose "
+            f"every prior-batch summary. Nothing was dispatched."
+        )
         return outcome
 
     transport = preferred_prompt_transport(provider_name)
@@ -1344,6 +1472,30 @@ def dispatch_task(
 
     while True:
         attempt_index += 1
+        if before_attempt is not None:
+            # The write path's snapshot / policy / audit leg. A refusal here means
+            # nothing is spawned for this attempt — the whole point of enforcing
+            # the policy pre-dispatch rather than only detecting it afterwards.
+            try:
+                before_attempt({
+                    "task": task,
+                    "task_id": task_id,
+                    "kind": kind,
+                    "profile": profile,
+                    "runner": runner,
+                    "provider": provider_name,
+                    "model": model,
+                    "cwd": cwd,
+                    "attempt": attempt_index,
+                    "prompt": prompt,
+                    "transport": transport,
+                    "outcome": outcome,
+                })
+            except ResultRejected as exc:
+                outcome.status = exc.status
+                outcome.reason = exc.message
+                outcome.duration_seconds = total_duration
+                return outcome
         capture = _spawn(
             provider=provider,
             model=model,
@@ -1378,6 +1530,29 @@ def dispatch_task(
                     outcome.status = STATUS_OK
                     outcome.duration_seconds = total_duration
                     _accumulate_usage(outcome, usage)
+                    if after_result is not None:
+                        # D3g: the model's claim is never the verdict. The
+                        # snapshot/diff classification runs HERE — after rung 6, so
+                        # a prose result has already failed as `schema_invalid` and
+                        # can never be classified as "applied".
+                        after_result({
+                            "task": task,
+                            "task_id": task_id,
+                            "kind": kind,
+                            "profile": profile,
+                            "runner": runner,
+                            "cwd": cwd,
+                            "attempt": attempt_index,
+                            "prompt": prompt,
+                            "result": data,
+                            "exit_code": capture.exit_code,
+                            "stderr_tail": _tail(capture.stderr, 2000),
+                            "usage": usage,
+                            "duration_seconds": total_duration,
+                            "outcome": outcome,
+                        })
+                        if not outcome.ok:
+                            return outcome
                     if capture.exit_code not in (0, None):
                         # Exit code is evidence, never the verdict: for a read
                         # task a schema-valid result wins over a non-zero exit
@@ -1946,6 +2121,130 @@ def simulate_native_invoker(
 
 
 # ---------------------------------------------------------------------------
+# D3l — --dry-run-subagents for the read half
+# ---------------------------------------------------------------------------
+
+def dry_run_report(
+    task_file: str,
+    *,
+    phase_dir: str,
+    phase: str = "",
+    document: Optional[Dict[str, Any]] = None,
+    anchor: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> str:
+    """Render every read/analyze dispatch without starting one. Returns the path.
+
+    The read-half twin of the scheduler's write dry run: resolve the runner, render
+    the exact argv (prompt elided to its digest), check the transport and the
+    prompt budget, apply the profile, probe runner presence and version — then write
+    ``{phase}/subagent_dry_run.json`` and return, having spawned nothing but
+    ``--version``.
+    """
+    try:
+        from .write_safety import DRY_RUN_FILENAME, redact_argv
+    except ImportError:  # pragma: no cover
+        from utils.write_safety import DRY_RUN_FILENAME, redact_argv
+
+    resolved_dir = phase_dir or os.path.dirname(os.path.abspath(task_file))
+    if document is None:
+        try:
+            from .subagent_tasks import read_task_file
+        except ImportError:  # pragma: no cover
+            from utils.subagent_tasks import read_task_file
+        document = read_task_file(task_file, phase_dir=resolved_dir)
+
+    kind = str(document.get("kind", ""))
+    entries: List[Dict[str, Any]] = []
+    runners: List[str] = []
+    for task in tasks_of(document):
+        task_id = str(task.get("task_id", ""))
+        entry: Dict[str, Any] = {
+            "task_id": task_id,
+            "kind": str(task.get("kind", kind)),
+            "cwd": cwd,
+        }
+        if task.get("executor_role") == "human":
+            entry["would_dispatch"] = False
+            entry["reason"] = "executor_role: human — never dispatched by any invoker"
+            entries.append(entry)
+            continue
+        try:
+            entry["profile"] = profile_for_kind(str(task.get("kind", kind)))
+        except ExecutorError as exc:
+            entry["would_dispatch"] = False
+            entry["reason"] = exc.message
+            entries.append(entry)
+            continue
+        runner = resolve_task_runner(task, anchor=anchor)
+        entry["runner"] = runner
+        runners.append(runner)
+        provider_name, model = parse_model_spec(runner, anchor=anchor)
+        provider = get_provider(provider_name)
+        transport = preferred_prompt_transport(provider_name)
+        entry["prompt_transport"] = transport
+        prompt = str(task.get("prompt") or "")
+        try:
+            from .subagent_tasks import utf16_units
+        except ImportError:  # pragma: no cover
+            from utils.subagent_tasks import utf16_units
+        entry["prompt_utf16_units"] = utf16_units(prompt)
+        reason = refuse_reason(
+            task,
+            supports_workspace_reads=bool(
+                provider is not None and provider.supports_workspace_reads
+            ),
+            runner=runner,
+        )
+        if reason is None:
+            try:
+                resolve_output_target(task, resolved_dir)
+            except ResultRejected as exc:
+                reason = exc.message
+        if reason is None and provider is not None:
+            reason = _prompt_over_budget(
+                provider, model, prompt, transport, entry["profile"]
+            )
+        if reason is None:
+            try:
+                info = preflight_runner(
+                    runner, profile=entry["profile"], anchor=anchor,
+                    key="driver.subagent_runner",
+                )
+                entry["runner_version"] = info["version"]
+            except ExecutorError as exc:
+                reason = exc.message
+        if reason is not None:
+            entry["would_dispatch"] = False
+            entry["reason"] = reason
+            entries.append(entry)
+            continue
+        try:
+            argv = provider.build_agent_command(prompt, model, entry["profile"])
+        except Exception as exc:  # noqa: BLE001 - a preflight must not raise
+            entry["would_dispatch"] = False
+            entry["reason"] = str(exc)
+            entries.append(entry)
+            continue
+        entry["argv"] = redact_argv(argv, prompt)
+        entry["would_dispatch"] = True
+        entries.append(entry)
+
+    path = os.path.join(resolved_dir, DRY_RUN_FILENAME)
+    _atomic_write_json(path, {
+        "dry_run_version": 1,
+        "kind": kind,
+        "phase": phase,
+        "task_file": task_file,
+        "cwd": cwd,
+        "ceilings": effective_ceiling(runners, anchor=anchor) if runners
+        else {"effective": 0},
+        "tasks": entries,
+    })
+    return path
+
+
+# ---------------------------------------------------------------------------
 # D3b — the self-contained continuation past a marker
 # ---------------------------------------------------------------------------
 
@@ -1980,6 +2279,22 @@ def continue_past_marker(
             falls back to salvage.
     """
     if not getattr(args, "exec_subagents", False):
+        return False
+
+    if getattr(args, "dry_run_subagents", False):
+        # D3l: the flag means "start no child", and it means it on the read half
+        # too. Without this branch a read phase would dispatch for real under a
+        # flag whose whole promise is that it does not — the surprise being worse
+        # here than on the write path precisely because nothing visibly changes.
+        report = dry_run_report(
+            task_file, phase_dir=phase_dir, phase=phase, document=document,
+            anchor=anchor, cwd=cwd,
+        )
+        print(
+            f"[dry-run-subagents] {report} — every {label} command rendered, no "
+            f"child started, nothing else changed. This phase still prints its "
+            f"marker and its follow-up command."
+        )
         return False
 
     print(f"\n[exec-subagents] dispatching {label} tasks from {task_file}")

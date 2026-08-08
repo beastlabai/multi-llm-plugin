@@ -15,6 +15,7 @@ import glob
 import json
 import os
 import sys
+import textwrap
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -309,6 +310,18 @@ class TestConsumersSurviveInterleavedHeartbeats:
         (tmp_path / "gemini_gemini-2_5-flash.json").write_text("[]", encoding="utf-8")
         (tmp_path / "grouped.json").write_text("[]", encoding="utf-8")
         (tmp_path / "report_data.json").write_text("{}", encoding="utf-8")
+        # Executor bookkeeping that lands in a REVIEW phase dir: the batch report
+        # (D3i) and `--dry-run-subagents`'s preflight (D3l). Both are objects, so a
+        # missing exclude pattern crashes reaggregate rather than degrading quietly.
+        (tmp_path / "subagent_batch_report.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "subagent_dry_run.json").write_text("{}", encoding="utf-8")
+        # The write scheduler's two, which normally live in an apply/implement dir.
+        (tmp_path / "write_batch_report.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "write_tasks.json").write_text("{}", encoding="utf-8")
+        # `.jsonl` never matches the `*.json` glob, so the audit log and the
+        # prior-changes log are invisible by construction — pinned, not assumed.
+        (tmp_path / "subagent_audit.jsonl").write_text("{}\n", encoding="utf-8")
+        (tmp_path / "prior_changes.jsonl").write_text("{}\n", encoding="utf-8")
         Path(detach.log_path(str(tmp_path))).write_text("live\n", encoding="utf-8")
         for run_id in ("run-old-1", "run-old-2"):
             Path(detach.rotated_log_path(str(tmp_path), run_id)).write_text(
@@ -319,9 +332,10 @@ class TestConsumersSurviveInterleavedHeartbeats:
             expect_run_id="run-a",
         )
 
-        # The exact collection reaggregate_from_existing_files performs.
-        exclude = ['grouped', 'validation', 'salvage', 'revalidation',
-                   'consolidated', 'consolidation', 'report_data']
+        # The exact collection reaggregate_from_existing_files performs — read from
+        # the module rather than restated, so a new phase-dir artifact that forgets
+        # its exclude pattern fails HERE instead of crashing a user's reaggregate.
+        exclude = _reaggregation_exclude_patterns()
         result_files = sorted(
             os.path.basename(f)
             for f in glob.glob(str(tmp_path / "*.json"))
@@ -330,6 +344,30 @@ class TestConsumersSurviveInterleavedHeartbeats:
         )
         assert result_files == ["cursor-agent_auto.json",
                                "gemini_gemini-2_5-flash.json"]
+
+
+def _reaggregation_exclude_patterns():
+    """The live ``exclude_patterns`` list from ``reaggregate_from_existing_files``.
+
+    Parsed out of the source rather than restated: the pitfall this guards is a new
+    non-model JSON file landing in a phase dir without being added to the list, and
+    a test carrying its own copy of the list cannot detect that.
+    """
+    import ast
+    import inspect
+
+    from utils import review_orchestrator_base
+
+    source = inspect.getsource(
+        review_orchestrator_base.reaggregate_from_existing_files
+    )
+    tree = ast.parse(textwrap.dedent(source))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", "") == "exclude_patterns"
+                        for t in node.targets)):
+            return ast.literal_eval(node.value)
+    raise AssertionError("exclude_patterns not found in the reaggregation helper")
 
 
 class TestRunCompareAndSet:

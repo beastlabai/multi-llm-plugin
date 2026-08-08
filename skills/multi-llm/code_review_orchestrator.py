@@ -1105,8 +1105,9 @@ async def reaggregate_from_existing_files(
 
     # Exclude non-model files
     # `subagent_batch_report` is executor bookkeeping (D3i), never a model
-    # result — see the same note in review_orchestrator_base.
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report']
+    # result — see the same note in review_orchestrator_base, which also explains
+    # `subagent_dry_run` (D3l) and the write scheduler's two reports.
+    exclude_patterns = ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report', 'subagent_dry_run', 'write_batch_report', 'write_tasks']
     result_files = [
         f for f in all_files
         if not any(ex in os.path.basename(f) for ex in exclude_patterns)

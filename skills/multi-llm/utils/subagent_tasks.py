@@ -62,6 +62,18 @@ except ImportError:  # pragma: no cover
 __all__ = [
     "TASKS_SCHEMA_VERSION",
     "KINDS",
+    "READ_KINDS",
+    "WRITE_KINDS",
+    "SHARED_ARTIFACT_WRITE_KINDS",
+    "PHASE_BY_WRITE_KIND",
+    "WRITE_KIND_BY_PHASE",
+    "PRIOR_CHANGES_TOKEN",
+    "is_write_kind",
+    "make_write_task",
+    "write_output_name",
+    "WRITE_OUTPUT_NAME_TEMPLATE",
+    "declared_file_set",
+    "snapshot_file_set",
     "TaskFileError",
     "TaskRefusal",
     "content_hash",
@@ -84,7 +96,9 @@ __all__ = [
 ]
 
 
-KINDS = (
+#: The read/analyze kinds: their answer IS a JSON document and no invoker of them
+#: ever needs write access (D3e pins them to ``agent-readonly``).
+READ_KINDS = (
     "validation",
     "revalidation",
     "consolidation",
@@ -92,6 +106,51 @@ KINDS = (
     "human_decision_judge",
     "task_generation",
 )
+
+#: The write kinds (D3f/D3g/D3n): their answer is the *edit*, and the JSON they
+#: print on stdout is the batch result contract, not the deliverable. One kind per
+#: phase rather than a single ``apply`` kind, because the four differ in what they
+#: snapshot, how they partition and which log they append to — and because the
+#: per-kind ``output_name`` pattern is what stops one phase's result from being
+#: written into another's reaggregation glob (D3f).
+WRITE_KINDS = (
+    "apply_suggestions",
+    "apply_task_suggestions",
+    "apply_code_fixes",
+    "implement",
+)
+
+#: Every kind a materialized task file may declare.
+KINDS = READ_KINDS + WRITE_KINDS
+
+#: Write kinds that edit ONE shared artifact, so their batches are strictly
+#: sequential no matter what the driver config permits (D3h — this is the
+#: batchers' own invariant, enforced here rather than trusted from them).
+SHARED_ARTIFACT_WRITE_KINDS = ("apply_suggestions", "apply_task_suggestions")
+
+#: The phase name each write kind belongs to, so the scheduler's ``prior_changes``
+#: and ``metrics`` calls use the same ``--phase`` value the markdown specifies.
+PHASE_BY_WRITE_KIND = {
+    "apply_suggestions": "apply-suggestions",
+    "apply_task_suggestions": "apply-task-suggestions",
+    "apply_code_fixes": "apply-code-fixes",
+    "implement": "implement",
+}
+
+#: The reverse map, for a caller that knows only the phase word.
+WRITE_KIND_BY_PHASE = {phase: kind for kind, phase in PHASE_BY_WRITE_KIND.items()}
+
+
+def is_write_kind(kind: Optional[str]) -> bool:
+    """Whether ``kind`` is an edit-capable (``agent-write``) task kind."""
+    return kind in WRITE_KINDS
+
+
+#: The literal token every apply prompt carries and the scheduler substitutes
+#: immediately before dispatch (D3n). Defined here, next to the refusals, because
+#: "this token must never reach a runner" is a dispatch contract rather than a
+#: string one producer happens to use.
+PRIOR_CHANGES_TOKEN = "{prior_changes_context}"
 
 #: Providers that carry a real non-argv prompt transport (D2d). Kept here rather
 #: than imported so this module stays usable without instantiating adapters.
@@ -239,6 +298,16 @@ _TASK_KEY_ORDER = (
     "repo_root",
     "plan_file",
     "grouped_file",
+    # Write kinds (D3f/D3g/D3h/D3n)
+    "task_title",
+    "declared_files",
+    "snapshot_files",
+    "expected_ids",
+    "prior_changes_id",
+    "can_parallelize",
+    "depends_on",
+    "is_human",
+    "file_key",
 )
 
 
@@ -329,6 +398,156 @@ def make_task(
                 + "; ".join(errors)
             )
     return ordered
+
+
+#: The per-kind ``output_name`` template for a write batch result (D3g). Kept next
+#: to the kind table so a new write kind cannot ship without one; the executor's
+#: ``OUTPUT_NAME_PATTERN_BY_KIND`` is the matching regex and the two are
+#: cross-checked by ``tests/test_subagent_tasks.py``.
+WRITE_OUTPUT_NAME_TEMPLATE = {
+    "apply_suggestions": "apply_batch_{index}.json",
+    "apply_task_suggestions": "apply_task_batch_{index}.json",
+    "apply_code_fixes": "apply_fix_batch_{index}.json",
+    "implement": "implement_batch_{index}.json",
+}
+
+
+def write_output_name(kind: str, batch_index: int) -> str:
+    """The ``output_name`` a write batch's result JSON is persisted under (D3g)."""
+    try:
+        template = WRITE_OUTPUT_NAME_TEMPLATE[kind]
+    except KeyError:
+        raise TaskFileError(
+            f"Refusing to name a write result for kind {kind!r}: known write kinds "
+            f"are {', '.join(WRITE_KINDS)}."
+        ) from None
+    return template.format(index=int(batch_index))
+
+
+def make_write_task(
+    *,
+    kind: str,
+    task_id: str,
+    prompt: str,
+    inputs: Dict[str, str],
+    batch_index: int,
+    prior_changes_id: str,
+    phase_dir: Optional[str] = None,
+    declared_files: Optional[Sequence[str]] = None,
+    snapshot_files: Optional[Sequence[str]] = None,
+    expected_ids: Optional[Sequence[str]] = None,
+    can_parallelize: bool = False,
+    depends_on: Optional[Sequence[str]] = None,
+    executor_role: str = "agent",
+    output_name: Optional[str] = None,
+    task_title: str = "",
+    file_key: str = "",
+    model_hint: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    validate: bool = True,
+) -> Dict[str, Any]:
+    """Build one materialized **write** task (``agent-write``, D3f/D3g/D3n).
+
+    Same envelope as :func:`make_task` — so both invokers read one shape — plus the
+    four fields a write dispatch cannot be safe without:
+
+    * ``declared_files`` — what D3h admits (or refuses) for co-scheduling and what
+      D3l checks against ``driver.write_paths`` *before* the runner starts. An
+      empty list means "undeclared", which runs the task alone; it never means
+      "touches nothing".
+    * ``snapshot_files`` — what the executor copies under
+      ``{phase}/pre_batch/{task_id}/`` so the post-run byte comparison has a
+      rollback point. Defaults to ``declared_files``.
+    * ``expected_ids`` — what D3g spot-checks, so "bytes moved" is not mistaken
+      for "this batch's changes landed".
+    * ``prior_changes_id`` — the stable ``--id`` for the prior-changes append,
+      never the loop index, so a re-dispatched batch appends once.
+
+    ``context_mode`` is fixed at ``workspace-read``: a write batch edits files in
+    the target repository, so a runner with no workspace access cannot serve it and
+    is refused before dispatch rather than handed a prompt full of unreadable
+    paths.
+    """
+    if kind not in WRITE_KINDS:
+        raise TaskFileError(
+            f"Refusing to materialize write task {task_id!r}: {kind!r} is not a "
+            f"write kind (known: {', '.join(WRITE_KINDS)})."
+        )
+    if not str(prior_changes_id or "").strip():
+        raise TaskFileError(
+            f"Refusing to materialize write task {task_id!r}: prior_changes_id is "
+            f"required — the prior-changes log is keyed by a stable content key, "
+            f"never by the loop index, so a re-dispatched batch appends once."
+        )
+    write_extra: Dict[str, Any] = {
+        "batch_index": int(batch_index),
+        "declared_files": [str(path) for path in (declared_files or [])],
+        "prior_changes_id": str(prior_changes_id),
+        "can_parallelize": bool(can_parallelize),
+    }
+    if snapshot_files is not None:
+        write_extra["snapshot_files"] = [str(path) for path in snapshot_files]
+    if expected_ids is not None:
+        write_extra["expected_ids"] = [str(item) for item in expected_ids]
+    if depends_on is not None:
+        write_extra["depends_on"] = [str(item) for item in depends_on]
+    if task_title:
+        write_extra["task_title"] = task_title
+    if file_key:
+        write_extra["file_key"] = file_key
+    write_extra["is_human"] = executor_role == "human"
+    if extra:
+        write_extra.update(extra)
+
+    return make_task(
+        kind=kind,
+        task_id=task_id,
+        prompt=prompt,
+        output_name=output_name or write_output_name(kind, batch_index),
+        inputs=inputs,
+        phase_dir=phase_dir,
+        context_mode="workspace-read",
+        capability_tier="full",
+        executor_role=executor_role,
+        model_hint=model_hint,
+        extra=write_extra,
+        validate=validate,
+    )
+
+
+def declared_file_set(task: Dict[str, Any]) -> List[str]:
+    """A write task's declared file set, normalized (D3h).
+
+    Reads ``declared_files`` and falls back to the batchers' own historical
+    spellings (``file_key`` for code fixes, ``files_to_modify`` /
+    ``files_to_create`` for implement tasks) so a task shaped by a producer that
+    predates ``declared_files`` still declares something rather than silently
+    reading as "undeclared" and being co-scheduled with everything.
+    """
+    declared = task.get("declared_files")
+    if isinstance(declared, list) and declared:
+        return [str(item) for item in declared if str(item).strip()]
+    collected: List[str] = []
+    for key in ("file_key",):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            collected.append(value.strip())
+    for key in ("files_to_modify", "files_to_create"):
+        value = task.get(key)
+        if isinstance(value, list):
+            collected.extend(str(item) for item in value if str(item).strip())
+    seen: Dict[str, None] = {}
+    for item in collected:
+        seen.setdefault(item, None)
+    return list(seen)
+
+
+def snapshot_file_set(task: Dict[str, Any]) -> List[str]:
+    """Which files the executor must snapshot before dispatching ``task`` (D3h)."""
+    declared = task.get("snapshot_files")
+    if isinstance(declared, list) and declared:
+        return [str(item) for item in declared if str(item).strip()]
+    return declared_file_set(task)
 
 
 def tasks_of(document: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -529,9 +529,22 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     supports_revalidation = True
     supports_skip_flag = False
     marks_phase_completed = False
+    # Partitioned by `file_key`, so batches MAY co-schedule — subject to
+    # driver.max_concurrent_write_subagents and the disjointness check (D3h).
+    write_kind = "apply_code_fixes"
 
     # Instance state populated by post_load_hook
     issue_to_group_map: Optional[Dict[int, Tuple[int, int]]] = None
+
+    def write_phase_artifact(self) -> str:
+        """No single shared artifact: each batch declares its own ``file_key``.
+
+        Returning the plan path here would snapshot the wrong file for every batch
+        and make the byte comparison report "unchanged" for a run that edited real
+        source, so the code-fix batches carry their declared set per batch and this
+        exists only to say so explicitly.
+        """
+        return self.plan_path
 
     # ----------------------------------------------------------------
     # Argument parser

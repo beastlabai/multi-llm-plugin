@@ -52,6 +52,16 @@ from utils.subagent_tasks import (  # noqa: E402
     utf16_units,
     write_task_file,
 )
+from utils.subagent_tasks import (  # noqa: E402
+    PRIOR_CHANGES_TOKEN,
+    READ_KINDS,
+    WRITE_KINDS,
+    declared_file_set,
+    is_write_kind,
+    make_write_task,
+    snapshot_file_set,
+    write_output_name,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +83,17 @@ def _kind_extras(kind: str):
         "salvage": {"suggestion_id": "gemini_pro"},
         "human_decision_judge": {"group_id": "g1"},
         "task_generation": {"repo_root": "/repo"},
+        # Write kinds (task 6): batch_index orders the loop, declared_files drives
+        # the disjointness admission and the write policy, prior_changes_id keys the
+        # idempotent prior-changes append.
+        "apply_suggestions": {"batch_index": 0, "declared_files": ["plan.md"],
+                              "prior_changes_id": "sec-intro"},
+        "apply_task_suggestions": {"batch_index": 0, "declared_files": ["tasks.md"],
+                                   "prior_changes_id": "sec-tasks"},
+        "apply_code_fixes": {"batch_index": 0, "declared_files": ["src/a.py"],
+                             "prior_changes_id": "src/a.py"},
+        "implement": {"batch_index": 0, "declared_files": ["src/a.py"],
+                      "prior_changes_id": "T001"},
     }[kind]
 
 
@@ -94,8 +115,10 @@ def make_minimal(kind: str, **over):
         phase_dir="/phase",
         extra=_kind_extras(kind),
     )
-    if kind == "task_generation":
+    if kind == "task_generation" or kind in WRITE_KINDS:
         kwargs["context_mode"] = "workspace-read"
+    if kind in WRITE_KINDS:
+        kwargs["output_name"] = write_output_name(kind, 0)
     kwargs.update(over)
     return make_task(**kwargs)
 
@@ -608,3 +631,139 @@ class TestAdapterTransports:
         assert not provider.supports_prompt_transport("stdin")
         with pytest.raises(ValueError):
             provider.build_command_for_transport("P", "m", "stdin")
+
+
+# ---------------------------------------------------------------------------
+# Write kinds (task 6): the materialized shape a write dispatch needs
+# ---------------------------------------------------------------------------
+
+class TestWriteKinds:
+    """The write kinds are part of the ONE delegation contract, not a side shape."""
+
+    def test_the_kind_table_is_read_plus_write_with_no_overlap(self):
+        assert set(KINDS) == set(READ_KINDS) | set(WRITE_KINDS)
+        assert not set(READ_KINDS) & set(WRITE_KINDS)
+        assert all(is_write_kind(k) for k in WRITE_KINDS)
+        assert not any(is_write_kind(k) for k in READ_KINDS)
+
+    def test_the_output_name_templates_match_the_executors_patterns(self):
+        """One fact, declared in two modules; they must not drift.
+
+        The template names the file a write batch's result is persisted under; the
+        executor's regex is what D3f admits. A mismatch means every write dispatch
+        is rejected at containment — or, worse, that a widened regex admits a name
+        no producer writes.
+        """
+        from utils.subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
+
+        for kind in WRITE_KINDS:
+            pattern = OUTPUT_NAME_PATTERN_BY_KIND[kind]
+            for index in (0, 1, 17):
+                assert pattern.match(write_output_name(kind, index)), (
+                    f"{kind}: {write_output_name(kind, index)!r} does not match "
+                    f"{pattern.pattern!r}"
+                )
+
+    def test_no_write_kinds_output_pattern_admits_anothers_name(self):
+        """A hand-edited task from one phase can never write into another's set."""
+        from utils.subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
+
+        for kind in WRITE_KINDS:
+            name = write_output_name(kind, 0)
+            others = [
+                other for other in WRITE_KINDS
+                if other != kind and OUTPUT_NAME_PATTERN_BY_KIND[other].match(name)
+            ]
+            assert others == [], f"{name} is also accepted by {others}"
+
+    def test_a_write_task_is_workspace_read_and_full_tier(self):
+        task = make_write_task(
+            kind="apply_suggestions", task_id="apply-0",
+            prompt=f"do it\n{PRIOR_CHANGES_TOKEN}\n",
+            inputs=_inputs(), batch_index=0, prior_changes_id="sec-1",
+            phase_dir="/phase", declared_files=["plan.md"],
+        )
+        assert task["context_mode"] == "workspace-read"
+        assert task["capability_tier"] == "full"
+        assert task["executor_role"] == "agent"
+        assert task["output_name"] == "apply_batch_0.json"
+        assert task["is_human"] is False
+        assert task["can_parallelize"] is False
+
+    def test_a_write_task_without_a_stable_prior_changes_key_is_refused(self):
+        """The append is idempotent on (id, phase), so the id may not be an index."""
+        with pytest.raises(TaskFileError) as excinfo:
+            make_write_task(
+                kind="apply_suggestions", task_id="apply-0", prompt="p",
+                inputs=_inputs(), batch_index=0, prior_changes_id="",
+                phase_dir="/phase", declared_files=["plan.md"],
+            )
+        assert "prior_changes_id" in str(excinfo.value)
+
+    def test_a_read_kind_cannot_be_built_as_a_write_task(self):
+        with pytest.raises(TaskFileError):
+            make_write_task(
+                kind="validation", task_id="v-0", prompt="p", inputs=_inputs(),
+                batch_index=0, prior_changes_id="x", phase_dir="/phase",
+            )
+
+    def test_declared_file_set_falls_back_to_the_batchers_own_spellings(self):
+        """A producer predating `declared_files` still declares something."""
+        assert declared_file_set({"declared_files": ["a.py"]}) == ["a.py"]
+        assert declared_file_set({"file_key": "src/x.py"}) == ["src/x.py"]
+        assert declared_file_set({
+            "files_to_modify": ["m.py"], "files_to_create": ["c.py"],
+        }) == ["m.py", "c.py"]
+        # Empty means UNDECLARED, which the scheduler runs alone — never "nothing".
+        assert declared_file_set({}) == []
+
+    def test_snapshot_file_set_defaults_to_the_declared_set(self):
+        assert snapshot_file_set({"declared_files": ["a.py"]}) == ["a.py"]
+        assert snapshot_file_set({
+            "declared_files": ["a.py"], "snapshot_files": ["a.py", "b.py"],
+        }) == ["a.py", "b.py"]
+
+    def test_the_prior_changes_token_spelling_is_shared(self):
+        """One literal, three consumers: the batchers, the executor, the scheduler."""
+        from utils.subagent_executor import _PRIOR_CHANGES_TOKEN
+        from utils.suggestion_batcher import format_batch_for_prompt
+        from utils.suggestion_batcher import SuggestionBatch
+
+        assert _PRIOR_CHANGES_TOKEN == PRIOR_CHANGES_TOKEN
+        batch = SuggestionBatch()
+        batch.add({"title": "T", "desc": "d", "description": "d",
+                   "importance": "MEDIUM", "type": "addition", "reference": "## S"})
+        assert PRIOR_CHANGES_TOKEN in format_batch_for_prompt(batch, "plan.md")
+
+    def test_a_human_write_task_agrees_across_all_three_role_fields(self):
+        task = make_write_task(
+            kind="implement", task_id="T001", prompt="manual step",
+            inputs={"plan_sha256": "a" * 16}, batch_index=0,
+            prior_changes_id="T001", phase_dir="/phase",
+            declared_files=["src/a.py"], executor_role="human",
+        )
+        assert task["executor_role"] == "human"
+        assert task["subagent_type"] == "human"
+        assert task["is_human"] is True
+
+    def test_a_write_task_file_round_trips_through_the_schema(self, tmp_path):
+        tasks = [
+            make_write_task(
+                kind="implement", task_id=f"T00{i}",
+                prompt=f"task {i}", inputs={"plan_sha256": "a" * 16},
+                batch_index=i, prior_changes_id=f"T00{i}",
+                phase_dir=str(tmp_path), declared_files=[f"src/{i}.py"],
+                depends_on=[f"T00{i-1}"] if i else [],
+                output_name=write_output_name("implement", i),
+            )
+            for i in range(3)
+        ]
+        document = make_task_file(
+            kind="implement", tasks=tasks, inputs={"plan_sha256": "a" * 16},
+            task_list_key="batches",
+        )
+        path = tmp_path / "write_tasks.json"
+        write_task_file(str(path), document)
+        reread = read_task_file(str(path), phase_dir=str(tmp_path))
+        assert [t["task_id"] for t in tasks_of(reread)] == ["T000", "T001", "T002"]
+        assert tasks_of(reread)[2]["depends_on"] == ["T001"]

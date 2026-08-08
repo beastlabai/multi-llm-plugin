@@ -638,13 +638,49 @@ def has_quick_models(mode: Optional[str] = None,
 
 #: The base `driver:` block's keys, with the types each accepts. This is the
 #: closed set: an unknown key under `driver:` is REJECTED rather than ignored, so
-#: a typo (`subagent_runners:`) is not silently a no-op. The write-path fields
-#: (`max_concurrent_write_subagents`, `write_paths`) join this table with the
-#: write executor; until then they are unknown keys like any other.
+#: a typo (`subagent_runners:`) is not silently a no-op.
 DRIVER_RUNNER_KEYS = ("subagent_runner", "subagent_runner_cheap")
-DRIVER_POSITIVE_INT_KEYS = ("max_concurrent_subagents", "subagent_retries")
+DRIVER_POSITIVE_INT_KEYS = (
+    "max_concurrent_subagents",
+    # D3h: write phases get their OWN ceiling, defaulting to 1, because the
+    # batchers' partitioning invariant (one shared artifact per apply phase, one
+    # file per code-fix batch) is not the read path's fan-out. Raising it only
+    # *permits* parallelism; the dispatch-time disjointness check still admits it.
+    "max_concurrent_write_subagents",
+    "subagent_retries",
+)
 DRIVER_OPTIONAL_INT_KEYS = ("subagent_timeout_s",)
-DRIVER_KEYS = DRIVER_RUNNER_KEYS + DRIVER_POSITIVE_INT_KEYS + DRIVER_OPTIONAL_INT_KEYS
+#: D3l: `allow`/`deny` glob lists resolved against the pinned repo root, enforced
+#: pre-dispatch (against the batch's declared file set) and post-run (against the
+#: set the snapshot diff actually observed).
+DRIVER_PATH_POLICY_KEYS = ("write_paths",)
+DRIVER_KEYS = (
+    DRIVER_RUNNER_KEYS
+    + DRIVER_POSITIVE_INT_KEYS
+    + DRIVER_OPTIONAL_INT_KEYS
+    + DRIVER_PATH_POLICY_KEYS
+)
+
+#: The shipped write policy (D3l). `allow` is the repository; `deny` is what a
+#: code-editing batch has no business touching. `.multi-llm/**` is denied to the
+#: RUNNER precisely because the EXECUTOR owns those bytes — orchestrator state,
+#: task files, snapshots, audit records and reports are written by the invoker
+#: under D3f containment, never by a subagent.
+DEFAULT_WRITE_PATHS: Dict[str, List[str]] = {
+    "allow": ["**"],
+    "deny": [
+        ".git/**",
+        ".multi-llm/**",
+        "**/.env",
+        "**/.env.*",
+        "**/*.pem",
+        "**/id_rsa*",
+        "**/.ssh/**",
+        "**/.aws/**",
+        "**/.npmrc",
+        "**/node_modules/**",
+    ],
+}
 
 #: Values used when the merged config carries no `driver:` block at all (a test
 #: fixture config, or a base file predating D3). The shipped base is fully
@@ -653,8 +689,10 @@ DRIVER_FALLBACKS: Dict[str, object] = {
     "subagent_runner": "claude-code:sonnet",
     "subagent_runner_cheap": "claude-code:haiku",
     "max_concurrent_subagents": 4,
+    "max_concurrent_write_subagents": 1,
     "subagent_timeout_s": None,
     "subagent_retries": 1,
+    "write_paths": DEFAULT_WRITE_PATHS,
 }
 
 
@@ -747,6 +785,45 @@ def validate_driver_block(driver: object) -> None:
                 f"default_timeout)."
             )
 
+    for key in DRIVER_PATH_POLICY_KEYS:
+        if key not in driver:
+            continue
+        _validate_path_policy(key, driver[key])
+
+
+def _validate_path_policy(key: str, value: object) -> None:
+    """Validate one ``allow``/``deny`` glob-list policy block (D3l).
+
+    Fail-fast for the same reason a bad runner spec is: a policy that silently
+    parsed as "no rules" would be indistinguishable from a policy that allows
+    everything, and the difference is whether a headless write run is contained.
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"multi-llm config error: driver.{key} is {value!r} — expected a "
+            f"mapping with `allow:` and/or `deny:` glob lists."
+        )
+    unknown = [name for name in value if name not in ("allow", "deny")]
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under driver.{key}: "
+            f"{', '.join(sorted(str(u) for u in unknown))}. Known keys: allow, deny."
+        )
+    for name in ("allow", "deny"):
+        if name not in value or value[name] is None:
+            continue
+        patterns = value[name]
+        if not isinstance(patterns, list) or not all(
+            isinstance(item, str) and item.strip() for item in patterns
+        ):
+            raise ConfigError(
+                f"multi-llm config error: driver.{key}.{name} is {patterns!r} — "
+                f"expected a list of non-empty glob strings (e.g. "
+                f'["src/**", "docs/*.md"]).'
+            )
+
 
 def get_driver_config(anchor: Optional[Union[str, Path]] = None) -> dict:
     """The merged ``driver:`` block, with every key present (D3).
@@ -809,6 +886,40 @@ def get_subagent_runner(
 def get_max_concurrent_subagents(anchor: Optional[Union[str, Path]] = None) -> int:
     """``driver.max_concurrent_subagents`` — the *global* executor gate."""
     return int(get_driver_config(anchor=anchor)["max_concurrent_subagents"])
+
+
+def get_max_concurrent_write_subagents(
+    anchor: Optional[Union[str, Path]] = None
+) -> int:
+    """``driver.max_concurrent_write_subagents`` — the write gate (default 1, D3h).
+
+    A separate key from the read gate on purpose: the write phases preserve the
+    batchers' partitioning invariant (apply phases edit one shared artifact,
+    code-fix batches are partitioned by file), so the read path's fan-out would be
+    two agents editing one file. Raising this only *permits* parallelism —
+    ``can_parallelize`` and the dispatch-time pairwise-disjoint admission check
+    still have to agree, and a shared-artifact phase is pinned to 1 regardless.
+    """
+    return max(1, int(get_driver_config(anchor=anchor)["max_concurrent_write_subagents"]))
+
+
+def get_write_paths(anchor: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
+    """``driver.write_paths`` — the declared write policy (D3l), always complete.
+
+    Returns a dict with both ``allow`` and ``deny`` present, falling back to
+    :data:`DEFAULT_WRITE_PATHS` per key, so a config that set only ``deny`` still
+    yields an ``allow`` list rather than an accidental deny-all.
+    """
+    configured = get_driver_config(anchor=anchor).get("write_paths")
+    configured = configured if isinstance(configured, dict) else {}
+    resolved: Dict[str, List[str]] = {}
+    for name in ("allow", "deny"):
+        patterns = configured.get(name)
+        if isinstance(patterns, list) and patterns:
+            resolved[name] = [str(item) for item in patterns]
+        else:
+            resolved[name] = list(DEFAULT_WRITE_PATHS[name])
+    return resolved
 
 
 def get_subagent_retries(anchor: Optional[Union[str, Path]] = None) -> int:

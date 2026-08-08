@@ -2,6 +2,7 @@ usage: apply_suggestions_orchestrator.py [-h] [--host ID] [--yes]
                                          [--interactive] [--detach]
                                          [--if-not-running] [--max-detached N]
                                          [--exec-subagents]
+                                         [--dry-run-subagents]
                                          [--skip-prerequisites] --plan-file
                                          PLAN_FILE [--skip-human-review]
                                          [--min-priority {low,medium,high}]
@@ -118,6 +119,13 @@ cross-cutting options:
                         (read/analyze phases: validation, revalidation,
                         consolidation, salvage, judging). Runner and limits
                         come from providers.yaml `driver:`.
+  --dry-run-subagents   Preflight every subagent dispatch and start no child:
+                        resolve the runner, render the exact argv, check
+                        prompt transport and size, apply the invocation
+                        profile, the write-concurrency admission check and
+                        driver.write_paths — then write
+                        {phase}/subagent_dry_run.json and exit 0 having
+                        changed nothing.
   --skip-prerequisites  Proceed even though a prerequisite phase's output was
                         never applied. Loud and recorded (the skip lands in
                         state.json and in every later report); never implied

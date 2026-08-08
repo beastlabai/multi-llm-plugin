@@ -320,12 +320,40 @@ driver:
   # this, the runner provider's own `max_concurrent` above, and the host's
   # documented ceiling.
   max_concurrent_subagents: 4
+  # WRITE phases (apply-*, implement) get their own ceiling and it defaults to 1:
+  # the batchers partition by artifact (one plan file per apply batch, one source
+  # file per code-fix batch), so the read path's fan-out would be two agents
+  # editing one file. Raising this only PERMITS parallelism — the batch must also
+  # declare `can_parallelize`, the declared file sets must be pairwise disjoint at
+  # dispatch time, and shared-artifact phases stay pinned to 1 regardless.
+  max_concurrent_write_subagents: 1
   # null = the runner provider's `default_timeout`. A positive integer overrides it.
   subagent_timeout_s: null
   # Re-dispatches for TRANSPORT-shaped failures only (timeout, no parsed text,
   # parse_output failure). A result that parsed but failed schema validation is
   # never retried — that is a deterministic disagreement a retry would launder.
   subagent_retries: 1
+  # The declared write policy for edit-capable dispatches, resolved against the
+  # pinned repo root and enforced TWICE: pre-dispatch against the batch's declared
+  # file set (refused before the runner starts) and post-run against the set the
+  # snapshot diff actually observed (batch failed, files restored, run exits 3).
+  # `.multi-llm/**` is denied to the RUNNER because the EXECUTOR owns those bytes.
+  # The runner's own sandbox stays the preventive control; this is the second,
+  # detective layer that makes a violation loud.
+  write_paths:
+    allow:
+      - '**'
+    deny:
+      - .git/**
+      - .multi-llm/**
+      - '**/.env'
+      - '**/.env.*'
+      - '**/*.pem'
+      - '**/id_rsa*'
+      - '**/.ssh/**'
+      - '**/.aws/**'
+      - '**/.npmrc'
+      - '**/node_modules/**'
 
 # Default models to use when no models are specified on CLI
 # If set, skips interactive selection and uses these models automatically

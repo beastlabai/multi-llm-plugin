@@ -54,11 +54,16 @@ class Mode:
             ``argument-hint`` as ``--<name>``.
         is_workflow_phase: True for the eight phases
             ``check_workflow_prerequisites.py`` gates on.
-        supports_detach: True for the modes ``--detach`` covers. Today that is
-            the fan-out modes, the only ones that can outlive a host's shell cap;
-            the executor-backed modes join them when the executor makes them
-            long-running. A mode with ``False`` **rejects** ``--detach`` with exit
-            3 rather than accepting a flag that silently does nothing.
+        supports_detach: True for the modes ``--detach`` covers: the fan-out modes
+            plus, since the write executor landed, every executor-backed mode
+            (``implement``, the three apply phases, ``generate-tasks``, ``full``) —
+            a write phase that schedules N batches through real agent CLIs outlives
+            a host's shell cap exactly as a fan-out does. A mode with ``False``
+            **rejects** ``--detach`` with exit 3 rather than accepting a flag that
+            silently does nothing. ``generate-tasks`` and ``full`` carry the column
+            because their detach support is real *plumbing*, while the modes
+            themselves are still ``unavailable`` — the ``unavailable`` exit-3 fires
+            first, so neither pretends to work.
         injected_flags: Flags the dispatcher prepends before the user's, because
             the mode is a thin view over a more general script.
         unavailable: When set, the mode is dispatchable but exits 3 with this
@@ -130,6 +135,7 @@ MODES: Tuple[Mode, ...] = (
         phase="apply-suggestions",
         instruction_file="apply-suggestions.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="generate-tasks",
@@ -138,6 +144,7 @@ MODES: Tuple[Mode, ...] = (
         phase="generate-tasks",
         instruction_file="generate-tasks.md",
         is_workflow_phase=True,
+        supports_detach=True,
         unavailable=NOT_YET_ON_THIS_HOST,
     ),
     Mode(
@@ -158,6 +165,7 @@ MODES: Tuple[Mode, ...] = (
         phase="apply-task-suggestions",
         instruction_file="apply-task-suggestions.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="implement",
@@ -167,6 +175,7 @@ MODES: Tuple[Mode, ...] = (
         phase="implement",
         instruction_file="implement.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="review-code",
@@ -186,12 +195,14 @@ MODES: Tuple[Mode, ...] = (
         phase="apply-code-fixes",
         instruction_file="apply-code-fixes.md",
         is_workflow_phase=True,
+        supports_detach=True,
     ),
     Mode(
         name="full",
         positionals=(POS_PLAN,),
         summary="Run the whole plan-to-code workflow as one resumable sequence.",
         instruction_file="full-workflow.md",
+        supports_detach=True,
         unavailable=NOT_YET_ON_THIS_HOST,
     ),
     Mode(
