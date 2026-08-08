@@ -1,9 +1,8 @@
 # uv Preflight (D6 row 1)
 
-Every orchestrator and helper in this skill runs through
-`uv run --project "${CLAUDE_SKILL_DIR}" -- python ...`, so when `uv` is genuinely
-absent the shell fails with `uv: command not found` (exit 127) *before* any Python
-that could explain it runs. Row 1 therefore cannot own its own detection, and
+Every orchestrator and helper in this skill runs through `uv run`, so when `uv`
+is genuinely absent the shell fails with `uv: command not found` (exit 127)
+*before* any Python that could explain it runs. Row 1 therefore cannot own its own detection, and
 ownership is split across three layers with three different lifetimes:
 
 | Layer | When | Owner |
@@ -76,7 +75,7 @@ command -v uv
 
 This check — and every other command in this skill — is POSIX-shell syntax and
 runs under the host's shell tool (Git Bash on Windows, the native shell on
-macOS/Linux). If the shell environment is **not** a POSIX shell (e.g. Claude Code
+macOS/Linux). If the shell environment is **not** a POSIX shell (e.g. a host
 fell back to its PowerShell tool because Git for Windows is not installed),
 **stop immediately** and tell the user:
 

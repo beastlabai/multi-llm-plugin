@@ -152,36 +152,58 @@ class TestAllowedToolsGlobSyntax:
 #: after the corpus rewrite each file collapses to at most the one invariant
 #: ``uv run --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py`` prefix per
 #: command, so a row whose count grows unexpectedly is a regression that
-#: reintroduced a second site. Today every row is ``(today's count, 0)``; the
-#: rewrite flips them to ``(0, n)`` — except ``SKILL.md``, the one file that keeps
-#: ``${CLAUDE_SKILL_DIR}`` because Claude Code expands it at load time.
+#: reintroduced a second site.
+#:
+#: **The rewrite has landed**, so every row is now ``(0, n)`` — except
+#: ``SKILL.md``, the one file that keeps ``${CLAUDE_SKILL_DIR}`` because it *is*
+#: the Claude Code shim and the host expands the variable at load time. That makes
+#: "the only residual ``${CLAUDE_SKILL_DIR}`` in the tree is the Claude Code
+#: ``SKILL.md``" directly assertable rather than aspirational: see
+#: ``test_claude_skill_dir_is_only_in_the_shim``.
 PLACEHOLDER_MANIFEST = {
-    "instructions/apply-code-fixes.md": (28, 0),
-    "instructions/apply-suggestions.md": (28, 0),
-    "instructions/apply-task-suggestions.md": (26, 0),
-    "instructions/ask.md": (4, 0),
+    # 28 ${CLAUDE_SKILL_DIR} -> 28 {SKILL_DIR}: the same commands, now naming the
+    # single entry point behind the invariant prefix.
+    "instructions/apply-code-fixes.md": (0, 28),
+    "instructions/apply-suggestions.md": (0, 28),
+    "instructions/apply-task-suggestions.md": (0, 26),
+    # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
+    # git root inline, launch) collapsed into the dispatcher's two positionals,
+    # and the mode gained its `--detach` + `status` poll pair.
+    "instructions/ask.md": (0, 6),
     # 50 -> 48: D6 row 12 deleted the no-TTY branch, and with it the
-    # `check_workflow_prerequisites.py --skip` command it carried. 48 -> 22: the
-    # Phase-3 sequencing (the inlined Task prompt, its Write-tool steps, the
+    # `check_workflow_prerequisites.py --skip` command it carried. 48 -> 36: the
+    # Phase-3 sequencing (the inlined subagent prompt, its file-write steps, the
     # per-phase skip-recording commands and row 12's question) moved into
-    # `full_workflow_orchestrator.py`. A count that *drops* is the corpus shrinking
-    # as designed; only a rise is a regression.
-    "instructions/full-workflow.md": (36, 0),
+    # `full_workflow_orchestrator.py`. 36 -> 30: six "load instructions from
+    # <path>" lines became one shared `util instructions <mode>` command. A count
+    # that *drops* is the corpus shrinking as designed; only a rise is a
+    # regression.
+    "instructions/full-workflow.md": (0, 30),
     # 8 -> 0: gate, materialization, dispatch, the in-process `update_plan_tasks`
     # call and the TASKS_FILE verification are all Python now, so the file names no
     # command at all.
     "instructions/generate-tasks.md": (0, 0),
-    "instructions/implement.md": (24, 0),
-    "instructions/init-config.md": (3, 0),
-    "instructions/review-code.md": (24, 0),
-    "instructions/review-plan.md": (26, 0),
-    "instructions/review-tasks.md": (16, 0),
+    # 24 -> 20: the skill's own pytest invocation (a dogfooding special case) and
+    # the inline `python -c` that inserted the summary reference are gone — the
+    # latter is `util finalize-tracking --plan-file --summary-file-relative`.
+    "instructions/implement.md": (0, 20),
+    # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
+    # is served pre-substituted.
+    "instructions/init-config.md": (0, 2),
+    "instructions/review-code.md": (0, 24),
+    "instructions/review-plan.md": (0, 26),
+    "instructions/review-tasks.md": (0, 16),
     "references/human-decision-batch.md": (0, 0),
     "references/resume-detection.md": (0, 0),
     "references/salvage-handling.md": (0, 0),
-    "references/uv-check.md": (1, 0),
+    # 1 -> 0: the illustrative `uv run --project "<dir>" -- python …` fragment was
+    # not a command anyone runs, and a token outside the invariant prefix is a
+    # failure by rule 1.
+    "references/uv-check.md": (0, 0),
     "references/wave-batching.md": (0, 0),
-    "SKILL.md": (7, 0),
+    # 7 -> 12: the read step became a dispatcher command (`util instructions`),
+    # which carries the prefix twice, and step 2 names it again.
+    "SKILL.md": (12, 0),
 }
 
 #: The one file allowed to keep ``${CLAUDE_SKILL_DIR}``: it *is* the Claude Code
@@ -324,29 +346,44 @@ class TestPlaceholderManifest:
             "regression."
         )
 
-    def test_claude_skill_dir_budget_is_declining(self):
-        """Only ``SKILL.md`` is *permitted* a permanent ``${CLAUDE_SKILL_DIR}``.
+    def test_claude_skill_dir_is_only_in_the_shim(self):
+        """The corpus rewrite's headline invariant, asserted on disk.
 
-        Every other row is expected to reach 0 with the corpus rewrite, so this
-        records the remaining debt rather than asserting it away.
+        Only ``SKILL.md`` may carry ``${CLAUDE_SKILL_DIR}``: it *is* the Claude
+        Code shim, and the host expands the variable at load time. Every other
+        file in the corpus reaches 0, which is what makes the placeholder a
+        host-specific detail of one file rather than a coupling spread over 5k
+        lines. Asserted against the files themselves, not only the manifest, so a
+        row edited to match a regression still fails.
         """
         assert PLACEHOLDER_MANIFEST[CLAUDE_SHIM][0] > 0, (
             "SKILL.md is the Claude Code shim and resolves the token via "
             "${CLAUDE_SKILL_DIR}; losing every occurrence means the shim broke."
         )
-        remaining = {
-            rel: counts[0]
-            for rel, counts in PLACEHOLDER_MANIFEST.items()
-            if rel != CLAUDE_SHIM and counts[0]
+        offenders = {
+            _rel(path): (path.read_text(encoding="utf-8").count("${CLAUDE_SKILL_DIR}"))
+            for path in _scanned_files()
+            if _rel(path) != CLAUDE_SHIM
+            and "${CLAUDE_SKILL_DIR}" in path.read_text(encoding="utf-8")
         }
-        # Not an assertion that `remaining` is empty (the rewrite has not landed);
-        # an assertion that the pinned total cannot silently grow.
-        # 238 -> 236 with D6 row 12's deleted no-TTY branch; 236 -> 216 when the
-        # generate-tasks sequence and `--full`'s Phase 3 moved into Python.
-        assert sum(remaining.values()) == 216, (
-            "the ${CLAUDE_SKILL_DIR} debt outside SKILL.md changed to "
-            f"{sum(remaining.values())}. Lower it freely with the corpus "
-            "rewrite; a rise means a new host-coupled site was added."
+        assert not offenders, (
+            "${CLAUDE_SKILL_DIR} is a Claude-Code-specific pre-expansion and may "
+            "exist in exactly one file, the Claude Code shim. Use the "
+            "{SKILL_DIR} template token (substituted by `multi_llm.py util "
+            f"instructions <mode>`) instead. Found in: {offenders}"
+        )
+        assert all(
+            counts[0] == 0
+            for rel, counts in PLACEHOLDER_MANIFEST.items()
+            if rel != CLAUDE_SHIM
+        ), "a manifest row outside SKILL.md still budgets for ${CLAUDE_SKILL_DIR}"
+
+    def test_the_token_corpus_is_not_vacuous(self):
+        """The rewrite moved the sites, it did not delete them."""
+        total = sum(counts[1] for counts in PLACEHOLDER_MANIFEST.values())
+        assert total >= 150, (
+            f"only {total} {{SKILL_DIR}} sites remain across the corpus, which "
+            "would mean the commands went missing rather than being rewritten."
         )
 
 
@@ -591,32 +628,271 @@ class TestNegativeSpellings:
         assert "$SKILL_DIR" not in cli_common._SKILL_DIR_TOKENS
 
     def test_instructions_and_shims_name_only_the_entry_point(self):
-        """The instruction core names exactly one script.
+        """The instruction core names exactly one script, and the debt is now zero.
 
-        Recorded as the *current* debt: the rewrite that switches the corpus to
-        ``multi_llm.py`` drives this number to 0. It is pinned so a new direct
-        ``*_orchestrator.py`` reference cannot slip in unnoticed.
+        Direct ``*_orchestrator.py`` invocation stays supported-but-unadvertised
+        (the test suite and the ``--internal-*`` re-entry rely on it); what the
+        core and the shims name is ``multi_llm.py``, so a host resolves one path
+        once and routes nothing itself.
         """
         hits = [
             _rel(path)
             for path in _scanned_files()
             if re.search(r"_orchestrator\.py", path.read_text(encoding="utf-8"))
         ]
-        assert sorted(hits) == [
-            "instructions/apply-code-fixes.md",
-            "instructions/apply-suggestions.md",
-            "instructions/apply-task-suggestions.md",
-            "instructions/ask.md",
-            "instructions/full-workflow.md",
-            "instructions/implement.md",
-            "instructions/review-code.md",
-            "instructions/review-plan.md",
-            "instructions/review-tasks.md",
-        ], (
-            "the set of files naming a *_orchestrator.py path changed. The "
-            "instruction core is meant to name only multi_llm.py; shrink this "
-            "list, never grow it."
+        assert hits == [], (
+            "the instruction core and the shims name only multi_llm.py; a direct "
+            f"*_orchestrator.py reference reappeared in: {hits}"
         )
+
+
+# ===========================================================================
+# The legacy escape hatch
+# ===========================================================================
+
+class TestLegacyInstructionHatch:
+    """A way back from the ~5k-line rewrite that does not revert the Python work.
+
+    The golden guard proves the modes its fixture exercises, not the interactive
+    corners a real user hits on day two — so the pre-refactor core is *moved*, not
+    deleted, and one environment variable switches the read path back to it.
+    """
+
+    LEGACY = SKILL_ROOT / "legacy"
+
+    def test_every_served_mode_has_a_frozen_copy(self):
+        for mode in mode_table.MODES:
+            if mode.instruction_file is None:
+                continue
+            assert (self.LEGACY / mode_table.instruction_path(mode.name)).exists(), (
+                f"no frozen pre-refactor copy for mode '{mode.name}'; the escape "
+                "hatch would silently serve the rewritten core instead"
+            )
+
+    def test_the_frozen_copies_are_the_pre_refactor_text(self):
+        """They still name the host's tools — that is the point of keeping them."""
+        legacy = (self.LEGACY / "instructions" / "review-plan.md").read_text(
+            encoding="utf-8"
+        )
+        assert "${CLAUDE_SKILL_DIR}" in legacy
+        assert "AskUserQuestion" in legacy
+        assert "run_in_background" in legacy
+
+    def test_the_hatch_is_closed_by_default(self, monkeypatch, capsys):
+        monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
+        captured = capsys.readouterr()
+        assert "${CLAUDE_SKILL_DIR}" not in captured.out
+        assert "AskUserQuestion" not in captured.out
+        assert "LEGACY_INSTRUCTIONS" not in captured.err
+
+    def test_the_hatch_serves_the_frozen_core_rendered(self, monkeypatch, capsys):
+        monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
+        captured = capsys.readouterr()
+        assert "AskUserQuestion" in captured.out, "the legacy text was not served"
+        # Rendered, not raw: the renderer substitutes every spelling, so the
+        # legacy corpus's `${CLAUDE_SKILL_DIR}` arrives resolved too.
+        for token in FORBIDDEN_IN_RENDERED:
+            assert token not in captured.out, f"{token} survived legacy rendering"
+        assert str(cli_common.skill_dir()) in captured.out
+        # The notice goes to stderr: stdout is the core, and a host may pipe it
+        # straight into a prompt.
+        assert "[LEGACY_INSTRUCTIONS]" in captured.err
+
+    def test_an_unset_value_other_than_one_does_not_open_it(self, monkeypatch,
+                                                            capsys):
+        for value in ("0", "", "true", "yes"):
+            monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, value)
+            assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
+            captured = capsys.readouterr()
+            assert "AskUserQuestion" not in captured.out, value
+
+    def test_legacy_is_outside_every_lint_and_manifest_scan(self):
+        """A frozen copy that had to pass the new rules would not be a copy."""
+        scanned = {_rel(p) for p in _scanned_files()}
+        assert not any(rel.startswith("legacy/") for rel in scanned), scanned
+        assert not any(
+            _rel(p).startswith("legacy/") for p in _lint_corpus_files()
+        )
+        assert not any(rel.startswith("legacy/") for rel in PLACEHOLDER_MANIFEST)
+
+    def test_the_hatch_is_documented(self):
+        readme = (self.LEGACY / "README.md").read_text(encoding="utf-8")
+        assert multi_llm.LEGACY_INSTRUCTIONS_ENV in readme
+        assert "Claude Code only" in readme
+
+
+# ===========================================================================
+# Host-neutrality lint (D5)
+# ===========================================================================
+#
+# The instruction core was rewritten to capability verbs, and after that rewrite
+# nothing but a test keeps host tool names from creeping back into the shared
+# core — so the refactor's central invariant is enforced mechanically, not by
+# review. Runs on every PR, not only under `-m live`.
+
+#: The closed three-verb vocabulary. Identical in all three places it appears: the
+#: wording in ``instructions/*.md``, the three ``capabilities.yaml`` fields and the
+#: three shim slots. A core sentence reaching for a fourth verb fails.
+CAPABILITY_VERBS = ("spawn subagents", "ask the user", "run detached")
+
+#: Tokens matched anywhere in a line. Each is paired with the verb that replaces
+#: it, so a failure is fixable without re-reading the design.
+FORBIDDEN_TOKENS = {
+    "AskUserQuestion": "ask the user",
+    "subagent_type": "spawn subagents",
+    "run_in_background": "run detached",
+    "TodoWrite": "(no replacement — the core tracks progress in state.json)",
+    "${CLAUDE_SKILL_DIR}": "{SKILL_DIR}",
+    ".claude/": "(no replacement — a host-specific config path)",
+}
+
+#: Tokens whose ordinary English senses appear constantly in this corpus ("read
+#: the plan file", "write the summary"), so they are matched *only* in their tool
+#: spellings: inside a code span, capitalized and followed by ``(``, or followed by
+#: the word "tool"/"subagent". "Read the plan file" passes; "use the Read tool"
+#: fails. The narrower rule is deliberate — a lint that cries wolf gets suppressed,
+#: and a suppressed lint guards nothing.
+AMBIGUOUS_TOOL_TOKENS = {
+    "Task": "spawn subagents",
+    "Read": "(plain English: read the file)",
+    "Write": "(plain English: write the file)",
+    "Edit": "(plain English: edit the file)",
+    "Glob": "(plain English: list/match files)",
+    "Grep": "(plain English: search the files)",
+}
+
+#: Files whose *job* is to name host tools, and therefore exempt: the Claude Code
+#: shim (D5c), the ``hosts/**`` shim templates, and the generated capability
+#: reference (D5b). Anything else needs a per-file, per-token entry below.
+LINT_EXEMPT_FILES = ("SKILL.md", "references/host-capabilities.md")
+LINT_EXEMPT_PREFIXES = ("hosts/",)
+
+#: Per-file, per-token exceptions with a one-line rationale. Every entry is
+#: asserted to still match something (``test_no_stale_lint_allowlist_entries``), so
+#: the allowlist cannot decay into a blanket ignore.
+LINT_ALLOWLIST: dict = {}
+
+
+def _ambiguous_patterns(token):
+    return (
+        rf"`{token}`",
+        rf"\b{token}\s*\(",
+        rf"\b{token}[ -][Tt]ool\b",
+        rf"\b{token} subagents?\b",
+    )
+
+
+def _lint_corpus_files():
+    files = sorted(SKILL_ROOT.glob("instructions/*.md"))
+    files += sorted(SKILL_ROOT.glob("references/*.md"))
+    return [
+        path for path in files
+        if _rel(path) not in LINT_EXEMPT_FILES
+        and not any(_rel(path).startswith(p) for p in LINT_EXEMPT_PREFIXES)
+    ]
+
+
+def _lint_violations():
+    hits = []
+    for path in _lint_corpus_files():
+        rel = _rel(path)
+        allowed = LINT_ALLOWLIST.get(rel, {})
+        for line_no, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            for token, verb in FORBIDDEN_TOKENS.items():
+                if token in line and token not in allowed:
+                    hits.append((rel, line_no, token, verb, line.strip()[:110]))
+            for token, verb in AMBIGUOUS_TOOL_TOKENS.items():
+                if token in allowed:
+                    continue
+                if any(re.search(p, line) for p in _ambiguous_patterns(token)):
+                    hits.append((rel, line_no, token, verb, line.strip()[:110]))
+    return hits
+
+
+class TestHostNeutralityLint:
+    def test_the_corpus_is_not_vacuous(self):
+        files = _lint_corpus_files()
+        assert len(files) >= 15, [_rel(p) for p in files]
+        assert any(_rel(p) == "instructions/implement.md" for p in files)
+
+    def test_no_host_tool_names_in_the_shared_core(self):
+        hits = _lint_violations()
+        assert not hits, (
+            "the shared instruction core must name capability verbs, never a "
+            "host's tool. Replace each with the verb named below:\n"
+            + "\n".join(
+                f"  {rel}:{line_no}: `{token}` -> {verb}\n      {text}"
+                for rel, line_no, token, verb, text in hits
+            )
+        )
+
+    def test_the_lint_actually_fires(self):
+        """A synthetic violation of each class is detected.
+
+        Without this, an over-narrowed pattern would silently pass the corpus.
+        """
+        for line, token in (
+            ("Use AskUserQuestion to pick models", "AskUserQuestion"),
+            ("call the Read tool on the plan", "Read"),
+            ('spawn Task(subagent_type="general-purpose")', "Task"),
+            ("read `${CLAUDE_SKILL_DIR}/providers.yaml`", "${CLAUDE_SKILL_DIR}"),
+            ("spawn a Task subagent per batch", "Task"),
+        ):
+            fired = token in line and token in FORBIDDEN_TOKENS
+            if not fired:
+                fired = any(
+                    re.search(p, line) for p in _ambiguous_patterns(token)
+                )
+            assert fired, f"the lint would not catch: {line!r}"
+
+    def test_ordinary_english_passes(self):
+        """The narrow rule: prose about reading and writing is not a violation."""
+        for line in (
+            "Read the plan file and note the marker.",
+            "Write the summary to the path the orchestrator printed.",
+            "Each task carries a complete prompt; run it as a subagent.",
+            "| Task | Status |",
+            "Task completion status is recorded in state.json.",
+        ):
+            for token in AMBIGUOUS_TOOL_TOKENS:
+                assert not any(
+                    re.search(p, line) for p in _ambiguous_patterns(token)
+                ), f"false positive on {line!r} for {token}"
+
+    def test_no_stale_lint_allowlist_entries(self):
+        stale = []
+        for rel, tokens in LINT_ALLOWLIST.items():
+            path = SKILL_ROOT / rel
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            for token in tokens:
+                present = token in text or any(
+                    re.search(p, text) for p in _ambiguous_patterns(token)
+                )
+                if not present:
+                    stale.append(f"{rel}:{token}")
+        assert not stale, (
+            "host-neutrality allowlist entries that no longer match anything "
+            f"(delete them, or the allowlist decays into a blanket ignore): {stale}"
+        )
+
+    @pytest.mark.parametrize("verb", CAPABILITY_VERBS)
+    def test_every_capability_verb_is_used_by_the_core(self, verb):
+        """The vocabulary is closed *and* live: each verb appears in the corpus."""
+        corpus = "\n".join(
+            path.read_text(encoding="utf-8") for path in _lint_corpus_files()
+        ).lower()
+        assert verb in corpus, (
+            f"the core never says {verb!r}; a verb nothing uses is not a "
+            "vocabulary, it is a comment"
+        )
+
+    def test_the_verb_vocabulary_is_closed_at_three(self):
+        assert len(CAPABILITY_VERBS) == 3, CAPABILITY_VERBS
+        assert len(set(CAPABILITY_VERBS)) == 3
 
 
 # ===========================================================================

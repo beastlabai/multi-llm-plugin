@@ -856,17 +856,23 @@ class TestRoutingAndDocs:
     def test_instruction_file_exists_with_usage_and_invocation(self):
         ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
         assert "/multi-llm:multi-llm --ask" in ask_md
-        # Foreground --project orchestrator invocation — the skill-dir expansion
-        # must be double-quoted (Windows install paths may contain spaces).
-        assert '--project "${CLAUDE_SKILL_DIR}"' in ask_md
-        assert "ask_orchestrator.py" in ask_md
-        # Shell-safe mechanisms + portable plan-path passing (Phase 3): the plan
-        # path is passed as given and the orchestrator resolves it natively —
-        # no $(realpath ...), whose POSIX /c/... output breaks native Windows
-        # processes.
+        # Host-neutral core: the skill dir is the `{SKILL_DIR}` template token
+        # (substituted by `util instructions ask` before an agent reads it), the
+        # command names the single entry point, and the expansion is still
+        # double-quoted (Windows install paths may contain spaces).
+        assert '--project "{SKILL_DIR}"' in ask_md
+        assert '"{SKILL_DIR}/multi_llm.py" ask' in ask_md
+        assert "ask_orchestrator.py" not in ask_md, (
+            "the core names multi_llm.py, never a second entry point"
+        )
+        # Shell-safe question passing: the dispatcher takes the question as a
+        # positional and owns the --question-file fallback itself, so the core no
+        # longer instructs an agent to write that file. The plan path is passed as
+        # given and the orchestrator resolves it natively — no $(realpath ...),
+        # whose POSIX /c/... output breaks native Windows processes.
         assert "--question-file" in ask_md
         assert "--question-env" in ask_md
-        assert '--plan-file "$PLAN_PATH"' in ask_md
+        assert '"$PLAN_PATH" "$RAW_QUESTION"' in ask_md
         assert '$(realpath "$PLAN_PATH")' not in ask_md
         # Single-quoted-question rule + error cases.
         assert "single argument" in ask_md
@@ -937,7 +943,16 @@ class TestRoutingAndDocs:
         assert "PYTHONUNBUFFERED" in skill
         assert "orchestrator-run.log" in skill
 
+        # The shared core states the same requirement in the host-neutral
+        # vocabulary: it names the *run detached* capability verb, never a host's
+        # background tool. The shim above resolves that verb to
+        # `run_in_background`; the core must not.
         ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
-        assert "run_in_background" in ask_md
+        assert "run detached" in ask_md.lower()
+        assert "run_in_background" not in ask_md, (
+            "instructions/ask.md is host-neutral core: the mechanism belongs in "
+            "the shim's verb resolution, not here"
+        )
+        assert "--detach" in ask_md
         assert "PYTHONUNBUFFERED" in ask_md
         assert ".log" in ask_md

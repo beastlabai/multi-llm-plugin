@@ -113,12 +113,40 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "decisions": ("display_decisions", "main", "Print the decision summary from an orchestrator output file."),
     "update-tasks": ("update_plan_tasks", "main", "Write generated tasks into a plan's Tasks section."),
     "prereq": ("check_workflow_prerequisites", "main", "Check, skip or report a workflow phase's prerequisites."),
+    "finalize-tracking": ("finalize_tracking", "main",
+                          "Record the files implementation changed, and link the "
+                          "summary from the plan."),
     "backup": ("utils.backup", "main", "Back up a file before it is modified."),
     "restore-batch": ("utils.restore_batch", "main",
                       "Restore a failed write batch from its pre-batch snapshot."),
     "runs": ("utils.run_registry", "main", "List (or --sweep) this project's detached runs."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
+
+
+#: The instruction-refactor escape hatch. Set to ``1`` and ``util instructions``
+#: serves the frozen pre-refactor core from ``legacy/`` instead of the host-neutral
+#: one — a way back from the ~5k-line markdown rewrite that does **not** revert the
+#: dispatcher, the executor or the unattended work with it. Read path only: same
+#: modes, same flags, same exit codes. See ``legacy/README.md``.
+LEGACY_INSTRUCTIONS_ENV = "MULTI_LLM_LEGACY_INSTRUCTIONS"
+
+#: Where the frozen copies live, relative to the skill root.
+LEGACY_INSTRUCTIONS_DIR = "legacy"
+
+
+def _legacy_instruction_path(relative: str) -> Optional[Path]:
+    """The frozen pre-refactor file for *relative*, when the hatch is open.
+
+    ``None`` when the variable is unset (the overwhelmingly common case, and the
+    only one that costs nothing) or when no frozen copy exists for that mode —
+    a partial legacy tree falls back to the current core rather than failing,
+    because the hatch is a mitigation and must not become a new failure mode.
+    """
+    if os.environ.get(LEGACY_INSTRUCTIONS_ENV) != "1":
+        return None
+    candidate = skill_dir() / LEGACY_INSTRUCTIONS_DIR / relative
+    return candidate if candidate.exists() else None
 
 
 class DispatchError(Exception):
@@ -503,6 +531,18 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
             "driven entirely by the dispatcher."
         )
     path = skill_dir() / relative
+    legacy = _legacy_instruction_path(relative)
+    if legacy is not None:
+        # Announced on stderr, never stdout: `util instructions` writes the core
+        # itself to stdout and a host may be piping it straight into a prompt.
+        print(
+            f"[LEGACY_INSTRUCTIONS] serving the pre-refactor core from "
+            f"{legacy.parent.name}/{legacy.name} because "
+            f"{LEGACY_INSTRUCTIONS_ENV}=1 (see legacy/README.md; Claude Code "
+            "only, frozen, unmaintained).",
+            file=sys.stderr,
+        )
+        path = legacy
     if not path.exists():
         raise DispatchError(
             f"ERROR: core instruction file missing: {path}\n"

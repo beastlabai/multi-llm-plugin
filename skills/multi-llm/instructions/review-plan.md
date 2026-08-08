@@ -129,7 +129,7 @@ Items with `needs-human-decision` status are included in the report for the user
      provider unavailable) the orchestrator exits **3** naming the flags that
      answer it — that is the whole resolution, so do not substitute a question
      for it (D6 row 2).
-   - If NO models provided and NOT `--yes`: Claude MUST use AskUserQuestion to prompt user for model selection
+   - If NO models provided and NOT `--yes`: **ask the user** to select models
      - Present available models from `providers.yaml` (multi-select)
      - Then run orchestrator with `--models <selected>`
 
@@ -141,16 +141,16 @@ Items with `needs-human-decision` status are included in the report for the user
 
 4. **Run the orchestrator (DETACHED):**
 
-   A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
+   A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" \
+   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" --models <selected> \
      > "{plan}/review-plan/orchestrator-run.log" 2>&1
    ```
 
    **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
-   Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-plan/orchestrator-run.log`**, not from terminal stdout.
+   **Run detached.** A detached run is not subject to your host's shell-command cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/review-plan/orchestrator-run.log`**, not from terminal stdout.
 
    **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
 
@@ -174,7 +174,7 @@ Items with `needs-human-decision` status are included in the report for the user
       a partial aggregate is usable output. The one exception: if *no* model
       produced a result there is nothing to aggregate, so it exits **3** naming
       the retry command.
-   5. Without `--yes`, **use AskUserQuestion** to inform the user:
+   5. Without `--yes`, **ask the user**, showing:
       - Which models completed successfully
       - Which models failed or were interrupted
       - Options: (a) Proceed with partial results (`--reaggregate`), (b) Resume — re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
@@ -185,7 +185,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    The reaggregation command for this mode is:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" \
      --reaggregate
    ```
@@ -225,7 +225,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` once from `{plan}/review-plan/`
    2. Count the number of batches as `{total_batches}` and mark the phase start before spawning the first wave:
       ```bash
-      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-plan" --total-batches {total_batches}
       ```
       Validation runs in parallel waves — wall-clock ETA reflects actual elapsed time, while per-batch duration would overstate it. The `record` step below picks `min(per-item, wall-clock)` automatically.
@@ -247,7 +247,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After validation completes, run the `reaggregate_command` from validation_tasks.json:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" --reaggregate
    ```
 
@@ -263,17 +263,17 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include `--batch-index` (cumulative across waves: 1..N) and `--total-batches`:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "review-plan" \
      --label "Validation batch {N}" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
    After all batches and reaggregation complete, mark the phase finish (only if `start` was called):
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-plan"
    ```
 
@@ -291,14 +291,14 @@ Items with `needs-human-decision` status are included in the report for the user
    unconsolidated results, warn, and continue — a failed optional pass is not a
    failed phase.
 
-   If **present** without `--yes`, inform the user of the group count and ask whether they want to run consolidation (use AskUserQuestion). If the user declines, skip this step.
+   If **present** without `--yes`, inform the user of the group count and **ask the user** whether to run consolidation. If the user declines, skip this step.
 
    If consolidation is to run (auto or agreed):
 
    **a) Run the consolidation orchestrator:**
 
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --consolidate
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
    ```
 
    **b) Handle subagent spawning for consolidation batches:**
@@ -311,14 +311,14 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`) — every task in its `batches` array carries a complete `prompt`
    2. Count the number of batches as `{total_batches}` and mark the consolidation phase start:
       ```bash
-      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" --total-batches {total_batches}
       ```
    3. For each task in the file, run `task.prompt` as a subagent — the filled `consolidate_suggestions.txt` template and that batch's group records are already inside it
    4. Write the JSON each subagent returns to that task's `output_path` (`consolidation_batch_N.json` in the phase directory)
    5. After each batch completes, record metrics with cumulative `--batch-index`:
       ```bash
-      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" \
         --label "Consolidation batch {N}" --subagent-type "general-purpose" \
         --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -332,12 +332,12 @@ Items with `needs-human-decision` status are included in the report for the user
    **c) Run reaggregation after all batches complete:**
 
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --reaggregate-consolidation
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
    ```
 
    After reaggregation, mark the consolidation phase finish:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-plan-consolidation"
    ```
 
@@ -355,18 +355,18 @@ Items with `needs-human-decision` status are included in the report for the user
 ```
 User: /multi-llm:multi-llm plans/my-feature.md
 
-Claude:
-1. No models in args, so Claude uses AskUserQuestion:
+Agent:
+1. No models in args, so the agent asks the user:
    "Which models would you like to use for the review?" (multi-select)
    Options: auto, gpt-5.2, gemini-3-pro, grok, gemini-3-flash, kimi-k2
 2. User selects: gpt-5.2, gemini-3-pro
-3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
+3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
 4. Orchestrator outputs [VALIDATION_PENDING] marker
 5. Claude reads plans/my-feature/review-plan/validation_tasks.json
 6. For each task: Claude runs task.prompt as a subagent
 7. Claude writes each subagent's JSON reply to that task's output_path
 8. Claude runs reaggregation:
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file plans/my-feature.md --reaggregate
 9. Claude reports all output files when complete
 ```

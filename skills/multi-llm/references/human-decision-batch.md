@@ -16,7 +16,7 @@ Before prompting for ANY needs-human-decision item, check:
    If it is `"claude_auto_decide"` (set by the `--claude-decide` flag, which
    **`--yes` sets for you** — D6 row 10, so an unattended run always lands here):
    - Do NOT prompt the user at all — skip the batch summary AND any
-     per-item AskUserQuestion.
+     per-item question.
    - Go directly to the **"Let Claude Decide" Mode** section below and
      evaluate every item autonomously.
    - This takes precedence over `batch_enabled` and `mode`.
@@ -32,7 +32,7 @@ Before prompting for ANY needs-human-decision item, check:
     1. **Process the pre-marked Claude set first, without prompting.** Run the
        **"Let Claude Decide" Mode** section below scoped to exactly those items
        (per-item trigger — one judging subagent, or the haiku coordinator fan-out
-       if >4). Do NOT emit any `AskUserQuestion` for these items, and do NOT
+       if >4). Do NOT ask the user about these items, and do NOT
        include them in any batch summary.
     2. **Then continue the steps below for the interactive set only** — the normal
        batch summary / individual prompts. (If the global
@@ -43,17 +43,17 @@ Before prompting for ANY needs-human-decision item, check:
 1. Otherwise, for the **interactive set** read `human_review_config.batch_enabled`
    from orchestrator output
 2. If `batch_enabled == true`:
-   - Do NOT use individual AskUserQuestion for each item
+   - Do NOT ask the user once per item
    - Present the batch summary prompt ONCE
    - Record all decisions with the same batch context
 3. If `batch_enabled == false` OR `human_review_config` is missing:
-   - Fall back to individual AskUserQuestion per item
+   - Fall back to asking the user once per item
 
 ## Batch Approval Flow
 
 When there are multiple `needs-human-decision` items, present them in batches organized by importance level.
 
-Use AskUserQuestion:
+**Ask the user**:
 - Question: "There are {N} items requiring human review ({X} HIGH, {Y} MEDIUM, {Z} LOW). How would you like to proceed?"
 - Header: "Batch review"
 - Options:
@@ -61,7 +61,7 @@ Use AskUserQuestion:
   - label: "Let Claude decide", description: "Claude evaluates each item using its judgment"
   - label: "Approve all LOW, review others", description: "Auto-approve LOW importance, ask about rest"
   - label: "Approve all MEDIUM and LOW", description: "Auto-approve MEDIUM/LOW, ask about HIGH only"
-  (Note: 4 option max for AskUserQuestion — "Approve all" and "Skip all" available via Other)
+  (A host whose ask mechanism caps the option count renders "Approve all" and "Skip all" through its overflow channel)
 
 ## "Let Claude Decide" Mode
 
@@ -191,7 +191,7 @@ Salvage (note `decision` stays `"approved"`):
 
 ## Individual Review Mode
 
-For "Review each individually" mode, group items by importance and present each level with AskUserQuestion.
+For "Review each individually" mode, group items by importance and ask the user once per level.
 
 For each importance level, first display the items as an informational list:
 
@@ -205,7 +205,7 @@ For each importance level, first display the items as an informational list:
    {context line}
 ```
 
-Then use AskUserQuestion for each importance level:
+Then **ask the user** once per importance level:
 - Question: "{IMPORTANCE} IMPORTANCE ({count} items): [{comma-separated titles}]. How would you like to handle these?"
 - Header: "{IMPORTANCE} items"
 - Options:
@@ -220,7 +220,7 @@ When the user picks **Review individually**, present each item in turn using the
 
 For single items, when `batch_enabled == false`, or when the user chose **Review individually** above.
 
-For each item, use AskUserQuestion:
+For each item, **ask the user**:
 - Question: "How should we handle this item?"
 - Header: "Review needed"
 - Options:

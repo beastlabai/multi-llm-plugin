@@ -60,145 +60,72 @@ two layers cannot diverge.
 1. **Validate the plan file exists** and that a **non-empty question** was
    supplied (error with the usage hint otherwise).
 
-2. **Pass the question safely — do not interpolate raw user text into the shell
-   command line.** The question is user-controlled free text and may contain
-   quotes, `$(...)` command substitutions, backticks, or other shell
-   metacharacters; building a `bash` string from it (or from an unquoted
-   `$PLAN_PATH`) would break the invocation or execute unintended shell syntax.
-   Use a safe argv-construction mechanism, in this order of preference:
-
-   **Preferred — write the question to a workspace temp file and pass
-   `--question-file`.** Temp artifacts live in the workspace temp dir
-   `$PROJECT_ROOT/.multi-llm/tmp/` (never the system temp dir, so Bash, native
-   processes, and harness tools resolve the same file on every OS). Resolve the
-   project root first and treat failure as a hard prerequisite failure:
+2. **Hand the question to the dispatcher as one argument — never build a shell
+   string out of it.** The question is user-controlled free text and may contain
+   quotes, `$(...)` command substitutions, backticks or other shell
+   metacharacters. You do **not** have to defend against that yourself: the
+   dispatcher takes the plan path and the question as its two positionals and
+   normalizes them into the flags the orchestrator parses, writing the question to
+   a temp file itself (and deleting it afterwards) when it outgrows the argv
+   budget. Copy the user's quoted question through verbatim:
 
    ```bash
-   git rev-parse --show-toplevel
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" [--models ...]
    ```
 
-   If the command fails or prints nothing, STOP with the error:
-   "multi-llm requires running inside a git repository." Never fall back to a
-   relative path or `$PWD`. Note the printed path — it is `{PROJECT_ROOT}` in
-   the steps below. **Shell variables do NOT survive between Bash calls** —
-   each Bash invocation is a fresh process, so a `PROJECT_ROOT=...` assignment
-   made here is empty in any later Bash call. Substitute the concrete absolute
-   path literally in harness-tool steps, and re-resolve the root inside any
-   Bash command that needs it via an **inline `$(git rev-parse --show-toplevel)`
-   command substitution** embedded in an allowlisted command (as the launch
-   block below does) — never via a leading `PROJECT_ROOT=...` assignment
-   segment, which the permission allowlist does not cover and which would
-   raise a permission prompt.
+   Three rules govern that one line:
 
-   Then write the **verbatim question text** (no trailing newline) with the
-   **Write tool** (NOT Bash) — no question bytes ever transit the shell command
-   line, and the Write tool creates parent directories automatically:
+   - **Quote both positionals.** A plan path or a question containing a space is
+     one argv element or the command is wrong.
+   - **Pass the plan path as given.** The orchestrator resolves it to an
+     OS-native absolute path itself; do NOT wrap it in `$(realpath …)` (on Git
+     for Windows `realpath` emits a POSIX `/c/…` path a native Windows Python
+     process cannot use).
+   - **Never re-type or re-assemble the question.** If the user's question is not
+     already a single argument, error out with the usage hint (see the parsing
+     rule above) instead of re-joining tokens.
 
-   - file_path: `{PROJECT_ROOT}/.multi-llm/tmp/ask_question_{plan_stem}.txt`
-     (absolute path — join the resolved project root with the relative part;
-     `{plan_stem}` is the plan filename without extension)
-   - content: the raw question text exactly as the user supplied it
-   - If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also
-     Write it with content `*` so the temp dir ignores itself. Filenames are
-     deterministic per plan: each run overwrites the previous file — there is
-     no cleanup step, and the user may delete `.multi-llm/tmp/` at any time
-     (the next run recreates it).
+   `--question`, `--question-file` and `--question-env` remain on the
+   orchestrator's own parser for a caller that already holds the text in one of
+   those forms; the positional above is the documented path and is what the
+   dispatcher normalizes into them.
 
-   Then launch the orchestrator, passing the same path. Root resolution and
-   launch happen in **one single Bash invocation** — the earlier
-   `git rev-parse` call ran in a different process, so its result must be
-   recomputed here, not referenced. Recompute it as an **inline command
-   substitution inside the `--question-file` argument** (not as a
-   `PROJECT_ROOT=...` assignment prefix — see step 2):
+3. **Run detached.** Ask mode fans out across many models and routinely runs far
+   longer than a single shell command a host is willing to wait for; a foreground
+   run risks being killed mid-flight and losing the in-flight answers. Add
+   `--detach` (which implies `--yes`) and poll, or — on a host whose *run
+   detached* resolution is its own background mechanism — launch the same command
+   through that mechanism with stdout+stderr redirected to a log file in the
+   phase dir and `PYTHONUNBUFFERED=1` set. Pick exactly one of the two; never
+   both.
 
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- \
-     python "${CLAUDE_SKILL_DIR}/ask_orchestrator.py" \
-     --plan-file "$PLAN_PATH" \
-     --question-file "$(git rev-parse --show-toplevel)/.multi-llm/tmp/ask_question_{plan_stem}.txt" \
-     [--models ...] \
-     > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
+   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" \
+     [--models ...] --detach
    ```
 
-   (The prerequisite check at the top of step 2 already hard-stopped outside a
-   git repository, so the substitution cannot come back empty here; if it ever
-   did, the orchestrator would fail fast on a missing question file — surface
-   the git-repository error above instead of retrying with a guessed path.)
-
-   (Launch DETACHED — see step 3. The `<question-slug>-<hash8>` log dir matches the
-   orchestrator's output dir; if you don't know it yet, redirect to the workspace
-   temp log instead — a Bash redirect does not create directories, and `mkdir` is
-   deliberately not allowlisted, so ensure the temp dir exists via the **Write
-   tool** (which creates parent directories automatically) before launching. The
-   preferred question-file mechanism in step 2 already guarantees this; if you
-   used the env-var mechanism instead, first Write
-   `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` with content `*` — that single
-   Write both creates the directory and makes it ignore itself. The redirect
-   resolves the root with the same inline substitution, inside the **same**
-   launch invocation (a variable set in any other Bash call would be empty
-   here):
+   A detached run is not subject to your host's shell-command cap, so each
+   model's own per-provider `default_timeout` (in `providers.yaml`) governs — no
+   cap-vs-provider timeout reconciliation is needed. `PYTHONUNBUFFERED=1` matters
+   only on the host-background path: Python block-buffers a non-TTY pipe, which
+   leaves the log empty for minutes. A host-background launch **without**
+   redirection loses stdout (including the `answers.md` path), which is why the
+   redirect is mandatory there; `--detach` writes and reports its own log path, so
+   it needs neither.
 
    ```bash
-   ... > "$(git rev-parse --show-toplevel)/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log" 2>&1
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase ask --view run --wait
    ```
-
-   then read markers/paths from that log with the Read tool, using the
-   concrete absolute path — `{PROJECT_ROOT}/.multi-llm/tmp/ask_orchestrator_{plan_stem}.log`
-   with the resolved root substituted literally, never a shell variable.)
-
-   **Alternatively — pass the question via a strictly-quoted environment
-   variable** the orchestrator reads:
-
-   ```bash
-   ASK_QUESTION="$RAW_QUESTION" uv run --project "${CLAUDE_SKILL_DIR}" -- \
-     python "${CLAUDE_SKILL_DIR}/ask_orchestrator.py" \
-     --plan-file "$PLAN_PATH" --question-env ASK_QUESTION [--models ...]
-   ```
-
-   **If passing `--question "<text>"` inline is unavoidable**, the value **must**
-   be inside double quotes with every embedded `"`, `` ` ``, `$`, and `\`
-   escaped. Prefer the temp-file or env-var mechanisms above precisely so this
-   brittle escaping is never required.
-
-   Always quote `"$PLAN_PATH"`, and pass it **as given** — the orchestrator
-   resolves it to an OS-native absolute path itself. Do NOT wrap it in
-   `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...`
-   path that a native Windows Python process cannot use. Use `--project`, not
-   `--directory` (known path-duplication bug). Exactly one of `--question` /
-   `--question-file` / `--question-env` is required (they are mutually
-   exclusive).
-
-3. **Run the orchestrator DETACHED** (Critical Rule 1). Ask mode fans out across
-   many models and routinely runs well past **10 minutes** — and the Claude Code
-   Bash tool hard-caps `timeout` at **600000 ms (10 min)**; any larger value is
-   silently clamped to 600000. A foreground run would therefore be SIGTERM'd
-   mid-flight and lose the in-flight answers. So launch with
-   `run_in_background: true`, redirecting stdout+stderr to a log file and setting
-   `PYTHONUNBUFFERED=1` (see the command block in step 2):
-
-   ```bash
-   ... ask_orchestrator.py --plan-file "$PLAN_PATH" \
-     --question-file "$QUESTION_FILE" [--models ...] \
-     > "{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log" 2>&1
-   ```
-
-   Detached runs are NOT subject to the 10-min Bash cap, so each model's own
-   per-provider `default_timeout` (in `providers.yaml`) governs — no Bash-vs-provider
-   timeout reconciliation is needed. `PYTHONUNBUFFERED=1` is required so Python
-   streams output to the log instead of block-buffering it (block-buffering leaves
-   the log empty for minutes when stdout is a non-TTY pipe). Backgrounding WITHOUT
-   redirection would lose stdout (including the `answers.md` path) — which is why
-   the redirect to a log file is mandatory.
 
    **Resume**: re-invoking the identical question with `--force` RESUMES (keeps
    already-completed `answer_<model>.md` files, runs only the missing models);
    `--rerun-all` forces a full re-run discarding existing per-model answers.
 
-4. **No validation/grouping/subagent steps.** When the background task completes,
-   read the `answers.md` path **from the log file**
-   (`{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log`, final line),
-   then read `answers.md` and present a brief summary per model plus the output
-   file path, following the skill's standard Summary Format.
+4. **No validation/grouping/subagent steps.** When the run finishes, read the
+   `answers.md` path from the log file
+   (`{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log`, final line, or the
+   path `status` printed), then read `answers.md` and present a brief summary per
+   model plus the output file path, following the skill's standard Summary Format.
 
 ## Output Files
 

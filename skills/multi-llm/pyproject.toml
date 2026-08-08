@@ -14,6 +14,7 @@ markers = [
     "live: marks tests that require Claude Code CLI and API (skipped in CI)",
     "timeout: marks tests with a timeout limit (requires pytest-timeout)",
     "config_override: opts out of the autouse per-project config isolation fixture (tests that exercise override discovery/env themselves)",
+    "slow: marks tests that drive several real orchestrator invocations end to end (the instruction-refactor golden guard); runs in CI, not deselected by default",
 ]
 # Filter out warnings about dataclass fixtures being collected by pytest
 filterwarnings = [

@@ -65,7 +65,30 @@ def main(argv=None) -> int:
         action="store_true",
         help="Show what would be tracked without updating state"
     )
+    # The implementation summary's back-reference used to be an inline `python -c`
+    # in instructions/implement.md that put the skill dir on sys.path by hand. That
+    # made the instruction core carry a second skill-dir substitution site and a
+    # block of Python for an agent to retype; the insertion is deterministic, so it
+    # belongs behind the same command that finalizes tracking.
+    parser.add_argument(
+        "--plan-file",
+        help="Plan file to insert the implementation-summary reference into "
+             "(requires --summary-file-relative)"
+    )
+    parser.add_argument(
+        "--summary-file-relative",
+        help="Summary path, relative to the plan's parent directory, as printed "
+             "by the orchestrator's summary_file_relative field"
+    )
     args = parser.parse_args(argv)
+
+    if bool(args.plan_file) != bool(args.summary_file_relative):
+        print(
+            "ERROR: --plan-file and --summary-file-relative are used together: "
+            "one names the plan to update, the other the reference to insert.",
+            file=sys.stderr,
+        )
+        return 1
 
     state_path = Path(args.state_file)
 
@@ -133,6 +156,29 @@ def main(argv=None) -> int:
         print(f"  - {entry['path']}")
 
     print(f"\nState file updated: {state_path}")
+
+    if args.plan_file:
+        code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
+        if code:
+            return code
+    return 0
+
+
+def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:
+    """Idempotently add the implementation-summary link to the plan."""
+    from utils import insert_implementation_summary_reference
+
+    plan_path = Path(plan_file)
+    if not plan_path.exists():
+        print(f"ERROR: Plan file not found: {plan_path}", file=sys.stderr)
+        return 1
+    content = plan_path.read_text(encoding="utf-8")
+    updated = insert_implementation_summary_reference(content, summary_relative)
+    if updated != content:
+        plan_path.write_text(updated, encoding="utf-8")
+        print(f"Updated {plan_path} with a reference to {summary_relative}")
+    else:
+        print(f"{plan_path} already references {summary_relative}")
     return 0
 
 

@@ -1,6 +1,6 @@
 # Implement Mode Instructions
 
-Executes implementation tasks from a plan using Claude Code's native Task tool.
+Executes implementation tasks from a plan by spawning subagents.
 
 ## Usage
 
@@ -21,11 +21,11 @@ Executes implementation tasks from a plan using Claude Code's native Task tool.
 ## Process
 
 1. **Generate Task JSON**: The orchestrator parses the plan and outputs task definitions to JSON
-2. **Claude Code Reads JSON**: Claude Code reads the task definitions
-3. **Execute Batches**: Claude Code executes each batch sequentially using its Task tool
+2. **The agent reads the JSON**: the driving agent reads the task definitions
+3. **Execute Batches**: the driving agent executes each batch sequentially by spawning subagents
 4. **Parallel Execution**: Tasks within a batch can run in parallel (no dependencies between them)
-5. **State Updates**: Claude Code updates the state file after each task completes
-6. **Generate Implementation Summary**: After all tasks complete, Claude Code creates `{plan}_implementation_summary.md`
+5. **State Updates**: the driving agent updates the state file after each task completes
+6. **Generate Implementation Summary**: after all tasks complete, the driving agent creates `{plan}_implementation_summary.md`
 7. **Update Plan**: Add reference to the implementation summary in the original plan
 8. **Report Results**: Summary of completed/failed tasks
 
@@ -59,7 +59,7 @@ Each task includes an `executor_role` field:
 | `general-purpose` | All implementation tasks (default) |
 | `human` | Manual steps (API keys, config, manual testing) |
 
-These are the only subagent types available in Claude Code for implementation work.
+A host whose subagent mechanism takes no role parameter simply ignores this column.
 
 ## State Management
 
@@ -123,7 +123,7 @@ reason and the run proceeds — re-asking would make the recorded skip meaningle
 
 There are unapplied suggestions from plan review. Parse the JSON that follows the marker.
 
-1. Use **AskUserQuestion** to prompt the user:
+1. **Ask the user**:
    - "Review found N suggestions. Apply them before implementation?"
    - Options: "Apply suggestions first", "Skip suggestions, proceed", "Cancel"
 
@@ -140,7 +140,7 @@ There are unapplied suggestions from plan review. Parse the JSON that follows th
      ```
      **Do NOT** proceed further. Stop execution after displaying this message.
 
-   - **"Skip suggestions, proceed"**: Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
+   - **"Skip suggestions, proceed"**: Run `uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
    - **"Cancel"**: Stop and inform user
 
 #### If output contains `[TASKS_MISSING]`:
@@ -178,7 +178,7 @@ recorded as skipped`. Proceed with implementation and do NOT prompt. The phase i
 summary and any later review can all see that the task-review findings were never
 applied.
 
-**Otherwise**, use **AskUserQuestion** to prompt the user:
+**Otherwise**, **ask the user**:
 - "There are N unapplied task suggestions from review-tasks. Apply them first? [y/N]"
 - Options: "Apply task suggestions first", "Skip, proceed to implement" (default), "Cancel"
 
@@ -195,7 +195,7 @@ Handle the response:
   ```
   **Do NOT** proceed further. Stop execution after displaying this message.
 
-- **"Skip, proceed to implement"** (default): Run `uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --skip` to mark the phase as skipped, then continue with implementation.
+- **"Skip, proceed to implement"** (default): Run `uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --skip` to mark the phase as skipped, then continue with implementation.
 
 - **"Cancel"**: Stop and inform user.
 
@@ -211,28 +211,28 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 2. **Resolve the project root, then run the orchestrator to generate task JSON:**
 
-   Intermediate artifacts live in the **workspace temp dir** `$PROJECT_ROOT/.multi-llm/tmp/` — never the system temp dir, so Bash commands, native processes, and harness Read/Write tools resolve the same file on every OS. Resolve the root first and treat failure as a hard prerequisite failure:
+   Intermediate artifacts live in the **workspace temp dir** `$PROJECT_ROOT/.multi-llm/tmp/` — never the system temp dir, so Bash commands, native processes and a host's own file tools resolve the same file on every OS. Resolve the root first and treat failure as a hard prerequisite failure:
    ```bash
    PROJECT_ROOT="$(git rev-parse --show-toplevel)"
    ```
    If the command fails or `$PROJECT_ROOT` is empty, STOP with the error: "multi-llm requires running inside a git repository." Never fall back to a relative path or `$PWD`.
 
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH" [--resume]
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH" [--resume]
    ```
    Do NOT pass `--output` — the orchestrator computes the workspace default itself: `$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`, where `{plan_stem}` is the plan filename without extension and `{hash8}` is the first 8 hex characters of the SHA-256 of the repo-relative plan path. The hash makes the name deterministic AND unique per plan *path* (same-stem plans such as `plans/api/index.md` and `plans/ui/index.md` get distinct artifacts, so concurrent runs cannot clobber each other), while a re-run for the same plan simply overwrites the previous artifact — there is no cleanup step; the orchestrator writes `.multi-llm/tmp/.gitignore` containing `*` so the directory ignores itself, and the user may delete `.multi-llm/tmp/` at any time — the next run recreates it. The orchestrator prints the exact absolute path on its `Output file:` summary line — note that path for step 4; never reconstruct the filename or compute the hash yourself.
 
    **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
 
-   **IMPORTANT**: Run this command in the FOREGROUND (do NOT use `run_in_background`). Use `timeout: 600000` (10 minutes — the Bash tool caps `timeout` at 600000 ms; larger values are silently clamped). The orchestrator runs quickly — it only generates task JSON, it does not execute tasks — so 10 minutes is far more than enough.
+   **IMPORTANT**: Run this command in the foreground — do **not** run it detached. The orchestrator runs quickly — it only generates task JSON, it does not execute tasks — so 10 minutes is far more than enough.
 
 3. **Check for prerequisite markers in orchestrator output** (see Step 0 above)
 
 4. **Read the task JSON file:**
    ```
-   Use the Read tool to load the absolute path printed on the orchestrator's `Output file:` line in step 2
+   Read the absolute path printed on the orchestrator's `Output file:` line in step 2
    ```
-   The Read tool requires an **absolute** path: use the `Output file:` path exactly as the orchestrator printed it (it is already absolute and OS-native, e.g. `{PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`). Do NOT rebuild the path yourself — the filename embeds a hash of the repo-relative plan path that only the orchestrator computes.
+   Reading a file requires an **absolute** path: use the `Output file:` path exactly as the orchestrator printed it (it is already absolute and OS-native, e.g. `{PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`). Do NOT rebuild the path yourself — the filename embeds a hash of the repo-relative plan path that only the orchestrator computes.
 
 #### 4a. Human Task Strategy (if applicable)
 
@@ -251,7 +251,7 @@ After reading the task JSON, scan all batches for tasks with `is_human: true`. I
    steps, so code tasks that depend on them cannot be assumed valid —
    `skip-continue` would run them anyway against unmet preconditions. An explicit
    `--force-strategy` still wins.
-4. **Prompt the user** (no `--yes`): Use `AskUserQuestion` to ask the user how to handle them:
+4. **Prompt the user** (no `--yes`): **ask the user** how to handle them:
 
 - Question: "This plan contains N human task(s) requiring manual action (e.g., {list first 2-3 titles}). How should these be handled?"
 - Options:
@@ -272,7 +272,7 @@ This ensures `--resume` can recover the strategy without re-prompting.
 #### 4b. The Python write executor: `--exec-subagents` (an alternative to steps 5-10)
 
 Steps 5 through 10 below are the **native-subagent** path: this agent walks the
-batches, spawns a Task subagent per task, updates state, records metrics, finalizes
+batches, spawns a subagent per task, updates state, records metrics, finalizes
 tracking, writes the implementation summary and inserts the plan-side reference.
 
 A host with no native subagent tool runs the *same* loop in Python. Add
@@ -315,21 +315,22 @@ batch sees the context an uninterrupted run would have.
 check, writes `{phase}/subagent_dry_run.json` and starts no child.
 `--detach` self-daemonizes the phase and reports per-task progress in
 `{phase}/.status.json` under `progress.write_subagents`; never combine it with a
-host's own background primitive (on Claude Code use `run_in_background`).
+host's own background mechanism, whichever *run detached* resolves to for
+your host.
 
 5. **Execute batches sequentially (batches have dependencies):**
 
    Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
    ```
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)
-   - For each task, spawn a Task subagent:
+   - For each task, spawn a subagent:
      ```
-     Task tool call:
+     Spawn one subagent with:
      - executor_role: task["executor_role"]  (always "agent" here; a "human" task never reaches this step)
      - description: task["title"]
      - prompt: task["prompt"]
@@ -359,8 +360,8 @@ host's own background primitive (on Claude Code use `run_in_background`).
      `[HUMAN_TASK_ANSWERED] T004=done`, so a re-invocation does not re-ask.)
 
      Where a structured ask tool exists and `--yes` was not passed:
-     - Do NOT spawn a Task subagent for human tasks
-     - Use `AskUserQuestion` to present the task:
+     - Do NOT spawn a subagent for human tasks
+     - **Ask the user**, presenting the task:
        - Question: "Task {id}: {title} requires manual action. Please complete the following and confirm when done:\n\n{description}\n\nAcceptance criteria:\n{acceptance_criteria}"
        - Options: "Done — I've completed this task", "Skip this task", "Cancel implementation"
      - Handle each response:
@@ -443,15 +444,15 @@ host's own background primitive (on Claude Code use `run_in_background`).
      state["updated_at"] = datetime.now().isoformat()
      json.dump(state, state_file)
      ```
-   - **Record metrics**: Run the metrics utility to store Task tool metrics:
+   - **Record metrics**: Run the metrics utility to store the subagent's metrics:
      ```bash
-     uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
        --state-file "$STATE_FILE" --phase "implement" \
        --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
        --total-batches {total_tasks} --batch-index {N}
      ```
-     Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result, and `{N}` is the cumulative 1-based task index across all batches. Omit any flags the Task tool didn't return. The script prints an `[ETA]` line to stderr after each call.
+     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
 
 6. **Handle errors:**
    - If a task fails, mark it as "failed" in state
@@ -461,9 +462,9 @@ host's own background primitive (on Claude Code use `run_in_background`).
 7. **Finalize file tracking:**
    After all tasks complete (before generating summary), mark the phase finish and run finalization:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "implement"
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/finalize_tracking.py" --state-file "$STATE_FILE"
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking --state-file "$STATE_FILE"
    ```
    Where `$STATE_FILE` is the `state_file` path from the JSON output.
 
@@ -475,11 +476,8 @@ host's own background primitive (on Claude Code use `run_in_background`).
 8. **Run post-implementation regression tests:**
    After all tasks complete, run the project's test suite **once** to catch any integration issues:
 
-   - If plan modifies `${CLAUDE_SKILL_DIR}/` files:
-     ```bash
-     uv run --project "${CLAUDE_SKILL_DIR}" -- pytest "${CLAUDE_SKILL_DIR}/tests/" -v --tb=short 2>&1 | tail -50
-     ```
-   - Otherwise, detect common test runners:
+   - Detect the target repository's own test runner (never this skill's — the
+     suite under test is the one the plan changed):
      - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
      - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short 2>&1 | tail -50`
    - Record pass/fail results for inclusion in the implementation summary
@@ -529,7 +527,7 @@ host's own background primitive (on Claude Code use `run_in_background`).
 
    Before writing the summary, generate the resource usage section:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "implement"
    ```
    Include the output (if non-empty) in the summary before "## Notes for Code Review".
@@ -540,20 +538,16 @@ host's own background primitive (on Claude Code use `run_in_background`).
    ```
 
 10. **Update the original plan:**
-   Add a reference to the implementation summary in the original plan using the absolute `plan_file` path and the `summary_file_relative` path from the JSON. The three paths are passed as quoted arguments *after* the `-c` script and read via `sys.argv` — never substitute a shell variable inside a Python string literal (on Windows the expanded backslash paths would become invalid or silently corrupting escape sequences):
+   Add a reference to the implementation summary in the original plan. This is the
+   same command as step 7 with two more flags — it is deterministic, so it is
+   Python's job and not a block of inline code for you to retype. Pass the
+   absolute `plan_file` and the `summary_file_relative` value exactly as the
+   orchestrator printed them; the insertion is idempotent, so re-running it on an
+   already-updated plan is a no-op:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python -c "
-   from pathlib import Path
-   import sys
-   sys.path.insert(0, sys.argv[1])
-   from utils import insert_implementation_summary_reference
-   plan_path = Path(sys.argv[2])  # absolute plan_file from orchestrator JSON
-   content = plan_path.read_text(encoding='utf-8')
-   summary_file = sys.argv[3]  # summary_file_relative from JSON
-   updated = insert_implementation_summary_reference(content, summary_file)
-   plan_path.write_text(updated, encoding='utf-8')
-   print(f'Updated {plan_path} with reference to {summary_file}')
-   " "${CLAUDE_SKILL_DIR}" "$PLAN_FILE" "$SUMMARY_FILE_RELATIVE"
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
+     --state-file "$STATE_FILE" --plan-file "$PLAN_FILE" \
+     --summary-file-relative "$SUMMARY_FILE_RELATIVE"
    ```
 
 11. **Report results** including:
@@ -564,7 +558,7 @@ host's own background primitive (on Claude Code use `run_in_background`).
    - Files modified
    - Resource usage summary (if metrics were captured)
 
-**IMPORTANT:** Claude Code orchestrates the execution by spawning Task subagents. Do NOT manually implement the code yourself - delegate to subagents via the Task tool.
+**IMPORTANT:** You orchestrate the execution by **spawning subagents**. Do NOT implement the code yourself — delegate every task to a subagent.
 
 ---
 
@@ -573,25 +567,25 @@ host's own background primitive (on Claude Code use `run_in_background`).
 ```
 User: /multi-llm:multi-llm --implement plans/my-feature.md
 
-Claude:
+Agent:
 1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)" (prerequisite check)
-   then: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-feature.md
+   then: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file plans/my-feature.md
 2. Orchestrator outputs:
    - Output file: {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_my-feature_1a2b3c4d.json (5 tasks in 3 batches; the _1a2b3c4d suffix is the orchestrator-computed hash of the repo-relative plan path)
-   - State file: ${CLAUDE_SKILL_DIR}/state/abc123.json
+   - State file: plans/my-feature/state.json
    - Summary file path: plans/my-feature/my-feature_implementation_summary.md
    - Tasks file path: plans/my-feature/my-feature_tasks.md
    - Summary file relative: my-feature/my-feature_implementation_summary.md
-3. Claude reads the `Output file:` path exactly as printed in step 2 (Read tool, absolute path)
-4. For each batch, Claude spawns Task subagents:
-   - Batch 0 (1 task): Task(subagent_type="general-purpose", prompt="Create database schema...")
+3. the agent reads the `Output file:` path exactly as printed in step 2 (absolute path)
+4. For each batch, the agent spawns subagents:
+   - Batch 0 (1 task): subagent with prompt="Create database schema..."
    - Batch 1 (2 tasks, parallel):
-     - Task(subagent_type="general-purpose", prompt="Implement service layer...")
-     - Task(subagent_type="general-purpose", prompt="Create form component...")
+     - subagent with prompt="Implement service layer..."
+     - subagent with prompt="Create form component..."
    - Batch 2 (2 tasks, parallel):
-     - Task(subagent_type="general-purpose", prompt="Add API routes...")
-     - Task(subagent_type="general-purpose", prompt="Write E2E tests...")
-5. After each task, Claude updates state file with status
+     - subagent with prompt="Add API routes..."
+     - subagent with prompt="Write E2E tests..."
+5. After each task, the agent updates the state file with status
 6. After all tasks complete, Claude generates:
    - plans/my-feature/my-feature_implementation_summary.md (summary of what was done)
 7. Claude updates the original plan to link to the summary using relative path

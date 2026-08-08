@@ -41,7 +41,7 @@ per-phase sections:
 
 ## Non-Interactive Mode (`--yes` / `--non-interactive`)
 
-By default, full mode still stops to ask you a few questions (model selection, `needs-human-decision` items, whether to review tasks). Passing **`--yes`** (alias **`--non-interactive`**) makes the entire workflow run **fully unattended — zero AskUserQuestion prompts** — by applying these effects to every phase:
+By default, full mode still stops to ask you a few questions (model selection, `needs-human-decision` items, whether to review tasks). Passing **`--yes`** (alias **`--non-interactive`**) makes the entire workflow run **fully unattended — zero rendered questions** — by applying these effects to every phase:
 
 | Phase | Default (interactive) | With `--yes` |
 |-------|----------------------|--------------|
@@ -81,26 +81,44 @@ together with `--interactive` is exit 3 at parse time — never a precedence rul
 
 ---
 
+## Loading a phase's core
+
+Each phase below says "load the `<mode>` core". That means exactly one command —
+the dispatcher serves the phase's instruction file with every skill-dir
+placeholder already substituted, so nothing is left for you to resolve:
+
+```bash
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util instructions <mode>
+```
+
+`<mode>` is the phase's mode word (`review-plan`, `apply-suggestions`,
+`review-tasks`, `apply-task-suggestions`, `implement`, `review-code`,
+`apply-code-fixes`). Reading `instructions/<mode>.md` out of the skill directory
+is the documented fallback, not the primary path: the served text is
+pre-substituted and the file on disk is not.
+
+---
+
 ## Step-by-Step Execution
 
 ### 1. Handle Model Selection (same as review-plan mode)
 
 - If models provided in args: use those directly
-- If `--yes` (or `--non-interactive`) was specified: **never prompt.** Resolve models without asking — use `--models` if given, else pass `--quick` if given, else pass no model flag at all (the orchestrator falls back to `providers.yaml` defaults). Skip the AskUserQuestion below entirely.
-- If NO models provided (and NOT `--yes`): Claude MUST use AskUserQuestion to prompt user for model selection
+- If `--yes` (or `--non-interactive`) was specified: **never prompt.** Resolve models without asking — use `--models` if given, else pass `--quick` if given, else pass no model flag at all (the orchestrator falls back to `providers.yaml` defaults). Skip the question below entirely.
+- If NO models provided (and NOT `--yes`): **ask the user** to select models
   - Present available models from `providers.yaml` (multi-select)
 
 ### 2. Execute Phase 1: Review Plan
 
-Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-plan.md` and execute.
+Load the `review-plan` core and execute it.
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --models <selected>
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the orchestrator instead of `--models`:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --quick
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --quick
 ```
 
 Wait for completion, then proceed to Phase 2.
@@ -113,19 +131,20 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 1. Run the consolidation orchestrator:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --consolidate
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
    ```
 
 2. Handle subagent batches using the same Strategy A/B logic from review-plan instructions:
-   - `[CONSOLIDATION_PENDING]`: single batch — spawn one Task subagent
+   - `[CONSOLIDATION_PENDING]`: single batch — spawn one subagent
    - `[CONSOLIDATION_BATCHES_PENDING]`: multiple batches — Strategy A (≤ 4: parallel direct) or Strategy B (> 4: wave-based spawning in waves of 4, last wave absorbs remainder)
    - Load `consolidation_tasks.json` from `{plan}/review-plan/`
-   - Read prompt template from `${CLAUDE_SKILL_DIR}/prompts/consolidate_suggestions.txt`
-   - Each subagent instruction: "Respond with ONLY the JSON output. No explanation."
+   - Every task in that file already carries a complete `prompt` (the filled
+     consolidation template plus that batch's group records), so there is no
+     template to open and no prompt to assemble
 
 3. Run reaggregation:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file "$PLAN_PATH" --reaggregate-consolidation
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
    ```
 
 4. Present consolidated report paths to user:
@@ -137,22 +156,22 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 ### 3. Execute Phase 2: Apply Suggestions
 
-Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-suggestions.md` and execute.
+Load the `apply-suggestions` core and execute it.
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH"
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended (Claude judges every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase applies validated suggestions sequentially:
 - Load validation results from Phase 1
 - Filter to valid suggestions (HIGH/MEDIUM importance)
-- Apply each suggestion one at a time using Task subagents
-- Handle needs-human-decision items via AskUserQuestion (or, under `--yes`, via the judged/deferred path — rows 10/11: `--yes` sets `--claude-decide` itself, and the no-selection confirmation is bypassed, so no item and no missing selection file can block)
+- Apply each suggestion one at a time by spawning subagents
+- Handle needs-human-decision items by asking the user (or, under `--yes`, via the judged/deferred path — rows 10/11: `--yes` sets `--claude-decide` itself, and the no-selection confirmation is bypassed, so no item and no missing selection file can block)
 - Generate applied suggestions report
 
 Wait for completion, then proceed to Phase 3.
@@ -190,7 +209,7 @@ the artifacts, under either invoker. Anything else restores the plan and stops.
 generation: implementing against a plan with no tasks is the error `--implement`'s
 auto-detection already reports. There is no "retry, or run generate-tasks in the
 main context, or cancel" prompt any more — the middle option was never anything but
-"do it by hand in Claude Code", and silently switching strategy is how a headless
+"do it by hand in your own session", and silently switching strategy is how a headless
 run ends up with a half-populated plan nobody reviewed. Retry *is* the same
 re-invocation; cancelling is not re-invoking.
 
@@ -200,7 +219,7 @@ Then Phase 3b follows.
 
 After task generation completes successfully, determine whether to run the review-tasks phase.
 
-**`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-tasks.md` and execute. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
+**`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load the `review-tasks` core and execute it. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
 
 **There is no TTY-sniffing branch, and there is no question.** "Not asked" is
 decided by the shim's baked `--yes` plus the user-typed `--review-tasks` opt-in —
@@ -232,44 +251,44 @@ recorded skipped (`reason: Skipped: skipped (no findings)`), and Phase 4 follows
 **(c) Review-tasks produced findings**: the phase runs —
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-confirm
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm
 ```
 
 If `--yes` (or `--non-interactive`) was specified, also append `--claude-decide` so any `needs-human-decision` task suggestions are judged by Claude rather than prompted:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_task_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --no-confirm --claude-decide
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm --claude-decide
 ```
 
 This phase:
 - Loads validated task suggestions from the review-tasks phase
 - Filters to valid suggestions (HIGH/MEDIUM importance)
-- Applies each suggestion to the tasks file using Task subagents
+- Applies each suggestion to the tasks file by spawning subagents
 - Generates an applied task suggestions report (`{prefix}_applied_task_suggestions.md`)
 - Produces `orchestrator_output.json` in `{plan}/apply-task-suggestions/`
 
-Follow the full apply-task-suggestions instruction file (`${CLAUDE_SKILL_DIR}/instructions/apply-task-suggestions.md`) to process batches, generate the summary report, and mark the phase completed. Then proceed to Phase 4.
+Load the `apply-task-suggestions` core and follow it to process batches, generate the summary report, and mark the phase completed. Then proceed to Phase 4.
 
 ### 5. Execute Phase 4: Implement
 
-Load instructions from `${CLAUDE_SKILL_DIR}/instructions/implement.md` and execute.
+Load the `implement` core and execute it.
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file "$PLAN_PATH"
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH"
 ```
 
 Wait for completion, then proceed to Phase 5.
 
 ### 6. Execute Phase 5: Review Code
 
-Load instructions from `${CLAUDE_SKILL_DIR}/instructions/review-code.md` and execute.
+Load the `review-code` core and execute it.
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file "$PLAN_PATH" --models <selected>
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the code review orchestrator:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file "$PLAN_PATH" --quick
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --quick
 ```
 
 Use the **same models resolved in Phase 1** (Critical Rule 4). Under `--yes`, resolve models the same non-interactive way as Phase 1 (never prompt). This phase only *reviews* the code and produces `{plan}/code-review/` outputs — the fixes are applied in Phase 6.
@@ -278,7 +297,7 @@ Wait for completion, then proceed to Phase 6.
 
 ### 6b. Execute Phase 6: Apply Code Fixes
 
-Load instructions from `${CLAUDE_SKILL_DIR}/instructions/apply-code-fixes.md` and execute. This phase mirrors Phase 2 (Apply Suggestions), but applies the validated findings from the code review (Phase 5) to the **code** rather than the plan.
+Load the `apply-code-fixes` core and execute it. This phase mirrors Phase 2 (Apply Suggestions), but applies the validated findings from the code review (Phase 5) to the **code** rather than the plan.
 
 **Conditional — skip if there is nothing to apply.** When
 `{plan}/code-review/grouped.json` is missing or carries no findings, the phase is
@@ -288,19 +307,19 @@ through the same `--skip --reason` state path, and the report follows.
 **Otherwise, run the apply-code-fixes orchestrator:**
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH"
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended:
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_code_fixes_orchestrator.py" --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase:
 - Loads validated code-review findings from Phase 5
 - Filters to valid findings (HIGH/MEDIUM importance)
-- Applies each fix to the code one at a time using Task subagents
-- Handles `needs-human-decision` items via AskUserQuestion (or, under `--yes`, via the judged/deferred path — rows 10/11, no prompt and no `confirmation_needed` payload)
+- Applies each fix to the code one at a time by spawning subagents
+- Handles `needs-human-decision` items by asking the user (or, under `--yes`, via the judged/deferred path — rows 10/11, no prompt and no `confirmation_needed` payload)
 - Generates an applied code fixes report and overlays decisions onto `{plan}/code-review/report.html`
 
 Follow the full apply-code-fixes instruction file to process batches, generate the summary report, and mark the phase completed. Wait for completion, then proceed to the report.
@@ -353,7 +372,7 @@ After all phases complete, provide a comprehensive summary:
 
 ### Phase 6: Apply Code Fixes *(only if executed, omit if skipped)*
 - Fixes applied: N
-- Decided by Claude: N (A approved, V salvaged, S skipped) *(under `--yes`)*
+- Decided by the judge subagent: N (A approved, V salvaged, S skipped) *(under `--yes`)*
 - Fixes skipped: N
 - Applied code fixes report: {prefix}_applied_code_fixes.md
 
@@ -363,7 +382,7 @@ After all phases complete, provide a comprehensive summary:
 
    Generate combined resource usage:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --all-phases
    ```
    Include the output (if non-empty) after "### All Output Files".
@@ -381,7 +400,7 @@ After all phases complete, provide a comprehensive summary:
 3. **State Preservation**: Each phase's state is preserved for the next phase
 4. **Same Models**: Use the same model selection for both review-plan and review-code phases
 5. **Apply Sequential**: In Phases 2, 3c, and 6, process items ONE AT A TIME to avoid conflicts
-6. **`--yes` is all-or-nothing for prompts**: When `--yes` / `--non-interactive` is set, **NO AskUserQuestion may be issued anywhere, for any reason** — not for a workflow decision, not for a crash, not for a prerequisite gate. Every decision point has exactly one of three endings: a documented default that is applied *and recorded* (`[AUTO_RESOLVED] <site>: <decision>`), exit **3** with the re-invocation named, or a flag the user typed. "Ask in free text" is not a fourth ending. See the Non-Interactive Mode table above for the per-site resolution.
+6. **`--yes` is all-or-nothing for prompts**: When `--yes` / `--non-interactive` is set, **no question may be asked anywhere, for any reason** — not for a workflow decision, not for a crash, not for a prerequisite gate. Every decision point has exactly one of three endings: a documented default that is applied *and recorded* (`[AUTO_RESOLVED] <site>: <decision>`), exit **3** with the re-invocation named, or a flag the user typed. "Ask in free text" is not a fourth ending. See the Non-Interactive Mode table above for the per-site resolution.
 
 ## Planned Features (Not Yet Implemented)
 

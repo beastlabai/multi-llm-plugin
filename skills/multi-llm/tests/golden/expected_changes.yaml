@@ -1,0 +1,41 @@
+# Declared, rationale-carrying allowlist for the instruction-refactor guard.
+#
+# The guard (tests/test_instruction_refactor_guard.py) re-runs the named fixture
+# — tests/fixtures/e2e/plans/auth-feature.md through
+# tests/fixtures/e2e/scenarios/full_workflow.yaml, against mock providers — and
+# diffs the normalized bundle against the baseline captured on the
+# `phase3-pre-refactor` tag (272f946). The acceptable diff threshold is **zero**:
+# identical instructions over pinned mock fixtures must produce a byte-identical
+# normalized bundle, so any diff is an instruction-following change to be
+# explained, not noise.
+#
+# Intentional changes are therefore *declared here*, never discovered by reading a
+# failure. Each entry is a normalized JSON-pointer path (the vocabulary
+# `diff_bundles` reports in) plus a one-line rationale. Two rules keep the file
+# from decaying into a blanket ignore:
+#
+#   1. A diff outside this list fails the guard.
+#   2. An entry that no longer matches anything ALSO fails the guard — a stale
+#      allowlist row is a lie about what the refactor did.
+#
+# `pointer` is matched as a prefix against the reported path, so one entry can
+# cover a subtree (e.g. `/phases/generate-tasks`) without enumerating leaves.
+# `pointer` may not be `/` — a blanket ignore is not expressible on purpose.
+#
+# Phase 3 task 7 shipped with this list EMPTY, which is the strongest possible
+# outcome: the host-neutral rewrite of instructions/*.md (7a), the additive
+# capability data plus `--host` plumbing (7b) and the Claude Code shim cutover
+# (7c) each reproduced the pre-refactor bundle exactly. Nothing about the
+# machinery is vacuous — see `test_allowlist_mechanism_is_not_vacuous`, which
+# drives a synthetic diff through both rules.
+
+changes: []
+
+# Example of the shape an entry takes, kept as documentation only (commented, so
+# it is not an active row that would have to match something):
+#
+# changes:
+#   - pointer: /phases/review-plan/status_steps
+#     rationale: >
+#       D4 replaced the host's run_in_background with --detach, so the phase's
+#       .status.json now carries a `run` object and one extra step value.

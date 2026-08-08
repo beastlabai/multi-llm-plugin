@@ -14,7 +14,7 @@ Reviews code changes made during implementation against the original plan.
 - `--base-ref`: Git ref to compare against (default: from state file)
 - `--skip-validation`: Skip the LLM validation step (faster but no false-positive filtering)
 - `--validation-model <model>`: Model to use for validation (default: "auto")
-- `--apply-fixes`: Prepare fix tasks for Claude Code subagents to apply
+- `--apply-fixes`: Prepare fix tasks for subagents to apply
 - `--quick` / `-q`: Use quick_models from providers.yaml for lightweight reviews (2 models)
 
 ## Process
@@ -24,7 +24,7 @@ Reviews code changes made during implementation against the original plan.
 3. **Aggregate Issues**: Collect and prioritize issues by severity
 4. **Validate Issues**: Filter out false positives and invalid issues
 5. **Prepare Fix Tasks** (if `--apply-fixes`): Generate fix tasks JSON for subagents
-6. **Apply Fixes** (if `--apply-fixes`): Claude spawns Task subagents to fix each valid issue
+6. **Apply Fixes** (if `--apply-fixes`): the agent spawns one subagent per valid issue
 7. **Update Plan**: Document what was fixed in the original plan
 8. **Generate Report**: Create review report with all findings
 
@@ -139,7 +139,7 @@ Items with `needs-human-decision` status are included in the report for the user
      (it prints `[AUTO_RESOLVED] model-selection: …`). If nothing resolves, it
      exits **3** naming the flags that answer the gate — do not substitute a
      question (D6 row 2). `--interactive` with `--yes` is exit 3 at parse time.
-   - If NO models provided and NOT `--yes`: Claude MUST use AskUserQuestion to prompt user for model selection
+   - If NO models provided and NOT `--yes`: **ask the user** to select models
      - Present available models from `providers.yaml` (multi-select)
      - Then run orchestrator with `--models <selected>`
    - **Partial results** (D6 row 3): under `--yes`, a model that produced nothing
@@ -167,16 +167,16 @@ Items with `needs-human-decision` status are included in the report for the user
 
 5. **Run the code review orchestrator (DETACHED):**
 
-   A fan-out review over many models routinely exceeds the Claude Code Bash tool's hard 10-min `timeout` cap (600000 ms; larger values are silently clamped), so run it **DETACHED** with `run_in_background: true`, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
+   A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --models <selected> [--base-ref REF] [--apply-fixes] \
      > "{plan}/code-review/orchestrator-run.log" 2>&1
    ```
 
    **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
-   Launch with `run_in_background: true`. Detached runs are NOT subject to the 10-min Bash cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
+   **Run detached.** A detached run is not subject to your host's shell-command cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe). When the background task completes, read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
 
    **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
 
@@ -191,7 +191,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    The reaggregation command for this mode is:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" \
      --reaggregate
    ```
@@ -226,13 +226,13 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each validation subagent. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Validation batch {N}" --subagent-type "agent" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result. Omit any flags the Task tool didn't return. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
    3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
 
@@ -242,7 +242,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` once from `{plan}/code-review/`
    2. Count the number of batches as `{total_batches}` and mark the phase start:
       ```bash
-      uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-code-batches" --total-batches {total_batches}
       ```
    3. Choose a strategy:
@@ -251,7 +251,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
-   **Run all batches in parallel** (single message with multiple Task tool calls).
+   **Run all batches in parallel** (one batch of parallel subagent spawns).
 
    **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
@@ -263,34 +263,34 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After validation completes, run the `reaggregate_command` from validation_tasks.json:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --reaggregate
    ```
 
    After reaggregation, mark the validation phase finish (only if `start` was called above):
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-code-batches"
    ```
 
    **CRITICAL**: Do NOT report results to the user until reaggregation is complete.
 
-8. **If `--apply-fixes` was used, apply fixes using Task subagents:**
+8. **If `--apply-fixes` was used, apply fixes by spawning subagents:**
 
-   After the orchestrator outputs `{prefix}_fix_tasks.json`, Claude MUST use the Task tool to spawn subagents to fix each issue.
+   After the orchestrator outputs `{prefix}_fix_tasks.json`, **spawn one subagent per issue**.
 
    Before the fix loop, mark the phase start where `{total_fixes}` is the number of fix tasks:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" start \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "review-code-fixes" --total-batches {total_fixes}
    ```
 
    For each fix task in the JSON file:
 
    a. Read the fix tasks JSON file to get the list of issues to fix
-   b. For each task, spawn a Task subagent:
+   b. For each task, spawn a subagent:
       ```
-      Task tool call:
+      Spawn one subagent with:
       - executor_role: "agent"
       - description: "Fix: {task.title}"
       - prompt: |
@@ -314,17 +314,17 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each fix subagent:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Fix: {task_title}" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_fixes} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from the Task tool result, and `{N}` is the 1-based fix index. Omit any flags the Task tool didn't return. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the 1-based fix index. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
 
    d. After all fixes are attempted, mark the phase finish:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" finish \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-code-fixes"
    ```
 
@@ -384,7 +384,7 @@ After spawning subagents to apply fixes:
 
    Generate resource usage:
    ```bash
-   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metrics.py" report \
+   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "code-review"
    ```
    Include the output (if non-empty) in the results report.
@@ -406,12 +406,12 @@ After spawning subagents to apply fixes:
 ```
 User: /multi-llm:multi-llm --review-code plans/my-feature.md
 
-Claude:
-1. No models in args, so Claude uses AskUserQuestion:
+Agent:
+1. No models in args, so the agent asks the user:
    "Which models would you like to use for the code review?" (multi-select)
    Options: auto, gpt-5.2, gemini-3-pro, grok, gemini-3-flash, kimi-k2
 2. User selects: gpt-5.2
-3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-feature.md --models gpt-5.2
+3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gpt-5.2
 4. Claude reports review findings and output files
 ```
 
@@ -420,14 +420,14 @@ Claude:
 ```
 User: /multi-llm:multi-llm --review-code --apply-fixes plans/my-feature.md
 
-Claude:
-1. No models in args, so Claude uses AskUserQuestion to prompt for model selection
+Agent:
+1. No models in args, so the agent asks the user to select models
 2. User selects: gemini-3-pro
-3. Runs: uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-feature.md --models gemini-3-pro --apply-fixes
+3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gemini-3-pro --apply-fixes
 4. Orchestrator outputs:
    - my-feature_code_review.md (report)
    - my-feature_fix_tasks.json (3 valid issues to fix)
-5. Claude reads fix_tasks.json and spawns Task subagents for each fix:
+5. Claude reads fix_tasks.json and spawns subagents for each fix:
    - Task 1: "Fix: Missing null check in user validation" -> Subagent fixes it
    - Task 2: "Fix: SQL injection vulnerability" -> Subagent fixes it
    - Task 3: "Fix: Incorrect error message" -> Subagent fixes it
