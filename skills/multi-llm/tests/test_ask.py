@@ -878,25 +878,32 @@ class TestRoutingAndDocs:
         assert "single argument" in ask_md
         assert "empty/whitespace-only question is an error" in ask_md or "empty question" in ask_md.lower()
 
-    def test_skill_md_lists_ask_mode(self):
+    def test_skill_md_routes_ask_mode(self):
+        """The shim's ask obligations, after the D5c slimming.
+
+        The mode *list* and the mode-detection pseudocode left the shim: `modes.py`
+        owns the vocabulary, `argument-hint` is rendered from it, and the mode word
+        is mechanically the flag without its `--`. What a shim must still carry is
+        the ask-specific argument rule (the one mode with two positionals) and a
+        worked example whose quoted path is what naive re-typing breaks.
+        """
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        # argument-hint, mode list, quick start, mode detection.
         assert "--ask" in skill
-        assert "11. **Ask**" in skill or "**Ask** (`--ask`)" in skill
-        assert '/multi-llm:multi-llm --ask plans/my-feature.md "Is the rollback strategy sufficient?"' in skill
-        assert '"--ask" -> mode = ask' in skill
-        # Intro count bumped (no longer "nine").
-        assert "Supports eleven workflow modes" in skill
-        # Mode-detection parsing rule states the same single-quoted-question rule.
-        assert "position-independent" in skill
-        assert "single (quoted) argument" in skill
+        assert "argument-hint:" in skill
+        # The mode word is derivable without a second list, and the shim says so.
+        assert "the mode word without its" in skill
+        # The ask-specific positional rule, and the quoted-path worked example.
+        assert "the next single quoted" in skill
+        assert '--ask "plans/my plan.md" "Is the rollback strategy sufficient?"' in skill
 
     def test_skill_and_instructions_agree_on_error_rule(self):
+        """Both layers refuse to repair an unquoted or empty question."""
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         ask_md = (SKILL_DIR / "instructions" / "ask.md").read_text(encoding="utf-8")
         for doc in (skill, ask_md):
             assert "unquoted" in doc.lower()
-            assert "usage hint" in doc.lower()
+        assert "usage hint" in ask_md.lower()
+        assert "usage hint" in skill.lower()
 
     def test_documented_bash_timeouts_within_cap_and_fanout_runs_detached(self):
         """The Claude Code Bash tool hard-caps `timeout` at 600000 ms (10 min);
