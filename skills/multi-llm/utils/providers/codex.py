@@ -4,7 +4,13 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import (
+    PROFILE_AGENT_READONLY,
+    PROFILE_GENERATE,
+    USAGE_FULL,
+    LLMProvider,
+    split_reasoning_effort,
+)
 
 # Reasoning effort values accepted by the OpenAI API for reasoning.effort
 # (verified live against codex-cli 0.144.0).
@@ -30,6 +36,17 @@ class CodexProvider(LLMProvider):
     # (`codex exec < prompt.txt`), so this adapter has a real non-argv transport
     # (D2d). The fan-out default stays "argv"; materialized prompts use stdin.
     supported_prompt_transports = ("argv", "stdin")
+
+    # Subagent-runner declarations (D3e/D3j/D3m). `-s read-only` is one of the
+    # three documented sandbox policies (`codex exec --help`, verified against
+    # codex-cli 0.146.0), so the read-only profile is the CLI's own sandbox
+    # rather than anything this repo enforces afterwards.
+    agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+    supports_workspace_reads = True
+    usage_support = USAGE_FULL
+    version_cmd = ("codex", "--version")
+    min_version = "0.144.0"
+    verified_version = "0.146.0"
 
     @property
     def name(self) -> str:
@@ -76,6 +93,71 @@ class CodexProvider(LLMProvider):
             )
         cmd = self.build_command(prompt, model)
         return cmd[:-1], prompt
+
+    def build_agent_command(
+        self, prompt: str, model: str, profile: str = PROFILE_AGENT_READONLY
+    ) -> List[str]:
+        """Build ``codex exec`` under an explicit sandbox policy (D3e).
+
+        ``agent-readonly`` swaps ``--sandbox workspace-write`` (what the
+        ``generate`` path hardcodes) for ``--sandbox read-only``: codex refuses
+        model-generated writes itself, so a prompt-injected validator cannot edit
+        the repository while pretending to score suggestions.
+        """
+        if profile != PROFILE_AGENT_READONLY:
+            return super().build_agent_command(prompt, model, profile)
+        cmd = self.build_command(prompt, model)
+        return ["read-only" if arg == "workspace-write" else arg for arg in cmd]
+
+    def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
+        """Read usage off the terminal turn event of ``codex exec --json`` (D3j).
+
+        Selected by event identity (``turn.completed`` carrying a ``usage``
+        object), never by position, and the **last** such event wins — the item
+        stream the answer is recovered from carries no usage at all, so the two
+        never interfere.
+        """
+        usage: Optional[Dict[str, Any]] = None
+        for line in (stdout or "").strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") not in ("turn.completed", "token_count"):
+                continue
+            candidate = event.get("usage")
+            if isinstance(candidate, dict):
+                usage = candidate
+
+        if not usage:
+            return None
+
+        def _num(key: str) -> Optional[Any]:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+            return None
+
+        out: Dict[str, Any] = {}
+        input_tokens = _num("input_tokens")
+        cached = _num("cached_input_tokens")
+        output_tokens = _num("output_tokens")
+        reasoning = _num("reasoning_output_tokens")
+        if input_tokens is not None:
+            out["input_tokens"] = input_tokens
+        if cached is not None:
+            out["cached_input_tokens"] = cached
+        if output_tokens is not None:
+            # Reasoning output is billed output; codex reports it separately.
+            out["output_tokens"] = output_tokens + (reasoning or 0)
+        if "input_tokens" in out and "output_tokens" in out:
+            out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
+        return out or None
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:

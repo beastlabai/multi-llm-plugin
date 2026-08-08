@@ -349,10 +349,24 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
 
     base_config = _load_base_config()
     config = base_config
+    driver_overridden = False
     for layer_name, path in _override_paths(anchor):
         data = _load_override_layer(layer_name, path, permissive)
         if data:
+            if "driver" in data:
+                driver_overridden = True
             config = _deep_merge(config, data)
+
+    # D3: `driver:` validation is fail-fast, and only for an EXPLICIT override.
+    # Base is ours (a broken base is a test failure, not a user's problem), and
+    # validating it here would turn every unrelated invocation into a config
+    # error. An override layer asked for these values, so a bad one raises
+    # ConfigError naming the key, the value and the reason at load time rather
+    # than surfacing as a mis-dispatched subagent mid-phase. Permissive mode
+    # deliberately does NOT relax this: a silently ignored runner spec degrades
+    # to "no runner configured", which is the failure this check exists for.
+    if driver_overridden:
+        validate_driver_block(config.get("driver"))
 
     # Load-time guard (post-merge): a clone-authored override can deep-merge a
     # malformed (non-mapping) provider value, e.g. `providers: {claude-code: "x"}`,
@@ -616,6 +630,200 @@ def has_quick_models(mode: Optional[str] = None,
                      anchor: Optional[Union[str, Path]] = None) -> bool:
     """Check if quick models are configured."""
     return len(get_quick_models(mode, anchor=anchor)) > 0
+
+
+# ---------------------------------------------------------------------------
+# driver: — the `--exec-subagents` dispatch config (D3, D3o)
+# ---------------------------------------------------------------------------
+
+#: The base `driver:` block's keys, with the types each accepts. This is the
+#: closed set: an unknown key under `driver:` is REJECTED rather than ignored, so
+#: a typo (`subagent_runners:`) is not silently a no-op. The write-path fields
+#: (`max_concurrent_write_subagents`, `write_paths`) join this table with the
+#: write executor; until then they are unknown keys like any other.
+DRIVER_RUNNER_KEYS = ("subagent_runner", "subagent_runner_cheap")
+DRIVER_POSITIVE_INT_KEYS = ("max_concurrent_subagents", "subagent_retries")
+DRIVER_OPTIONAL_INT_KEYS = ("subagent_timeout_s",)
+DRIVER_KEYS = DRIVER_RUNNER_KEYS + DRIVER_POSITIVE_INT_KEYS + DRIVER_OPTIONAL_INT_KEYS
+
+#: Values used when the merged config carries no `driver:` block at all (a test
+#: fixture config, or a base file predating D3). The shipped base is fully
+#: populated, so in a real run these are never reached.
+DRIVER_FALLBACKS: Dict[str, object] = {
+    "subagent_runner": "claude-code:sonnet",
+    "subagent_runner_cheap": "claude-code:haiku",
+    "max_concurrent_subagents": 4,
+    "subagent_timeout_s": None,
+    "subagent_retries": 1,
+}
+
+
+def _driver_runner_error(key: str, value: object, reason: str) -> str:
+    """One rejection surface for a bad `driver.*` runner spec (D3)."""
+    return (
+        f"multi-llm config error: driver.{key} is {value!r} — {reason}. "
+        f"Set it to a provider:model spec whose provider has a built-in adapter "
+        f"(e.g. claude-code:sonnet, codex:gpt-5.6-sol, opencode:<model>), or "
+        f"remove the key to inherit the default."
+    )
+
+
+def validate_driver_block(driver: object) -> None:
+    """Validate a merged ``driver:`` block, raising :class:`ConfigError`.
+
+    Fail-fast and total: every field is checked, unknown keys are rejected, and
+    each message names the key, the value and the reason. Called from
+    :func:`load_config` whenever an **override** layer carried a ``driver:``
+    block, so a bad value surfaces at load time rather than as a mis-dispatched
+    subagent mid-phase.
+
+    A runner spec is checked structurally here (parses as ``provider:model``, and
+    that provider has a hardcoded adapter). Catalog membership
+    (:func:`is_model_valid`) and the profile check (D3e) happen at resolution
+    time, because both read the merged config this function is validating.
+    """
+    if driver is None:
+        return
+    if not isinstance(driver, dict):
+        raise ConfigError(
+            f"multi-llm config error: `driver:` must be a mapping, got "
+            f"{type(driver).__name__}"
+        )
+
+    unknown = [key for key in driver if key not in DRIVER_KEYS]
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under `driver:`: "
+            f"{', '.join(sorted(unknown))}. Known keys: "
+            f"{', '.join(DRIVER_KEYS)}. A typo here would otherwise be a silent "
+            f"no-op, so it is rejected instead of ignored."
+        )
+
+    for key in DRIVER_RUNNER_KEYS:
+        if key not in driver:
+            continue
+        value = driver[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(_driver_runner_error(key, value, "expected a non-empty string"))
+        provider_name, _, model = value.partition(":")
+        if not provider_name.strip() or not model.strip():
+            raise ConfigError(_driver_runner_error(
+                key, value,
+                "it must be an explicit provider:model spec (a bare model name "
+                "cannot be resolved for a runner)",
+            ))
+        # Deliberately NOT warn-and-filter: a filtered runner spec silently
+        # degrades to "no runner configured" and resurfaces mid-phase, so the
+        # driver validator raises where the fan-out path warns. The fan-out
+        # behavior (_provider_has_adapter's warn-once) is untouched.
+        if get_provider(provider_name.strip()) is None:
+            raise ConfigError(_driver_runner_error(
+                key, value,
+                f"provider {provider_name.strip()!r} has no built-in adapter "
+                f"(reason code: unknown_provider) — run --init to refresh a "
+                f"stale config",
+            ))
+
+    for key in DRIVER_POSITIVE_INT_KEYS:
+        if key not in driver:
+            continue
+        value = driver[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigError(
+                f"multi-llm config error: driver.{key} is {value!r} — expected a "
+                f"positive integer."
+            )
+
+    for key in DRIVER_OPTIONAL_INT_KEYS:
+        if key not in driver:
+            continue
+        value = driver[key]
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigError(
+                f"multi-llm config error: driver.{key} is {value!r} — expected a "
+                f"positive integer or null (null = the runner provider's "
+                f"default_timeout)."
+            )
+
+
+def get_driver_config(anchor: Optional[Union[str, Path]] = None) -> dict:
+    """The merged ``driver:`` block, with every key present (D3).
+
+    Reads go through this and the typed accessors below — never ad-hoc
+    ``config["driver"]`` indexing — so a config layer that omitted a key still
+    yields a complete block.
+    """
+    config = load_config(anchor=anchor)
+    driver = config.get("driver")
+    driver = dict(driver) if isinstance(driver, dict) else {}
+    merged = dict(DRIVER_FALLBACKS)
+    for key in DRIVER_KEYS:
+        if key in driver and driver[key] is not None:
+            merged[key] = driver[key]
+        elif key in driver and key in DRIVER_OPTIONAL_INT_KEYS:
+            merged[key] = None
+    return merged
+
+
+def get_driver_provenance(
+    key: str, anchor: Optional[Union[str, Path]] = None
+) -> str:
+    """Which layer supplied ``driver.<key>``: ``env``/``project``/``base``/``default``.
+
+    D3o: `--status` and `install-host --check` print the resolved runner together
+    with the layer that supplied it, because "I set it and nothing changed" is
+    otherwise a support question. Highest-precedence layer that names the key
+    wins, matching the merge order exactly.
+    """
+    permissive = _truthy_env(ENV_PERMISSIVE_VAR)
+    for layer_name, path in reversed(_override_paths(anchor)):
+        data = _load_override_layer(layer_name, path, permissive)
+        driver = (data or {}).get("driver")
+        if isinstance(driver, dict) and driver.get(key) is not None:
+            return layer_name
+    base_driver = _load_base_config().get("driver")
+    if isinstance(base_driver, dict) and key in base_driver:
+        return "base"
+    return "default"
+
+
+def get_subagent_runner(
+    tier: str = "full", anchor: Optional[Union[str, Path]] = None
+) -> str:
+    """The configured runner spec for a capability tier (D2e/D3).
+
+    ``cheap`` resolves to ``driver.subagent_runner_cheap`` and falls back to
+    ``driver.subagent_runner``; every other tier resolves to
+    ``driver.subagent_runner``.
+    """
+    driver = get_driver_config(anchor=anchor)
+    if tier == "cheap":
+        cheap = driver.get("subagent_runner_cheap")
+        if isinstance(cheap, str) and cheap.strip():
+            return cheap
+    return str(driver.get("subagent_runner") or DRIVER_FALLBACKS["subagent_runner"])
+
+
+def get_max_concurrent_subagents(anchor: Optional[Union[str, Path]] = None) -> int:
+    """``driver.max_concurrent_subagents`` — the *global* executor gate."""
+    return int(get_driver_config(anchor=anchor)["max_concurrent_subagents"])
+
+
+def get_subagent_retries(anchor: Optional[Union[str, Path]] = None) -> int:
+    """``driver.subagent_retries`` — transport-shaped re-dispatches only."""
+    return int(get_driver_config(anchor=anchor)["subagent_retries"])
+
+
+def get_subagent_timeout(
+    provider_name: str, anchor: Optional[Union[str, Path]] = None
+) -> int:
+    """Per-dispatch timeout: ``driver.subagent_timeout_s`` or the provider default."""
+    configured = get_driver_config(anchor=anchor)["subagent_timeout_s"]
+    if isinstance(configured, int) and not isinstance(configured, bool):
+        return configured
+    return get_provider_timeout(provider_name)
 
 
 def get_provider_max_concurrent(provider_name: str) -> Optional[int]:

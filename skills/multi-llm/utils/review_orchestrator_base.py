@@ -185,6 +185,146 @@ def read_plan(plan_path: str) -> str:
         return f.read()
 
 
+def merge_validation_batches(
+    phase_dir: str,
+    batch_metadata: Dict[str, Any],
+    grouped: List[Any],
+    validation_path: str,
+) -> List[Dict[str, Any]]:
+    """Merge ``validation_batch_N.json`` files into ``validation.json`` + groups.
+
+    Shared by the two reaggregation sites and by the ``--exec-subagents``
+    continuation (D3b), which reaches the merge in the *same* invocation that
+    dispatched the batch instead of exiting at the marker. One implementation
+    means the executor path and the native path cannot drift in how a batch is
+    merged — only in who dispatched it.
+    """
+    validation_results = merge_batched_validation_results(
+        output_dir=phase_dir,
+        batch_metadata=batch_metadata,
+        total_groups=len(grouped),
+    )
+    save_validation_results(validation_results, Path(validation_path))
+    print(f"Merged validation saved to: {validation_path}")
+    return apply_validation_to_groups(
+        [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+        validation_results,
+    )
+
+
+def exec_subagents_requested(args: Any) -> bool:
+    """Whether this run drives its own subagents (D3b self-contained mode).
+
+    A single accessor so every marker site asks the same question and the
+    flag-off path stays byte-identical to what shipped before the executor.
+    """
+    return bool(getattr(args, "exec_subagents", False))
+
+
+def dispatch_subagent_tasks(
+    args: Any,
+    *,
+    task_file: str,
+    phase_dir: str,
+    phase: str,
+    document: Optional[Dict[str, Any]] = None,
+    plan_path: Optional[str] = None,
+    label: str = "subagent",
+    retry_command: Optional[str] = None,
+) -> bool:
+    """Run a materialized batch through the executor, or decline (D3b).
+
+    Returns ``False`` when ``--exec-subagents`` is off (the caller then prints its
+    marker and follow-up command exactly as before), ``True`` when every task
+    produced a schema-valid result file and the caller may continue in-process.
+    A partial batch exits **3** here — even under ``--yes`` — rather than letting
+    the phase reaggregate a short set.
+    """
+    if not exec_subagents_requested(args):
+        return False
+    from .subagent_executor import BatchFailed, ExecutorError, continue_past_marker
+
+    project_root = get_project_root(plan_path) if plan_path else None
+    try:
+        return continue_past_marker(
+            args,
+            task_file=task_file,
+            phase_dir=phase_dir,
+            phase=phase,
+            document=document,
+            anchor=plan_path,
+            cwd=project_root,
+            label=label,
+            retry_command=retry_command,
+        )
+    except BatchFailed as failure:
+        print(failure.message, file=sys.stderr)
+        update_status(phase_dir, {"state": "subagents_failed"})
+        sys.exit(failure.exit_code)
+    except ExecutorError as failure:
+        print(f"ERROR: {failure.message}", file=sys.stderr)
+        sys.exit(failure.exit_code)
+
+
+def dispatch_salvage_tasks(
+    args: Any,
+    *,
+    phase_dir: str,
+    phase: str,
+    plan_path: Optional[str] = None,
+) -> List[str]:
+    """Run every materialized ``salvage_task_*.json`` in a phase dir (D3b).
+
+    Salvage repairs an unparseable *model review* on the fan-out path, so it is
+    dispatched here — once, after the fan-out, when the requests exist — rather
+    than from inside the per-model result writer, which has no flags and no
+    phase-level view.
+
+    **Deliberately non-fatal, unlike a validation batch.** A failed salvage leaves
+    that model failed, which is exactly the partial-results outcome D6 row 3
+    already covers (partial fan-out results are usable output); it is not the
+    "reaggregating a short set" D3i forbids, because the *validation* set is still
+    complete. A failed salvage is reported in ``subagent_batch_report.json`` like
+    any other task.
+
+    Returns:
+        The output paths successfully repaired, in dispatch order.
+    """
+    if not exec_subagents_requested(args):
+        return []
+    import glob as glob_module
+
+    from .subagent_executor import ExecutorError, run_task_file
+
+    repaired: List[str] = []
+    project_root = get_project_root(plan_path) if plan_path else None
+    for task_file in sorted(
+        glob_module.glob(os.path.join(phase_dir, "salvage_task_*.json"))
+    ):
+        print(f"\n[exec-subagents] dispatching salvage task from {task_file}")
+        try:
+            report = run_task_file(
+                task_file,
+                phase_dir=phase_dir,
+                phase=phase,
+                anchor=plan_path,
+                cwd=project_root,
+            )
+        except ExecutorError as failure:
+            print(f"  salvage dispatch refused: {failure.message}", file=sys.stderr)
+            continue
+        for outcome in report.outcomes:
+            if outcome.ok and outcome.output_path:
+                repaired.append(outcome.output_path)
+            else:
+                print(
+                    f"  salvage {outcome.task_id} failed ({outcome.status}): "
+                    f"{outcome.reason or ''}",
+                    file=sys.stderr,
+                )
+    return repaired
+
+
 def get_backoff_delay(base_delay: float) -> float:
     """Get backoff delay, respecting test mode for fast retries.
 
@@ -655,6 +795,129 @@ async def run_models_concurrent(
         for task in tasks:
             if not task.done():
                 task.cancel()
+
+    return results
+
+
+async def run_tasks_concurrent(
+    tasks: List[Dict[str, Any]],
+    per_task_coro_factory: Callable[[Dict[str, Any], str, int], Any],
+    *,
+    runner_for_task: Callable[[Dict[str, Any]], str],
+    timeout: Optional[float] = None,
+    max_parallel: int = 4,
+    skip_predicate: Optional[Callable[[Dict[str, Any], str, int], Optional[Any]]] = None,
+    provider_limits: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """:func:`run_models_concurrent`'s mechanics, keyed by ``task_id`` (D3).
+
+    ``run_models_concurrent`` returns a dict keyed by ``model_spec`` — correct for
+    model fan-out, **wrong** for a subagent batch, where every task normally
+    shares the one configured runner, so completed tasks would overwrite one
+    another. This is the same machinery keyed by each task's stable ``task_id``:
+
+    - the same global ``asyncio.Semaphore(max_parallel)``
+    - the same per-provider semaphores from ``get_provider_max_concurrent``,
+      acquired *before* the global one, and **shared in shape** with the fan-out
+      path so a mixed-tier batch on one provider contends on ONE semaphore
+      (the rate limit belongs to the provider, not the model)
+    - the same stagger, bucketed by resolved provider
+    - the same overall timeout wrapping ``asyncio.gather``
+
+    ``model_spec`` is used *only* to pick the provider semaphore and stagger
+    bucket; it is a column on each row, never the key. ``run_models_concurrent``
+    keeps its current signature and callers.
+
+    Args:
+        tasks: The materialized task objects (not model specs — each task carries
+            its own prompt and its runner is a *derived* attribute).
+        per_task_coro_factory: ``(task, runner_spec, index) -> awaitable``.
+        runner_for_task: Resolves a task's runner spec once, at batch start.
+        timeout: Per-task timeout override, also driving the overall timeout.
+        max_parallel: The global gate (``driver.max_concurrent_subagents``,
+            already reduced to D3i's three-way minimum by the caller).
+        skip_predicate: Cheap synchronous ``(task, runner, index) -> result|None``
+            checked *before* the stagger sleep and any semaphore acquisition, so a
+            resume of already-complete tasks stays fast.
+        provider_limits: Optional per-provider in-flight overrides (D3i
+            backpressure narrows a throttled provider's slots for the rest of the
+            batch); defaults to ``get_provider_max_concurrent``.
+
+    Returns:
+        ``{task_id: whatever the callback returned}``.
+    """
+    results: Dict[str, Any] = {}
+    if not tasks:
+        return results
+
+    runners = {
+        str(task.get("task_id", index)): runner_for_task(task)
+        for index, task in enumerate(tasks)
+    }
+
+    semaphore = asyncio.Semaphore(max_parallel)
+
+    provider_semaphores: Dict[str, asyncio.Semaphore] = {}
+    for spec in set(runners.values()):
+        prov, _ = parse_model_spec(spec)
+        if prov in provider_semaphores:
+            continue
+        limit = (provider_limits or {}).get(prov, get_provider_max_concurrent(prov))
+        if limit is not None:
+            provider_semaphores[prov] = asyncio.Semaphore(limit)
+
+    async def run_with_semaphore(task: Dict[str, Any], index: int) -> Tuple[str, Any]:
+        task_id = str(task.get("task_id", index))
+        runner = runners[task_id]
+        provider_name, _ = parse_model_spec(runner)
+
+        if skip_predicate is not None:
+            skipped = skip_predicate(task, runner, index)
+            if skipped is not None:
+                return (task_id, skipped)
+
+        if index > 0:
+            stagger_delay = get_backoff_delay(index * PROVIDER_STAGGER_DELAY)
+            await asyncio.sleep(stagger_delay)
+
+        prov_sem = provider_semaphores.get(provider_name)
+        if prov_sem:
+            async with prov_sem:
+                async with semaphore:
+                    return (task_id, await per_task_coro_factory(task, runner, index))
+        else:
+            async with semaphore:
+                return (task_id, await per_task_coro_factory(task, runner, index))
+
+    coros = [
+        asyncio.create_task(run_with_semaphore(task, idx))
+        for idx, task in enumerate(tasks)
+    ]
+
+    if timeout is not None:
+        base_timeout = timeout
+    else:
+        base_timeout = max(
+            get_provider_timeout(parse_model_spec(spec)[0])
+            for spec in runners.values()
+        )
+    total_timeout = base_timeout * 2 + len(tasks) * PROVIDER_STAGGER_DELAY
+
+    try:
+        completed = await asyncio.wait_for(
+            asyncio.gather(*coros, return_exceptions=True), timeout=total_timeout
+        )
+        for item in completed:
+            if isinstance(item, Exception):
+                print(f"Subagent task exception: {item}")
+                continue
+            task_id, result = item
+            results[task_id] = result
+    except asyncio.TimeoutError:
+        print(f"Total subagent batch timeout ({total_timeout}s) exceeded")
+        for coro in coros:
+            if not coro.done():
+                coro.cancel()
 
     return results
 
@@ -1305,7 +1568,10 @@ async def reaggregate_from_existing_files(
     pattern = os.path.join(phase_dir, "*.json")
     all_files = glob_module.glob(pattern)
 
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data']
+    # `subagent_batch_report` is executor bookkeeping (D3i), not a model
+    # result: it lives in the phase dir and MUST be excluded or the glob
+    # below would parse it as a suggestion list and crash reaggregate.
+    exclude_patterns = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report']
     result_files = [
         f for f in all_files
         if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude_patterns)
@@ -1421,20 +1687,25 @@ async def reaggregate_from_existing_files(
 
             if batches_found == total_batches and total_batches > 0:
                 print(f"All {total_batches} batch files found, merging...")
-                validation_results = merge_batched_validation_results(
-                    output_dir=phase_dir,
-                    batch_metadata=batch_metadata,
-                    total_groups=len(grouped)
+                validated_groups_for_report = merge_validation_batches(
+                    phase_dir, batch_metadata, grouped, validation_path
                 )
-
-                save_validation_results(validation_results, Path(validation_path))
-                print(f"Merged validation saved to: {validation_path}")
-
-                validated_groups = apply_validation_to_groups(
-                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    validation_results
+            elif dispatch_subagent_tasks(
+                args,
+                task_file=validation_tasks_path,
+                phase_dir=phase_dir,
+                phase=phase_name,
+                document=batch_metadata,
+                plan_path=str(plan_path),
+                label="validation",
+            ):
+                # D3b on the reaggregate path: a run resumed with
+                # --exec-subagents dispatches the still-incomplete batches itself
+                # (completed ones are skipped by their result files, D3i) rather
+                # than telling a host to go run subagents it may not have.
+                validated_groups_for_report = merge_validation_batches(
+                    phase_dir, batch_metadata, grouped, validation_path
                 )
-                validated_groups_for_report = validated_groups
             else:
                 print(f"Only {batches_found}/{total_batches} batch files found.")
                 print("Wait for all validation subagents to complete before reaggregating.")
@@ -1495,13 +1766,33 @@ async def reaggregate_from_existing_files(
 
             print(f"\nValidation prepared for Claude Code subagent.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-            print("\nAfter validation completes, run:")
-            print(f"  {batched_tasks.get('reaggregate_command', '')}")
-            # The single follow-up a native-subagent host is owed, also exposed
-            # on the dispatcher's MULTI_LLM_RESULT line so a host that cannot
-            # parse prose does not have to regex-mine this stdout.
-            record_next(batched_tasks.get('reaggregate_command') or None)
-            return
+
+            # D3b: with --exec-subagents this process continues past the marker
+            # instead of exiting — dispatch the batch, then fall through to the
+            # merge below and finish the phase in one invocation. The marker is
+            # still printed above (logs and .status.json), but it is
+            # informational on this path.
+            if dispatch_subagent_tasks(
+                args,
+                task_file=validation_tasks_path,
+                phase_dir=phase_dir,
+                phase=phase_name,
+                document=batched_tasks,
+                plan_path=str(plan_path),
+                label="validation",
+                retry_command=batched_tasks.get("reaggregate_command"),
+            ):
+                validated_groups_for_report = merge_validation_batches(
+                    phase_dir, batched_tasks, grouped, validation_path
+                )
+            else:
+                print("\nAfter validation completes, run:")
+                print(f"  {batched_tasks.get('reaggregate_command', '')}")
+                # The single follow-up a native-subagent host is owed, also
+                # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
+                # that cannot parse prose does not have to regex-mine stdout.
+                record_next(batched_tasks.get('reaggregate_command') or None)
+                return
     else:
         print("\nSkipping validation (--skip-validation flag set)")
 
@@ -1636,7 +1927,10 @@ async def run_review_orchestration(
             if not os.path.isdir(phase_dir):
                 print(f"ERROR: Phase directory does not exist: {phase_dir}")
                 sys.exit(1)
-            consolidation_handlers['consolidate'](phase_dir, plan_path)
+            # `args` is threaded so the handler can honor --exec-subagents
+            # (D3b): with the flag on it dispatches the consolidation
+            # batch and reaggregates in this same invocation.
+            consolidation_handlers['consolidate'](phase_dir, plan_path, args)
             return
 
         if getattr(args, 'reaggregate_consolidation', False):
@@ -1649,7 +1943,7 @@ async def run_review_orchestration(
                 sys.exit(1)
             import glob as glob_module
             pattern_glob = os.path.join(phase_dir, "*.json")
-            exclude = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data']
+            exclude = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report']
             result_files = [
                 f for f in glob_module.glob(pattern_glob)
                 if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude)
@@ -1810,6 +2104,22 @@ async def run_review_orchestration(
         if not save_model_result(prefix, model_spec, success, output, error, out_dir, phase_dir, salvage_phase_name):
             failed_models[model_spec] = error or "Unknown error"
 
+    # D3b: a salvage task exists for every model whose output would not parse.
+    # With --exec-subagents this run repairs them itself; a model whose result
+    # file now exists is no longer failed, so the partial-results accounting
+    # below sees the post-salvage truth rather than the pre-salvage one.
+    if failed_models and exec_subagents_requested(args):
+        dispatch_salvage_tasks(
+            args, phase_dir=phase_dir, phase=phase_name, plan_path=plan_path
+        )
+        for model_spec in list(failed_models):
+            recovered = os.path.join(
+                phase_dir, f"{sanitize_model_name(model_spec)}.json"
+            )
+            if os.path.exists(recovered) and os.path.getsize(recovered) > 0:
+                print(f"[{model_spec}] recovered by salvage: {recovered}")
+                del failed_models[model_spec]
+
     # D6 row 3: partial results are usable output, so a run that lost *some*
     # models resumes-then-reaggregates (never a question, never `--rerun-all`)
     # and exits 0 with `state: "partial"`; a run where *no* model produced a
@@ -1938,26 +2248,46 @@ async def run_review_orchestration(
                 print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
-                print("\nAfter validation completes, run:")
-                print(f"  {batched_tasks.get('reaggregate_command', '')}")
-                record_next(batched_tasks.get('reaggregate_command') or None)
 
-                # The follow-up command is persisted in its **durable, rebindable**
-                # form (mode word + plan path), never as the resolved
-                # skill-dir-absolute string the same run prints: the Claude plugin
-                # cache is keyed by commit hash, so a stored absolute command
-                # points at a directory that no longer exists after any plugin
-                # update. `status` (and utils/detach.resolved_reaggregate_command)
-                # rebuild it at read time from the *running* skill dir.
-                update_status(phase_dir, {
-                    "state": "validation_pending",
-                    "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
-                    "validation_tasks_path": validation_tasks_path,
-                    **durable_reaggregate_fields(orchestrator_script, plan_path),
-                })
-                _detach.report_progress(phase_dir, step="validation_pending")
+                # D3b: self-contained mode continues past the marker in this same
+                # process — dispatch, merge, and finish the phase in one
+                # invocation. Host-driven mode (the default) is unchanged below.
+                if dispatch_subagent_tasks(
+                    args,
+                    task_file=validation_tasks_path,
+                    phase_dir=phase_dir,
+                    phase=phase_name,
+                    document=batched_tasks,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    retry_command=batched_tasks.get("reaggregate_command"),
+                ):
+                    validation_path = os.path.join(phase_dir, "validation.json")
+                    validated_groups_for_report = merge_validation_batches(
+                        phase_dir, batched_tasks, grouped, validation_path
+                    )
+                else:
+                    print("\nAfter validation completes, run:")
+                    print(f"  {batched_tasks.get('reaggregate_command', '')}")
+                    record_next(batched_tasks.get('reaggregate_command') or None)
 
-                return  # Exit early - Claude Code handles validation
+                    # The follow-up command is persisted in its **durable,
+                    # rebindable** form (mode word + plan path), never as the
+                    # resolved skill-dir-absolute string the same run prints: the
+                    # Claude plugin cache is keyed by commit hash, so a stored
+                    # absolute command points at a directory that no longer
+                    # exists after any plugin update. `status` (and
+                    # utils/detach.resolved_reaggregate_command) rebuild it at
+                    # read time from the *running* skill dir.
+                    update_status(phase_dir, {
+                        "state": "validation_pending",
+                        "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
+                        "validation_tasks_path": validation_tasks_path,
+                        **durable_reaggregate_fields(orchestrator_script, plan_path),
+                    })
+                    _detach.report_progress(phase_dir, step="validation_pending")
+
+                    return  # Exit early - Claude Code handles validation
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 

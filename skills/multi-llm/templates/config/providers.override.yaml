@@ -278,6 +278,24 @@
 ## is detected (inherits the base default).
 # default_provider: cursor-agent
 
+## --- driver -----------------------------------------------------------------
+## How `--exec-subagents` dispatches materialized subagent prompts. Only
+## consulted when the Python executor is the invoker — a host with native
+## subagents (Claude Code, Cursor) never reads these on a default run, because
+## the key configures the EXECUTOR's runner, not the session's model.
+## NOT written by `--init`: uncomment a line to override it. The block merges
+## key-by-key (set one field, inherit the rest), a BLANK value keeps the base,
+## and an unknown key under `driver:` is REJECTED at load time rather than
+## silently ignored. In a repo driven from several hosts, leaving
+## `subagent_runner` unset is the healthy arrangement: each host then resolves
+## its own CLI instead of one host's choice being pinned for all of them.
+# driver:
+#   subagent_runner: claude-code:sonnet
+#   subagent_runner_cheap: claude-code:haiku
+#   max_concurrent_subagents: 4
+#   subagent_timeout_s: null
+#   subagent_retries: 1
+
 
 ## --- defaults ---------------------------------------------------------------
 defaults:

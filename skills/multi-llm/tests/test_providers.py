@@ -2549,6 +2549,63 @@ class TestPromptTransport:
         assert registered == {cls for cls, _, _ in TRANSPORT_CASES}
 
 
+def _registered_provider_names():
+    """Every provider id in the registry, so the sweeps below cannot miss a new one."""
+    from utils.provider_registry import _PROVIDERS
+
+    return list(_PROVIDERS)
+
+
+class TestSubagentRunnerDeclarations:
+    """Every adapter's D3 capability declarations must match its members.
+
+    The capability data cannot be allowed to drift from the code in either
+    direction: an adapter that gains `build_agent_command()` without declaring
+    the profile would be rejected as a runner it can actually serve, and one that
+    declares a profile it does not implement would be dispatched and fail at
+    runtime on a user's host.
+    """
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_declared_profiles_match_implemented_members(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+        implements = (
+            type(provider).build_agent_command is not LLMProvider.build_agent_command
+        )
+        assert implements == ("agent-readonly" in provider.agent_profiles), (
+            f"{name}: build_agent_command implemented={implements} but "
+            f"agent_profiles={provider.agent_profiles}"
+        )
+        # `generate` is every adapter's build_command and is always declared.
+        assert "generate" in provider.agent_profiles
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_declared_usage_matches_an_implemented_extractor(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+        implements = type(provider).parse_usage is not LLMProvider.parse_usage
+        assert implements == (provider.usage_support != "none"), (
+            f"{name}: parse_usage implemented={implements} but "
+            f"usage_support={provider.usage_support!r}"
+        )
+        if not implements:
+            assert provider.parse_usage("anything at all", "") is None
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_a_runner_declaring_a_profile_also_declares_its_version_data(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+        if "agent-readonly" not in provider.agent_profiles:
+            return
+        assert provider.version_cmd, f"{name}: no version_cmd"
+        assert provider.min_version, f"{name}: no min_version"
+        assert provider.verified_version, f"{name}: no verified_version"
+
+
 class TestDescribeFailure:
     """The opt-in hook that recovers a failure reason from a non-zero exit."""
 

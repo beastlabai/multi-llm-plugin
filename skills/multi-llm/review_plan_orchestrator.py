@@ -59,6 +59,7 @@ from utils.html_report_generator import (
 )
 from utils.review_orchestrator_base import (
     run_review_orchestration,
+    dispatch_subagent_tasks,
     # Re-export for backward compatibility (tests or other modules may import these)
     REQUIRED_FIELDS,
     VALID_IMPORTANCE,
@@ -471,8 +472,14 @@ Examples:
 # Consolidation handlers (specific to review-plan)
 # ---------------------------------------------------------------------------
 
-def consolidate_mode(phase_dir: str, plan_path: str) -> None:
-    """Run consolidation to cluster related suggestion groups."""
+def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
+    """Run consolidation to cluster related suggestion groups.
+
+    ``args`` is optional so a direct call still works; when it carries
+    ``--exec-subagents`` the consolidation batch is dispatched and reaggregated in
+    this same invocation (D3b) instead of printing a follow-up command for a host
+    to drive.
+    """
     grouped_path = os.path.join(phase_dir, "grouped.json")
     validation_path = os.path.join(phase_dir, "validation.json")
 
@@ -515,6 +522,24 @@ def consolidate_mode(phase_dir: str, plan_path: str) -> None:
     print(f"\nConsolidation prepared for Claude Code subagent.")
     print(f"Sections with 2+ groups: {len([s for s in section_groups.values() if len(s) >= 2])}")
     print(f"Singleton sections: {len(tasks_metadata.get('singleton_sections', {}))}")
+
+    # D3b: continue past the marker in-process when this run drives its own
+    # subagents — consolidation's consumer is reaggregate_consolidation_mode, so
+    # the phase closes here rather than owing a host a second turn.
+    if args is not None and dispatch_subagent_tasks(
+        args,
+        task_file=tasks_path,
+        phase_dir=phase_dir,
+        phase="review-plan",
+        document=tasks_metadata,
+        plan_path=plan_path,
+        label="consolidation",
+        retry_command=tasks_metadata.get("reaggregate_command"),
+    ):
+        prefix = derive_prefix(plan_path)
+        reaggregate_consolidation_mode(phase_dir, plan_path, prefix, [])
+        return
+
     print(f"\nAfter consolidation completes, run:")
     print(f"  {tasks_metadata.get('reaggregate_command', '--reaggregate-consolidation')}")
 

@@ -11,6 +11,8 @@ Supported Providers:
     - opencode: NDJSON events (step_start, text, step_finish)
     - codex: NDJSON events (thread.started, turn.started, item.completed, turn.completed)
     - kilocode: Direct JSON output
+    - claude-code (launcher name ``claude``): {"type": "result", "result": "...",
+      "usage": {...}, "total_cost_usd": ...}
 
 Environment Variables (Legacy - for backward compatibility):
     MULTI_LLM_TEST_MODE: Must be set to "1" for the mock to run (safety check)
@@ -23,6 +25,12 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_SCENARIO: Path to scenario YAML file for pattern-based responses
     MOCK_LLM_CONFIG: JSON string with dynamic configuration
     MOCK_LLM_CALL_LOG: Path to JSONL file for logging all invocations
+    MOCK_LLM_VERSION: Version string `--version` prints (default: the per-provider
+        release each shipped parser fixture was captured from). Drives the D3m
+        minimum-version refusal path in tests.
+    MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
+        read-only sentinel test can prove a runner that ignores its profile is
+        detectable (a genuinely read-only runner never sets this).
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -82,6 +90,12 @@ def get_provider_name() -> str:
     # Handle both direct name and any suffix/prefix variations
     known_providers = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
 
+    # The claude-code adapter's binary is `claude`, so the launcher name and the
+    # provider id differ for exactly this one.
+    for invoked_name in invoked_names:
+        if invoked_name == "claude" or invoked_name.endswith("claude"):
+            return "claude-code"
+
     for provider in known_providers:
         for invoked_name in invoked_names:
             if invoked_name == provider or invoked_name.endswith(provider):
@@ -140,14 +154,117 @@ def match_prompt_pattern(prompt: str, scenario: Dict[str, Any]) -> Optional[str]
     return None
 
 
+def _unique(values: List[str]) -> List[str]:
+    """De-duplicate while keeping first-seen order."""
+    seen = set()
+    out = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
+    """Answer a materialized subagent prompt by echoing the ids it embeds.
+
+    Selected with ``MOCK_LLM_ECHO=<kind>``. A materialized read/analyze prompt
+    carries every input it needs as *values* (``context_mode: inline``), so a
+    schema-valid answer can be derived from the prompt alone — which is exactly
+    what makes an executor dispatch comparable to the in-process native-invoker
+    simulation: both sides derive the same answer from the same prompt, one
+    through a real subprocess and the provider adapter stack, the other in
+    process. The shapes mirror
+    ``SkillRunner.simulate_subagents``'s default builder.
+
+    Returns None for an unknown kind **and whenever the prompt carries none of
+    the ids that kind needs**, so the caller falls through to the normal response
+    precedence. That is what makes ``MOCK_LLM_ECHO`` safe to set for a whole
+    orchestrator run: the model fan-out's own review prompts contain no group
+    hashes, so they still get the scenario/fixture answer, and only the
+    materialized subagent prompts are echoed.
+    """
+    if kind in ("validation", "revalidation"):
+        hashes = _unique(re.findall(r'"group_hash":\s*"([0-9a-fA-F]+)"', prompt))
+        if not hashes:
+            return None
+        indices = _unique(re.findall(r'"index":\s*(\d+)', prompt))
+        return json.dumps({
+            "groups": [
+                {
+                    "group_index": int(indices[position]) if position < len(indices) else position,
+                    "group_hash": group_hash,
+                    "status": "valid",
+                    "reason": "simulated",
+                    "confidence": 1.0,
+                }
+                for position, group_hash in enumerate(hashes)
+            ],
+            "metadata": {
+                "model": "mock",
+                "timestamp": "1970-01-01T00:00:00",
+                "schema_version": "2.1",
+            },
+        })
+
+    if kind == "human_decision_judge":
+        group_ids = _unique(re.findall(r'"group_id":\s*"([0-9a-fA-F]+)"', prompt))
+        if not group_ids:
+            return None
+        return json.dumps({
+            "schema_version": "1.0",
+            "verdicts": [
+                {
+                    "group_id": group_id,
+                    "decision": "approve",
+                    "reason": "simulated approval",
+                }
+                for group_id in group_ids
+            ],
+        })
+
+    if kind == "consolidation":
+        group_ids = _unique(re.findall(r'"group_id":\s*"([0-9a-fA-F]+)"', prompt))
+        if not group_ids:
+            return None
+        indices = _unique(re.findall(r'"index":\s*(\d+)', prompt))
+        return json.dumps({
+            "verification": "passed",
+            "clusters": [],
+            "singletons": [
+                {
+                    "group_id": group_id,
+                    "group_index": int(indices[position]) if position < len(indices) else position,
+                    "reasoning": "simulated singleton",
+                }
+                for position, group_id in enumerate(group_ids)
+            ],
+        })
+
+    if kind == "salvage":
+        if "JSON extraction specialist" not in prompt:
+            return None
+        return json.dumps([
+            {
+                "title": "Salvaged suggestion",
+                "desc": "Recovered from an unparseable model reply.",
+                "importance": "MEDIUM",
+                "reference": "## Step 1",
+                "type": "addition",
+            }
+        ])
+    return None
+
+
 def get_response_content(prompt: str) -> str:
     """Determine response content based on environment and prompt.
 
     Precedence:
     1. MOCK_LLM_FIXTURE (legacy)
-    2. MOCK_LLM_SCENARIO pattern matching
-    3. MOCK_LLM_CONFIG
-    4. Default response
+    2. MOCK_LLM_ECHO (materialized-subagent answer derived from the prompt)
+    3. MOCK_LLM_SCENARIO pattern matching
+    4. MOCK_LLM_CONFIG
+    5. Default response
 
     Args:
         prompt: The prompt text (used for pattern matching).
@@ -160,6 +277,13 @@ def get_response_content(prompt: str) -> str:
     if fixture_path and Path(fixture_path).exists():
         with open(fixture_path, "r", encoding="utf-8") as f:
             return f.read()
+
+    # D3: answer a materialized subagent prompt from the ids it embeds.
+    echo_kind = os.environ.get("MOCK_LLM_ECHO")
+    if echo_kind:
+        echoed = echo_subagent_answer(echo_kind, prompt)
+        if echoed is not None:
+            return echoed
 
     # New: MOCK_LLM_SCENARIO for pattern-based responses
     scenario_path = os.environ.get("MOCK_LLM_SCENARIO")
@@ -281,6 +405,32 @@ def format_gemini_output(content: str) -> str:
     })
 
 
+def format_claude_code_output(content: str) -> str:
+    """Format output for the claude-code provider (binary name ``claude``).
+
+    Mirrors `claude -p --output-format json`: the answer is wrapped in a
+    ``result`` envelope that also carries the ``usage`` block and
+    ``total_cost_usd`` the D3j extractor reads. ``parse_output`` unwraps
+    ``result`` and discards the rest, so keeping the envelope complete here is
+    what makes the usage extractor testable at all.
+    """
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": content,
+        "session_id": "mock-session-claude",
+        "num_turns": 1,
+        "usage": {
+            "input_tokens": 120,
+            "output_tokens": 45,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 0,
+        },
+        "total_cost_usd": 0.0123,
+    })
+
+
 def format_opencode_output(content: str) -> str:
     """Format output for opencode provider.
 
@@ -326,6 +476,19 @@ def format_opencode_output(content: str) -> str:
                 "sessionID": session_id,
                 "messageID": message_id,
                 "type": "step-finish",
+                # The real StepFinishPart carries `reason`, `cost` and a
+                # `tokens: {input, output, reasoning, cache: {read, write}}`
+                # object (verified against the part schema in the 1.18.x
+                # binary's embedded bundle). The D3j extractor sums these across
+                # steps, so a mock without them could not exercise it.
+                "reason": "stop",
+                "cost": 0.0042,
+                "tokens": {
+                    "input": 200,
+                    "output": 60,
+                    "reasoning": 5,
+                    "cache": {"read": 40, "write": 0},
+                },
             },
         ),
     ]
@@ -402,6 +565,7 @@ def format_output(provider: str, content: str) -> str:
         "opencode": format_opencode_output,
         "codex": format_codex_output,
         "kilocode": format_kilocode_output,
+        "claude-code": format_claude_code_output,
     }
 
     formatter = formatters.get(provider, format_cursor_agent_output)
@@ -449,6 +613,10 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         run_parser.add_argument("--print-logs", dest="print_logs", action="store_true")
         run_parser.add_argument("--log-level", dest="log_level", default=None)
         run_parser.add_argument("--variant", default=None)
+        # The `agent-readonly` profile passes `--agent plan` (D3e). Accepting it
+        # here is what keeps the read-only dispatch from degrading into an
+        # argparse exit-2 that looks like a provider failure.
+        run_parser.add_argument("--agent", default=None)
         run_parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         if args.command != "run":
@@ -474,6 +642,22 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
             sys.exit(1)
         return args, args.prompt
 
+    elif provider == "claude-code":
+        parser = argparse.ArgumentParser(description="Mock claude CLI")
+        parser.add_argument("-p", "--print", dest="print_mode", action="store_true")
+        parser.add_argument("--output-format", dest="output_format", default="json")
+        parser.add_argument("--model", default="sonnet")
+        parser.add_argument("--effort", default=None)
+        # The `agent-readonly` profile's tool policy (D3e). Real `claude` accepts
+        # both spellings of each flag; the adapter emits the hyphenated ones.
+        parser.add_argument("--allowed-tools", "--allowedTools", dest="allowed_tools",
+                            default=None)
+        parser.add_argument("--disallowed-tools", "--disallowedTools",
+                            dest="disallowed_tools", default=None)
+        parser.add_argument("prompt", nargs="?", default="")
+        args = parser.parse_args()
+        return args, args.prompt
+
     elif provider == "kilocode":
         parser = argparse.ArgumentParser(description="Mock kilocode CLI")
         parser.add_argument("--auto", action="store_true")
@@ -489,6 +673,41 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         return args, args.prompt
+
+
+#: What `<provider> --version` prints, mirroring each real CLI's own format.
+#: These are the releases the shipped parser fixtures were captured from, so a
+#: mock run passes the D3m minimum-version gate the way a supported CLI does.
+VERSION_STRINGS = {
+    "codex": "codex-cli 0.146.0",
+    "opencode": "1.18.12",
+    "claude-code": "2.1.224 (Claude Code)",
+    "cursor-agent": "2026.02.01-abcdef",
+    "gemini": "0.9.0",
+    "kilocode": "1.4.0",
+}
+
+
+def print_version(provider: str) -> None:
+    """Answer `--version` the way the emulated CLI does (D3m preflight)."""
+    override = os.environ.get("MOCK_LLM_VERSION")
+    print(override if override else VERSION_STRINGS.get(provider, "0.0.0"))
+
+
+def read_stdin_prompt() -> str:
+    """Read the prompt from stdin (the executor's non-argv transport, D2d).
+
+    Every runner-eligible CLI reads its prompt from stdin when no positional
+    prompt is given, and the executor uses exactly that transport for
+    materialized prompts, so a mock that only looked at argv would see an empty
+    prompt and silently answer the default fixture.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.closed:
+            return ""
+        return sys.stdin.read()
+    except (OSError, ValueError):
+        return ""
 
 
 def main() -> int:
@@ -511,8 +730,24 @@ def main() -> int:
     # Detect provider from invocation name
     provider = get_provider_name()
 
+    # `--version` is answered before any provider argument parsing: the D3m
+    # preflight runs it once per distinct runner, and every real CLI accepts it
+    # without a subcommand.
+    if "--version" in sys.argv[1:] or "-V" in sys.argv[1:]:
+        print_version(provider)
+        return 0
+
     # Parse arguments based on provider
     args, prompt = parse_provider_args(provider)
+    if not prompt:
+        prompt = read_stdin_prompt()
+
+    # A genuinely read-only runner can never do this; the D3e sentinel test uses
+    # it to prove the check has teeth rather than passing vacuously.
+    touch_path = os.environ.get("MOCK_LLM_TOUCH")
+    if touch_path:
+        Path(touch_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(touch_path).write_text("written by the mock runner\n", encoding="utf-8")
 
     # Log the call (always, regardless of mode)
     log_call(provider, sys.argv[1:], prompt)

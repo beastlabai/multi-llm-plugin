@@ -1301,6 +1301,85 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         phase_dir = self.human_decision_phase_dir()
         expected_ids = [group_id_of(g) for g in scope]
 
+        ingest, remaining = self._ingest_judge_verdicts(scope, phase_dir, expected_ids)
+        if not remaining:
+            return
+
+        # Judging ran but did not cover everything, and this is an unattended
+        # run: skip the leftovers with a warning rather than stalling. When
+        # judging has not run at all (no verdict file yet) there is nothing to
+        # be unattended about — the tasks are materialized below and the invoker
+        # runs them. Interactively, leftovers fall back to the normal ask by
+        # staying in needs_human.
+        if ingest.verdicts and getattr(self.args, "yes", False):
+            self._skip_unjudged(remaining)
+            return
+
+        items = [judge_item_from_group(g) for g in remaining]
+        try:
+            document = build_judge_tasks(
+                items=items,
+                phase_dir=phase_dir,
+                plan_file=str(self.plan_path),
+            )
+            tasks_path = write_judge_tasks(document, phase_dir)
+        except Exception as exc:  # noqa: BLE001 - must not fail the apply run
+            self.logger.warning("Could not materialize judging tasks: %s", exc)
+            return
+
+        print(f"\n[HUMAN_DECISION_JUDGING_PENDING] {tasks_path}")
+        print(f"Items to judge: {len(items)}")
+
+        # D3b/D2b: with --exec-subagents the judges run here and their verdict
+        # FILES are ingested in the same invocation, so the decisions reach
+        # ``record_human_decision`` and the apply batch without a verdict ever
+        # travelling through chat context.
+        from .review_orchestrator_base import dispatch_subagent_tasks
+
+        if not dispatch_subagent_tasks(
+            self.args,
+            task_file=tasks_path,
+            phase_dir=phase_dir,
+            phase=self.phase_name,
+            document=document,
+            plan_path=str(self.plan_path),
+            label="human-decision judging",
+        ):
+            return
+
+        ingest, remaining = self._ingest_judge_verdicts(scope, phase_dir, expected_ids)
+        if remaining and getattr(self.args, "yes", False):
+            self._skip_unjudged(remaining)
+
+    def _skip_unjudged(self, remaining: List[Dict[str, Any]]) -> None:
+        """Move judged-but-unresolved groups to skipped under ``--yes``."""
+        for group in remaining:
+            print(
+                "Warning: no judge verdict for group "
+                f"{group_id_of(group)}; skipping it (--yes).",
+                file=sys.stderr,
+            )
+            group["validation_status"] = "skipped"
+            group["reason"] = "No Claude decision returned for this group"
+            self.skipped.append(group)
+        leftover = {id(g) for g in remaining}
+        self.needs_human[:] = [
+            g for g in self.needs_human if id(g) not in leftover
+        ]
+
+    def _ingest_judge_verdicts(
+        self,
+        scope: List[Dict[str, Any]],
+        phase_dir: str,
+        expected_ids: List[str],
+    ) -> Tuple[Any, List[Dict[str, Any]]]:
+        """Read, record and apply every verdict file present. Returns the leftovers.
+
+        Extracted so both judging legs run the *same* ingest: the native path
+        reaches it once (the driving agent persisted the files before re-invoking)
+        and the executor path reaches it twice — before dispatching, and again
+        after — which is what closes the loop in one invocation.
+        """
         ingest = ingest_verdicts(phase_dir=phase_dir, expected_group_ids=expected_ids)
         for message in ingest.errors:
             print(f"ERROR: human-decision verdict rejected: {message}", file=sys.stderr)
@@ -1341,45 +1420,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             g for g in self.needs_human
             if group_id_of(g) in set(expected_ids)
         ]
-        if not remaining:
-            return
-
-        # Judging ran but did not cover everything, and this is an unattended
-        # run: skip the leftovers with a warning rather than stalling. When
-        # judging has not run at all (no verdict file yet) there is nothing to
-        # be unattended about — the tasks are materialized below and the invoker
-        # runs them. Interactively, leftovers fall back to the normal ask by
-        # staying in needs_human.
-        if ingest.verdicts and getattr(self.args, "yes", False):
-            for group in remaining:
-                print(
-                    "Warning: no judge verdict for group "
-                    f"{group_id_of(group)}; skipping it (--yes).",
-                    file=sys.stderr,
-                )
-                group["validation_status"] = "skipped"
-                group["reason"] = "No Claude decision returned for this group"
-                self.skipped.append(group)
-            leftover = {id(g) for g in remaining}
-            self.needs_human[:] = [
-                g for g in self.needs_human if id(g) not in leftover
-            ]
-            return
-
-        items = [judge_item_from_group(g) for g in remaining]
-        try:
-            document = build_judge_tasks(
-                items=items,
-                phase_dir=phase_dir,
-                plan_file=str(self.plan_path),
-            )
-            tasks_path = write_judge_tasks(document, phase_dir)
-        except Exception as exc:  # noqa: BLE001 - must not fail the apply run
-            self.logger.warning("Could not materialize judging tasks: %s", exc)
-            return
-
-        print(f"\n[HUMAN_DECISION_JUDGING_PENDING] {tasks_path}")
-        print(f"Items to judge: {len(items)}")
+        return ingest, remaining
 
     # ==================================================================
     # Phase 4 — _prepare_batches
@@ -2153,6 +2194,31 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         print(
             f"Items to revalidate: {revalidation_tasks['items_to_revalidate']}"
         )
+
+        # D3b: with --exec-subagents this process dispatches the revalidation
+        # batch and merges it in place, so the phase continues with the updated
+        # validation instead of exiting for a host to drive a second turn.
+        from .review_orchestrator_base import dispatch_subagent_tasks
+
+        if dispatch_subagent_tasks(
+            self.args,
+            task_file=revalidation_task_path,
+            phase_dir=review_dir,
+            phase=self.phase_name,
+            document=revalidation_tasks,
+            plan_path=str(self.plan_path),
+            label="revalidation",
+        ):
+            from .validation import merge_batched_revalidation_results
+
+            self.validation = merge_batched_revalidation_results(
+                output_dir=review_dir,
+                revalidation_metadata=revalidation_tasks,
+            )
+            save_validation_results(self.validation, validation_path, model=model)
+            print(f"Updated validation saved to: {validation_path}", file=sys.stderr)
+            return
+
         print(
             "\nAfter revalidation completes, run this orchestrator again "
             "without --revalidate"

@@ -292,8 +292,11 @@ def build_parent_parser(
     group.add_argument(
         "--exec-subagents",
         action="store_true",
-        help="Reserved: run materialized subagent prompts through the provider "
-             "executor (accepted and recorded; not yet implemented).",
+        help="Run materialized subagent prompts through the provider executor "
+             "instead of a host's native subagent tool, and continue past each "
+             "marker in the same process (read/analyze phases: validation, "
+             "revalidation, consolidation, salvage, judging). Runner and limits "
+             "come from providers.yaml `driver:`.",
     )
     # D6a: consent to run unattended is not consent to stale input, so this is a
     # separate flag and `--yes` never implies it. Defined here rather than per

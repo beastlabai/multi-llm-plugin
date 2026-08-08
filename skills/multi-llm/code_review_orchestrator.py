@@ -60,7 +60,11 @@ from utils.state_manager import (
 )
 from utils.output_handler import get_phase_dir
 from utils.detach import record_output_files, report_progress
-from utils.review_orchestrator_base import maybe_detach
+from utils.review_orchestrator_base import (
+    dispatch_subagent_tasks,
+    maybe_detach,
+    merge_validation_batches,
+)
 from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
@@ -1100,7 +1104,9 @@ async def reaggregate_from_existing_files(
     all_files = sorted(glob_module.glob(pattern))
 
     # Exclude non-model files
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'report_data']
+    # `subagent_batch_report` is executor bookkeeping (D3i), never a model
+    # result — see the same note in review_orchestrator_base.
+    exclude_patterns = ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report']
     result_files = [
         f for f in all_files
         if not any(ex in os.path.basename(f) for ex in exclude_patterns)
@@ -1263,10 +1269,27 @@ async def reaggregate_from_existing_files(
 
             print(f"\nValidation prepared for Claude Code subagent.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-            print("\nAfter validation completes, run:")
-            print(f"  {batched_tasks.get('reaggregate_command', '')}")
-            record_next(batched_tasks.get('reaggregate_command') or None)
-            return  # Exit early - Claude Code handles validation
+
+            # D3b: with --exec-subagents this process dispatches the batch itself
+            # and continues to the merge below instead of exiting at the marker.
+            if dispatch_subagent_tasks(
+                args,
+                task_file=str(validation_tasks_path),
+                phase_dir=str(phase_dir),
+                phase="code-review",
+                document=batched_tasks,
+                plan_path=str(plan_path),
+                label="validation",
+                retry_command=batched_tasks.get("reaggregate_command"),
+            ):
+                validated_groups_for_report = merge_validation_batches(
+                    str(phase_dir), batched_tasks, grouped, str(validation_path)
+                )
+            else:
+                print("\nAfter validation completes, run:")
+                print(f"  {batched_tasks.get('reaggregate_command', '')}")
+                record_next(batched_tasks.get('reaggregate_command') or None)
+                return  # Exit early - Claude Code handles validation
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 
@@ -1638,14 +1661,35 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
-                print("\nAfter validation completes, run:")
                 # Fully resolved: a skill-dir placeholder no shell expands is
                 # the bug. Still starts with `uv run`, so Claude Code's
                 # Bash(uv:*) allow rule keeps matching.
                 reaggregate_cmd = reaggregate_command('review-code', plan_path)
-                print(f"  {reaggregate_cmd}")
-                record_next(reaggregate_cmd)
-                return  # Exit early - Claude Code handles validation
+
+                # D3b: self-contained mode dispatches and merges here rather than
+                # exiting for a host to drive a second turn.
+                if dispatch_subagent_tasks(
+                    args,
+                    task_file=str(validation_tasks_path),
+                    phase_dir=str(phase_dir),
+                    phase="code-review",
+                    document=batched_tasks,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    retry_command=reaggregate_cmd,
+                ):
+                    validation_path = get_output_paths(
+                        plan_path, "code_review_validation", phase='code-review'
+                    )
+                    validated_groups_for_report = merge_validation_batches(
+                        str(phase_dir), batched_tasks, grouped, str(validation_path)
+                    )
+                    validated_groups = validated_groups_for_report
+                else:
+                    print("\nAfter validation completes, run:")
+                    print(f"  {reaggregate_cmd}")
+                    record_next(reaggregate_cmd)
+                    return  # Exit early - Claude Code handles validation
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
                 validated_groups = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
