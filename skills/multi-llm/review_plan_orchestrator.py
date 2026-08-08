@@ -12,13 +12,13 @@ registry. Models can be specified as 'provider:model' or bare 'model' names
 
 Usage:
     # Use YAML defaults (no prompting if defaults.models is set)
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file plans/my-plan.md
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan plans/my-plan.md
 
     # Override defaults with specific models
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
     # Force interactive selection even if defaults exist
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/review_plan_orchestrator.py" --plan-file plans/my-plan.md --interactive
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan plans/my-plan.md --interactive
 """
 
 import argparse
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # via utils.review_orchestrator_base which handles validation orchestration.
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser
+from utils.cli_common import build_parent_parser, dispatcher_prefix
 from utils.output_handler import sanitize_prefix, get_phase_dir
 from utils.prompt_loader import load_prompt
 from utils.state_manager import load_groups_payload
@@ -324,6 +324,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     except Exception as e:
         available_models = [f"(config error: {type(e).__name__} - check providers.yaml)"]
 
+    # `--help` goes to stdout, so its examples are *printed* commands and follow
+    # the rule the follow-ups do (D1/D1c): fully resolved from `__file__`, never a
+    # skill-dir placeholder — no shell but Claude Code's expands one, so on Codex or
+    # OpenCode a copied example would die before Python started. Interpolating
+    # `dispatcher_prefix()` also keeps the leading token `uv run`, which is what
+    # keeps Claude Code's `Bash(uv:*)` glob matching, and names the single entry
+    # point rather than this script.
+    run = dispatcher_prefix()
     parser = argparse.ArgumentParser(
         description="Run plan reviews across multiple LLM models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -341,13 +349,13 @@ Model selection priority:
 
 Examples:
   # Use YAML defaults (no prompting)
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_plan_orchestrator.py" --plan-file plans/my-plan.md
+  {run} review-plan plans/my-plan.md
 
   # Specify models explicitly
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_plan_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+  {run} review-plan plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
   # Force interactive selection
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/review_plan_orchestrator.py" --plan-file plans/my-plan.md --interactive
+  {run} review-plan plans/my-plan.md --interactive
         """
     )
 

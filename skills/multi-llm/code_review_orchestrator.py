@@ -12,13 +12,13 @@ registry. Models can be specified as 'provider:model' or bare 'model' names
 
 Usage:
     # Use YAML defaults (no prompting if defaults.models is set)
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code plans/my-plan.md
 
     # Override defaults with specific models
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
     # Force interactive selection even if defaults exist
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/code_review_orchestrator.py" --plan-file plans/my-plan.md --interactive
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code plans/my-plan.md --interactive
 """
 
 import argparse
@@ -51,7 +51,12 @@ from utils import (
     PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser, reaggregate_command, record_next
+from utils.cli_common import (
+    build_parent_parser,
+    dispatcher_prefix,
+    reaggregate_command,
+    record_next,
+)
 from utils.state_manager import (
     load_groups_payload,
     save_groups_payload,
@@ -130,6 +135,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # Get available models for help text
     available_models = get_all_model_specs()
 
+    # Printed commands, so resolved from `__file__` and never a skill-dir
+    # placeholder (see review_plan_orchestrator.parse_args for why).
+    run = dispatcher_prefix()
     parser = argparse.ArgumentParser(
         description="Review implementation changes against a plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -147,13 +155,13 @@ Model selection priority:
 
 Examples:
   # Use YAML defaults (no prompting)
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md
+  {run} review-code plans/my-plan.md
 
   # Specify models explicitly
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
+  {run} review-code plans/my-plan.md --models cursor-agent:auto gemini:gemini-2.5-flash
 
   # Force interactive selection
-  uv run --project "${{CLAUDE_SKILL_DIR}}" -- python "${{CLAUDE_SKILL_DIR}}/code_review_orchestrator.py" --plan-file plans/my-plan.md --interactive
+  {run} review-code plans/my-plan.md --interactive
         """
     )
 

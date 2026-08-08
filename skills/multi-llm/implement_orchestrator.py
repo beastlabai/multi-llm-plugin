@@ -7,7 +7,7 @@ into dependency-respecting batches, and outputs JSON for Claude Code to execute
 using its native Task tool.
 
 Usage:
-    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/implement_orchestrator.py" --plan-file plans/my-plan.md [--output tasks.json]
+    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement plans/my-plan.md [--output tasks.json]
 """
 
 import argparse
