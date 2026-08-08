@@ -350,6 +350,8 @@ uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode 
 
 Writes `$XDG_CONFIG_HOME/opencode/commands/multi-llm.md` (whose `$XDG_CONFIG_HOME` falls back to `~/.config` when unset) (`--project`: `.opencode/commands/multi-llm.md`), then start a new opencode session afterwards (it enumerates its commands/skills at session start). Invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`; unattended is the default on every host but Claude Code, so `--yes` is baked in.
 
+Headless, the argument list needs the host's own separator: `opencode run --command multi-llm -- "<args>"`.
+
 ### Capability matrix
 
 Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data `install-host` renders a shim from. Every value carries a **provenance**: `verified` means a recorded live run observed it, `documented` means host docs only, `unknown` is the shipping default, and a `documented`-only value never selects the non-conservative path (which is why hosts whose native subagent dispatch is merely documented ship as `executor`).
@@ -358,7 +360,7 @@ Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data `ins
 |---|---|---|---|---|---|---|---|---|
 | `claude-code` | no (ships with the plugin) | `markdown+frontmatter` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | `none` |
 | `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | `new-session` |
-| `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — documented | `opencode:opencode/sonnet` | `new-session` |
+| `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | `new-session` |
 
 ### Where the shim goes
 

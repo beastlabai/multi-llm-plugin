@@ -65,6 +65,7 @@ from utils.cli_common import (
     activate_result,
     clear_invocation,
     deactivate_result,
+    dispatcher_command,
     flag_present,
     flag_value,
     record_invocation,
@@ -561,10 +562,21 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         raise DispatchError(_unknown_mode_message(word))
     relative = mode_table.instruction_path(mode.name)
     if relative is None:
-        raise DispatchError(
-            f"ERROR: mode '{mode.name}' has no core instruction file; it is "
-            "driven entirely by the dispatcher."
+        # Dispatcher-driven by design (`status`, `install-host`,
+        # `uninstall-host`): there is no workflow to narrate, only flags. Every
+        # shim names this command as its unconditional read step, so erroring
+        # here would hand a host agent a failure before it had done anything —
+        # observed on OpenCode, where the agent had to improvise past an exit 3.
+        # Answer with the one useful thing instead and exit 0; a mode that
+        # *declares* a core file which is missing is still a hard error below.
+        print(
+            f"Mode '{mode.name}' has no core instruction file: it is driven "
+            "entirely by the dispatcher, so there are no workflow steps to "
+            "follow. Its flags are the whole interface:"
         )
+        print()
+        print(f"  {dispatcher_command(mode.name)} --help")
+        return EXIT_OK
     path = skill_dir() / relative
     legacy = _legacy_instruction_path(relative)
     if legacy is not None:

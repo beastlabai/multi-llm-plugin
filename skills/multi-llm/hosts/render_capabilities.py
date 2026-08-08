@@ -313,6 +313,14 @@ def render_readme_section(base: Optional[str] = None) -> str:
             "default on every host but Claude Code, so `--yes` is baked in.",
             "",
         ]
+        # Only where the obvious headless form is wrong in a way that fails
+        # confusingly rather than loudly — see the field's schema description.
+        if host.get("headless_invocation"):
+            lines += [
+                f"Headless, the argument list needs the host's own separator: "
+                f"`{host['headless_invocation']}`.",
+                "",
+            ]
     lines += [
         "### Capability matrix",
         "",

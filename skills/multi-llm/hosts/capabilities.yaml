@@ -175,7 +175,15 @@ hosts:
       global: ["$XDG_CONFIG_HOME/opencode/commands", "$HOME/.config/opencode/commands"]
       legacy: [".opencode/command"]
     reload: new-session
-    arguments: placeholder           # $ARGUMENTS / $1
+    arguments: placeholder           # $ARGUMENTS / $1 — verified: the message
+                                     # text reaches the command body.
+    # Measured, and a trap worth shipping: `opencode run` parses the message
+    # with yargs, so an argument list that STARTS with a flag (`--ask …`,
+    # `--review-plan …` — i.e. every invocation this skill takes) is swallowed
+    # as an option and the run silently prints yargs' own help instead. The
+    # `--` separator is mandatory headless. Harmless in the TUI, where
+    # `/multi-llm --ask …` needs no separator.
+    headless_invocation: 'opencode run --command multi-llm -- "<args>"'
     multi_turn: false
     subagents: executor              # `mode: subagent` dispatch is documented only;
                                      # dispatch is instructed in the command body,
@@ -205,16 +213,25 @@ hosts:
     # only through the environment/config surface — and the installer only ever
     # writes through a non-`none` channel.
     timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    # Promoted from a recorded smoke on opencode 1.18.12 (2026-08-08): the
+    # installed command was discovered by name in a new session, its uv
+    # preflight ran ahead of the first `uv run`, the baked prefix resolved, and
+    # a `--detach`ed `ask` fan-out was polled through `status --wait` to a
+    # terminal `done` and its answers file read back. Everything that run did
+    # not exercise stays where it was — in particular `subagents` (no subagent
+    # was dispatched) and `ask` (nothing was asked), which is what keeps the
+    # conservative resolution in force.
     provenance:
-      shim: documented
-      installable: documented
-      install_paths: documented
-      reload: documented
-      arguments: documented
+      shim: verified
+      installable: verified
+      install_paths: verified
+      reload: verified
+      arguments: verified
+      headless_invocation: verified
       multi_turn: documented
       subagents: documented
       ask: documented
-      detach: documented
+      detach: verified
       native_tool: documented
       default_subagent_runner: documented
       subagent_tiers: documented
