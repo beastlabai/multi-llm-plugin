@@ -47,10 +47,12 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser
+from utils.cli_common import build_parent_parser, dispatcher_command
 from utils.output_handler import get_phase_dir, slugify_question
 from utils.prompt_loader import load_prompt
 from utils.interactive import resolve_models
+from utils import unattended as unattended_mod
+from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
     get_provider_timeout,
@@ -668,7 +670,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR: --quick and --interactive are mutually exclusive.")
         return 1
 
-    # Resolve models.
+    # Resolve models. D6 row 2: `defaults.models` is the auto-selected answer and
+    # an unresolvable set is exit 3 — `ask` never renders a picker unattended.
+    unattended = bool(getattr(args, "yes", False))
     try:
         model_specs = resolve_models(
             cli_models=args.models,
@@ -676,7 +680,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             quick=args.quick,
             mode="ask",
             anchor=plan_path,  # per-project config discovery follows the plan-derived root
+            unattended=unattended,
         )
+    except NeedsHuman as e:
+        return unattended_mod.fail_closed(e.message, site_id=e.site)
     except RuntimeError as e:
         print(f"ERROR: {e}")
         available = get_all_model_specs()
@@ -758,6 +765,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
         "plan_hash": plan_hash,
         "answers_md": os.path.join(question_dir, "answers.md"),
     })
+    if unattended and not args.models and not args.quick:
+        # D6 row 2, recorded rather than merely applied (see review base).
+        unattended_mod.record_resolution(
+            question_dir,
+            unattended_mod.row(2).site_id,
+            "defaults.models: " + ", ".join(model_specs),
+        )
     report_progress(
         question_dir, step="fanout",
         models_total=len(model_specs), models_done=0,
@@ -904,12 +918,22 @@ async def main(argv: Optional[List[str]] = None) -> int:
     if failed_models:
         for spec, reason in failed_models.items():
             print(f"  - FAILED {spec}: {reason}")
+    # D6 row 3: a partial answer set is usable output — marker + `state:
+    # "partial"` + exit 0. Zero answers has nothing to aggregate, so it is exit 3
+    # naming the retry command rather than the old bare exit 1.
+    row3 = unattended_mod.report_partial_results(
+        completed=completed,
+        failed=list(failed_models),
+        phase_dir=question_dir,
+        retry_command=dispatcher_command("ask", plan_path, question, "--force"),
+        unattended=unattended,
+    )
+
     # Final stdout line: the answers.md path (so the instruction layer/Claude
     # can report it).
     print(answers_md)
 
-    # Exit 1 only on total failure; exit 0 on partial success.
-    return 0 if completed else 1
+    return row3
 
 
 if __name__ == "__main__":

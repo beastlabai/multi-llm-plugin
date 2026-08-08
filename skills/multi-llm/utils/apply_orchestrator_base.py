@@ -142,6 +142,31 @@ def _format_override_target(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# D6 rows 10 and 11 — what `--yes` turns on for an apply phase
+# ---------------------------------------------------------------------------
+
+def apply_unattended_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    """Make ``--yes`` mean what D6 rows 10/11 say it means, in Python.
+
+    Row 11 (the no-selections confirmation) was already covered:
+    ``should_bypass_no_selection_confirmation(yes=...)`` treats ``--yes`` as
+    deliberate intent, so no ``confirmation_needed`` payload is emitted.
+
+    Row 10 (``needs-human-decision`` items) was **not**: ``--claude-decide`` was
+    implied only by the instruction files telling the agent to append it, which
+    means a host that invoked the orchestrator directly with ``--yes`` got items
+    routed to a prompt that an unattended run can never answer. D5a is explicit
+    that ``--yes`` sets *both*, so it is set here — one place, every apply phase,
+    whichever entry point was used.
+
+    Mutates and returns *args* (argparse namespaces are the shared carrier here).
+    """
+    if getattr(args, "yes", False) and not getattr(args, "claude_decide", False):
+        args.claude_decide = True
+    return args
+
+
+# ---------------------------------------------------------------------------
 # Argument parser builder
 # ---------------------------------------------------------------------------
 
@@ -492,6 +517,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        apply_unattended_defaults(args)
         self.logger = logging.getLogger(f"orchestrator.{self.phase_name}")
 
         # State populated during lifecycle phases

@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.interactive import (
-    is_tty,
+    NoDecisionChannel,
     _numbered_prompt,
     _try_gum_choose,
     _try_fzf_multi,
@@ -20,13 +20,24 @@ from utils.interactive import (
 )
 
 
-class TestIsTty:
-    """Tests for is_tty function."""
+class TestNoTtySniffing:
+    """D6b: interactivity is requested, never detected.
 
-    def test_returns_bool(self):
-        """Test that is_tty returns a boolean."""
-        result = is_tty()
-        assert isinstance(result, bool)
+    ``is_tty()`` is gone on purpose — a run whose behavior depends on whether
+    stdout is a pipe produces different phases from the same argv, and the pipe
+    case is exactly the headless invocation with nobody to answer a picker.
+    """
+
+    def test_is_tty_is_gone(self):
+        import utils.interactive as interactive
+
+        assert not hasattr(interactive, "is_tty")
+
+    def test_module_source_has_no_isatty_call(self):
+        import utils.interactive as interactive
+
+        source = Path(interactive.__file__).read_text(encoding="utf-8")
+        assert "isatty" not in source
 
 
 class TestNumberedPrompt:
@@ -64,8 +75,13 @@ class TestNumberedPrompt:
         result = _numbered_prompt(options, "Test prompt")
         assert result == []
 
-    def test_handles_eof_error(self, monkeypatch):
-        """Test numbered prompt returns empty list on EOFError."""
+    def test_eof_raises_instead_of_selecting_nothing(self, monkeypatch):
+        """EOF means "no channel", not "chose nothing" (D6b).
+
+        Returning ``[]`` here made a closed stdin indistinguishable from a user
+        who deliberately selected no models, which is how a headless run used to
+        end up fanning out to zero models instead of failing visibly.
+        """
         options = ["model-a", "model-b"]
 
         def raise_eof(_):
@@ -73,8 +89,8 @@ class TestNumberedPrompt:
 
         monkeypatch.setattr('builtins.input', raise_eof)
 
-        result = _numbered_prompt(options, "Test prompt")
-        assert result == []
+        with pytest.raises(NoDecisionChannel):
+            _numbered_prompt(options, "Test prompt")
 
     def test_handles_keyboard_interrupt(self, monkeypatch):
         """Test numbered prompt returns empty list on KeyboardInterrupt."""
@@ -196,20 +212,24 @@ class TestTryFzfMulti:
 class TestSelectModelsInteractive:
     """Tests for select_models_interactive function."""
 
-    def test_raises_when_no_tty(self, monkeypatch):
-        """Test raises RuntimeError when not in a TTY."""
-        monkeypatch.setattr('sys.stdin.isatty', lambda: False)
-        monkeypatch.setattr('sys.stdout.isatty', lambda: True)
+    def test_closed_stdin_fails_visibly_instead_of_selecting_nothing(
+        self, monkeypatch
+    ):
+        """A picker reached with no channel raises, it does not return []."""
+        monkeypatch.setattr('shutil.which', lambda x: None)  # No gum or fzf
 
-        with pytest.raises(RuntimeError) as exc_info:
+        def _eof(_prompt):
+            raise EOFError
+
+        monkeypatch.setattr('builtins.input', _eof)
+
+        with pytest.raises(NoDecisionChannel) as exc_info:
             select_models_interactive(["model-a"])
 
-        assert "No TTY available" in str(exc_info.value)
+        assert "--models" in str(exc_info.value)
 
     def test_falls_back_to_numbered_prompt(self, monkeypatch):
         """Test falls back to numbered prompt when gum and fzf unavailable."""
-        monkeypatch.setattr('sys.stdin.isatty', lambda: True)
-        monkeypatch.setattr('sys.stdout.isatty', lambda: True)
         monkeypatch.setattr('shutil.which', lambda x: None)  # No gum or fzf
         monkeypatch.setattr('builtins.input', lambda _: "1")
 
@@ -222,7 +242,6 @@ class TestSelectMultiCascade:
 
     def test_unavailable_backend_falls_through_to_next(self, monkeypatch):
         """gum UNAVAILABLE → cascade tries fzf, whose selection is returned."""
-        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
         monkeypatch.setattr(
             'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
         )
@@ -249,7 +268,6 @@ class TestSelectMultiCascade:
         selection must NOT fall through and re-prompt the user via fzf or the
         numbered fallback.
         """
-        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
         monkeypatch.setattr(
             'utils.interactive._try_gum_choose', lambda opts, prompt: []
         )
@@ -274,7 +292,6 @@ class TestSelectMultiCascade:
 
     def test_fzf_cancel_does_not_cascade_to_numbered(self, monkeypatch):
         """gum UNAVAILABLE, fzf ran-but-cancelled → return []; numbered not used."""
-        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
         monkeypatch.setattr(
             'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
         )
@@ -296,7 +313,6 @@ class TestSelectMultiCascade:
 
     def test_both_unavailable_falls_back_to_numbered(self, monkeypatch):
         """gum and fzf both UNAVAILABLE → numbered fallback is used."""
-        monkeypatch.setattr('utils.interactive.is_tty', lambda: True)
         monkeypatch.setattr(
             'utils.interactive._try_gum_choose', lambda opts, prompt: UNAVAILABLE
         )

@@ -4,7 +4,8 @@
 Four cross-cutting concerns live here so no entry point re-implements them:
 
 * **The cross-cutting flag set.** ``--host``, ``--yes``/``--non-interactive``,
-  ``--interactive``, ``--detach`` and ``--exec-subagents`` are defined exactly
+  ``--interactive``, ``--detach``, ``--exec-subagents`` and
+  ``--skip-prerequisites`` are defined exactly
   once, as an ``add_help=False`` *parent* parser that ``multi_llm.py`` and every
   orchestrator parser mix in via ``parents=[...]``. Each orchestrator keeps its
   own parser as the source of truth for its own flags (the dispatcher forwards
@@ -293,6 +294,18 @@ def build_parent_parser(
         action="store_true",
         help="Reserved: run materialized subagent prompts through the provider "
              "executor (accepted and recorded; not yet implemented).",
+    )
+    # D6a: consent to run unattended is not consent to stale input, so this is a
+    # separate flag and `--yes` never implies it. Defined here rather than per
+    # orchestrator because the two gated modes plus
+    # `check_workflow_prerequisites.py` all need the same spelling and the same
+    # semantics (loud, recorded, non-fatal).
+    group.add_argument(
+        "--skip-prerequisites",
+        action="store_true",
+        help="Proceed even though a prerequisite phase's output was never "
+             "applied. Loud and recorded (the skip lands in state.json and in "
+             "every later report); never implied by --yes.",
     )
     # Hidden re-entry flags: the detached worker is re-executed as
     # `multi_llm.py <mode> … --internal-worker --internal-run-id <uuid>`, so every

@@ -2,12 +2,19 @@
 
 When the orchestrator output includes `human_review_config`, use batch mode for efficient review of `needs-human-decision` items.
 
+**Under `--yes` (or `--non-interactive`) nothing in this file renders.** `--yes`
+implies `--claude-decide`, so `decision_mode` is always `"claude_auto_decide"` and
+the guard below routes every item to the judge — no batch summary, no per-item
+prompt, no 4-option cap to work around (D6 row 10). The batching described here
+exists only for the attended path.
+
 ## Batch Mode Guard (Required)
 
 Before prompting for ANY needs-human-decision item, check:
 
 0. Read `human_review_config.decision_mode` from orchestrator output.
-   If it is `"claude_auto_decide"` (set by the `--claude-decide` flag):
+   If it is `"claude_auto_decide"` (set by the `--claude-decide` flag, which
+   **`--yes` sets for you** — D6 row 10, so an unattended run always lands here):
    - Do NOT prompt the user at all — skip the batch summary AND any
      per-item AskUserQuestion.
    - Go directly to the **"Let Claude Decide" Mode** section below and

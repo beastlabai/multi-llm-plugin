@@ -64,7 +64,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
    - Only process fixes with `status: "valid"`
    - Exclude issues marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related fixes by file location
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6.
+4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one fix's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every fix up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those fixes to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
 5. **Batch Application**: Process each batch with a specialist subagent:
    - Run the batch as a subagent (every batch is `executor_role: "agent"`)
    - Wait for completion before moving to the next batch
@@ -183,7 +183,13 @@ The orchestrator will:
 
 After the orchestrator completes, check if its stdout contains `"status": "confirmation_needed"`.
 
-If present:
+**Under `--yes` / `--no-confirm` this marker is never emitted** (D6 row 11): the
+orchestrator treats either flag as deliberate intent and applies the valid set
+without asking, so there is nothing here to render. The prompt below is a
+Python-emitted status, not a markdown judgment — if you see it, `--yes` was not
+passed.
+
+If present (attended runs only):
 1. Display the warning message to the user
 2. Use AskUserQuestion:
    > "No user selections were found (no user_selections.json, consolidated_user_selections.json, or report.md edits detected). This will apply ALL {item_count} valid fixes. Continue?"

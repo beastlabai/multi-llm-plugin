@@ -160,7 +160,10 @@ PLACEHOLDER_MANIFEST = {
     "instructions/apply-suggestions.md": (28, 0),
     "instructions/apply-task-suggestions.md": (26, 0),
     "instructions/ask.md": (4, 0),
-    "instructions/full-workflow.md": (50, 0),
+    # 50 -> 48: D6 row 12 deleted the no-TTY branch, and with it the
+    # `check_workflow_prerequisites.py --skip` command it carried. A count that
+    # *drops* is the corpus shrinking as designed; only a rise is a regression.
+    "instructions/full-workflow.md": (48, 0),
     "instructions/generate-tasks.md": (8, 0),
     "instructions/implement.md": (24, 0),
     "instructions/init-config.md": (3, 0),
@@ -332,7 +335,8 @@ class TestPlaceholderManifest:
         }
         # Not an assertion that `remaining` is empty (the rewrite has not landed);
         # an assertion that the pinned total cannot silently grow.
-        assert sum(remaining.values()) == 238, (
+        # 238 -> 236 with D6 row 12's deleted no-TTY branch.
+        assert sum(remaining.values()) == 236, (
             "the ${CLAUDE_SKILL_DIR} debt outside SKILL.md changed to "
             f"{sum(remaining.values())}. Lower it freely with the corpus "
             "rewrite; a rise means a new host-coupled site was added."

@@ -277,7 +277,9 @@ class TestAnswerCapture:
                       result={"success": True, "data": [{"frag": 1}]})
         rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                       "--models", "claude-code:sonnet"], inv)
-        assert rc == 1
+        # D6 row 3: zero answers has nothing to aggregate, so it is exit 3
+        # ("needs a human") rather than a bare exit 1.
+        assert rc == 3
         d = qdir(plan, "Q")
         status = read_status(d)
         assert status["state"] == "failed"
@@ -302,7 +304,9 @@ class TestAnswerCapture:
                               "data": None, "raw": ndjson})
         rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                       "--models", "codex:gpt-5.2-codex"], inv)
-        assert rc == 1
+        # D6 row 3: zero answers has nothing to aggregate, so it is exit 3
+        # ("needs a human") rather than a bare exit 1.
+        assert rc == 3
         d = qdir(plan, "Q")
         # The NDJSON event dump is never pasted into answers.md.
         assert "reasoning" not in read_answers(d)
@@ -328,7 +332,9 @@ class TestAnswerCapture:
                               "error_code": "TIMEOUT"})
         rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                       "--models", "claude-code:sonnet"], inv)
-        assert rc == 1
+        # D6 row 3: zero answers has nothing to aggregate, so it is exit 3
+        # ("needs a human") rather than a bare exit 1.
+        assert rc == 3
         d = qdir(plan, "Q")
         sanitized = sanitize_model_name("claude-code:sonnet")
         assert (d / f"error_{sanitized}.log").exists()
@@ -599,14 +605,16 @@ class TestStatusAndExit:
         assert set(status["models_failed"]) == {"cursor-agent:auto"}
         assert "exited 1" in status["models_failed"]["cursor-agent:auto"]
 
-    def test_all_fail_exit_1_with_files(self, plan):
+    def test_all_fail_exit_3_with_files(self, plan):
         inv = FakeInvoker()
         for spec in ("claude-code:sonnet", "cursor-agent:auto"):
             inv.configure(spec, write_file=False,
                           result={"success": False, "error": "nope", "error_code": "SUBPROCESS_FAILED"})
         rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                       "--models", "claude-code:sonnet", "cursor-agent:auto"], inv)
-        assert rc == 1
+        # D6 row 3: zero answers has nothing to aggregate, so it is exit 3
+        # ("needs a human") rather than a bare exit 1.
+        assert rc == 3
         d = qdir(plan, "Q")
         assert (d / "answers.md").exists()
         assert (d / ".status.json").exists()

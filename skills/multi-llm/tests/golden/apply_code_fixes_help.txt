@@ -1,7 +1,8 @@
 usage: apply_code_fixes_orchestrator.py [-h] [--host ID] [--yes]
                                         [--interactive] [--detach]
                                         [--if-not-running] [--max-detached N]
-                                        [--exec-subagents] --plan-file
+                                        [--exec-subagents]
+                                        [--skip-prerequisites] --plan-file
                                         PLAN_FILE [--skip-human-review]
                                         [--min-priority {low,medium,high}]
                                         [--dry-run] [--no-batch]
@@ -115,6 +116,10 @@ cross-cutting options:
   --exec-subagents      Reserved: run materialized subagent prompts through
                         the provider executor (accepted and recorded; not yet
                         implemented).
+  --skip-prerequisites  Proceed even though a prerequisite phase's output was
+                        never applied. Loud and recorded (the skip lands in
+                        state.json and in every later report); never implied
+                        by --yes.
 
 This orchestrator outputs a JSON list of fixes to apply.
 The actual application is handled by Claude Code using Task subagents.

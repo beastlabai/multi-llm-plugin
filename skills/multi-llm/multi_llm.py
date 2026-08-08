@@ -29,9 +29,13 @@ Grammar (one line, no shell preprocessing)::
   path), stream setup happens once, and foreground Ctrl-C reaches the code that
   owns the phase dir with no forwarding layer.
 * **Exit codes are uniform and never remapped**: 0 done, 1 unexpected error,
-  2 nothing to do / phase already complete, 3 needs a human. The only codes this
-  script invents are the 3s it raises for an unknown mode, a bad positional or a
-  rejected flag combination.
+  2 nothing to do / phase already complete, 3 needs a human. Exit **3** is
+  reserved across every mode for "unattended run cannot proceed" (missing
+  tooling, unmet prerequisite, contradictory or empty decision flag), so a host
+  can tell "needs a human" from "already done" (exit 2) without parsing prose.
+  The only codes this script invents are the 3s it raises for an unknown mode, a
+  bad positional, a rejected flag combination, an empty/unrecognized decision
+  value (D6 row 15) and a missing ``uv`` (D6 row 1 / D6c layer 3).
 * **Exactly one machine-readable last stdout line per invocation** —
   ``MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}``
   — emitted even on a crash, so the contract holds for a host that cannot parse
@@ -68,6 +72,11 @@ from utils.cli_common import (
     skill_dir,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils.unattended import (
+    NeedsHuman,
+    require_uv,
+    validate_decision_flags,
+)
 
 #: Above this many characters the ``ask`` question is handed over as a file
 #: instead of an argv value. Well under the tightest real ceiling (Windows caps a
@@ -149,7 +158,13 @@ def render_help() -> str:
         "",
         "cross-cutting flags (accepted by every mode, and by each orchestrator",
         "directly): --host ID, --yes/-y/--non-interactive, --interactive/-i,",
-        "--detach, --if-not-running, --max-detached N, --exec-subagents.",
+        "--detach, --if-not-running, --max-detached N, --exec-subagents,",
+        "--skip-prerequisites.",
+        "",
+        "Unattended is the default everywhere except Claude Code: --yes resolves",
+        "every gate from config and flags and renders no question, --interactive",
+        "is the opt-in to a rendered gate, and the two together are exit 3 (never",
+        "a precedence rule). --yes never implies --skip-prerequisites.",
         "",
         "--detach self-daemonizes the long-running modes "
         f"({', '.join(mode_table.DETACH_MODES)}):",
@@ -158,7 +173,8 @@ def render_help() -> str:
         "a host background primitive — pick one mechanism.",
         "",
         "exit codes: 0 done | 1 unexpected error | 2 nothing to do / phase already",
-        "complete | 3 needs a human.",
+        "complete | 3 needs a human (an unattended run that cannot proceed:",
+        "missing uv, unmet prerequisite, contradictory or empty decision flag).",
         "",
         "Every invocation ends with one machine-readable line:",
         '  MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[...],"next":...}',
@@ -410,6 +426,11 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
                 _load_target(mode.target_module, mode.target_attr), list(flags)
             )
         _reject_incompatible_flags(mode, flags)
+        # D6 row 15 then row 1, both before anything is created: an empty or
+        # unrecognized decision value and a missing `uv` are the two failures a
+        # mode must never discover halfway through a phase dir.
+        validate_decision_flags(flags)
+        require_uv()
         argv = (
             list(mode.injected_flags)
             + list(mode_table.alias_flags(word))
@@ -540,6 +561,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exit_code = _dispatch(argv, ctx)
         except DispatchError as exc:
             print(str(exc), file=sys.stderr)
+            exit_code = exc.exit_code
+        except NeedsHuman as exc:
+            # Every unattended gate that cannot resolve lands here with the same
+            # code, whether it was raised by the dispatcher's own pre-checks or
+            # by the mode it dispatched to.
+            print(exc.message, file=sys.stderr)
+            ctx.state = "needs-human"
             exit_code = exc.exit_code
         except SystemExit as exc:
             exit_code = _exit_code_of(exc)

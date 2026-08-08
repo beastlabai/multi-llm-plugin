@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Interactive utilities for terminal-based user input."""
+"""Interactive utilities for terminal-based user input.
+
+**Interactivity is requested here, never detected** (D6b). This module used to
+gate its pickers on a TTY probe; it no longer probes anything, because
+a run whose behavior depends on whether stdout is a pipe produces different
+phases from the same argv — and the pipe case is exactly the headless invocation
+that has nobody to answer a picker. A picker is now reached only when the caller
+asked for one (``--interactive``), and :func:`resolve_models` refuses with exit 3
+rather than guessing when models cannot be resolved from flags and config.
+"""
 
 import shutil
 import subprocess
@@ -7,6 +16,7 @@ import sys
 from typing import List, Optional
 
 from .provider_registry import load_config
+from .unattended import NeedsHuman, row
 
 
 class _Unavailable:
@@ -37,9 +47,14 @@ class _Unavailable:
 UNAVAILABLE = _Unavailable()
 
 
-def is_tty() -> bool:
-    """Check if stdin/stdout are connected to a TTY."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
+class NoDecisionChannel(RuntimeError):
+    """A picker was reached with nothing on the other end of stdin.
+
+    Raised instead of returning an empty selection so a run that would have
+    blocked fails *visibly*. A ``RuntimeError`` subclass on purpose: every
+    existing caller already maps ``RuntimeError`` from model resolution to a
+    printed error, so this changes the message and not the control flow.
+    """
 
 
 def _try_gum_choose(options: List[str], prompt: str):
@@ -128,7 +143,15 @@ def _numbered_prompt(options: List[str], prompt: str) -> List[str]:
 
     try:
         user_input = input("> ").strip()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        # stdin is closed (or the user pressed Ctrl-D): there is no channel to
+        # answer on, which is a visible failure rather than "selected nothing".
+        raise NoDecisionChannel(
+            "No interactive channel for model selection: stdin is closed. "
+            "Pass --models \"provider:model,...\" (or --quick), or configure "
+            "defaults.models in providers.yaml."
+        )
+    except KeyboardInterrupt:
         return []
 
     if not user_input:
@@ -166,14 +189,8 @@ def select_models_interactive(
         List of selected model names (may be empty if user cancels)
 
     Raises:
-        RuntimeError: If not running in a TTY
+        NoDecisionChannel: If the numbered fallback is reached with stdin closed.
     """
-    if not is_tty():
-        raise RuntimeError(
-            "No TTY available for interactive selection. "
-            "Use --models flag to specify models explicitly."
-        )
-
     # Cascade gum → fzf → numbered, falling through ONLY when a backend is
     # UNAVAILABLE. A backend that ran returns a (possibly empty) list; an empty
     # list is a deliberate cancel and is returned as-is, not re-prompted.
@@ -211,14 +228,8 @@ def select_multi(
         List of selected options (may be empty if user cancels)
 
     Raises:
-        RuntimeError: If not running in a TTY
+        NoDecisionChannel: If the numbered fallback is reached with stdin closed.
     """
-    if not is_tty():
-        raise RuntimeError(
-            "No TTY available for interactive selection. "
-            "Use --models flag to specify models explicitly."
-        )
-
     # Cascade gum → fzf → numbered, but ONLY fall through when a backend is
     # UNAVAILABLE. A backend that actually ran returns a (possibly empty) list;
     # an empty list means the user cancelled / hit Esc / selected nothing, which
@@ -312,7 +323,8 @@ def resolve_models(
     interactive: bool = False,
     quick: bool = False,
     mode: Optional[str] = None,
-    anchor: Optional[str] = None
+    anchor: Optional[str] = None,
+    unattended: bool = False,
 ) -> List[str]:
     """
     Resolve which models to use based on priority order.
@@ -324,6 +336,14 @@ def resolve_models(
     4. YAML defaults.models     -> Use configured defaults (no prompting)
     5. Interactive selection    -> Two-step selection (fallback if no defaults)
 
+    D6 row 2: under *unattended* the ladder stops at step 4. ``defaults.models``
+    from the resolved config layering is the auto-selected answer; an empty or
+    unresolvable set is **exit 3** (:class:`NeedsHuman`) naming ``--models``, and
+    step 5's picker is never reached — an unattended run that renders a
+    multi-select is a hang, not a prompt. ``--interactive`` together with the
+    unattended flag is a contradiction and is likewise exit 3 (the dispatcher
+    already rejects it at parse time; this covers direct invocation).
+
     Args:
         cli_models: Models specified via --models CLI flag
         interactive: Whether --interactive flag was passed
@@ -333,9 +353,13 @@ def resolve_models(
             directory). When supplied, per-project config discovery resolves the
             git root from it so the override file used matches the orchestrator's
             plan-derived root; when omitted, discovery falls back to CWD.
+        unattended: Whether --yes / --non-interactive was passed.
 
     Returns:
         List of model specs in provider:model format
+
+    Raises:
+        NeedsHuman: When nothing resolves and no human may be asked (exit 3).
     """
     # Import here to avoid circular imports
     from .provider_registry import (
@@ -347,21 +371,42 @@ def resolve_models(
         parse_model_spec,
     )
 
+    # 0. Row 15, second layer: `--models ""` is never "use the defaults".
+    if cli_models is not None:
+        for spec in cli_models:
+            if not str(spec).strip():
+                raise NeedsHuman(
+                    "ERROR: --models was passed an empty value. Pass at least "
+                    "one provider:model spec, or omit --models to use "
+                    "defaults.models from providers.yaml.",
+                    site=row(2).site_id,
+                )
+
     # 1. CLI --models flag takes highest priority
     if cli_models and len(cli_models) > 0:
         return cli_models
 
     # 2. --interactive flag forces interactive selection
     if interactive:
+        if unattended:
+            raise NeedsHuman(
+                "ERROR: --interactive and --yes/--non-interactive are "
+                "contradictory: one forces a rendered model picker, the other "
+                "forbids prompting. Pass exactly one.",
+                site=row(2).site_id,
+            )
         return select_models_two_step(anchor=anchor)
 
     # 3. --quick flag uses quick_models from YAML
     if quick:
         if not has_quick_models(mode, anchor=anchor):
-            raise RuntimeError(
+            message = (
                 "No quick_models configured in providers.yaml. "
                 "Add a 'quick_models' list under 'defaults' in providers.yaml."
             )
+            if unattended:
+                raise NeedsHuman(f"ERROR: {message}", site=row(2).site_id)
+            raise RuntimeError(message)
         quick_models = get_quick_models(mode, anchor=anchor)
         available_models = []
         unavailable_providers = set()
@@ -385,10 +430,13 @@ def resolve_models(
         if available_models:
             return available_models
         elif quick_models:
-            raise RuntimeError(
+            message = (
                 f"All quick_models providers are unavailable: {list(unavailable_providers)}. "
                 "Please install at least one provider CLI or use --models to specify models."
             )
+            if unattended:
+                raise NeedsHuman(f"ERROR: {message}", site=row(2).site_id)
+            raise RuntimeError(message)
 
     # 4. Check for YAML defaults (with availability filtering)
     if has_default_models(mode, anchor=anchor):
@@ -418,10 +466,31 @@ def resolve_models(
             return available_models
         elif default_models:
             # All default providers are unavailable
+            if unattended:
+                raise NeedsHuman(
+                    "ERROR: every provider in defaults.models is unavailable: "
+                    f"{sorted(unavailable_providers)}.\n"
+                    "       Install at least one provider CLI, or re-run naming "
+                    "the models explicitly:\n"
+                    "         --models \"provider:model,...\"",
+                    site=row(2).site_id,
+                )
             raise RuntimeError(
                 f"All default providers are unavailable: {list(unavailable_providers)}. "
                 "Please install at least one provider CLI or use --interactive to select models."
             )
 
-    # 5. Fall back to interactive selection
-    return select_models_two_step(anchor=anchor)
+    # 5. Nothing resolved. A picker is *requested* (step 2), never inferred, so
+    #    this is a fail-closed gate rather than a fallback prompt (D6 rows 2/15).
+    raise NeedsHuman(
+        "ERROR: no models could be resolved and none may be guessed.\n"
+        "       Answer this gate with one of:\n"
+        "         --models \"provider:model,...\"   name the models\n"
+        "         --quick                          use quick_models from "
+        "providers.yaml\n"
+        "         defaults.models in providers.yaml (multi_llm.py init "
+        "scaffolds it)"
+        + ("" if unattended else "\n         --interactive                    "
+                                 "pick them now"),
+        site=row(2).site_id,
+    )

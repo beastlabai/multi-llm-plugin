@@ -11,7 +11,7 @@ Reviews generated implementation tasks using multiple LLMs, with plan coverage a
 ## Process
 
 1. **Prerequisite Check**: Verify that `generate-tasks` phase is complete
-2. **Model Selection**: Models provided as args, `--quick` for quick_models, or interactive selection via AskUserQuestion
+2. **Model Selection**: Models provided as args, `--quick` for quick_models, `defaults.models` under `--yes` (never a prompt), or interactive selection via AskUserQuestion
 3. **Run Reviews**: Execute the orchestrator with selected models
 4. **Post-processing**: Group findings, validate (valid/invalid/needs-human-decision), handle human decisions
 5. **Generate Report**: Create `report.html` with all findings
@@ -47,7 +47,7 @@ plans/todo/my-feature/                           # Output folder
 - **invalid** (x): False positive, can be ignored
 - **needs-human-decision** (?): Requires human judgment
 
-When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed.
+When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--claude-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
 
 ---
 
@@ -61,9 +61,27 @@ Before reviewing tasks, verify that `generate-tasks` has been completed:
 uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/check_workflow_prerequisites.py" --plan-file "$PLAN_PATH" --mode review-tasks
 ```
 
-Parse the JSON output. If `prerequisites_met` is `false`:
+Parse the JSON output (stdout is always pure JSON; the human-readable
+`[PREREQUISITE_*]` block goes to stderr and is repeated in the JSON as
+`message`). If `prerequisites_met` is `false`:
 
-- Use **AskUserQuestion** to inform the user that `generate-tasks` must run first.
+- **With `--yes` (or `--non-interactive`)**: the check has already exited **3**
+  with the block below on stderr — a plan with no task list has nothing to
+  review, and generating tasks is not a repair this mode may make (unlike the
+  generate-tasks/implement gates, where the missing phase is the *prerequisite*
+  rather than the subject). Print the block and stop; do not ask, and do not run
+  `generate-tasks` yourself. `--skip-prerequisites` is deliberately refused here
+  (D6 row 13).
+
+  ```
+  [PREREQUISITE_UNMET] review-tasks: no task list has been generated for /abs/plan.md.
+    1) Generate the tasks first — <dispatcher> generate-tasks /abs/plan.md --yes
+       then re-run              — <dispatcher> review-tasks /abs/plan.md --yes
+  ```
+
+  Structurally unreachable inside `--full`, where phase order guarantees tasks
+  exist.
+- Without `--yes`, use **AskUserQuestion** to inform the user that `generate-tasks` must run first.
 - Options:
   - **"Run generate-tasks first"**: Stop and instruct the user to run:
     1. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
@@ -83,7 +101,12 @@ Also verify the tasks file exists: check for `<!-- TASKS_FILE: ... -->` marker i
 
 - If models provided in args (e.g., `/multi-llm:multi-llm --review-tasks plans/foo.md gpt-5.2 gemini-3-pro`): use those directly
 - If `--quick` flag is set: use `quick_models` from `providers.yaml`
-- If `--interactive` flag is set OR no models provided: Claude MUST use AskUserQuestion to prompt user for model selection
+- **With `--yes` (or `--non-interactive`)**: never ask. Pass no model flag and
+  let the orchestrator resolve `defaults.models`; it prints
+  `[AUTO_RESOLVED] model-selection: …`, and exits **3** naming the answering
+  flags if nothing resolves (D6 row 2). `--interactive` together with `--yes` is
+  rejected at parse time with exit 3, never silently downgraded.
+- If `--interactive` flag is set OR no models provided (and NOT `--yes`): Claude MUST use AskUserQuestion to prompt user for model selection
   - Present available models from `providers.yaml` (multi-select)
   - Then run orchestrator with `--models <selected>`
 
@@ -116,7 +139,12 @@ If the detached orchestrator was interrupted or `{plan}/review-tasks/orchestrato
 1. Read `{plan}/review-tasks/.status.json`
 2. Based on `state` field: `models_running` -> check which `{model}.json` files exist; `models_complete`/`grouping_complete` -> check for `grouped.json`, `validation_tasks.json`; `validation_pending` -> proceed to validation; `complete` -> report results
 3. If no `.status.json` -> fall back to file-based resume detection (step 2)
-4. **Use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
+4. **With `--yes`: always resume, never ask** (D6 row 3) -- re-run only the
+   missing models with `--force`, never `--rerun-all`. A model that fails twice in
+   one run is reported, not retried again: `[PARTIAL_RESULTS: <model>,...]`,
+   `MULTI_LLM_RESULT.state: "partial"`, exit **0**. Zero results is exit **3**
+   naming the retry command.
+5. Without `--yes`, **use AskUserQuestion** to inform the user which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
 
 ### 5. Salvage Handling (Post-Orchestrator)
 

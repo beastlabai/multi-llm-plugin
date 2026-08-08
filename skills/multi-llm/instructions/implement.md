@@ -5,7 +5,7 @@ Executes implementation tasks from a plan using Claude Code's native Task tool.
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>]
+/multi-llm:multi-llm --implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip] [--skip-prerequisites]
 ```
 
 ## Options
@@ -13,8 +13,10 @@ Executes implementation tasks from a plan using Claude Code's native Task tool.
 - `--resume`: Resume from previous session state (skip completed tasks)
 - `--task T001`: Execute only a specific task
 - `--dry-run`: Show task summary without executing
-- `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently
-- `--force-strategy <strategy>`: Skip the human task strategy prompt and use the given strategy directly. Valid values: `pause-and-ask`, `skip-continue`, `skip-dependents`. Useful for scripted/non-interactive runs.
+- `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).
+- `--force-strategy <strategy>`: Skip the human task strategy prompt and use the given strategy directly. Valid values: `pause-and-ask`, `skip-continue`, `skip-dependents`. Useful for scripted/non-interactive runs. `pause-and-ask` together with `--yes` is exit 3 at parse time — it promises a gate that an unattended run can never render.
+- `--human-task ID=done|skip` (repeatable): Answer one human task without a prompt (D6 row 9), e.g. `--human-task T004=done`. Recorded in `state.json` under `human_task_decisions`. An empty or unrecognized value is exit 3 at parse time.
+- `--skip-prerequisites`: Proceed even though plan-review suggestions were never applied. Loud and recorded; **never implied by `--yes`**.
 
 ## Process
 
@@ -90,7 +92,34 @@ State is persisted in `{plan}/state.json` (plan-local):
 
 The implement orchestrator checks prerequisites and may output special markers. Handle them as follows:
 
-#### If output contains `[PREREQUISITE_CHECK]`:
+#### If output contains `[PREREQUISITE_UNMET]` (under `--yes`):
+
+There are unapplied suggestions from plan review and this run is unattended, so
+the orchestrator has already **exited 3** without producing anything — no phase
+dir, no task JSON, no `state.json` mutation (D6a). Print the block verbatim and
+stop. It names both fixes:
+
+```
+[PREREQUISITE_UNMET] implement: 7 HIGH / 3 MEDIUM suggestions in
+/abs/plans/x/review-plan/validation.json have not been applied.
+  1) Apply them first — <dispatcher> apply-suggestions /abs/plans/x.md --yes
+     then re-run      — <dispatcher> implement /abs/plans/x.md --yes
+  2) Proceed on unapplied review output (recorded) —
+     <dispatcher> implement /abs/plans/x.md --yes --skip-prerequisites
+```
+
+`--yes` never implies `--skip-prerequisites`: consent to run unattended is not
+consent to stale input. With `--skip-prerequisites` the orchestrator prints
+`[PREREQUISITE_SKIPPED] implement: …(reason: explicit --skip-prerequisites)`,
+records the skip in `state.json`, and proceeds.
+
+**`--implement` gates on its own prerequisite only.** It does not re-litigate how
+the tasks it is about to implement were produced: if `generate-tasks` ran under
+`--skip-prerequisites`, that shows up as one
+`[PREREQUISITE_SKIPPED_UPSTREAM apply-suggestions: …]` line quoting the recorded
+reason and the run proceeds — re-asking would make the recorded skip meaningless.
+
+#### If output contains `[PREREQUISITE_CHECK]` (no `--yes`):
 
 There are unapplied suggestions from plan review. Parse the JSON that follows the marker.
 
@@ -140,7 +169,14 @@ free from the codebase exploration data generated during task creation.
 
 There are unapplied task suggestions from `review-tasks`. This is an **advisory only** — it does NOT block implementation. Parse the JSON that follows the marker to get the `actionable_count`.
 
-**If `--yes` or `--no-confirm` was passed**: Skip the prompt silently and proceed with implementation. Do NOT prompt the user.
+**If `--yes` or `--no-confirm` was passed** (D6 row 7): the orchestrator has
+already resolved this — it records `apply-task-suggestions` as skipped in
+`state.json` and prints
+`[AUTO_RESOLVED] task-suggestion-advisory: skipped; apply-task-suggestions
+recorded as skipped`. Proceed with implementation and do NOT prompt. The phase is
+*recorded* skipped rather than merely ignored, so `--status`, the implementation
+summary and any later review can all see that the task-review findings were never
+applied.
 
 **Otherwise**, use **AskUserQuestion** to prompt the user:
 - "There are N unapplied task suggestions from review-tasks. Apply them first? [y/N]"
@@ -202,11 +238,20 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 After reading the task JSON, scan all batches for tasks with `is_human: true`. If any are found, determine the strategy:
 
-**Strategy resolution order:**
+**Strategy resolution order** (the orchestrator resolves and persists this; read
+`human_task_strategy` from the task JSON rather than re-deriving it):
 
 1. **`--force-strategy` flag**: If provided, use that strategy directly (no prompt).
 2. **`--resume` with saved strategy**: On resume, load the saved strategy from state.json (`human_task_strategy` field). If present, use it without re-prompting.
-3. **Prompt the user**: Use `AskUserQuestion` to ask the user how to handle them:
+3. **`--yes` / `--non-interactive`** (D6 row 8): resolves to
+   **`skip-dependents`**, recorded as
+   `[AUTO_RESOLVED] human-task-strategy: skip-dependents for N human task(s)` and
+   persisted to `state.json` exactly as `--force-strategy` does, so `--resume`
+   stays stable. Why the strictest option: an unattended run cannot perform manual
+   steps, so code tasks that depend on them cannot be assumed valid —
+   `skip-continue` would run them anyway against unmet preconditions. An explicit
+   `--force-strategy` still wins.
+4. **Prompt the user** (no `--yes`): Use `AskUserQuestion` to ask the user how to handle them:
 
 - Question: "This plan contains N human task(s) requiring manual action (e.g., {list first 2-3 titles}). How should these be handled?"
 - Options:
@@ -245,6 +290,27 @@ This ensures `--resume` can recover the strategy without re-prompting.
    - **Human task handling** (tasks with `is_human: true`):
 
      **"Pause and ask me" strategy:**
+
+     Unreachable under `--yes` (D6 row 9): the strategy never resolves to
+     `pause-and-ask` unattended, and `--force-strategy pause-and-ask` together
+     with `--yes` is **rejected at parse time with exit 3** rather than hanging
+     forever on a stdin nobody is on.
+
+     On a host with no structured ask tool, answer it with the flag instead — the
+     pause becomes a process boundary rather than a blocked stdin. Print the task
+     plus its two re-invocations, exit 0 with the batch pending, and be re-invoked:
+
+     ```
+     <dispatcher> implement /abs/plan.md --resume --human-task T004=done
+     <dispatcher> implement /abs/plan.md --resume --human-task T004=skip
+     ```
+
+     (Repeatable; "cancel" is simply not re-invoking. `--human-task T004=` or any
+     value other than `done`/`skip` is exit 3 at parse time, never a guess. Answers
+     are recorded in `state.json` under `human_task_decisions` and echoed as
+     `[HUMAN_TASK_ANSWERED] T004=done`, so a re-invocation does not re-ask.)
+
+     Where a structured ask tool exists and `--yes` was not passed:
      - Do NOT spawn a Task subagent for human tasks
      - Use `AskUserQuestion` to present the task:
        - Question: "Task {id}: {title} requires manual action. Please complete the following and confirm when done:\n\n{description}\n\nAcceptance criteria:\n{acceptance_criteria}"

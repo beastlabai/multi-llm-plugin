@@ -36,6 +36,8 @@ from .cli_common import (
 from .output_handler import sanitize_prefix, get_phase_dir
 from .prompt_loader import load_prompt
 from .interactive import resolve_models
+from . import unattended as _unattended
+from .unattended import NeedsHuman
 from .provider_registry import (
     get_all_model_specs,
     parse_model_spec,
@@ -1673,7 +1675,9 @@ async def run_review_orchestration(
         print("ERROR: --quick and --interactive are mutually exclusive.")
         sys.exit(1)
 
-    # Handle model selection
+    # Handle model selection (D6 row 2: auto-select `defaults.models` when
+    # nothing was named; fail closed with exit 3 when nothing resolves).
+    unattended = bool(getattr(args, "yes", False))
     try:
         model_specs = resolve_models(
             cli_models=args.models,
@@ -1681,7 +1685,10 @@ async def run_review_orchestration(
             quick=args.quick,
             mode=phase_name,
             anchor=plan_path,  # per-project config discovery follows the plan-derived root
+            unattended=unattended,
         )
+    except NeedsHuman as e:
+        sys.exit(_unattended.fail_closed(e.message, site_id=e.site))
     except RuntimeError as e:
         print(f"ERROR: {e}")
         available = get_all_model_specs()
@@ -1764,6 +1771,16 @@ async def run_review_orchestration(
         "models_requested": list(model_specs),
         "error": None,
     })
+    # D6 row 2, recorded rather than merely applied: an auto-selection nobody can
+    # see afterwards is indistinguishable from a silent degradation. Only under
+    # `--yes`, where it replaced a question — with `--yes` unset nothing about a
+    # run changes.
+    if unattended and not args.models and not args.quick:
+        _unattended.record_resolution(
+            phase_dir,
+            _unattended.row(2).site_id,
+            "defaults.models: " + ", ".join(model_specs),
+        )
     _detach.report_progress(
         phase_dir, step="fanout", models_total=len(model_specs), models_done=0
     )
@@ -1793,16 +1810,35 @@ async def run_review_orchestration(
         if not save_model_result(prefix, model_spec, success, output, error, out_dir, phase_dir, salvage_phase_name):
             failed_models[model_spec] = error or "Unknown error"
 
-    # Check if all failed
-    if len(failed_models) == len(model_specs):
+    # D6 row 3: partial results are usable output, so a run that lost *some*
+    # models resumes-then-reaggregates (never a question, never `--rerun-all`)
+    # and exits 0 with `state: "partial"`; a run where *no* model produced a
+    # result has nothing to aggregate and is exit 3 naming the retry command.
+    completed_models = [m for m in model_specs if m not in failed_models]
+    if not completed_models:
         print("\nERROR: All models failed")
         for model_spec, reason in failed_models.items():
             print(f"  - {model_spec}: {reason}")
-        sys.exit(1)
+        sys.exit(_unattended.report_partial_results(
+            completed=completed_models,
+            failed=list(failed_models),
+            phase_dir=phase_dir,
+            retry_command=dispatcher_command(
+                _modes().mode_for_script(orchestrator_script) or phase_name,
+                plan_path,
+                "--force",
+            ),
+        ))
+    _unattended.report_partial_results(
+        completed=completed_models,
+        failed=list(failed_models),
+        phase_dir=phase_dir,
+        unattended=unattended,
+    )
 
     update_status(phase_dir, {
         "state": "models_complete",
-        "models_completed": [m for m in model_specs if m not in failed_models],
+        "models_completed": completed_models,
         "models_failed": failed_models,
     })
     _detach.report_progress(
