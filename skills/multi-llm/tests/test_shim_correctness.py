@@ -514,11 +514,18 @@ class TestEveryModeFromTheReferenceHost:
         expected = mode_table.instruction_path(mode)
         exit_code = multi_llm.main(["util", "instructions", mode])
         out = capsys.readouterr().out
+        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0]
+        # A mode with no core file is dispatcher-driven, not broken: the shims
+        # name this command as their *unconditional* read step, so erroring
+        # here fails a host agent before it has done anything (observed live on
+        # OpenCode). It must answer, and the answer must point somewhere.
         if expected is None:
-            assert exit_code == 3, f"{mode} has no core file but did not say so"
+            assert exit_code == 0, out
+            assert f"{mode} --help" in body, (
+                f"{mode} has no core file and did not point at its flags"
+            )
             return
         assert exit_code == 0, out
-        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0]
         assert body.strip(), f"{mode}: the served core is empty"
         for token in ("{SKILL_DIR}", "${CLAUDE_SKILL_DIR}", "$SKILL_DIR"):
             assert token not in body, f"{mode}: {token} survived the render"

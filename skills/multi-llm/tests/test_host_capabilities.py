@@ -136,11 +136,29 @@ class TestSchema:
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(broken, schema)
 
-    def test_shim_max_lines_is_the_only_optional_key(self):
+    #: The only keys allowed to be absent. Both govern a lint or generated
+    #: documentation and **never** a dispatch decision — that is the whole
+    #: admission test, because a defaulted *capability* is the silent guess the
+    #: schema exists to remove. Anything that could change what runs must be
+    #: required, so its absence is a validation error rather than a guess.
+    OPTIONAL_KEYS = {"shim_max_lines", "headless_invocation"}
+
+    def test_only_lint_and_doc_keys_are_optional(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         host = schema["definitions"]["host"]
         optional = set(host["properties"]) - set(host["required"])
-        assert optional == {"shim_max_lines"}, optional
+        assert optional == self.OPTIONAL_KEYS, (
+            f"optional key set changed to {sorted(optional)}. A new optional key "
+            "is only admissible if it cannot affect dispatch; if it can, make it "
+            "required instead."
+        )
+
+    def test_every_optional_key_is_provenance_tracked(self):
+        """Optional does not mean unattributed."""
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        prov = schema["definitions"]["host"]["properties"]["provenance"]["properties"]
+        for key in self.OPTIONAL_KEYS:
+            assert key in prov, f"optional key '{key}' has no provenance slot"
 
 
 @pytest.mark.parametrize("host_id", HOST_IDS)
@@ -289,8 +307,25 @@ class TestConservativeResolution:
             assert HOSTS[host_id]["subagents"] == "executor", host_id
             assert HOSTS[host_id]["provenance"]["subagents"] == "documented"
 
+    #: The ledger of what a *recorded* smoke actually observed, per host. A
+    #: `verified` value outside this set is an unbacked claim; a value inside it
+    #: that the smoke did not exercise is worse, because it retires the
+    #: conservative resolution on nothing. Extend a row only together with the
+    #: comment in `capabilities.yaml` that says which run promoted it.
+    #:
+    #: opencode, 1.18.12, 2026-08-08: installed shim discovered by name in a new
+    #: session; uv preflight ran ahead of the first `uv run`; baked prefix
+    #: resolved; `--` separator confirmed necessary headless; a detached `ask`
+    #: fan-out polled through `status --wait` to terminal `done`. No subagent was
+    #: dispatched and nothing was asked, so `subagents` and `ask` stay documented.
+    RECORDED_SMOKES = {
+        "opencode": {
+            "shim", "installable", "install_paths", "reload", "arguments",
+            "headless_invocation", "detach",
+        },
+    }
+
     def test_no_value_is_verified_without_a_recorded_run(self):
-        """Only the reference host may carry `verified` before Phase 3's smokes."""
         for host_id, host in HOSTS.items():
             verified = {
                 field for field, value in host["provenance"].items()
@@ -299,10 +334,33 @@ class TestConservativeResolution:
             if host_id == "claude-code":
                 assert verified, "the reference host has observed *something*"
                 continue
-            assert not verified, (
-                f"{host_id} claims verified provenance for {sorted(verified)} "
-                "before any smoke run has been recorded for it"
+            allowed = self.RECORDED_SMOKES.get(host_id, set())
+            assert verified <= allowed, (
+                f"{host_id} claims verified provenance for "
+                f"{sorted(verified - allowed)} with no recorded smoke behind it"
             )
+
+    def test_the_smoke_ledger_has_no_stale_rows(self):
+        """A ledger entry that nothing claims is a promotion silently reverted."""
+        for host_id, fields in self.RECORDED_SMOKES.items():
+            assert host_id in HOSTS, f"ledger names unknown host '{host_id}'"
+            prov = HOSTS[host_id]["provenance"]
+            for field in fields:
+                assert prov.get(field) == "verified", (
+                    f"{host_id}.{field} is recorded as smoke-verified but the "
+                    f"entry says '{prov.get(field)}'"
+                )
+
+    def test_an_unexercised_verb_is_never_verified(self):
+        """The two verbs the recorded smokes could not reach stay conservative."""
+        for host_id in self.RECORDED_SMOKES:
+            prov = HOSTS[host_id]["provenance"]
+            for verb in ("subagents", "ask"):
+                assert prov[verb] != "verified", (
+                    f"{host_id}.{verb} was promoted to verified, but no recorded "
+                    "smoke dispatched a subagent or rendered a question. "
+                    "Promoting it retires the conservative resolution on nothing."
+                )
 
 
 # ===========================================================================

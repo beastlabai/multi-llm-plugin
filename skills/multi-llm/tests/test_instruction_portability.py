@@ -517,8 +517,48 @@ class TestServedCoreIsTokenFree:
 
     def test_missing_mode_is_an_error(self, capsys):
         assert multi_llm.main(["util", "instructions", "no-such-mode"]) == 3
-        assert multi_llm.main(["util", "instructions", "install-host"]) == 3
         capsys.readouterr()
+
+    #: Modes with no core instruction file *by design* — they are pure flag
+    #: surfaces with no workflow to narrate. Pinned so the set cannot grow
+    #: silently: a new mode landing here means a shim's read step now says
+    #: nothing useful about it, which is a review decision, not a default.
+    DISPATCHER_DRIVEN = ["status", "install-host", "uninstall-host"]
+
+    def test_dispatcher_driven_set_is_exactly_the_pinned_one(self):
+        actual = sorted(m.name for m in mode_table.MODES if not m.instruction_file)
+        assert actual == sorted(self.DISPATCHER_DRIVEN), (
+            "the set of modes with no core instruction file changed. Every shim "
+            "names `util instructions <mode>` as its unconditional read step, so "
+            "each of these must still answer usefully rather than error."
+        )
+
+    @pytest.mark.parametrize("mode", DISPATCHER_DRIVEN)
+    def test_dispatcher_driven_mode_answers_instead_of_erroring(self, mode, capsys):
+        """Regression: this exited 3, so a host agent's first step failed.
+
+        Observed live on OpenCode — the shim's read step returned exit 3 for
+        `status` and the agent had to improvise past it. A mode with no core
+        file is not an error, it is a mode whose flags are the interface.
+        """
+        exit_code = multi_llm.main(["util", "instructions", mode])
+        out = capsys.readouterr().out
+        assert exit_code == 0, out
+        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0]
+        assert mode in body
+        # It has to point somewhere, not just decline.
+        assert f"{mode} --help" in body
+        for token in FORBIDDEN_IN_RENDERED:
+            assert token not in body, f"util instructions {mode}: {token} in output"
+
+    @pytest.mark.parametrize("mode", [m.name for m in mode_table.MODES])
+    def test_every_mode_word_is_answerable(self, mode, capsys):
+        """No mode in the dispatch table may fail the shims' read step."""
+        exit_code = multi_llm.main(["util", "instructions", mode])
+        out = capsys.readouterr().out
+        assert exit_code == 0, f"util instructions {mode} exited {exit_code}:\n{out}"
+        body = out.rsplit(cli_common.RESULT_MARKER, 1)[0].strip()
+        assert body, f"util instructions {mode} produced no output"
 
     def test_alias_serves_the_canonical_file(self, capsys):
         assert multi_llm.main(["util", "instructions", "code-review"]) == 0

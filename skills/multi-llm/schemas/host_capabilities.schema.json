@@ -62,6 +62,11 @@
           "minimum": 40,
           "maximum": 400
         },
+        "headless_invocation": {
+          "description": "Optional. The exact headless command line for this host when it differs from the obvious one — a measured fact, not a convention. Present only where getting it wrong fails confusingly rather than loudly (OpenCode's yargs swallows an argument list that starts with a flag and prints its own help instead of running). Absent means the host's documented headless form needs no correction. Governs generated documentation only, never a dispatch decision.",
+          "type": "string",
+          "minLength": 1
+        },
         "installable": {"type": "boolean"},
         "install_paths": {
           "description": "Per-scope lists in the host's own discovery-precedence order, with $HOME / %USERPROFILE% / $XDG_CONFIG_HOME left as tokens. D7's path matrix is generated from this, never hand-written.",
@@ -196,6 +201,7 @@
           "properties": {
             "shim": {"$ref": "#/definitions/provenance_value"},
             "shim_max_lines": {"$ref": "#/definitions/provenance_value"},
+            "headless_invocation": {"$ref": "#/definitions/provenance_value"},
             "installable": {"$ref": "#/definitions/provenance_value"},
             "install_paths": {"$ref": "#/definitions/provenance_value"},
             "reload": {"$ref": "#/definitions/provenance_value"},
