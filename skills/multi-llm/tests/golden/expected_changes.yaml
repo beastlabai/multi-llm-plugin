@@ -29,7 +29,25 @@
 # machinery is vacuous — see `test_allowlist_mechanism_is_not_vacuous`, which
 # drives a synthetic diff through both rules.
 
-changes: []
+changes:
+  - pointer: /phases/review-plan/created_paths
+    rationale: >
+      D4a's compare-and-set is now interprocess: every read-modify-write of
+      `.status.json` holds `{phase}/.status.lock` (utils/status_file.py,
+      `checkpoint_lock`) across the comparison and the atomic replace, because
+      the run's own writers — worker, heartbeat, `status` close-out, `--abort`,
+      `--sweep` — are separate processes that a thread lock cannot serialize.
+      The mutex file is created next to the checkpoint it guards, so the phase
+      writes one more path than the baseline; nothing else about the phase
+      changed. Every entry after it shifts by one index because the bundle
+      flattens lists positionally, which is why this covers the list rather
+      than a leaf.
+  - pointer: /output_root_paths
+    rationale: >
+      The same one file (`review-plan/.status.lock`) seen from the plan output
+      root, with the same positional shift. `review-plan` is the only phase in
+      this fixture that writes a checkpoint at all, so it is the only dir that
+      gains a mutex.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

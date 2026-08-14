@@ -266,6 +266,8 @@ interactive prompt.
 
 ### 2. Reported on success
 
+Report in the shape `references/summary-format.md` defines, carrying:
+
 - Path of the rendered tasks file (`{plan}/tasks/tasks.md`) and the plan's fresh
   `<!-- TASKS_FILE: … -->` marker
 - Number of tasks generated and their dependencies

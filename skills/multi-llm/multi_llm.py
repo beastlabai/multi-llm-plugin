@@ -35,7 +35,10 @@ Grammar (one line, no shell preprocessing)::
   can tell "needs a human" from "already done" (exit 2) without parsing prose.
   The only codes this script invents are the 3s it raises for an unknown mode, a
   bad positional, a rejected flag combination, an empty/unrecognized decision
-  value (D6 row 15) and a missing ``uv`` (D6 row 1 / D6c layer 3).
+  value (D6 row 15) and a missing ``uv`` (D6 row 1 / D6c layer 3) — plus the one
+  code it *rewrites*: argparse's usage exit (2) out of a target's own parser
+  becomes 3, because 2 already means "phase already complete" and a host must
+  never read a typo'd flag as a finished phase.
 * **Exactly one machine-readable last stdout line per invocation** —
   ``MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}``
   — emitted even on a crash, so the contract holds for a host that cannot parse
@@ -59,6 +62,7 @@ import modes as mode_table
 from utils.cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
+    EXIT_NOTHING_TO_DO,
     EXIT_OK,
     INTERNAL_FLAG_PREFIX,
     ResultContext,
@@ -205,7 +209,8 @@ def render_help() -> str:
         "",
         "exit codes: 0 done | 1 unexpected error | 2 nothing to do / phase already",
         "complete | 3 needs a human (an unattended run that cannot proceed:",
-        "missing uv, unmet prerequisite, contradictory or empty decision flag).",
+        "missing uv, unmet prerequisite, contradictory or empty decision flag, or",
+        "a command line a parser refused).",
         "",
         "Every invocation ends with one machine-readable line:",
         '  MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[...],"next":...}',
@@ -372,12 +377,10 @@ def _reject_capability_conflicts(mode: "mode_table.Mode", argv: Sequence[str]) -
     exit 3.
 
     ``--exec-subagents`` is rejected the same way, from the capability data rather
-    than from a guess here: a host whose entry declares no executor-capable runner
-    (D3e's ``agent-readonly``/``agent-write`` profiles) would otherwise accept the
-    flag, stop at a dispatch marker and wait for a subagent nobody starts.
+    than from a guess here — but in ``_require_executor_capability`` below, which
+    runs *after* the implications so ``--detach``'s implied flag is gated exactly
+    like a typed one.
     """
-    if flag_present(argv, "--exec-subagents"):
-        _host_capabilities().require_executor_runner(resolve_host(argv))
     if not flag_present(argv, "--detach"):
         return None
     if flag_present(argv, "--interactive", "-i"):
@@ -412,12 +415,33 @@ def _apply_flag_implications(argv: List[str]) -> List[str]:
     The detached child's argv is rebuilt from the invoker's, so an implication
     that stayed implicit would have to be re-derived in a second place. Making it
     explicit here means the worker's recorded argv says exactly what it ran with.
+
+    Two implications, both D4c's, and both about there being nobody on the other
+    end: ``--yes`` because no one is there to *answer*, and ``--exec-subagents``
+    because no one is there to *continue* — a detached worker without it would
+    print ``[VALIDATION_PENDING]``/``[SALVAGE_NEEDED]`` and exit 0 with the phase
+    unfinished, which a poller reads as ``run.state: done``, and the write phases
+    would decline the scheduler outright.
     """
-    if flag_present(argv, "--detach") and not flag_present(
-        argv, "--yes", "-y", "--non-interactive"
-    ):
-        argv = list(argv) + ["--yes"]
+    if flag_present(argv, "--detach"):
+        if not flag_present(argv, "--yes", "-y", "--non-interactive"):
+            argv = list(argv) + ["--yes"]
+        if not flag_present(argv, "--exec-subagents"):
+            argv = list(argv) + ["--exec-subagents"]
     return argv
+
+
+def _require_executor_capability(argv: Sequence[str]) -> None:
+    """Gate ``--exec-subagents`` on the host's capability data (D3e/D5b).
+
+    Called *after* ``_apply_flag_implications``, so the flag ``--detach`` implies
+    is checked exactly like one the caller typed: a host whose entry declares no
+    executor-capable runner (the ``agent-readonly``/``agent-write`` profiles)
+    would otherwise accept the run, stop at a dispatch marker and wait for a
+    subagent nobody starts.
+    """
+    if flag_present(argv, "--exec-subagents"):
+        _host_capabilities().require_executor_runner(resolve_host(argv))
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +528,10 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
             + list(flags)
         )
         argv = _apply_flag_implications(argv)
+        # After the implications: --detach's implied --exec-subagents faces the
+        # same capability gate as an explicit one, so a host with no executor-
+        # capable runner is exit 3 here rather than a marker nobody continues.
+        _require_executor_capability(argv)
         # What a detached child re-executes: the mode word plus this normalized
         # argv, never a remembered sys.argv (see utils/detach.build_child_command).
         record_invocation(mode.name, argv)
@@ -626,7 +654,11 @@ def _dispatch(argv: Sequence[str], ctx: ResultContext) -> int:
 
 
 def _exit_code_of(exc: SystemExit) -> int:
-    """A target's ``sys.exit`` is its return value; never remap 0/1/2/3."""
+    """A target's ``sys.exit`` is its return value; never remap 0/1/2/3.
+
+    The one exception is argparse's usage exit — see ``_is_argparse_usage_exit``,
+    which the caller consults; that code was never the target's to spend.
+    """
     code = exc.code
     if code is None:
         return EXIT_OK
@@ -634,6 +666,31 @@ def _exit_code_of(exc: SystemExit) -> int:
         return code
     print(str(code), file=sys.stderr)
     return EXIT_ERROR
+
+
+def _is_argparse_usage_exit(exc: SystemExit) -> bool:
+    """True when this ``SystemExit`` came out of argparse's usage-error path.
+
+    ``ArgumentParser.error`` exits **2**, which is the one code this skill has
+    already spent: 2 means "nothing to do / phase already complete" (the
+    orchestrators' phase-complete guards, which raise it with a plain
+    ``sys.exit(2)``). Passing argparse's 2 through would put
+    ``state: nothing-to-do`` on the MULTI_LLM_RESULT line for a typo'd flag or a
+    missing ``--plan-file``, and a host reading only the machine contract would
+    conclude the phase was done and skip it — the worst possible reading of a
+    command that never ran.
+
+    The two are distinguishable only by origin, so the traceback is the
+    discriminator: argparse raises from its own module frames, a phase guard from
+    the orchestrator's. Matching on frames rather than on the message keeps this
+    independent of argparse's (localized, version-dependent) wording.
+    """
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_globals.get("__name__") == "argparse":
+            return True
+        tb = tb.tb_next
+    return False
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -660,6 +717,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exit_code = exc.exit_code
         except SystemExit as exc:
             exit_code = _exit_code_of(exc)
+            if exit_code == EXIT_NOTHING_TO_DO and _is_argparse_usage_exit(exc):
+                # A parser refused the command line: that is a broken invocation
+                # a human has to retype, so it lands on exit 3 with every other
+                # "cannot proceed" — never on 2, which the phase-complete guards
+                # own. argparse has already named the offending token on stderr.
+                print(
+                    "ERROR: that command line did not parse (see the usage error "
+                    "above). Fix the invocation and re-run.\nExit 3, not 2: exit 2 "
+                    "is reserved for 'nothing to do / phase already complete', and "
+                    "nothing about this phase ran.",
+                    file=sys.stderr,
+                )
+                exit_code = EXIT_NEEDS_HUMAN
         except KeyboardInterrupt:
             print("\nInterrupted.", file=sys.stderr)
             exit_code = EXIT_ERROR

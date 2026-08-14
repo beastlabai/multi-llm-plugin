@@ -1279,11 +1279,14 @@ class TestPlanWithoutTasks:
                 dry_run=False,
                 # Declared explicitly: MagicMock auto-creates unknown
                 # attributes as TRUTHY mocks, which would silently turn
-                # --exec-subagents and --detach on for this test.
+                # --exec-subagents and --detach on for this test — and `yes`,
+                # which turns the missing task list into exit 3 (the unattended
+                # ending, asserted separately in tests/test_unattended.py).
                 exec_subagents=False,
                 dry_run_subagents=False,
                 detach=False,
                 internal_worker=False,
+                yes=False,
             )
 
             with pytest.raises(SystemExit):

@@ -21,11 +21,13 @@ After any mode completes, report:
 - State file: [path, if the mode has one]
 
 ### Next Steps
-- `/clear` (recommended before the next phase, for best performance)
+- Start the next phase in a fresh context (recommended, for best performance) —
+  use whatever context-reset command your host provides, and omit this line if it
+  has none
 - [Recommended actions, if any]
 ```
 
-Two rules:
+Every mode ends with this report. Two rules:
 
 - **Paths come from the run, never from memory.** Take them from the orchestrator's
   own output — the `[OUTPUT_FILE]` lines, the paths a phase printed, and

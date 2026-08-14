@@ -110,14 +110,22 @@ def env(home):
 
 @pytest.fixture
 def ready(monkeypatch):
-    """Row 5's prerequisites, stubbed: uv resolves and the runner CLI exists.
+    """Row 5's prerequisites, stubbed: uv resolves, and the runner is installed,
+    authenticated and current.
 
-    Neither is a property of the machine running the tests — CI has no codex or
-    opencode binary — and row 5 has its own dedicated tests below, so every other
-    test stubs it rather than asserting the state of the test runner.
+    None of the three is a property of the machine running the tests — CI has no
+    codex or opencode binary, and a developer's may have one that is logged out —
+    and row 5 has its own dedicated tests below, so every other test stubs them
+    rather than asserting the state of the test runner. Stubbing the probe also
+    keeps the suite hermetic: the real one shells out to `<cli> --version` and the
+    adapter's `auth_check`.
     """
     monkeypatch.setattr(hi, "find_uv", lambda: "/usr/bin/uv")
     monkeypatch.setattr(hi, "runner_available", lambda provider: True)
+    monkeypatch.setattr(
+        hi, "probe_runner",
+        lambda spec, **kwargs: {"auth": "ok", "version": "9.9.9", "problem": ""},
+    )
 
 
 def install(host_id, skill, env, project, **kwargs):
@@ -477,8 +485,73 @@ class TestCheckAssertions:
         monkeypatch.setattr(hi, "runner_available", lambda provider: False)
         row = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
         assert not row.ok
-        runner = caps.entry(self.HOST, str(skill))["default_subagent_runner"]
+        runner, _ = hi.configured_runner(
+            self.HOST, base=str(skill), project_root=project
+        )
         assert runner in row.detail
+
+    def test_row_five_checks_the_runner_that_would_really_be_dispatched(
+        self, skill, env, project, monkeypatch, tmp_path
+    ):
+        """The layered runner is what runs, so it is what --check probes (D3o).
+
+        Reading the capability entry's `default_subagent_runner` instead would
+        green-light a project configured for another runner while that one is
+        absent, logged out or too old — and fail a project over a default nothing
+        on it would ever dispatch. The layer that supplied the value is reported
+        with it, because "I set it and nothing changed" is otherwise a support
+        question.
+        """
+        override = tmp_path / "providers.yaml"
+        override.write_text(
+            'driver:\n  subagent_runner: "opencode:opencode/sonnet"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
+        monkeypatch.setattr(hi, "find_uv", lambda: "/usr/bin/uv")
+        probed = []
+        monkeypatch.setattr(
+            hi, "runner_available", lambda provider: probed.append(provider)
+        )
+        row = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
+        entry_default = caps.entry(self.HOST, str(skill))["default_subagent_runner"]
+        assert probed == ["opencode"], probed
+        assert not row.ok
+        assert "opencode:opencode/sonnet" in row.detail
+        assert "supplied by env" in row.detail
+        assert entry_default not in row.detail
+
+    def test_row_five_reports_auth_and_version_not_just_presence(
+        self, skill, env, project, monkeypatch
+    ):
+        """Installed is not authenticated (D3c), and `which` cannot tell them apart.
+
+        A logged-out or too-old CLI passes detection and then fails once per task
+        in the first batch it is dispatched into, so the probe the executor runs
+        per phase is the probe --check runs here.
+        """
+        monkeypatch.setattr(hi, "find_uv", lambda: "/usr/bin/uv")
+        monkeypatch.setattr(hi, "runner_available", lambda provider: True)
+        monkeypatch.setattr(
+            hi, "probe_runner",
+            lambda spec, **kwargs: {
+                "auth": "unknown", "version": "unknown",
+                "problem": f"Refusing to dispatch: {spec} (reason: not_authenticated)",
+            },
+        )
+        row = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
+        assert not row.ok and "not_authenticated" in row.detail
+
+        monkeypatch.setattr(
+            hi, "probe_runner",
+            lambda spec, **kwargs: {
+                "auth": "ok", "version": "1.2.3", "problem": "",
+            },
+        )
+        row = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
+        assert row.ok, row.detail
+        assert "auth=ok" in row.detail and "version=1.2.3" in row.detail
+        assert "nested_exec=" in row.detail
 
     def test_the_runner_probe_reuses_the_init_detection(self):
         """One detector, not two: `--init` and `--check` ask the same question."""
@@ -1036,9 +1109,14 @@ class TestWindowsSeam:
             "the temp file must live in the target directory, which is what makes "
             "os.replace atomic on Windows too"
         )
-        assert 'newline="\\n"' in source, (
-            "identical bytes on every platform; idempotency and the body hash both "
-            "depend on it"
+        assert 'os.fdopen(handle, "wb")' in source, (
+            "the write is byte mode — identical bytes on every platform, which "
+            "idempotency and the body hash both depend on, and which a backup or "
+            "a rollback needs too: round-tripping a user's file through a text "
+            "stream would rewrite its line endings"
+        )
+        assert ', "w",' not in source, (
+            "a text-mode stream translates newlines on Windows; encode instead"
         )
 
 

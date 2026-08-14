@@ -31,8 +31,11 @@ one.*
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -44,6 +47,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from .provider_registry import (
         get_max_concurrent_write_subagents,
+        get_provider_max_concurrent,
         parse_model_spec,
     )
     from .subagent_executor import (
@@ -62,6 +66,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         ExecutorError,
         ResultRejected,
         TaskOutcome,
+        _atomic_write_json,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -80,12 +85,14 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from .write_safety import (
         DRY_RUN_FILENAME,
+        MAX_SNAPSHOT_BYTES,
         AuditLog,
         PolicyViolation,
         TaskSnapshot,
         WritePolicy,
         WriteSafetyError,
         admit_disjoint_groups,
+        file_sha256,
         overlapping_pairs,
         relative_to_root,
         resolve_repo_root,
@@ -94,6 +101,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import prior_changes as _prior_changes
     from utils.provider_registry import (
         get_max_concurrent_write_subagents,
+        get_provider_max_concurrent,
         parse_model_spec,
     )
     from utils.subagent_executor import (
@@ -112,6 +120,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         ExecutorError,
         ResultRejected,
         TaskOutcome,
+        _atomic_write_json,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -130,12 +139,14 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils.write_safety import (
         DRY_RUN_FILENAME,
+        MAX_SNAPSHOT_BYTES,
         AuditLog,
         PolicyViolation,
         TaskSnapshot,
         WritePolicy,
         WriteSafetyError,
         admit_disjoint_groups,
+        file_sha256,
         overlapping_pairs,
         relative_to_root,
         resolve_repo_root,
@@ -165,6 +176,46 @@ STRATEGIES = (STRATEGY_PAUSE, STRATEGY_SKIP_CONTINUE, STRATEGY_SKIP_DEPENDENTS)
 #: file because it records the *loop*: batch order, the stopping batch, the skip
 #: set, the override records and whether finalization ran.
 WRITE_BATCH_REPORT_FILENAME = "write_batch_report.json"
+
+#: The D2g inputs binding for the results already on disk, kept beside them.
+#: A **leading dot** on purpose: reaggregation globs ``{phase_dir}/*.json`` and
+#: treats every file it matches as a per-model result list, and ``glob`` skips
+#: leading-dot names — the same reason ``.status.json`` is invisible to it.
+WRITE_FINGERPRINT_FILENAME = ".write_task_inputs.json"
+
+#: Directory *names* the post-run containment sweep never descends into. A VCS
+#: metadata dir churns on anything the runner happens to run — ``git status``
+#: alone rewrites ``.git/index`` — so attributing that churn to the batch would
+#: stop the loop on a violation the runner never committed. They are denied by
+#: ``driver.write_paths`` out of the box, which is where the *preventive* half
+#: (the runner's own sandbox) applies; the sweep is the detective half and does
+#: not guess at VCS internals.
+SWEEP_PRUNED_DIR_NAMES = (".git", ".hg", ".svn")
+
+#: Above this many regular files the sweep is abandoned rather than run: it
+#: walks the tree twice per dispatch, and a control that silently doubles a
+#: phase's wall clock is a control that gets switched off. The degradation is
+#: announced once per run, never silent.
+SWEEP_MAX_FILES = 60000
+
+#: Where the sweep's rollback bytes live: ``{phase}/rollback_store/ab/<sha256>``,
+#: content-addressed so a file that survives ten dispatches is stored once and a
+#: reverted edit costs nothing. Under the phase dir like every other executor
+#: artifact, which is also what keeps it out of the sweep's own census.
+ROLLBACK_STORE_DIRNAME = "rollback_store"
+
+#: The rollback store's byte budget for a whole run. Detection is cheap (a stat
+#: per file); *reversibility* costs a read and a copy, so it is bounded and the
+#: bound is announced. Past it the sweep still observes, checks and audits an
+#: undeclared write — it just cannot undo it, which is the state every release
+#: before this one was in for all of them.
+SWEEP_RETAIN_MAX_BYTES = 64 * 1024 * 1024
+
+#: The most undeclared paths one dispatch adopts into its snapshot. A runner that
+#: ran a package install can touch tens of thousands of files, and a manifest
+#: with one entry each helps nobody. Every observed path is still reported and
+#: policy-checked; only the rollback points are capped.
+SWEEP_ADOPT_MAX_FILES = 1000
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 3
@@ -202,6 +253,20 @@ class HumanTaskPlan:
 _DEFERRED_REASON = (
     "deferred — user chose to complete manually after implementation"
 )
+
+
+def _under_any(path: str, roots: Sequence[str]) -> bool:
+    """Whether ``path`` is one of ``roots`` or sits beneath one of them.
+
+    Separator-aware rather than a bare ``startswith``, which would also swallow
+    a sibling whose name merely shares a prefix (``plans-old/`` under
+    ``plans/``).
+    """
+    candidate = os.path.abspath(path)
+    for root in roots:
+        if candidate == root or candidate.startswith(root + os.sep):
+            return True
+    return False
 
 
 def resolve_human_task_plan(
@@ -352,6 +417,34 @@ class SchedulerResult:
         }
 
 
+@dataclass
+class UndeclaredWrites:
+    """What one dispatch's containment sweep saw outside the declared set.
+
+    Two lists rather than one, because "observed" and "reversible" are different
+    facts about the same path and collapsing them is how a rollback point that
+    does not exist gets promised. ``paths`` is the whole observed set — it is what
+    the post-run ``WritePolicy`` check runs on and what the audit records.
+    ``restorable`` is the subset whose pre-run bytes (or recorded absence) made it
+    into the task's snapshot, and therefore the only part that may join
+    ``files_touched``, which is what ``util restore-batch`` reverts.
+    """
+
+    paths: List[str] = field(default_factory=list)
+    restorable: List[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.paths)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    @property
+    def unrecoverable(self) -> List[str]:
+        keepable = set(self.restorable)
+        return [path for path in self.paths if path not in keepable]
+
+
 class WriteBatchScheduler:
     """Drives one write phase's batches in ``batch_index`` order (D3n).
 
@@ -427,26 +520,103 @@ class WriteBatchScheduler:
         self.audit = AuditLog(self.phase_dir)
         self.snapshots: Dict[str, TaskSnapshot] = {}
         self.invoker = "native-simulated" if respond is not None else "executor"
+        #: Serializes the per-dispatch bookkeeping (`_record_batch_effects`).
+        #: With `driver.max_concurrent_write_subagents` > 1 a disjoint group runs
+        #: in a thread pool, and every member reaches the SAME in-memory
+        #: `StateManager` and the SAME `prior_changes.jsonl`. Both are
+        #: read-modify-write, so two unsynchronized siblings would race on
+        #: `state.save()`'s `os.replace` — last writer wins and a sibling's task
+        #: status is silently dropped, leaving resume and the report disagreeing
+        #: with what actually ran.
+        self._effects_lock = threading.Lock()
+        #: Task ids for which a terminal (`completed`) audit line has been
+        #: written, so `_audit_terminal` can close out a dispatch that never
+        #: reached `_classify` without ever double-recording one that did.
+        self._audited: set = set()
+        #: The post-run containment sweep's own state: the pre-dispatch census
+        #: per in-flight task, and the union of the declared sets that have
+        #: already passed their pre-dispatch policy check. A co-scheduled
+        #: sibling writes its OWN declared files while this task is being
+        #: classified, so those paths are subtracted before the sweep's result
+        #: reaches the policy — otherwise a disjoint group would report each
+        #: other's legitimate writes as undeclared.
+        self._sweep_lock = threading.Lock()
+        self._census_before: Dict[str, Optional[Dict[str, Tuple[int, int]]]] = {}
+        self._declared_seen: set = set()
+        self._sweep_warned = False
+        #: The rollback half of the same sweep. Observing an undeclared write is
+        #: worth little if it cannot be undone, and the snapshot only ever held
+        #: the declared set, so the pre-run bytes of everything else the runner
+        #: could reach are retained here before dispatch:
+        #: `_retained` is the run-wide `relative -> (stamp, digest|None)` cache
+        #: that keeps a file from being re-hashed while its (size, mtime_ns) is
+        #: unchanged, `_retained_before` is the per-in-flight-task view a sibling
+        #: dispatch cannot overwrite, and `_retained_bytes` accounts the store
+        #: against `SWEEP_RETAIN_MAX_BYTES`.
+        self._retained: Dict[str, Tuple[Tuple[int, int], Optional[str]]] = {}
+        self._retained_before: Dict[str, Dict[str, str]] = {}
+        self._retained_bytes = 0
+        self._retain_warned = False
 
     # -- ceilings -------------------------------------------------------
 
     def write_ceiling(self) -> int:
         """The effective write parallelism (D3h/D3i), and why it is what it is.
 
-        ``driver.max_concurrent_write_subagents`` (default 1) bounded by the host's
-        own ceiling, then **pinned to 1** for a shared-artifact phase regardless of
-        either — that is the batchers' own invariant
+        D3i's three-way minimum with the write gate substituted for the read one:
+        ``driver.max_concurrent_write_subagents`` (default 1) × the runner
+        provider's own ``max_concurrent`` (claude-code and cursor-agent ship 2) ×
+        the host's own ceiling — then **pinned to 1** for a shared-artifact phase
+        regardless of all three, because that is the batchers' own invariant
         (apply-suggestions/apply-task-suggestions edit one file), enforced here
         rather than trusted from them.
+
+        The provider leg is not optional: raising the driver key above a
+        provider's cap would otherwise over-subscribe it on the parallelizable
+        implement/code-fix batches, which is exactly the ceiling the user did not
+        set and cannot see.
         """
         configured = get_max_concurrent_write_subagents(anchor=self.anchor)
         candidates = [configured]
         if self.host_max is not None:
             candidates.append(int(self.host_max))
+        limits = [
+            limit for limit in self.provider_write_limits().values()
+            if limit is not None
+        ]
+        if limits:
+            # The *min* across providers, where the read path's
+            # `effective_ceiling` takes the max: that path holds a per-provider
+            # semaphore underneath the global gate, so a permissive group ceiling
+            # is still bounded per provider. A write group has no second gate —
+            # this number is the only thing standing between a mixed batch and an
+            # over-subscribed provider — so it binds to the tightest cap.
+            candidates.append(min(limits))
         ceiling = max(1, min(candidates))
         if self.kind in SHARED_ARTIFACT_WRITE_KINDS:
             return 1
         return ceiling
+
+    def provider_write_limits(self) -> Dict[str, Optional[int]]:
+        """``max_concurrent`` per provider this phase's runners resolve to (D3i).
+
+        Resolution mirrors the dispatch path exactly (``--runner`` override, else
+        each task's own chain), and it is computed identically for both invokers
+        so the executor and the simulated native invoker admit the same groups. A
+        spec naming a provider with no configured cap contributes ``None``, which
+        is "no provider leg", never zero.
+        """
+        specs: List[str] = []
+        if self.forced_runner:
+            specs.append(self.forced_runner)
+        else:
+            for task in self.tasks:
+                specs.append(resolve_task_runner(task, anchor=self.anchor))
+        limits: Dict[str, Optional[int]] = {}
+        for spec in dict.fromkeys(specs):
+            provider_name, _ = parse_model_spec(spec, anchor=self.anchor)
+            limits[provider_name] = get_provider_max_concurrent(provider_name)
+        return limits
 
     # -- ordering -------------------------------------------------------
 
@@ -495,7 +665,29 @@ class WriteBatchScheduler:
     # -- the loop -------------------------------------------------------
 
     def run(self) -> SchedulerResult:
-        """Schedule the phase. Returns the phase's :class:`SchedulerResult`."""
+        """Schedule the phase. Returns the phase's :class:`SchedulerResult`.
+
+        The rollback store is staging, not an artifact: every path it made
+        reversible has its own copy under ``{phase}/pre_batch/{task_id}/files/``
+        by the time a dispatch is classified, so it is dropped on every exit —
+        success, stop or crash — rather than leaving up to
+        ``SWEEP_RETAIN_MAX_BYTES`` of the repository behind in the plan dir.
+        """
+        try:
+            return self._run()
+        finally:
+            self._discard_rollback_store()
+
+    def _discard_rollback_store(self) -> None:
+        """Drop the sweep's staging bytes and the index that describes them."""
+        shutil.rmtree(
+            os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME), ignore_errors=True
+        )
+        with self._sweep_lock:
+            self._retained.clear()
+            self._retained_bytes = 0
+
+    def _run(self) -> SchedulerResult:
         result = SchedulerResult(kind=self.kind, phase=self.phase)
         ordered = self.batches()
 
@@ -505,7 +697,13 @@ class WriteBatchScheduler:
             strategy=self.human_task_strategy,
             decisions=self.human_task_decisions,
         )
-        self._persist_human_plan(result.human_plan)
+        if not self.dry_run:
+            # A dry run resolves the plan (the report says what *would* be
+            # skipped) but never persists it: D3l's contract is "no child
+            # started, nothing else changed", and persisting would pin the
+            # strategy, mark human tasks skipped and record dependency overrides
+            # in `state.json` for a run that never dispatched anything.
+            self._persist_human_plan(result.human_plan)
 
         if result.human_plan.pending:
             # Fail closed: an unanswered human task is exactly the D6 "needs a
@@ -524,7 +722,9 @@ class WriteBatchScheduler:
                 f"[dry-run-subagents] {result.dry_run_path} — every command "
                 f"rendered, no child started, nothing changed."
             )
-            result.report_path = self._write_report(result)
+            # No report: `subagent_dry_run.json` IS the dry run's artifact, and
+            # writing the zero-outcome batch reports here would clobber a real
+            # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
         # 3. The batches, in order, each verified before the next is dispatched.
@@ -536,7 +736,35 @@ class WriteBatchScheduler:
             ]
             if not runnable:
                 continue
-            outcomes = self._run_batch(batch_index, runnable, result)
+            try:
+                outcomes = self._run_batch(batch_index, runnable, result)
+            except ExecutorError as exc:
+                # D3k rung 1: a pre-dispatch refusal (a missing binary, an
+                # unauthenticated runner, a profile the adapter cannot serve —
+                # `preflight_runner` raising `RunnerRejected`) fails the batch
+                # *here*, exactly like every other stop. Left to propagate it
+                # reached the dispatcher's generic handler as a traceback and exit
+                # 1, so the run produced no `write_batch_report.json`, no
+                # `.status.json` mirror and none of the exit-3 wording that names
+                # the fix — the read path has converted the same exception to
+                # `failure.exit_code` since D3b.
+                result.stopped_at_batch = batch_index
+                result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
+                result.messages.extend(
+                    self._refusal_message(exc, batch_index, result)
+                )
+                if self.summary_file and result.outcomes:
+                    # Only when an earlier batch really applied something: the
+                    # partial summary is that run's account (D3n), and an empty
+                    # one for a refusal on the first dispatch would claim a run
+                    # that never started.
+                    result.summary_file = self._write_summary(result)
+                    result.messages.append(
+                        f"Partial implementation summary: {result.summary_file}"
+                    )
+                result.report_path = self._write_report(result)
+                self._mirror_status(result)
+                return result
             result.outcomes.extend(outcomes)
             result.batches_dispatched.append(batch_index)
             self._mirror_status(result)
@@ -546,6 +774,18 @@ class WriteBatchScheduler:
                 result.stopped_at_batch = batch_index
                 result.exit_code = EXIT_NEEDS_HUMAN
                 result.messages.extend(self._stop_message(batch_index, outcomes))
+                # The partial summary is the cancellation's own record (D3n,
+                # instructions/implement.md): `_finalize` never runs on this
+                # path, so without this write the `## Cancelled` section would be
+                # unreachable and `--resume` would have no account of what the
+                # stopped run applied. The phase is still NOT completed and the
+                # plan-side reference is still NOT inserted — only the summary is
+                # written.
+                if self.summary_file:
+                    result.summary_file = self._write_summary(result)
+                    result.messages.append(
+                        f"Partial implementation summary: {result.summary_file}"
+                    )
                 result.report_path = self._write_report(result)
                 self._mirror_status(result)
                 return result
@@ -617,6 +857,27 @@ class WriteBatchScheduler:
                 status=exc.status, profile=profile, reason=exc.message,
             )
 
+        # D3l pre-dispatch: a batch whose DECLARED set is not wholly inside the
+        # policy never starts a runner — and the check runs BEFORE the snapshot,
+        # not after it. Snapshotting first would copy the bytes of every denied
+        # path the task named (`.env`, `.git/config`, `*.pem`) into
+        # `{phase}/pre_batch/{task_id}/files/` and then refuse the dispatch,
+        # leaving the payload behind: the deny list exists precisely to keep that
+        # material out of executor-owned artifacts, so a refusal that creates one
+        # is the control defeating itself.
+        declared = [
+            relative_to_root(path, self.repo_root)
+            for path in declared_file_set(task)
+        ]
+        try:
+            self.policy.check(declared, when="pre-dispatch")
+        except PolicyViolation as exc:
+            return TaskOutcome(
+                task_id=task_id, kind=self.kind, runner=self.invoker,
+                status=STATUS_REJECTED, profile=profile, reason=exc.message,
+                write_outcome=WRITE_POLICY_VIOLATION,
+            )
+
         try:
             snapshot = self._snapshot(task)
         except WriteSafetyError as exc:
@@ -625,44 +886,362 @@ class WriteBatchScheduler:
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
             )
 
-        # D3l pre-dispatch: a batch whose DECLARED set is not wholly inside the
-        # policy never starts a runner.
-        declared = [
-            relative_to_root(path, self.repo_root)
-            for path in declared_file_set(task)
-        ]
-        try:
-            self.policy.check(declared, when="pre-dispatch")
-        except PolicyViolation as exc:
-            outcome = TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=exc.message,
-                write_outcome=WRITE_POLICY_VIOLATION,
-                snapshot_dir=snapshot.directory,
-            )
-            return outcome
-
+        self._begin_sweep(task_id, declared)
         started = time.time()
-        if self.respond is not None:
-            outcome = self._dispatch_native(task, prompt, snapshot, profile)
-        else:
-            outcome = self._dispatch_executor(task, prompt, snapshot, profile, declared)
-        outcome.snapshot_dir = snapshot.directory
-        if not outcome.duration_seconds:
-            outcome.duration_seconds = time.time() - started
-        if outcome.write_outcome is None and not outcome.ok:
-            # The four-outcome axis is total, so a dispatch that never reached the
-            # classification still says which bucket it fell in. Rungs 5 and 6 are
-            # both "the runner did not return the batch result contract" — prose and
-            # a well-formed wrong object are the same failure to a consumer — so
-            # they share the schema-rejection outcome. Rungs 1-4 (no child, no
-            # auth, timeout, runner error) are transport failures, not write
-            # outcomes, and are deliberately left unlabelled.
-            if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
-                outcome.write_outcome = WRITE_SCHEMA_REJECTED
+        try:
+            if self.respond is not None:
+                outcome = self._dispatch_native(task, prompt, snapshot, profile)
+            else:
+                outcome = self._dispatch_executor(
+                    task, prompt, snapshot, profile, declared
+                )
+            outcome.snapshot_dir = snapshot.directory
+            if not outcome.duration_seconds:
+                outcome.duration_seconds = time.time() - started
+            if outcome.write_outcome is None and not outcome.ok:
+                # The four-outcome axis is total, so a dispatch that never reached
+                # the classification still says which bucket it fell in. Rungs 5
+                # and 6 are both "the runner did not return the batch result
+                # contract" — prose and a well-formed wrong object are the same
+                # failure to a consumer — so they share the schema-rejection
+                # outcome. Rungs 1-4 (no child, no auth, timeout, runner error) are
+                # transport failures, not write outcomes, and are deliberately left
+                # unlabelled.
+                if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
+                    outcome.write_outcome = WRITE_SCHEMA_REJECTED
 
+            self._audit_terminal(outcome, snapshot, profile)
+        finally:
+            # The census and its retained-byte index are consumed by whichever of
+            # `_classify` / `_audit_terminal` got there first; this drops them in
+            # the one case neither did (a dispatch that raised out).
+            with self._sweep_lock:
+                self._census_before.pop(task_id, None)
+                self._retained_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index)
         return outcome
+
+    def _audit_terminal(
+        self, outcome: TaskOutcome, snapshot: TaskSnapshot, profile: str
+    ) -> None:
+        """Close the audit record for a dispatch that never reached ``_classify``.
+
+        D3l's contract is *one fsynced line before dispatch and one after
+        classification*, but the classifier only runs once rung-6 validation has
+        passed. A dispatch that timed out, errored, was rate-limited out or came
+        back as prose (rungs 2-5) therefore left a ``dispatched`` line with no
+        terminal record — and ``AuditLog.failed_task_ids`` reads only
+        ``completed`` events, so ``util restore-batch --all-failed`` silently
+        skipped exactly the dispatches most likely to have left half-written
+        bytes behind (a timeout mid-edit).
+
+        The record carries the observed post-run hashes, and ``files_touched`` is
+        filled from the byte comparison rather than left empty, because that set
+        is what the restore path restores and verifies against. The sweep runs
+        first on purpose: a timeout mid-edit is exactly the case where the runner
+        was writing somewhere it never declared, and adopting those paths into the
+        snapshot before ``changed()`` is read is what puts them in reach of
+        ``util restore-batch --all-failed``.
+        """
+        if outcome.task_id in self._audited:
+            return
+        if self.respond is None and not outcome.attempts:
+            # `dispatch_task` refused before its first `before_attempt`, so no
+            # `dispatched` line was written either. A lone completion here would
+            # claim a run that never started.
+            return
+        undeclared = self._undeclared_writes(outcome.task_id, snapshot)
+        observed = self._observed_with_undeclared(snapshot, undeclared)
+        if not outcome.files_touched:
+            outcome.files_touched = snapshot.changed()
+        last = outcome.attempts[-1] if outcome.attempts else None
+        self._audit_completion(
+            outcome,
+            outcome.runner,
+            profile,
+            last.index if last is not None else 1,
+            last.exit_code if last is not None else None,
+            observed,
+            outcome.duration_seconds,
+        )
+
+    # -- D3l post-run containment: the OBSERVED set, not the declared one ---
+
+    def _begin_sweep(self, task_id: str, declared: Sequence[str]) -> None:
+        """Take this dispatch's pre-run census, retain its bytes, register its set.
+
+        The census is what makes the post-run policy check non-vacuous; the
+        retention pass is what makes its verdict *actionable*. Both happen before
+        the runner starts, because neither can be reconstructed afterwards.
+        """
+        census = self._census()
+        with self._sweep_lock:
+            self._census_before[task_id] = census
+            self._retained_before[task_id] = self._retain(census)
+            self._declared_seen.update(declared)
+            if census is None and not self._sweep_warned:
+                self._sweep_warned = True
+                self.log(
+                    f"[write-subagents] the tree under {self.repo_root} holds more "
+                    f"than {SWEEP_MAX_FILES} files — the post-run containment sweep "
+                    f"is skipped for this run and driver.write_paths is enforced "
+                    f"against the declared set only (D3l)."
+                )
+
+    def _sweep_exclusions(self) -> Tuple[str, ...]:
+        """Absolute paths the sweep must never attribute to the runner.
+
+        The phase dir is the *executor's* own artifact tree (results, snapshots,
+        the audit log, ``.status.json``), and the two output-dir bookkeeping
+        files are written by :meth:`_record_batch_effects` — for a co-scheduled
+        sibling, while this task is being classified. The detached-run registry
+        is the same story one level up: ``status --sweep`` or a second run's
+        claim can rewrite it at any moment. Every one of them would otherwise
+        read as an undeclared write, and ``.multi-llm/**`` is denied by default,
+        so the sweep would fail batches on the tool's own bookkeeping. Only the
+        ``runs/`` subtree is excluded, never all of ``.multi-llm/`` — a runner
+        rewriting ``.multi-llm/providers.yaml`` is exactly what the deny rule is
+        for and stays observable.
+        """
+        excluded = [
+            os.path.abspath(self.phase_dir),
+            os.path.abspath(os.path.join(self.output_dir, _prior_changes.FILENAME)),
+            os.path.abspath(os.path.join(self.repo_root, ".multi-llm", "runs")),
+        ]
+        state_file = getattr(self.state, "state_file", None)
+        if state_file:
+            excluded.append(os.path.abspath(str(state_file)))
+        if self.summary_file:
+            excluded.append(os.path.abspath(self.summary_file))
+        return tuple(excluded)
+
+    def _census(self) -> Optional[Dict[str, Tuple[int, int]]]:
+        """``repo-relative -> (size, mtime_ns)`` for every file under the root.
+
+        ``None`` means *not usable* — the tree is over :data:`SWEEP_MAX_FILES` —
+        and a ``None`` on either side of the comparison makes the sweep a no-op
+        rather than a guess. ``os.path.relpath`` rather than ``relative_to_root``
+        on purpose: the walk starts at the pinned root, so the relative path is
+        exact by construction and a per-file ``Path.resolve()`` would put a
+        syscall on every entry of a tree this size.
+        """
+        excluded = self._sweep_exclusions()
+        census: Dict[str, Tuple[int, int]] = {}
+        stack = [self.repo_root]
+        while stack:
+            try:
+                entries = list(os.scandir(stack.pop()))
+            except OSError:
+                continue
+            for entry in entries:
+                if _under_any(entry.path, excluded):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in SWEEP_PRUNED_DIR_NAMES:
+                            stack.append(entry.path)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                relative = os.path.relpath(entry.path, self.repo_root)
+                census[relative.replace(os.sep, "/")] = (
+                    info.st_size, info.st_mtime_ns
+                )
+                if len(census) > SWEEP_MAX_FILES:
+                    return None
+        return census
+
+    def _blob_path(self, digest: str) -> str:
+        """Where the rollback store keeps ``digest``'s bytes."""
+        return os.path.join(
+            self.phase_dir, ROLLBACK_STORE_DIRNAME, digest[:2], digest
+        )
+
+    def _retain(self, census: Optional[Dict[str, Tuple[int, int]]]) -> Dict[str, str]:
+        """Copy every censused file's current bytes into the rollback store.
+
+        ``relative -> sha256`` for what was retained. Three exclusions, each for
+        a reason the alternative makes worse:
+
+        * **A path ``driver.write_paths`` denies** (``.env``, ``**/*.pem``,
+          ``**/.ssh/**``) is never copied. The deny list exists precisely to keep
+          that material out of executor-owned artifacts — it is why the
+          pre-dispatch policy check runs *before* ``_snapshot`` — and a rollback
+          store that quietly mirrors every secret in the repo into the phase dir
+          would be a new vulnerability rather than a control. Such a write is
+          still observed, still fails the post-run check and still stops the loop;
+          it just gets no automatic undo.
+        * **A file over ``MAX_SNAPSHOT_BYTES``**, the same per-file cap a declared
+          snapshot refuses to dispatch over.
+        * **Anything past ``SWEEP_RETAIN_MAX_BYTES``**, so insurance cannot cost
+          more than the run.
+
+        The ``(size, mtime_ns)`` cache is what keeps this from being a full-tree
+        read per dispatch: only a file whose stamp moved since the last dispatch
+        is hashed again, and the store is content-addressed, so re-storing a
+        reverted edit is a no-op.
+        """
+        if census is None:
+            return {}
+        kept: Dict[str, str] = {}
+        skipped = 0
+        for relative, stamp in census.items():
+            cached = self._retained.get(relative)
+            if cached is None or cached[0] != stamp:
+                cached = (stamp, self._store_blob(relative, stamp))
+                self._retained[relative] = cached
+            if cached[1]:
+                kept[relative] = cached[1]
+            else:
+                skipped += 1
+        if skipped and not self._retain_warned:
+            self._retain_warned = True
+            self.log(
+                f"[write-subagents] {skipped} file(s) under {self.repo_root} have "
+                f"no rollback point in {os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME)} "
+                f"(denied by driver.write_paths, over the {MAX_SNAPSHOT_BYTES}-byte "
+                f"per-file cap, or past the {SWEEP_RETAIN_MAX_BYTES}-byte store "
+                f"budget). An undeclared write to one of them is still detected, "
+                f"policy-checked and audited — `util restore-batch` just cannot "
+                f"undo it (D3l)."
+            )
+        return kept
+
+    def _store_blob(
+        self, relative: str, stamp: Tuple[int, int]
+    ) -> Optional[str]:
+        """Put one file's bytes in the store, or ``None`` when it is not retained."""
+        size = stamp[0]
+        if size > MAX_SNAPSHOT_BYTES:
+            return None
+        if self._retained_bytes + size > SWEEP_RETAIN_MAX_BYTES:
+            return None
+        absolute = os.path.join(self.repo_root, relative)
+        if self.policy.violation(absolute) is not None:
+            return None
+        digest = file_sha256(absolute)
+        if digest is None:
+            return None
+        blob = self._blob_path(digest)
+        if os.path.isfile(blob):
+            return digest
+        try:
+            os.makedirs(os.path.dirname(blob), exist_ok=True)
+            # Same temp-then-replace shape every other executor write uses, so a
+            # crash mid-copy can never leave a truncated blob that a later
+            # restore would write over a good file.
+            pending = f"{blob}.{os.getpid()}.{threading.get_ident()}.tmp"
+            shutil.copy2(absolute, pending)
+            os.replace(pending, blob)
+        except OSError:
+            return None
+        self._retained_bytes += size
+        return digest
+
+    def _undeclared_writes(
+        self, task_id: str, snapshot: TaskSnapshot
+    ) -> UndeclaredWrites:
+        """Paths this dispatch moved *outside* any declared set, made reversible.
+
+        This is what makes the post-run policy check non-vacuous.
+        ``snapshot.changed()`` can only ever report files the task declared —
+        ``write_phase_bridge`` leaves ``snapshot_files`` equal to
+        ``declared_files`` — and that exact list already passed the identical
+        ``policy.check(..., when="pre-dispatch")``, so enforcing the policy on it
+        alone can never raise. A runner is nevertheless free to write anywhere
+        its own sandbox allows (the claude-code write profile permits ``Bash``),
+        and "it wrote outside what it declared" is precisely the containment
+        failure D3l's detective layer exists to observe.
+
+        Observing it is only half the control, so each observed path is adopted
+        into this task's snapshot — the retained pre-run bytes for a file that
+        existed, the recorded absence for one the runner created — which is what
+        lets ``_classify``'s policy-violation branch really restore it and
+        ``util restore-batch`` revert it later. A path with no retained bytes
+        (denied, oversized, past the budget, or unreadable before the run) stays
+        out of ``restorable`` and therefore out of ``files_touched``: promising a
+        rollback point that does not exist is the failure this method's caller
+        would otherwise ship.
+
+        Deletions count: a declared-set-external file that disappeared was
+        touched just as surely as one that grew.
+        """
+        with self._sweep_lock:
+            before = self._census_before.pop(task_id, None)
+            retained = self._retained_before.pop(task_id, None) or {}
+            ignored = set(self._declared_seen)
+        if before is None:
+            return UndeclaredWrites()
+        after = self._census()
+        if after is None:
+            return UndeclaredWrites()
+        moved = {
+            relative for relative, stamp in after.items()
+            if relative not in ignored and before.get(relative) != stamp
+        }
+        moved.update(
+            relative for relative in before
+            if relative not in after and relative not in ignored
+        )
+        observed = UndeclaredWrites(paths=sorted(moved))
+        adopted = 0
+        for relative in observed.paths:
+            if adopted >= SWEEP_ADOPT_MAX_FILES:
+                break
+            stamp = before.get(relative)
+            digest = retained.get(relative)
+            try:
+                entry = snapshot.adopt(
+                    relative,
+                    existed=stamp is not None,
+                    sha256=digest,
+                    size=stamp[0] if stamp else 0,
+                    payload_source=self._blob_path(digest) if digest else None,
+                    save=False,
+                )
+            except (WriteSafetyError, OSError):
+                entry = None
+            if entry is not None:
+                observed.restorable.append(relative)
+                adopted += 1
+        if adopted:
+            snapshot.save()
+        return observed
+
+    def _observed_with_undeclared(
+        self, snapshot: TaskSnapshot, undeclared: UndeclaredWrites
+    ) -> Dict[str, Any]:
+        """``snapshot.observed()`` plus a row per undeclared write, for the audit.
+
+        Every observed path is in the audit line whether or not it could be made
+        reversible, and each says which it is: an operator reading this log has to
+        be able to tell "restore-batch will undo this" from "this one needs a
+        human", and silence on the second is how the first gets assumed.
+        """
+        observed = snapshot.observed()
+        restorable = set(undeclared.restorable)
+        for relative in undeclared.paths:
+            row = observed.get(relative)
+            if row is None:
+                row = {
+                    "sha256_before": None,
+                    "sha256_after": file_sha256(
+                        os.path.join(self.repo_root, relative)
+                    ),
+                }
+                observed[relative] = row
+            row["declared"] = False
+            row["rollback"] = "retained" if relative in restorable else "unavailable"
+            row["note"] = (
+                "observed by the post-run sweep, outside any declared set"
+                if relative in restorable else
+                "observed by the post-run sweep, outside any declared set; no "
+                "pre-run bytes were retained for it, so it cannot be restored"
+            )
+        return observed
 
     def _dispatch_executor(
         self,
@@ -812,11 +1391,15 @@ class WriteBatchScheduler:
           the loop continues, and the prior-changes entry takes the documented
           ``(batch failed — …, verified no file changes)`` form.
         * bytes moved + the batch reported ``failed``, **or** only some of the
-          batch's ``expected_ids`` came back → **partial application**: stops the
-          loop, keeps the snapshots, exits 3 even under ``--yes``.
+          batch's ``expected_ids`` came back, **or** the runner exited non-zero →
+          **partial application**: stops the loop, keeps the snapshots, exits 3
+          even under ``--yes``.
         * a touched file outside ``driver.write_paths`` → **policy violation**:
           the batch fails, the offending files are restored from the snapshot, the
-          loop stops (D3l post-run enforcement).
+          loop stops (D3l post-run enforcement). "Touched" is the set the sweep
+          observed, declared or not, and the sweep retained its pre-run bytes, so
+          "restored" means an undeclared write too — see
+          :meth:`_undeclared_writes`.
 
         A prose result never reaches here at all — it already failed rung 6 as
         ``schema_invalid``, which is the fourth outcome.
@@ -826,36 +1409,117 @@ class WriteBatchScheduler:
         reported_ids = [str(i) for i in ((result or {}).get("ids") or [])]
         expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
         changed = snapshot.changed()
-        observed = snapshot.observed()
+        undeclared = self._undeclared_writes(outcome.task_id, snapshot)
+        observed = self._observed_with_undeclared(snapshot, undeclared)
 
-        outcome.files_touched = list(changed)
+        # `changed` stays the DECLARED verdict — it is what the four outcomes are
+        # decided on below. `files_touched` is the ROLLBACK set, so it also
+        # carries the undeclared writes the sweep retained bytes for; an
+        # undeclared path with no rollback point is deliberately absent, because
+        # `util restore-batch` reads this list and would report a file it cannot
+        # actually restore.
+        outcome.files_touched = list(changed) + list(undeclared.restorable)
         outcome.summary = summary or None
 
         # D3l post-run: recompute the touched set and enforce the policy on it.
+        # The observed set is the declared files whose bytes moved PLUS whatever
+        # else under the pinned root the sweep saw move; enforcing on `changed`
+        # alone is vacuous, because every path in it is one the identical
+        # pre-dispatch check already passed.
+        if undeclared:
+            stranded = undeclared.unrecoverable
+            self.log(
+                f"[write-subagents] {outcome.task_id}: {len(undeclared)} file(s) "
+                f"changed outside this task's declared set "
+                f"({', '.join(undeclared.paths[:5])}"
+                f"{', …' if len(undeclared) > 5 else ''}) — checking them against "
+                f"driver.write_paths."
+                + (
+                    f" {len(stranded)} of them had no retained pre-run bytes and "
+                    f"cannot be restored automatically."
+                    if stranded else ""
+                )
+            )
         try:
-            self.policy.check(changed, when="post-run")
+            self.policy.check(list(changed) + undeclared.paths, when="post-run")
         except PolicyViolation as exc:
             report = snapshot.restore(exc.paths)
+            stranded = sorted(
+                path for path, state in report.items()
+                if state.startswith("skipped:")
+            )
             outcome.status = STATUS_POLICY_VIOLATION
             outcome.write_outcome = WRITE_POLICY_VIOLATION
             outcome.reason = (
                 f"{exc.message} The offending file(s) were restored from the "
                 f"pre-batch snapshot ({', '.join(f'{k}: {v}' for k, v in report.items())}) "
                 f"and the loop stops here."
+                + (
+                    # A path the sweep could not retain bytes for (a policy-denied
+                    # one above all: its bytes are deliberately never copied into
+                    # an executor artifact). Saying "restored" and leaving the
+                    # contradiction in the parenthetical is how a violation gets
+                    # read as handled.
+                    f" No rollback point existed for {len(stranded)} of them "
+                    f"({', '.join(stranded[:5])}"
+                    f"{', …' if len(stranded) > 5 else ''}); those files remain on "
+                    f"disk exactly as the runner left them — inspect them by hand."
+                    if stranded else ""
+                )
             )
             self.audit.restored(task_id=outcome.task_id, report=report, force=False)
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
             return
 
-        missing_ids = [i for i in expected_ids if reported_ids and i not in reported_ids]
+        # `ids` is OPTIONAL in write_batch_result.schema.json, so a batch can move
+        # bytes and say nothing at all about *which* of its expected changes
+        # landed. The old `if reported_ids` guard emptied `missing_ids` in exactly
+        # that case, which made every id-less reply — including a `no-op` claim
+        # contradicted by a non-empty diff — read as a full application, and D3n's
+        # spot-check ("this batch's expected changes landed, rather than merely
+        # that bytes moved") silently never happened. An unattested batch that
+        # moved bytes is a partial application until something attests it.
+        if expected_ids and not reported_ids:
+            missing_ids = list(expected_ids)
+        else:
+            missing_ids = [i for i in expected_ids if i not in reported_ids]
 
-        if changed and (claimed == "failed" or missing_ids):
-            detail = (
-                f"the batch reported {claimed!r}" if claimed == "failed"
-                else f"only {len(reported_ids)} of {len(expected_ids)} expected "
-                     f"id(s) came back (missing: {', '.join(missing_ids)})"
-            )
+        # D3k inverts the exit-code rule for write tasks. On the read path a
+        # schema-valid result wins over a non-zero exit (CLIs exit non-zero on
+        # warnings while still printing the answer, and nothing is at stake but a
+        # report); here it fails closed — a non-zero exit never counts as success
+        # on its own, and a non-zero exit with a non-empty diff is a partial
+        # application, never an applied batch. The case this exists for is a
+        # runner that printed an optimistic `{"status": "applied", "ids": [all of
+        # them]}` and *then* died mid-edit: the claim is schema-valid and the ids
+        # are complete, so claim-and-diff alone read it as a full application and
+        # the loop dispatched batch N+1 on top of half-applied bytes.
+        # ``None`` is "no exit code observed" (the native invoker), not zero.
+        crashed = exit_code not in (0, None)
+
+        if changed and (crashed or claimed == "failed" or missing_ids):
+            details = []
+            if crashed:
+                details.append(
+                    f"the runner exited {exit_code} (claiming "
+                    f"{claimed or 'no status'!r})"
+                )
+            if claimed == "failed":
+                details.append(f"the batch reported {claimed!r}")
+            elif missing_ids and not reported_ids:
+                details.append(
+                    f"it reported no `ids` at all, so nothing attests that the "
+                    f"{len(expected_ids)} expected change(s) "
+                    f"({', '.join(expected_ids[:5])}"
+                    f"{', …' if len(expected_ids) > 5 else ''}) are what landed"
+                )
+            elif missing_ids:
+                details.append(
+                    f"only {len(reported_ids)} of {len(expected_ids)} expected "
+                    f"id(s) came back (missing: {', '.join(missing_ids)})"
+                )
+            detail = " and ".join(details)
             outcome.status = STATUS_PARTIAL
             outcome.write_outcome = WRITE_PARTIAL
             outcome.reason = (
@@ -877,13 +1541,16 @@ class WriteBatchScheduler:
             outcome.reason = (
                 f"CLEAN FAILURE: the batch reported {claimed or 'no status'!r} but "
                 f"the pre-batch snapshot comparison found no byte changes in "
-                f"{', '.join(e.relative for e in snapshot.entries) or 'any declared file'}. "
+                f"{', '.join(e.relative for e in snapshot.declared_entries()) or 'any declared file'}. "
                 f"Recorded; the loop continues."
             )
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
             return
 
+        # Reachable only on a clean exit: `crashed` with a non-empty diff is the
+        # partial branch above and `crashed` with an empty one is the clean
+        # failure, so no non-zero exit can land on APPLIED (D3k).
         outcome.write_outcome = WRITE_APPLIED
         outcome.status = STATUS_OK
         self._audit_completion(outcome, runner, profile, attempt, exit_code,
@@ -899,6 +1566,7 @@ class WriteBatchScheduler:
         observed: Dict[str, Any],
         duration: float,
     ) -> None:
+        self._audited.add(outcome.task_id)
         self.audit.completed(
             task_id=outcome.task_id, kind=self.kind, attempt=attempt,
             runner=runner, profile=profile, status=outcome.status,
@@ -916,6 +1584,14 @@ class WriteBatchScheduler:
 
         The ordering is not cosmetic: the append must land before batch N+1's
         substitution reads the log, or the injected context lags a batch behind.
+
+        The whole body is serialized. A co-scheduled group runs this from several
+        threads against one in-memory ``StateManager``, one ``prior_changes.jsonl``
+        and one ``state.json`` — all three read-modify-write — so without the lock
+        two siblings can interleave and the later ``state.save()`` overwrites the
+        earlier sibling's task status, leaving resume and both reports describing
+        a run that did not happen. The work here is bookkeeping measured in
+        milliseconds, so serializing it costs the batch nothing.
         """
         task_id = str(task.get("task_id", ""))
         entry_id = str(task.get("prior_changes_id") or task_id)
@@ -932,16 +1608,26 @@ class WriteBatchScheduler:
         else:
             summary = None
 
-        if summary:
-            _prior_changes.append(self.output_dir, entry_id, self.phase, summary[:400])
+        with self._effects_lock:
+            if summary:
+                _prior_changes.append(
+                    self.output_dir, entry_id, self.phase, summary[:400]
+                )
 
-        self._record_metrics(task, outcome, batch_index)
+            self._record_metrics(task, outcome, batch_index)
 
-        if self.state is not None:
-            status = "completed" if outcome.ok else "failed"
-            reason = None if outcome.ok else (outcome.reason or outcome.status)
-            self.state.update_task_status(task_id, status, reason=reason)
-            self.state.save()
+            if self.state is not None:
+                status = "completed" if outcome.ok else "failed"
+                reason = None if outcome.ok else (outcome.reason or outcome.status)
+                self.state.update_task_status(task_id, status, reason=reason)
+                self.state.save()
+
+            if outcome.output_path:
+                # A result file only counts as this task's on resume when it was
+                # produced from these inputs (D2g/D3i). The binding is written
+                # here, under the same lock, because the file is one shared
+                # read-modify-write map for the whole phase.
+                self._record_fingerprint(task)
 
     def _record_metrics(
         self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int
@@ -1016,7 +1702,91 @@ class WriteBatchScheduler:
         self.snapshots[task_id] = snapshot
         return snapshot
 
+    # -- resume's inputs binding (D2g/D3i) ------------------------------
+
+    def _task_fingerprint(self, task: Dict[str, Any]) -> str:
+        """The D2g binding for one materialized write task, as one hash.
+
+        Over the **materialized task**, deliberately not over its ``inputs``
+        block. D2g's hashes name upstream artifacts, and a write phase *writes*
+        the artifacts its own hashes cover: ``apply-suggestions`` rewrites the
+        plan ``inputs.plan_sha256`` binds to, ``apply-code-fixes`` invalidates
+        the ``inputs.diff_sha256`` its own edits were derived from, and
+        ``implement`` inserts the summary reference into the plan. Comparing
+        those on resume would make a *successful* batch look like changed
+        inputs and re-dispatch it — applying it twice, which is the failure the
+        resume guard exists to prevent.
+
+        The prompt, the expected ids and the declared set are the derived data
+        that actually moves when the plan, the suggestions or the batching
+        changed: under ``context_mode: inline`` the payload travels *inside*
+        ``prompt``, so an edited suggestion changes the prompt directly.
+        ``prompt`` is the **raw** prompt — ``{prior_changes_context}`` is bound
+        late and per dispatch — so the text hashed here is stable across runs
+        of the same inputs.
+        """
+        payload = json.dumps(
+            {
+                "kind": self.kind,
+                "prompt": str(task.get("prompt") or ""),
+                "expected_ids": [str(i) for i in (task.get("expected_ids") or [])],
+                "declared_files": sorted(declared_file_set(task)),
+                "batch_index": int(task.get("batch_index", 0)),
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _fingerprint_path(self) -> Path:
+        return Path(self.phase_dir) / WRITE_FINGERPRINT_FILENAME
+
+    def _load_fingerprints(self) -> Dict[str, str]:
+        try:
+            data = json.loads(self._fingerprint_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+        recorded = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(recorded, dict):
+            return {}
+        return {str(key): str(value) for key, value in recorded.items()}
+
+    def _record_fingerprint(self, task: Dict[str, Any]) -> None:
+        """Persist one task's inputs binding beside its result file."""
+        recorded = self._load_fingerprints()
+        recorded[str(task.get("task_id", ""))] = self._task_fingerprint(task)
+        path = self._fingerprint_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_text(json.dumps({
+                "fingerprint_version": 1,
+                "kind": self.kind,
+                "tasks": recorded,
+            }, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(str(temp), str(path))
+        except OSError as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+            self.log(
+                f"[write-subagents] warning: could not record the inputs binding "
+                f"for {task.get('task_id')}: {exc}"
+            )
+
     def _already_done(self, task: Dict[str, Any]) -> bool:
+        """Resume's definition of done (D3i), all four clauses of it.
+
+        The result file must exist, parse and validate — **and** the task it was
+        produced from must not have moved (D2g). The bridge rewrites
+        ``write_tasks.json`` before the scheduler runs, so the previous run's own
+        hashes are gone by the time resume asks; the binding therefore lives
+        beside the results in ``.write_task_inputs.json`` and is compared against
+        the *freshly materialized* task (see :meth:`_task_fingerprint`). A
+        recorded binding that moved means the plan, the suggestions or the
+        batching changed between the partial run and the resume, and the stale
+        batch result is re-dispatched rather than silently accepted as current.
+
+        A task with **no** recorded binding keeps the previous behaviour: absence
+        of evidence that the inputs moved is not evidence that they did, and
+        re-dispatching an apply batch that already landed would apply it twice.
+        """
         try:
             target = resolve_output_target(task, self.phase_dir)
         except ResultRejected:
@@ -1027,7 +1797,18 @@ class WriteBatchScheduler:
             data = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return False
-        return not validate_result(self.kind, data)
+        if validate_result(self.kind, data):
+            return False
+        task_id = str(task.get("task_id", ""))
+        recorded = self._load_fingerprints().get(task_id)
+        if recorded and recorded != self._task_fingerprint(task):
+            self.log(
+                f"[write-subagents] {task_id}: the inputs it was materialized "
+                f"from have changed since {target.name} was written — "
+                f"re-dispatching it instead of resuming it (D2g)."
+            )
+            return False
+        return True
 
     # -- human plan persistence -----------------------------------------
 
@@ -1097,6 +1878,38 @@ class WriteBatchScheduler:
             "re-dispatches only the unfinished batches and replays the "
             "prior-changes log from disk.",
         ]
+        return lines
+
+    def _refusal_message(
+        self, exc: ExecutorError, batch_index: int, result: SchedulerResult
+    ) -> List[str]:
+        """A refused batch, worded like :meth:`_stop_message` (D3k rung 1).
+
+        The refusal's own text already names the offending key, the spec as
+        written and the fix (one rejection formatter, ``_render_runner_rejection``),
+        so this frames it rather than restating it: which batch was refused, that
+        no child started for it, and what the batches before it left behind.
+        """
+        lines = [
+            "",
+            f"ERROR: batch {batch_index} was refused before any child started. No "
+            f"later batch was dispatched and the {self.phase} phase is NOT marked "
+            f"completed.",
+            f"  - {exc.message}",
+        ]
+        if result.batches_dispatched:
+            lines += [
+                f"Batches already applied this run: "
+                f"{', '.join(str(i) for i in result.batches_dispatched)} — their "
+                f"pre-batch snapshots are intact under "
+                f"{os.path.join(self.phase_dir, 'pre_batch')}/, and re-invoking "
+                f"with --resume re-dispatches only the unfinished batches.",
+                f"Audit log: {self.audit.path}",
+            ]
+        else:
+            lines.append(
+                "Nothing was dispatched and no file was modified."
+            )
         return lines
 
     def _finalize(self, result: SchedulerResult) -> None:
@@ -1239,9 +2052,11 @@ class WriteBatchScheduler:
 
     def _write_report(self, result: SchedulerResult) -> str:
         path = os.path.join(self.phase_dir, WRITE_BATCH_REPORT_FILENAME)
-        Path(self.phase_dir).mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(result.to_dict(), indent=2)
-        Path(path).write_text(payload, encoding="utf-8")
+        # D3l: a scheduler artifact is written under the same rules as any other
+        # executor write — same-directory temp, 0600, ``os.replace`` — so a run
+        # killed mid-write leaves either the old report or the new one, never a
+        # truncated JSON for `status`/CI to parse, and never a umask-wide mode.
+        _atomic_write_json(path, result.to_dict())
         # The executor's own per-dispatch report, so `--status` and the D3k rung
         # accounting look identical on both halves of the executor.
         report = BatchReport(
@@ -1250,6 +2065,7 @@ class WriteBatchScheduler:
             ceilings={"effective": self.write_ceiling(),
                       "driver_max_concurrent_write_subagents":
                           get_max_concurrent_write_subagents(anchor=self.anchor),
+                      "provider_max_concurrent": self.provider_write_limits(),
                       "host_max_concurrent_subagents": self.host_max,
                       "shared_artifact_phase":
                           self.kind in SHARED_ARTIFACT_WRITE_KINDS},
@@ -1377,6 +2193,11 @@ class WriteBatchScheduler:
                     info = preflight_runner(
                         runner, profile=entry["profile"], anchor=self.anchor,
                         key="driver.subagent_runner",
+                        # D3l: this flag renders commands and starts no child, so
+                        # the nested-exec preflight keeps the declared verdict
+                        # (a `denied` host is still refused) and skips its
+                        # throwaway dispatch, which is a real turn.
+                        probe_nested=False,
                     )
                     entry["runner_version"] = info["version"]
                 except ExecutorError as exc:
@@ -1398,8 +2219,8 @@ class WriteBatchScheduler:
                 entries.append(entry)
 
         path = os.path.join(self.phase_dir, DRY_RUN_FILENAME)
-        Path(self.phase_dir).mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps({
+        # Same containment as every other executor write (see ``_write_report``).
+        _atomic_write_json(path, {
             "dry_run_version": 1,
             "kind": self.kind,
             "phase": self.phase,
@@ -1408,13 +2229,14 @@ class WriteBatchScheduler:
                 "effective_write_parallelism": ceiling,
                 "driver_max_concurrent_write_subagents":
                     get_max_concurrent_write_subagents(anchor=self.anchor),
+                "provider_max_concurrent": self.provider_write_limits(),
                 "host_max_concurrent_subagents": self.host_max,
                 "shared_artifact_phase": self.kind in SHARED_ARTIFACT_WRITE_KINDS,
             },
             "write_paths": self.policy.to_dict(),
             "human_task_strategy": plan.strategy,
             "tasks": entries,
-        }, indent=2), encoding="utf-8")
+        })
         return path
 
 

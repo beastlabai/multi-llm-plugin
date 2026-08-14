@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
@@ -91,13 +92,26 @@ def skill_dir() -> Path:
 
 
 def _quote(text: Union[str, Path]) -> str:
-    """Double-quote a path for a copy-pasteable command line.
+    """Encode one argument for the POSIX shell every rendered command targets.
 
-    Double quotes rather than ``shlex.quote``'s single quotes: Windows install
-    paths routinely contain spaces and ``cmd.exe``/PowerShell do not honour
-    single quoting, while POSIX shells honour both.
+    ``shlex.quote``, never hand-written double quotes: a double-quoted string
+    still expands ``$VAR``, a backtick substitution and ``$(cmd)``, and every
+    string quoted here is *filesystem-derived* — the skill dir, a plan path, a
+    question. A checkout under ``/tmp/$(id).d`` would turn a printed follow-up
+    into arbitrary command execution the moment a user ran it, which is not a
+    thing a copy-pasteable command may do. Single quotes are inert in every
+    POSIX shell, and POSIX is the *only* shell these commands are written for:
+    every rendered shim and follow-up is a POSIX-shell command block, which is
+    exactly why Git Bash is a hard install-time prerequisite on Windows
+    (``host_install.GIT_BASH_MISSING`` — "there is no PowerShell instruction
+    path"). So there is no second, ``cmd.exe``-flavoured renderer
+    here to keep in sync; adding a native-Windows command surface means adding
+    its encoder next to this one, not loosening this one.
+
+    An argument with no shell-special character comes back bare, so an ordinary
+    command still reads the way a user would type it.
     """
-    return f'"{text}"'
+    return shlex.quote(str(text))
 
 
 def dispatcher_prefix(base: Optional[Path] = None) -> str:
@@ -118,13 +132,16 @@ def dispatcher_command(
 ) -> str:
     """Build ``uv run … multi_llm.py <mode> <args…>`` with every path resolved.
 
-    Arguments that are paths (or contain whitespace) are quoted; bare flags are
-    not, so the result reads the way a user would type it.
+    **Every** element goes through ``_quote`` — the mode word included. A bare
+    flag and a plain mode word carry no shell-special character, so they come
+    back unchanged and the result still reads the way a user would type it;
+    what the uniform encoding removes is the "looks like a flag, so pass it
+    through raw" branch, which handed a shell whatever a caller had (an ``ask``
+    question, a ``--force-strategy`` value) with no encoding at all.
     """
-    parts = [dispatcher_prefix(base), mode]
+    parts = [dispatcher_prefix(base), _quote(mode)]
     for arg in args:
-        text = str(arg)
-        parts.append(text if text.startswith("-") and " " not in text else _quote(text))
+        parts.append(_quote(arg))
     return " ".join(parts)
 
 
@@ -486,22 +503,71 @@ def parse_result_line(text: str) -> Optional[Dict[str, Any]]:
 # argv inspection (used by the dispatcher's parse-time rejection rules)
 # ---------------------------------------------------------------------------
 
+def _flag_matches(head: str, name: str) -> bool:
+    """Whether the option-name token ``head`` would bind to option ``name``.
+
+    Exact spelling **or an argparse abbreviation**: no parser in the skill passes
+    ``allow_abbrev=False``, so argparse resolves ``--y``, ``--intera`` and
+    ``--det`` to their full options — and a dispatcher rule that scanned for the
+    exact spelling only was therefore bypassable by typing three fewer
+    characters. ``--det`` on a mode that does not support ``--detach`` sailed
+    past the D6b rejection and ran the mode with a flag that does nothing, which
+    is precisely the outcome that rejection exists to prevent.
+
+    ``allow_abbrev`` cannot be fixed from *this* side of the call: it is a
+    property of the parser doing the parsing (and is **not** inherited through
+    ``parents=[...]``), so the scan is what is taught argparse's rule instead —
+    one place rather than one per parser, and it stays correct for the
+    orchestrator parsers a direct invocation reaches too.
+
+    Abbreviation is long-option only (argparse never abbreviates a short flag),
+    and a token is only ever matched against a *longer* name, so a real
+    ``--host-something`` never reads as ``--host``. A prefix that is ambiguous
+    across the target's real options (``--d`` for ``--detach`` and
+    ``--dry-run-subagents``) is reported present here where argparse would
+    instead refuse the whole command line: both end the run at exit 3, and
+    over-reporting keeps the guard closed rather than open.
+    """
+    if head == name:
+        return True
+    if not name.startswith("--"):
+        return False  # short options never abbreviate
+    if not head.startswith("--") or len(head) <= 2:
+        return False  # bare `--`, a short flag, or a positional
+    return name.startswith(head)
+
+
 def flag_present(argv: Sequence[str], *names: str) -> bool:
-    """True if any of ``names`` appears in ``argv``, bare or as ``--flag=value``."""
+    """True if any of ``names`` appears in ``argv``, bare or as ``--flag=value``.
+
+    Matches the way argparse would — see ``_flag_matches`` for why an
+    abbreviation counts.
+    """
     for token in argv:
-        if token in names:
-            return True
         head = token.split("=", 1)[0]
-        if head in names:
-            return True
+        for name in names:
+            if _flag_matches(head, name):
+                return True
     return False
 
 
 def flag_value(argv: Sequence[str], name: str) -> Optional[str]:
-    """The value of ``--name value`` or ``--name=value``, else ``None``."""
+    """The value of ``--name value`` or ``--name=value``, else ``None``.
+
+    The **last** occurrence wins, because that is what a ``store`` action does:
+    reading the first meant ``--force-strategy skip-dependents --force-strategy
+    pause-and-ask`` scanned as ``skip-dependents`` while the run really got
+    ``pause-and-ask``. Abbreviations bind here too (``--force-strat=…``); a
+    trailing occurrence with no value left to take is argparse's error to report
+    and never erases a value an earlier one supplied.
+    """
+    found: Optional[str] = None
     for index, token in enumerate(argv):
-        if token == name and index + 1 < len(argv):
-            return argv[index + 1]
-        if token.startswith(name + "="):
-            return token.split("=", 1)[1]
-    return None
+        head, separator, inline = token.partition("=")
+        if not _flag_matches(head, name):
+            continue
+        if separator:
+            found = inline
+        elif index + 1 < len(argv):
+            found = argv[index + 1]
+    return found

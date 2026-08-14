@@ -20,10 +20,13 @@ restore colon-bearing model specs during reaggregation. A detached run therefore
 adds keys to the *same* document under two reserved objects rather than writing a
 second file with a private shape:
 
-* ``run``: ``{run_id, pid, process_start_time, detached, host, mode, cwd,
+* ``run``: ``{run_id, pid, process_start_time, pgid, detached, host, mode, cwd,
   log_path, heartbeat_at, heartbeat_interval_s, state, exit_code, error,
   resolutions}`` — the **process** state machine
-  (``starting → running → {done, failed, aborted}``).
+  (``starting → running → {done, failed, aborted}``). ``pgid`` is the worker's
+  process group, recorded at start because it cannot be re-derived once the
+  worker dies — it is what the close-out signals to reap surviving provider
+  CLIs (``None`` on Windows, where a Job Object does that).
 * ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
   failed_task_ids, models_done, models_total}`` — reporting only; no external
   actor advances it.
@@ -39,21 +42,67 @@ After the initial ``write_status`` a detached child only ever calls
 ``update_status`` (via :func:`update_run`): a heartbeat-shaped ``write_status``
 would drop ``question``, ``plan_hash`` and ``models_requested`` and break both
 ask resume and the unsanitize map.
+
+**Every write in this module is one critical section** (:func:`checkpoint_lock`).
+Both writers are read-modify-write — ``write_status`` carries the reserved
+objects over from disk, ``update_status`` merges into what it read — and a
+detached run has two writer *threads*: the orchestrator's main thread (phase
+transitions, ``output_files``, the terminal record from ``RunHandle.finish``)
+and ``RunHandle``'s daemon heartbeat, beating every 10 s. Unserialized, a
+heartbeat that read the file just before a main-thread write and
+``os.replace``\\ s just after it reverts that write wholesale — the ``done``
+record back to ``running`` (later mis-closed as ``failed(heartbeat_timeout)``),
+or a dropped ``validation_tasks_path``. The compare-and-set in
+:func:`update_run` does not close that window on its own: it is check-then-act
+against a *separate* read, so the lock has to span the read, the CAS and the
+write.
+
+**And the section has to be interprocess, not just interthread.** The writers of
+one ``run`` record live in *different processes* by design: the worker (main
+thread and heartbeat), ``status``'s ``failed(heartbeat_timeout)`` close-out,
+``status --abort``, and ``--sweep``. ``{phase}/.lock`` cannot serialize them —
+it is *ownership*, taken once by the worker and held for the run's lifetime, so
+the very processes that have to interleave safely with it are the ones that can
+never hold it (``status`` deliberately takes no lock, which is what lets it
+report on a live run). With only a thread lock, an abort and a late completion
+both read ``running``, both pass their expected-state check, and the second
+``os.replace`` wins — a terminal ``aborted`` record silently replaced by
+``done``, or a closed-out predecessor overwriting the run that displaced it. So
+every read-modify-write here takes :func:`checkpoint_lock`: a
+``threading.RLock`` (:data:`_WRITE_LOCK`, reentrant because the write path nests
+``update_run`` → ``update_status`` → ``write_status``) **plus** a
+``process_control.FileMutex`` over ``{phase}/.status.lock``, held across the
+comparison *and* the atomic replace, by claims and terminal transitions alike.
+The mutex file is separate from ``{phase}/.lock`` precisely because the two
+locks answer different questions ("who owns this dir" vs "whose turn is it to
+write"); it is created on demand, never unlinked, and its existence says nothing
+about whether anyone holds it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
+import threading
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
+
+from . import process_control
 
 #: The checkpoint file name. Dot-prefixed on purpose: reaggregation globs
 #: ``{phase_dir}/*.json`` and Python's ``glob`` skips leading-dot names, which is
 #: the only reason this file is not parsed as a model result.
 STATUS_FILENAME = ".status.json"
+
+#: The interprocess mutex guarding every read-modify-write of the checkpoint.
+#: A *second* lock file next to ``{phase}/.lock`` on purpose — that one is
+#: ownership held for the whole run, this one is a turn taken for the length of
+#: one merge (see the module docstring). Dot-prefixed like its sibling, so
+#: reaggregation's ``*.json`` glob never sees it either.
+STATUS_LOCK_FILENAME = ".status.lock"
 
 #: Keys whose value is a dict that is *merged* rather than replaced wholesale, so
 #: a writer that knows about one sub-key cannot erase another writer's.
@@ -75,6 +124,19 @@ RUN_STATE_ABORTED = "aborted"
 
 TERMINAL_RUN_STATES = (RUN_STATE_DONE, RUN_STATE_FAILED, RUN_STATE_ABORTED)
 
+#: Serializes every read-modify-write of the checkpoint within this process, so
+#: the heartbeat thread cannot revert a main-thread write (see module docstring).
+#: Reentrant because the write path nests; held only across local file I/O, so
+#: nothing under it waits on another thread.
+_WRITE_LOCK = threading.RLock()
+
+#: The interprocess mutexes this process currently holds, keyed by lock path.
+#: Only ever touched under :data:`_WRITE_LOCK`, which is also what makes the
+#: entry a sufficient reentrancy record: while the RLock is held no *other*
+#: thread can be inside :func:`checkpoint_lock` at all, so a key that is present
+#: can only be this thread's own outer frame.
+_HELD_MUTEXES: Dict[str, "process_control.FileMutex"] = {}
+
 #: Legal transitions. Anything else is a bug and is refused loudly rather than
 #: merged — including any transition *out of* a terminal state, which is what
 #: keeps "exactly one terminal state per run" true.
@@ -93,8 +155,51 @@ def status_path(phase_dir: str) -> str:
     return os.path.join(str(phase_dir), STATUS_FILENAME)
 
 
+def status_lock_path(phase_dir: str) -> str:
+    """Path of the phase dir's checkpoint mutex (:data:`STATUS_LOCK_FILENAME`)."""
+    return os.path.join(str(phase_dir), STATUS_LOCK_FILENAME)
+
+
 def now_iso() -> str:
     return datetime.now().isoformat()
+
+
+@contextlib.contextmanager
+def checkpoint_lock(phase_dir: str) -> Iterator[None]:
+    """Hold *phase_dir*'s checkpoint mutex — across threads and processes.
+
+    Every read-modify-write in this module runs inside one of these, and so must
+    any caller that has to span a read and a later compare-and-set as one step.
+    Reentrant: the write path nests (``update_run`` → ``update_status`` →
+    ``write_status``), and only the outermost frame takes and drops the
+    interprocess lock. A nested frame must *not* take it a second time — an OS
+    lock is held per open file description, so a second ``open`` of the same
+    file is just another contender, even in the process that already holds it,
+    and every nested write would stall until its wait expired.
+
+    **Best-effort, exactly like the writes it guards.** A phase dir that does not
+    exist (nothing to lock, and the write is about to fail anyway) or a holder
+    that is stopped rather than dead leaves the mutex untaken after its bounded
+    wait; the body then runs unserialized, which is what it did before this lock
+    existed. It is never an exception, because a heartbeat that raises out of a
+    checkpoint write kills a run over a lock file.
+    """
+    with _WRITE_LOCK:
+        # `realpath`, so one phase dir is one lock domain however a caller spells
+        # it: a worker started through a symlinked plan path and a `status
+        # --abort` started through the real one must contend for the same file.
+        key = os.path.realpath(status_lock_path(phase_dir))
+        if key in _HELD_MUTEXES:  # a nested write; the outer frame owns it
+            yield
+            return
+        mutex = process_control.FileMutex(key)
+        mutex.acquire()
+        _HELD_MUTEXES[key] = mutex
+        try:
+            yield
+        finally:
+            del _HELD_MUTEXES[key]
+            mutex.release()
 
 
 # ---------------------------------------------------------------------------
@@ -110,31 +215,36 @@ def write_status(phase_dir: str, data: dict) -> None:
     opening ``state: models_running`` must not erase the heartbeat of the very run
     performing it. Passing the key explicitly (including as ``None``) still wins,
     which is how :func:`claim_run` replaces a predecessor's record.
+
+    The carry-over read and the rename are one critical section (thread *and*
+    process): a concurrent writer between them would either lose its own
+    reserved objects or be reverted by this one.
     """
     temp_path = None
     path = status_path(phase_dir)
-    try:
-        if any(key not in data for key in _RESERVED_OBJECTS):
-            existing = read_status(phase_dir)
-            for key in _RESERVED_OBJECTS:
-                if key not in data and key in existing:
-                    data[key] = existing[key]
-    except Exception:
-        pass
-    try:
-        data["updated_at"] = now_iso()
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=phase_dir, suffix='.tmp', prefix='.status_'
-        )
-        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_path, path)
-    except Exception:
+    with checkpoint_lock(phase_dir):
         try:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
+            if any(key not in data for key in _RESERVED_OBJECTS):
+                existing = read_status(phase_dir)
+                for key in _RESERVED_OBJECTS:
+                    if key not in data and key in existing:
+                        data[key] = existing[key]
         except Exception:
             pass
+        try:
+            data["updated_at"] = now_iso()
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=phase_dir, suffix='.tmp', prefix='.status_'
+            )
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(temp_path, path)
+        except Exception:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass
 
 
 def update_status(phase_dir: str, updates: dict) -> None:
@@ -144,30 +254,36 @@ def update_status(phase_dir: str, updates: dict) -> None:
     replaced, so a heartbeat that carries only ``heartbeat_at`` cannot erase
     ``run.run_id`` and a progress update cannot erase a sibling counter. Every
     other key is replaced, exactly as before.
+
+    The read, the merge and the nested :func:`write_status` are one critical
+    section — held against other processes as well as other threads — so a
+    concurrent writer's document can neither be read stale nor be reverted by
+    the rename that follows.
     """
     path = status_path(phase_dir)
-    try:
-        existing = {}
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                existing = json.load(f)
-        if not isinstance(existing, dict):
-            existing = {}
-        for key in _MERGED_OBJECTS:
-            incoming = updates.get(key)
-            current = existing.get(key)
-            if isinstance(incoming, dict) and isinstance(current, dict):
-                merged = dict(current)
-                merged.update(incoming)
-                updates = dict(updates)
-                updates[key] = merged
-        existing.update(updates)
-        write_status(phase_dir, existing)
-    except Exception:
+    with checkpoint_lock(phase_dir):
         try:
-            write_status(phase_dir, updates)
+            existing = {}
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            if not isinstance(existing, dict):
+                existing = {}
+            for key in _MERGED_OBJECTS:
+                incoming = updates.get(key)
+                current = existing.get(key)
+                if isinstance(incoming, dict) and isinstance(current, dict):
+                    merged = dict(current)
+                    merged.update(incoming)
+                    updates = dict(updates)
+                    updates[key] = merged
+            existing.update(updates)
+            write_status(phase_dir, existing)
         except Exception:
-            pass
+            try:
+                write_status(phase_dir, updates)
+            except Exception:
+                pass
 
 
 def read_status(phase_dir: str) -> Dict[str, Any]:
@@ -197,7 +313,8 @@ def read_run(phase_dir: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class RunConflict(Exception):
-    """A ``run`` write was refused: wrong ``run_id`` or an illegal transition."""
+    """A ``run`` write was refused: wrong ``run_id``, a closed-out (terminal)
+    record, or an illegal transition."""
 
 
 def claim_run(phase_dir: str, record: Dict[str, Any]) -> None:
@@ -213,8 +330,13 @@ def claim_run(phase_dir: str, record: Dict[str, Any]) -> None:
     """
     # Drop the predecessor's `run` *and* `progress` wholesale: inheriting either
     # would report another run's exit code or another run's step as this one's.
-    update_status(phase_dir, {"run": None, "progress": None})
-    update_status(phase_dir, {"run": dict(record)})
+    # Both writes are one critical section — the same one `update_run`'s
+    # compare-and-set takes — so no writer, in this process or another, can
+    # observe (or write into) the momentary run-less document between them and
+    # mistake it for a dir with no owner.
+    with checkpoint_lock(phase_dir):
+        update_status(phase_dir, {"run": None, "progress": None})
+        update_status(phase_dir, {"run": dict(record)})
 
 
 def update_run(
@@ -228,40 +350,73 @@ def update_run(
     """Compare-and-set merge into ``run``; ``True`` when the write happened.
 
     Refuses (returning ``False``) when the on-disk ``run.run_id`` is neither
-    absent nor equal to ``expect_run_id``, or when the requested
-    ``run.state`` is not a legal successor of the recorded one. Both refusals are
-    the same guarantee from two directions: a run that was closed out (by
-    ``status``'s heartbeat-timeout sweep, or by ``--abort``) stays closed, and a
-    second writer cannot interleave its heartbeat with the holder's.
+    absent nor equal to ``expect_run_id``, when the recorded ``run.state`` is
+    already terminal and the update does not carry a ``state`` of its own, or
+    when the requested ``run.state`` is not a legal successor of the recorded
+    one. All three refusals are the same guarantee from three directions: a run
+    that was closed out (by ``status``'s heartbeat-timeout sweep, or by
+    ``--abort``) stays closed, and a second writer cannot interleave its
+    heartbeat with the holder's.
+
+    The middle refusal is the one that stops a *zombie*. A worker that was
+    paused past its heartbeat window (SIGSTOP, a suspended laptop) and closed
+    out keeps the **same** ``run_id``, so the identity check alone lets it
+    through, and a heartbeat carries no ``state`` for the transition table to
+    judge. Left to write, it would go on beating — and therefore go on
+    dispatching providers and interleaving result files with a foreground
+    ``--resume`` — with only its final ``finish()`` refused. So a terminal
+    record accepts nothing but a legal restatement of its own terminal state
+    (``_LEGAL_TRANSITIONS`` allows the self-loop and nothing else), which is
+    what turns ``update_run``'s ``False`` into the heartbeat loop's stop
+    signal (``RunHandle._beat_loop``).
+
+    The comparison and the set share one :func:`checkpoint_lock`, because a CAS
+    whose check happens against one read and whose act happens against a later
+    write is not a CAS at all: the heartbeat thread would re-open a record
+    ``finish()`` closed a moment after it read it — and, since that lock is
+    interprocess, so would ``--abort`` and the stale-cleanup sweep, which run in
+    processes of their own and would otherwise both pass the expected-state
+    check and let the slower ``os.replace`` win.
     """
-    current = read_run(phase_dir)
-    disk_id = current.get("run_id")
-    if disk_id is not None and disk_id != expect_run_id:
-        if not quiet:
-            print(
-                f"NOTE: refusing to update run {expect_run_id} — {phase_dir} is "
-                f"now owned by run {disk_id}",
-                file=sys.stderr,
-            )
-        return False
-    new_state = updates.get("state")
-    if new_state is not None:
-        allowed = _LEGAL_TRANSITIONS.get(current.get("state"), ())
-        if new_state not in allowed:
+    with checkpoint_lock(phase_dir):
+        current = read_run(phase_dir)
+        disk_id = current.get("run_id")
+        if disk_id is not None and disk_id != expect_run_id:
             if not quiet:
                 print(
-                    f"NOTE: refusing illegal run transition "
-                    f"{current.get('state')!r} -> {new_state!r} for run "
-                    f"{expect_run_id} in {phase_dir}",
+                    f"NOTE: refusing to update run {expect_run_id} — {phase_dir} is "
+                    f"now owned by run {disk_id}",
                     file=sys.stderr,
                 )
             return False
-    payload: Dict[str, Any] = dict(extra or {})
-    merged = dict(updates)
-    merged.setdefault("run_id", expect_run_id)
-    payload["run"] = merged
-    update_status(phase_dir, payload)
-    return True
+        disk_state = current.get("state")
+        new_state = updates.get("state")
+        if new_state is None and disk_state in TERMINAL_RUN_STATES:
+            if not quiet:
+                print(
+                    f"NOTE: refusing to update run {expect_run_id} — {phase_dir} "
+                    f"recorded a terminal run.state ({disk_state!r}); the record "
+                    "is closed",
+                    file=sys.stderr,
+                )
+            return False
+        if new_state is not None:
+            allowed = _LEGAL_TRANSITIONS.get(disk_state, ())
+            if new_state not in allowed:
+                if not quiet:
+                    print(
+                        f"NOTE: refusing illegal run transition "
+                        f"{disk_state!r} -> {new_state!r} for run "
+                        f"{expect_run_id} in {phase_dir}",
+                        file=sys.stderr,
+                    )
+                return False
+        payload: Dict[str, Any] = dict(extra or {})
+        merged = dict(updates)
+        merged.setdefault("run_id", expect_run_id)
+        payload["run"] = merged
+        update_status(phase_dir, payload)
+        return True
 
 
 def append_resolution(
@@ -271,13 +426,18 @@ def append_resolution(
 
     ``site`` is a D6 table row identifier, so the table stays the single source
     of truth for what the default *was*.
+
+    Append-to-a-list is itself a read-modify-write, so it takes the same lock:
+    two resolutions recorded from different threads — or different processes —
+    must not lose one.
     """
-    current = read_run(phase_dir)
-    resolutions = list(current.get("resolutions") or [])
-    resolutions.append({"site": site, "decision": decision, "at": now_iso()})
-    return update_run(
-        phase_dir, {"resolutions": resolutions}, expect_run_id=run_id, quiet=True
-    )
+    with checkpoint_lock(phase_dir):
+        current = read_run(phase_dir)
+        resolutions = list(current.get("resolutions") or [])
+        resolutions.append({"site": site, "decision": decision, "at": now_iso()})
+        return update_run(
+            phase_dir, {"resolutions": resolutions}, expect_run_id=run_id, quiet=True
+        )
 
 
 def update_progress(phase_dir: str, updates: Dict[str, Any]) -> None:

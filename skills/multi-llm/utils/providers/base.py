@@ -1,5 +1,6 @@
 """Base protocol for LLM CLI providers."""
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Collection, Dict, List, Optional, Tuple
 
@@ -51,6 +52,92 @@ def split_reasoning_effort(model: str, efforts: Collection[str]) -> Tuple[str, O
     if base and suffix in efforts:
         return base, suffix
     return model, None
+
+
+#: Terms that make a *bare* token a real failure signal rather than a
+#: coincidence. A one-word pattern ("429", "unauthorized") is required to occur
+#: near one of these — outside its own span — because on its own it appears in
+#: places that say nothing about the run: opencode prints per-step costs
+#: (``"cost":0.0429``), every runner prints token counts (``14290``), and a
+#: review answer quotes the plan and diff under review ("the unauthorized branch
+#: returns early").
+_ERROR_CONTEXT = re.compile(
+    r"http|status|code|error|err\b|response|fail|denied|forbidden|reject|"
+    r"invalid|expired|exceeded|missing|quota|retry|throttl|too\s*many|rate|"
+    r"limit|credential|login|log\s*in|sign\s*in|api[\s_-]*key|401|403|429|529"
+)
+
+#: How far either side of a bare-token match :data:`_ERROR_CONTEXT` is looked for.
+_CONTEXT_WINDOW = 48
+
+#: Compiled-pattern cache: the classifier runs on every failed dispatch.
+_STREAM_PATTERNS: Dict[str, "re.Pattern[str]"] = {}
+
+
+def stream_pattern(pattern: str) -> "re.Pattern[str]":
+    """Compile one classifier substring into a boundary-aware regex.
+
+    A textual pattern keeps a left word boundary while staying a prefix match on
+    the right — "rate limit" must still recognize "rate limits" and
+    "rate-limited" — and any run of separators inside the pattern matches any run
+    of separators in the stream, so one entry covers ``rate limit``,
+    ``rate-limit`` and ``ratelimit`` alike. A numeric pattern (an HTTP status
+    code) must additionally stand alone as a token, so ``429`` is not found
+    inside ``0.0429`` or ``14290``.
+
+    Patterns are matched against a lowercased haystack, so the compiled regex is
+    lowercase and carries no ``IGNORECASE`` flag.
+    """
+    token = (pattern or "").strip().lower()
+    cached = _STREAM_PATTERNS.get(token)
+    if cached is not None:
+        return cached
+    if token.isdigit():
+        regex = re.compile(rf"(?<![\w.]){token}(?![\w.])")
+    else:
+        body = re.sub(r"(?:\\?[ _\-])+", r"[\\s_\\-]*", re.escape(token))
+        regex = re.compile(rf"(?<![a-z0-9]){body}")
+    _STREAM_PATTERNS[token] = regex
+    return regex
+
+
+def _needs_context(token: str) -> bool:
+    """Whether ``token`` is too bare to classify a run on its own.
+
+    A multi-word phrase ("not logged in", "too many requests", "quota_exceeded")
+    is specific enough to stand alone; a single token ("429", "unauthorized",
+    "overloaded") is not, because it occurs inside numbers and inside the prose a
+    runner prints about somebody else's code.
+    """
+    return re.search(r"[\s_\-]", token) is None
+
+
+def matches_any(patterns: Collection[str], haystack: str) -> bool:
+    """Whether any declared classifier pattern really occurs in ``haystack``.
+
+    This is the whole difference between the executor classifying a run and
+    guessing at one: the D3k ladder consults
+    :meth:`LLMProvider.classify_failure` for a run with no usable result, and a
+    bare ``pattern in haystack`` test moves such a run onto a rung with different
+    retry rules than the one it belongs on — ``rate_limited`` is retried *without*
+    consuming the retry budget, ``auth_failed`` fails the entire batch.
+    """
+    for pattern in patterns:
+        token = (pattern or "").strip().lower()
+        if not token:
+            continue
+        regex = stream_pattern(token)
+        bare = _needs_context(token)
+        for match in regex.finditer(haystack):
+            if not bare:
+                return True
+            window = "\n".join((
+                haystack[max(0, match.start() - _CONTEXT_WINDOW):match.start()],
+                haystack[match.end():match.end() + _CONTEXT_WINDOW],
+            ))
+            if _ERROR_CONTEXT.search(window):
+                return True
+    return False
 
 
 class LLMProvider(ABC):
@@ -119,6 +206,21 @@ class LLMProvider(ABC):
     min_version: str = ""
     verified_version: str = ""
 
+    #: A cheap, **non-generating** argv that reports whether this CLI is logged in
+    #: (D3c) — a ``login status`` / ``whoami``-class subcommand. The executor
+    #: probes it once per distinct runner per run, in the same preflight that runs
+    #: ``version_cmd``, so a logged-out runner is refused *before* a child is
+    #: spawned instead of being discovered one dispatch at a time (installed is not
+    #: authenticated: every ``is_available()`` is a bare ``shutil.which``).
+    #: Empty means "this CLI offers no such subcommand": the probe is skipped and
+    #: the auth state is recorded ``unknown`` rather than assumed good.
+    auth_check: Tuple[str, ...] = ()
+
+    #: The command that fixes a failed ``auth_check``, named verbatim in the
+    #: exit-3 refusal. Mirrors ``runners[*].login_cmd`` in ``hosts/capabilities.yaml``,
+    #: which is the same fact from the host's side.
+    login_cmd: str = ""
+
     #: Substrings that identify a login/credential notice on either stream, so a
     #: logged-out CLI lands on D3k rung 1 (``auth_failed``, no retry) instead of
     #: burning the retry budget as generic runner noise (D3c).
@@ -138,7 +240,10 @@ class LLMProvider(ABC):
     #: Substrings that identify a rate-limit / quota / overloaded response. A
     #: 429 is **not** a transport failure (D3i): it is retried with backoff and
     #: jitter and does not consume the retry budget, so it needs its own
-    #: classification rather than being absorbed by "no parsed text".
+    #: classification rather than being absorbed by "no parsed text". The bare
+    #: status code is matched **with context** (see :func:`stream_pattern`) — a
+    #: substring test would find it inside a cost or a token count and hand a
+    #: never-retried failure an unlimited retry path.
     rate_limit_patterns: Tuple[str, ...] = (
         "429",
         "rate limit",
@@ -170,15 +275,41 @@ class LLMProvider(ABC):
         Auth is checked first: a logged-out CLI is D3k rung 1 (no retry, whole
         batch fails), and misreading it as a rate limit would retry a condition
         no retry can fix.
+
+        Every pattern is matched through :func:`stream_pattern`, never as a bare
+        substring: the declared sets contain a status code (``429``) and short
+        words (``unauthorized``) that occur inside numbers and longer tokens a
+        runner routinely prints, and both misreadings move a run onto a rung with
+        different retry rules than the one it belongs on.
         """
         haystack = f"{stdout or ''}\n{stderr or ''}".lower()
         if not haystack.strip():
             return None
-        if any(pattern in haystack for pattern in self.auth_error_patterns):
+        if matches_any(self.auth_error_patterns, haystack):
             return "auth_failed"
-        if any(pattern in haystack for pattern in self.rate_limit_patterns):
+        if matches_any(self.rate_limit_patterns, haystack):
             return "rate_limited"
         return None
+
+    def classify_auth_probe(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[bool]:
+        """Read an ``auth_check`` run as authenticated / not / unknown (D3c).
+
+        ``False`` means a login/credential notice was recognized — that is the
+        only verdict that refuses a run, so it is the only one drawn from a
+        pattern match. A non-zero exit with nothing recognized is ``None``
+        ("unknown"), because an older CLI without the subcommand, a broken pipe or
+        an offline probe all exit non-zero without saying anything about
+        credentials, and blocking a run on that would be worse than the dispatch
+        it is meant to save. ``True`` is a clean exit with no notice.
+        """
+        haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+        if matches_any(self.auth_error_patterns, haystack):
+            return False
+        if exit_code != 0:
+            return None
+        return True
 
     def supports_profile(self, profile: str) -> bool:
         """Whether this adapter declares ``profile`` (D3e)."""

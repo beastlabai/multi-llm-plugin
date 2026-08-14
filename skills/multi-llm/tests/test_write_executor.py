@@ -88,6 +88,32 @@ def _install_launcher(bin_dir: Path, name: str) -> Path:
     return target
 
 
+def _install_crashing_launcher(bin_dir: Path, name: str, code: int = 17) -> Path:
+    """A launcher that answers normally and *then* dies with a non-zero exit.
+
+    The shape D3k's write rule exists for: the runner printed its optimistic
+    result JSON, kept editing, and was killed part way. Version and auth probes
+    pass through untouched, or the runner would be refused before dispatch and
+    the classification under test would never run.
+    """
+    target = bin_dir / (f"{name}.py" if os.name == "nt" else name)
+    if target.is_symlink() or target.exists():
+        target.unlink()
+    target.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys\n"
+        "argv = sys.argv[1:]\n"
+        "env = dict(os.environ, MOCK_LLM_PROVIDER=%r)\n"
+        "rc = subprocess.run([sys.executable, %r] + argv, env=env).returncode\n"
+        "probe = any(a in ('--version', '-v', 'login', 'status') for a in argv)\n"
+        "sys.exit(rc if probe or rc else %d)\n"
+        % ("claude-code" if name == "claude" else name, str(MOCK_LLM), code),
+        encoding="utf-8",
+    )
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return target
+
+
 class WriteEnv:
     """A real git repo, a mock PATH, a plan and a phase dir.
 
@@ -301,6 +327,7 @@ class TestWriteProfile:
         """D3h: the sandbox root is the resolved repo root, never inherited."""
         env.use(runner)
         log = env.enable_call_log()
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["s0"]))
         env.edits([_patch_edit(env.plan)])
         result = env.scheduler([env.apply_task(0)]).run()
         assert result.exit_code == 0, result.messages
@@ -362,6 +389,27 @@ class TestFourWriteOutcomes:
         assert result.exit_code == 3
         # The half-applied bytes are deliberately still there.
         assert "edit" in env.plan.read_text()
+
+    def test_partial_application_is_also_a_non_zero_exit(self, env):
+        """D3k inverts the read rule for writes: a crash is never an application.
+
+        The runner prints a schema-valid ``applied`` naming every expected id and
+        *then* dies mid-edit. Claim and diff alone read that as a full
+        application, so the loop would dispatch batch N+1 on top of half-applied
+        bytes; the exit code is what makes it a partial application.
+        """
+        _install_crashing_launcher(env.bin_dir, "codex")
+        executor.reset_version_cache()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "did it"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.stops_the_loop
+        assert "exited 17" in outcome.reason
+        assert result.exit_code == 3
 
     def test_partial_application_is_also_missing_expected_ids(self, env):
         """"Bytes moved" is not "this batch's changes landed" (D3g spot-check)."""

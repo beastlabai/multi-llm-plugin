@@ -72,7 +72,7 @@ from utils.cli_common import (
     record_next,
 )
 from utils.git_utils import get_project_root
-from utils.output_handler import get_output_paths, get_phase_dir
+from utils.output_handler import archive_file, get_output_paths, get_phase_dir
 from utils.plan_updater import TASKS_FILE_REFERENCE_PATTERN
 from utils.stream_bootstrap import bootstrap_streams
 from utils.subagent_prompts import build_task_generation_prompt
@@ -566,6 +566,36 @@ def run_generate_tasks(
             f"instead of re-dispatching (pass --force to re-dispatch)."
         )
         return consume_document(plan_path, result_path)
+
+    if args.force and os.path.exists(result_path):
+        # Skipping the branch above is not enough: the executor's resume rule is
+        # defined by the same artifact (D3i — a task is done iff its result file
+        # exists, parses and validates), so leaving the old file in place makes
+        # the dispatch below a no-op and the consumer ingests exactly the stale
+        # document `--force` was invoked to replace. Move it aside *before*
+        # materialization, and archive rather than delete: a result that cost a
+        # dispatch is never thrown away silently.
+        if getattr(args, "dry_run_subagents", False):
+            # D3l: this run starts no child, so there is nothing to replace the
+            # old result with — archiving it here would change the phase dir
+            # under a flag whose promise is that nothing else changes.
+            print(
+                f"[dry-run-subagents] keeping the existing {RESULT_NAME}: no child "
+                f"is started, so nothing would replace it. The real --force run "
+                f"archives it."
+            )
+        else:
+            try:
+                archived = archive_file(Path(result_path))
+            except OSError as exc:
+                return _fail(
+                    f"ERROR: --force could not move the existing {RESULT_NAME} in "
+                    f"{phase_dir} aside: {exc}\n"
+                    f"       Leaving it would make the re-dispatch a no-op and this "
+                    f"phase would consume the stale document instead. Remove or "
+                    f"rename it by hand, then re-run."
+                )
+            print(f"[force] archived the previous {RESULT_NAME} as {archived}")
 
     try:
         task_file, document = materialize_task_file(plan_path, phase_dir)

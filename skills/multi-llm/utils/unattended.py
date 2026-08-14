@@ -149,6 +149,7 @@ ROWS: Tuple[Row, ...] = (
         dispositions=(AUTO_SELECT, FAIL_CLOSED),
         flags=("--force", "--reaggregate", "--rerun-all"),
         enforced_in=("utils/review_orchestrator_base.py", "ask_orchestrator.py",
+                     "code_review_orchestrator.py",
                      "instructions/review-plan.md"),
     ),
     Row(
@@ -248,7 +249,8 @@ ROWS: Tuple[Row, ...] = (
         modes=("review-tasks",),
         dispositions=(FAIL_CLOSED,),
         flags=(),
-        enforced_in=("check_workflow_prerequisites.py",),
+        enforced_in=("check_workflow_prerequisites.py",
+                     "review_tasks_orchestrator.py"),
     ),
     Row(
         number=14,

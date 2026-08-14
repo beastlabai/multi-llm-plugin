@@ -14,6 +14,7 @@ asserted to survive interleaved heartbeats here.
 import glob
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
@@ -218,9 +219,11 @@ class TestDetachFieldsAreAdditive:
 
     def test_claim_replaces_a_predecessor_run_wholesale(self, tmp_path):
         _checkpoint(tmp_path)
-        status_file.claim_run(str(tmp_path), _run_record("run-old", "done"))
-        status_file.update_run(str(tmp_path), {"exit_code": 0},
-                               expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        # Closed out the way `finish()` does it: state and exit code together,
+        # because a terminal record refuses a stateless merge afterwards.
+        assert status_file.update_run(str(tmp_path), {"state": "done", "exit_code": 0},
+                                      expect_run_id="run-old")
         status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
         data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
         assert data["run"]["run_id"] == "run-new"
@@ -434,12 +437,37 @@ class TestRunCompareAndSet:
 
     def test_heartbeat_writes_need_no_state_and_never_transition(self, tmp_path):
         _checkpoint(tmp_path)
-        status_file.claim_run(str(tmp_path), _run_record("run-a", "done"))
+        status_file.claim_run(str(tmp_path), _run_record("run-a", "starting"))
         assert status_file.update_run(
             str(tmp_path), {"heartbeat_at": status_file.now_iso()},
             expect_run_id="run-a",
         )
-        assert status_file.read_run(str(tmp_path))["state"] == "done"
+        assert status_file.read_run(str(tmp_path))["state"] == "starting"
+
+    @pytest.mark.parametrize("terminal", ["done", "failed", "aborted"])
+    def test_a_heartbeat_against_a_closed_record_is_refused(self, tmp_path, terminal):
+        """The zombie leg of D4b: same run_id, no `state`, still refused.
+
+        A worker paused past its heartbeat window keeps its own run_id, so the
+        identity check passes, and a heartbeat carries no state for the
+        transition table to judge. If the merge succeeded the loop would see
+        ok=True and the zombie would go on dispatching providers over a
+        terminal record; only its final finish() would be refused.
+        """
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-a", terminal))
+        beat = "2999-01-01T00:00:00"
+        assert not status_file.update_run(
+            str(tmp_path), {"heartbeat_at": beat}, expect_run_id="run-a", quiet=True,
+        )
+        # Nothing at all was merged — not the beat, not a sibling key.
+        run = status_file.read_run(str(tmp_path))
+        assert run["state"] == terminal
+        assert run["heartbeat_at"] != beat
+        assert not status_file.append_resolution(
+            str(tmp_path), run_id="run-a", site="D6-row-3", decision="late",
+        )
+        assert status_file.read_run(str(tmp_path))["resolutions"] == []
 
     def test_is_terminal_reads_the_documented_vocabulary(self):
         assert status_file.TERMINAL_RUN_STATES == ("done", "failed", "aborted")
@@ -447,3 +475,86 @@ class TestRunCompareAndSet:
         assert not status_file.is_terminal({"state": "running"})
         assert not status_file.is_terminal({})
         assert not status_file.is_terminal(None)
+
+
+#: Driven in a *second process* by the tests below, because the writers of one
+#: run record are separate processes (worker, heartbeat, `status` close-out,
+#: `--abort`, `--sweep`) and a thread lock proves nothing about them.
+_ABORTER = """
+import sys, time
+sys.path.insert(0, {skill_root!r})
+from utils import status_file
+
+phase = {phase!r}
+with status_file.checkpoint_lock(phase):
+    open({flag!r}, "w").close()          # the lock is mine from here
+    time.sleep({hold})                   # ... and the racer must wait it out
+    status_file.update_run(phase, {{"state": "aborted"}}, expect_run_id="run-a")
+"""
+
+
+class TestCompareAndSwapIsInterprocess:
+    """The CAS spans the read *and* the replace, against other processes too.
+
+    ``{phase}/.lock`` cannot serialize these writers: it is ownership, taken once
+    by the worker for the whole run, so ``status``/``--abort``/``--sweep`` — which
+    take no lock precisely so they can report on a live run — could never hold it.
+    """
+
+    def _spawn_aborter(self, tmp_path, hold: float):
+        flag = tmp_path / "holder-has-the-lock"
+        script = _ABORTER.format(
+            skill_root=str(Path(__file__).parent.parent), phase=str(tmp_path),
+            flag=str(flag), hold=hold,
+        )
+        child = subprocess.Popen([sys.executable, "-c", script])
+        deadline = time.time() + 30
+        while not flag.exists() and time.time() < deadline:
+            if child.poll() is not None:
+                raise AssertionError("the holder process died before locking")
+            time.sleep(0.01)
+        assert flag.exists(), "the holder never took the checkpoint lock"
+        return child
+
+    def test_a_second_process_waits_for_the_checkpoint_lock(self, tmp_path):
+        _checkpoint(tmp_path)
+        child = self._spawn_aborter(tmp_path, hold=1.0)
+        started = time.monotonic()
+        status_file.update_status(str(tmp_path), {"state": "models_complete"})
+        waited = time.monotonic() - started
+        assert child.wait(timeout=30) == 0
+        assert waited > 0.5, (
+            "update_status walked straight into another process's critical "
+            f"section (waited {waited:.2f}s)"
+        )
+        assert status_file.read_status(str(tmp_path))["state"] == "models_complete"
+
+    def test_a_late_completion_cannot_overwrite_another_process_abort(self, tmp_path):
+        """The exact interleaving: both writers see ``running`` and both write."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-a"))
+        child = self._spawn_aborter(tmp_path, hold=1.0)
+        # Enters while the aborter still reads `running`, so a check-then-act CAS
+        # (or a process-local lock) would let this `done` land last and win.
+        wrote = status_file.update_run(
+            str(tmp_path), {"state": "done", "exit_code": 0}, expect_run_id="run-a",
+            quiet=True,
+        )
+        assert child.wait(timeout=30) == 0
+        run = status_file.read_run(str(tmp_path))
+        assert run["state"] == "aborted", (
+            "a terminal abort written by another process was overwritten by a "
+            f"late completion (run.state is {run['state']!r})"
+        )
+        assert not wrote, "the refused write must report False, not silently lose"
+        assert run.get("exit_code") is None
+
+    def test_the_mutex_is_its_own_file_and_is_never_the_phase_lock(self, tmp_path):
+        _checkpoint(tmp_path)
+        assert status_file.status_lock_path(str(tmp_path)).endswith(".status.lock")
+        assert (tmp_path / ".status.lock").exists(), "created next to the checkpoint"
+        assert not (tmp_path / ".lock").exists(), (
+            "the ownership lock is a different file with a different lifetime"
+        )
+        # Dot-prefixed like its sibling, so reaggregation's glob never sees it.
+        assert glob.glob(str(tmp_path / "*.json")) == []

@@ -19,6 +19,7 @@ Test groups map onto the design items:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -26,6 +27,8 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -186,6 +189,55 @@ def _write_validation_task_file(phase_dir: Path, tasks) -> Path:
     path = phase_dir / "validation_tasks.json"
     write_task_file(str(path), document)
     return path
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+class _NeverFinishingPopen:
+    """A child that always times out — and that was never actually spawned.
+
+    ``pid = -1`` is the point: the timeout path signals the child's *process
+    group*, so a fixture handing it a plausible pid would signal a real one.
+    ``kill_tree`` refuses any pid ``<= 0``, which makes this fake inert.
+    """
+
+    spawned = []
+
+    def __init__(self, args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.pid = -1
+        self.returncode = None
+        self.stdin = self.stdout = self.stderr = None
+        self.drains = 0
+        _NeverFinishingPopen.spawned.append(self)
+
+    def communicate(self, input=None, timeout=None):
+        self.drains += 1
+        if self.drains == 1:
+            raise subprocess.TimeoutExpired(
+                cmd=self.args, timeout=timeout or 1, output=b"partial", stderr=b""
+            )
+        return ("partial", "")
+
+    def kill(self):  # pragma: no cover - only the teardown fallback calls this
+        self.returncode = -9
+
+
+@pytest.fixture
+def timing_out_spawn(monkeypatch):
+    """Replace the spawn with a child that never finishes; yields the spawn log."""
+    _NeverFinishingPopen.spawned = []
+    monkeypatch.setattr(executor.subprocess, "Popen", _NeverFinishingPopen)
+    return _NeverFinishingPopen.spawned
 
 
 # ---------------------------------------------------------------------------
@@ -416,14 +468,14 @@ class TestReadOnlyProfile:
         repo = tmp_path / "repo"
         repo.mkdir()
         seen = {}
-        real_run = subprocess.run
+        real_popen = subprocess.Popen
 
         def spy(*args, **kwargs):
             if kwargs.get("cwd"):
                 seen["cwd"] = kwargs["cwd"]
-            return real_run(*args, **kwargs)
+            return real_popen(*args, **kwargs)
 
-        monkeypatch.setattr(executor.subprocess, "run", spy)
+        monkeypatch.setattr(executor.subprocess, "Popen", spy)
         executor.run_tasks(
             [_validation_batch(tmp_path)], phase_dir=str(tmp_path),
             kind="validation", cwd=str(repo),
@@ -523,7 +575,7 @@ class TestFailureLadder:
         def denied(*args, **kwargs):
             raise PermissionError("spawn denied by the host sandbox")
 
-        monkeypatch.setattr(executor.subprocess, "run", denied)
+        monkeypatch.setattr(executor.subprocess, "Popen", denied)
         outcome = self._dispatch(tmp_path, runner_env)
         assert outcome.status == executor.STATUS_SPAWN_FAILED
         assert outcome.rung == 1
@@ -541,21 +593,100 @@ class TestFailureLadder:
         assert len(outcome.attempts) == 1
         assert outcome.fatal
 
-    def test_rung_2_timeout_consumes_the_retry_budget(self, tmp_path, runner_env, monkeypatch):
+    def test_rung_2_timeout_consumes_the_retry_budget(
+        self, tmp_path, runner_env, timing_out_spawn
+    ):
         runner_env.use("codex:gpt-5.5")
-
-        class Boom(subprocess.TimeoutExpired):
-            def __init__(self):
-                super().__init__(cmd=["codex"], timeout=1)
-
-        monkeypatch.setattr(
-            executor.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(Boom())
-        )
         outcome = self._dispatch(tmp_path, runner_env, retries=2)
         assert outcome.status == executor.STATUS_TIMEOUT
         assert outcome.rung == 2
         assert len(outcome.attempts) == 3  # initial + 2 retries
         assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_rung_2_kills_the_child_with_its_process_group(
+        self, tmp_path, runner_env, timing_out_spawn, monkeypatch
+    ):
+        """The kill target is the group, never the CLI alone (D3k rung 2).
+
+        An agentic runner spawns tool children that inherit both its group and
+        its stdout pipe; killing only the direct child leaves them running and
+        leaves the post-kill drain blocked on a pipe that never reaches EOF.
+        """
+        runner_env.use("codex:gpt-5.5")
+        killed = []
+        monkeypatch.setattr(
+            executor.process_control,
+            "kill_tree",
+            lambda pid, **kwargs: (killed.append((pid, kwargs)), "killed")[1],
+        )
+        self._dispatch(tmp_path, runner_env, retries=0)
+
+        # The child is spawned as the root of its own group — the precondition
+        # for the group signal, and the one thing `subprocess.run` cannot do.
+        group_kwargs = executor.process_control.new_process_group_kwargs()
+        assert group_kwargs, "no supported platform spawns without a group flag"
+        for key, value in group_kwargs.items():
+            assert timing_out_spawn[0].kwargs[key] == value
+        # ...and the timeout tears that group down through the one facade.
+        assert killed, "the timed-out child was never killed"
+        pid, kwargs = killed[0]
+        assert pid == timing_out_spawn[0].pid
+        assert "pgid" in kwargs
+        assert kwargs["start_time"] is None  # an unverified kill, requested
+
+    def test_a_timed_out_dispatch_never_hangs_on_a_surviving_grandchild(
+        self, tmp_path, runner_env
+    ):
+        """The regression itself: a grandchild holding the inherited pipe.
+
+        The fake runner backgrounds a child that keeps stdout open well past the
+        dispatch timeout. A leader-only kill (what `subprocess.run(timeout=…)`
+        does) leaves that child running against a task nobody is reading, and
+        leaves the drain waiting on a writer that never goes away. The dispatch
+        must land on rung 2 in bounded time *and* take the tree with it.
+        """
+        if os.name == "nt":  # pragma: no cover - POSIX process groups
+            pytest.skip("process groups are POSIX; Windows tears down via the job")
+        runner_env.use("codex:gpt-5.5")
+        marker = tmp_path / "grandchild.pid"
+        script = runner_env.bin_dir / "codex"
+        script.unlink()
+        script.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/bin/sh
+                case "$1" in --version|-V) echo "codex 9.9.9"; exit 0;; esac
+                # A tool child that inherits stdout and outlives its parent.
+                sh -c 'echo $$ > "{marker}"; sleep 30' &
+                sleep 30
+                """
+            ),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        done = threading.Event()
+        box = {}
+
+        def run():
+            try:
+                box["outcome"] = executor.dispatch_task(
+                    _validation_batch(tmp_path), phase_dir=str(tmp_path),
+                    runner="codex:gpt-5.5", timeout=2, retries=0,
+                    sleep=lambda _s: None,
+                )
+            finally:
+                done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        assert done.wait(60), "the dispatch never returned — the drain hung"
+        assert box["outcome"].status == executor.STATUS_TIMEOUT
+
+        pid = int(marker.read_text(encoding="utf-8").strip())
+        deadline = time.time() + 10
+        while time.time() < deadline and _pid_alive(pid):
+            time.sleep(0.1)
+        assert not _pid_alive(pid), "the runner's tool child survived the kill"
 
     def test_rung_3_rate_limited_does_not_consume_the_retry_budget(
         self, tmp_path, runner_env, monkeypatch
@@ -634,14 +765,15 @@ class TestFailureLadder:
         """Exit code is evidence, never the verdict, for a read task."""
         runner_env.use("codex:gpt-5.5")
         runner_env.echo("validation")
-        real_run = executor.subprocess.run
+        real_popen = executor.subprocess.Popen
 
-        def nonzero(*args, **kwargs):
-            completed = real_run(*args, **kwargs)
-            completed.returncode = 3
-            return completed
+        class NonZero(real_popen):
+            def communicate(self, *args, **kwargs):
+                streams = super().communicate(*args, **kwargs)
+                self.returncode = 3
+                return streams
 
-        monkeypatch.setattr(executor.subprocess, "run", nonzero)
+        monkeypatch.setattr(executor.subprocess, "Popen", NonZero)
         outcome = self._dispatch(tmp_path, runner_env)
         assert outcome.status == executor.STATUS_OK
         assert "exited 3" in (outcome.reason or "")
@@ -707,6 +839,68 @@ class TestBatchOutcome:
         assert all(row["status"] == executor.STATUS_RUNNER_ERROR
                    for row in report["tasks"])
         assert all(row["rung"] == 4 for row in report["tasks"])
+
+    def _failed_batch_message(self, tmp_path, runner_env, monkeypatch, host):
+        """One dispatched-and-failed batch, returning its exit-3 message."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.setenv("MOCK_LLM_FAIL", "1")
+        task_file = _write_validation_task_file(
+            tmp_path, [_validation_batch(tmp_path)]
+        )
+        args = type(
+            "Args", (), {"exec_subagents": True, "yes": True, "host": host}
+        )()
+        with pytest.raises(executor.BatchFailed) as excinfo:
+            executor.continue_past_marker(
+                args, task_file=str(task_file), phase_dir=str(tmp_path),
+                phase="review-plan", label="validation",
+                retry_command="uv run … multi_llm.py review-plan p.md --force",
+            )
+        return excinfo.value.message
+
+    def test_a_multi_turn_host_is_told_to_re_invoke(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The instruction is followable, so it is addressed to the agent."""
+        message = self._failed_batch_message(
+            tmp_path, runner_env, monkeypatch, "claude-code"
+        )
+        assert "Re-invoke to retry only the failures (validation-batch-0)" in message
+        assert "a human has to act on it" not in message
+        assert "uv run … multi_llm.py review-plan p.md --force" in message
+
+    def test_a_single_turn_host_addresses_the_human_instead(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """No turn follows this command, so no agent can follow the instruction.
+
+        The value is read from the capability data, not assumed: flipping the
+        entry flips the addressee, which is what keeps the executor honest when a
+        host's real answer changes.
+        """
+        from utils import host_capabilities as caps
+
+        document = copy.deepcopy(caps.load())
+        document["hosts"]["opencode"]["multi_turn"] = False
+        monkeypatch.setattr(caps, "load", lambda base=None: document)
+
+        message = self._failed_batch_message(
+            tmp_path, runner_env, monkeypatch, "opencode"
+        )
+        assert "no agent turn follows this output" in message
+        assert "a human has to act on it" in message
+        assert "Re-invoke to retry only the failures" not in message
+        # The fix itself is unchanged: the command still has to be named.
+        assert "uv run … multi_llm.py review-plan p.md --force" in message
+
+    def test_the_shipped_opencode_entry_keeps_the_agent_addressee(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Its recorded run took four tool turns inside one `opencode run`."""
+        message = self._failed_batch_message(
+            tmp_path, runner_env, monkeypatch, "opencode"
+        )
+        assert "Re-invoke to retry only the failures" in message
 
     def test_no_failure_path_reaches_salvage(self, tmp_path, runner_env, monkeypatch):
         """A failed subagent task never triggers salvage — it blocks the phase."""
@@ -977,7 +1171,8 @@ class TestEveryKindReachesItsConsumer:
         assert executor.run_tasks(
             tasks, phase_dir=str(tmp_path), kind="human_decision_judge"
         ).ok
-        assert (tmp_path / "human_decision_batch_0.json").exists()
+        # Keyed by the judged group's stable id, never by list position.
+        assert (tmp_path / "human_decision_batch_aaaa000000000000.json").exists()
 
         ingest = ingest_verdicts(
             phase_dir=str(tmp_path), expected_group_ids=["aaaa000000000000"]
@@ -1316,7 +1511,7 @@ class TestEveryKindReachesItsConsumer:
         # The judges ran, their verdict FILES landed, and the decisions reached
         # both the state record and the apply set — in this one invocation.
         assert (phase_dir / JUDGE_TASKS_FILENAME).exists()
-        assert (phase_dir / "human_decision_batch_0.json").exists()
+        assert (phase_dir / "human_decision_batch_aaaa000000000000.json").exists()
         assert orch.needs_human == []
         assert [g["group_hash"] for g in orch.valid] == ["aaaa000000000000"]
         decisions = json.dumps(orch.state.state)
@@ -1350,6 +1545,7 @@ class TestAdditiveUntilAsked:
             raise AssertionError("the executor spawned a child with the flag off")
 
         monkeypatch.setattr(executor.subprocess, "run", explode)
+        monkeypatch.setattr(executor.subprocess, "Popen", explode)
         args = type("Args", (), {"exec_subagents": False})()
         assert executor.continue_past_marker(
             args, task_file=str(task_file), phase_dir=str(tmp_path),
@@ -1575,6 +1771,198 @@ class TestRunnerVersions:
                 f"{VERSION_STRINGS[key]!r} but the adapter's verified_version is "
                 f"{provider.verified_version!r}"
             )
+
+
+class TestRunnerAuthPreflight:
+    """D3c: installed is not authenticated, and the probe runs before any child."""
+
+    def test_a_logged_out_runner_is_refused_before_any_child(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        monkeypatch.setenv("MOCK_LLM_LOGGED_OUT", "1")
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        message = excinfo.value.message
+        assert excinfo.value.reason_code == "not_authenticated"
+        assert excinfo.value.exit_code == 3
+        assert "codex:gpt-5.5" in message
+        # The exact login command, so the fix needs no lookup.
+        assert "codex login" in message
+        # Refused at preflight: no child ran, so no result file exists.
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_an_authenticated_runner_is_probed_once_and_recorded(
+        self, tmp_path, runner_env
+    ):
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        info = executor.preflight_runner("codex:gpt-5.5")
+        assert info["auth"] == "ok"
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path, i) for i in range(2)],
+            phase_dir=str(tmp_path), kind="validation",
+        )
+        assert report.ok
+
+    def test_a_runner_without_a_probe_is_unknown_never_assumed_good(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """claude-code ships no non-interactive status subcommand (D3c)."""
+        runner_env.use("claude-code:sonnet")
+        runner_env.echo("validation")
+        monkeypatch.setenv("MOCK_LLM_LOGGED_OUT", "1")
+        assert not registry.get_provider("claude-code").auth_check
+        info = executor.preflight_runner("claude-code:sonnet")
+        assert info["auth"] == "unknown"
+
+    def test_an_unreadable_probe_never_blocks(self, tmp_path, runner_env, monkeypatch):
+        """A probe that cannot run at all is `unknown`, not a refusal."""
+        monkeypatch.setattr(executor, "_run_probe", lambda argv: None)
+        runner_env.use("codex:gpt-5.5")
+        info = executor.preflight_runner("codex:gpt-5.5")
+        assert info["auth"] == "unknown"
+
+    @pytest.mark.parametrize("name", ["codex", "opencode"])
+    def test_a_declared_probe_is_non_generating(self, name):
+        """The probe must be a status subcommand, never a throwaway dispatch."""
+        provider = registry.get_provider(name)
+        assert provider.auth_check and provider.login_cmd
+        assert provider.auth_check[0] == provider.version_cmd[0]
+        assert not any(
+            arg in provider.auth_check for arg in ("exec", "run", "--json", "-p")
+        )
+
+
+class TestNestedExecPreflight:
+    """D3c: can a runner run *inside this host*, asked before the batch is scheduled.
+
+    The throwaway dispatch is the one preflight leg that costs a real turn, so
+    every case here fakes the capture rather than spawning: what is being pinned
+    is the classification and the caching, not the mock CLI.
+    """
+
+    class _Capture:
+        def __init__(self, **kwargs):
+            self.stdout = kwargs.get("stdout", "")
+            self.stderr = kwargs.get("stderr", "")
+            self.exit_code = kwargs.get("exit_code", 0)
+            self.duration = 0.0
+            self.timed_out = kwargs.get("timed_out", False)
+            self.launch_error = kwargs.get("launch_error")
+            self.argv = []
+
+    def _probe(self, monkeypatch, host="codex", **capture):
+        """Run the nested leg on *host* against one faked probe capture."""
+        spawned = []
+
+        def fake_spawn(**kwargs):
+            spawned.append(kwargs)
+            return self._Capture(**capture)
+
+        monkeypatch.setenv("MULTI_LLM_HOST", host)
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        executor.reset_version_cache()
+        try:
+            state = executor._detect_nested_exec(
+                "codex", "gpt-5.5", key="driver.subagent_runner",
+                spec="codex:gpt-5.5",
+            )
+        except executor.RunnerRejected as exc:
+            return exc, spawned
+        return state, spawned
+
+    def test_an_unknown_host_is_probed_once_and_recorded(self, monkeypatch):
+        """`unknown` in the data means "go and find out", not "assume allowed"."""
+        state, spawned = self._probe(
+            monkeypatch, stdout="MULTI_LLM_NESTED_EXEC_OK", exit_code=0
+        )
+        assert state == "allowed"
+        assert len(spawned) == 1
+        # Read-only regardless of the batch's own profile: a preflight writes
+        # nothing, so it never holds write access.
+        assert spawned[0]["profile"] == PROFILE_AGENT_READONLY
+        # Cached per host/runner: the second distinct runner in a batch does not
+        # buy a second billed turn.
+        executor._detect_nested_exec(
+            "codex", "gpt-5.5", key="driver.subagent_runner", spec="codex:gpt-5.5"
+        )
+        assert len(spawned) == 1
+
+    def test_an_allowed_host_spawns_nothing(self, monkeypatch):
+        """claude-code declares all three legs allowed; the data has answered."""
+        state, spawned = self._probe(
+            monkeypatch, host="claude-code", stdout="ok", exit_code=0
+        )
+        assert state == "allowed" and spawned == []
+
+    def test_a_declared_denial_is_refused_before_any_child(self, monkeypatch):
+        from utils import host_capabilities as caps
+
+        monkeypatch.setattr(caps, "nested_exec", lambda host_id, base=None: {
+            "spawn": "denied", "network": "unknown", "credentials": "unknown",
+            "notes": "The host sandbox forbids a second agent CLI.",
+        })
+        rejected, spawned = self._probe(monkeypatch, stdout="ok")
+        assert isinstance(rejected, executor.RunnerRejected)
+        assert rejected.reason_code == "nested_exec_denied"
+        assert rejected.exit_code == 3
+        assert "spawn" in rejected.message and "sandbox" in rejected.message
+        assert spawned == []
+
+    @pytest.mark.parametrize("capture,reason", [
+        ({"launch_error": "Operation not permitted"}, "nested_exec_spawn"),
+        ({"stderr": "error: connection refused", "exit_code": 1},
+         "nested_exec_network"),
+        ({"stderr": "ERROR: not logged in", "exit_code": 1},
+         "nested_exec_credentials"),
+    ])
+    def test_a_probed_denial_names_its_leg_and_exits_three(
+        self, monkeypatch, capture, reason
+    ):
+        rejected, _ = self._probe(monkeypatch, **capture)
+        assert isinstance(rejected, executor.RunnerRejected), rejected
+        assert rejected.reason_code == reason
+        assert rejected.exit_code == 3
+        assert "Nothing was dispatched." in rejected.message
+
+    @pytest.mark.parametrize("capture", [
+        {"timed_out": True},
+        {"exit_code": 7, "stderr": "something the classifier does not know"},
+        {"exit_code": 0, "stdout": "", "stderr": ""},
+    ])
+    def test_an_inconclusive_probe_never_blocks(self, monkeypatch, capture):
+        """A preflight probe reports; it never blocks on its own failure."""
+        state, _ = self._probe(monkeypatch, **capture)
+        assert state == "unknown"
+
+    def test_a_dry_run_keeps_the_verdict_and_starts_no_child(self, monkeypatch):
+        """D3l: `--dry-run-subagents` promises no child, and the probe is one."""
+        spawned = []
+        monkeypatch.setenv("MULTI_LLM_HOST", "codex")
+        monkeypatch.setattr(
+            executor, "_spawn",
+            lambda **kwargs: spawned.append(kwargs) or self._Capture(stdout="ok"),
+        )
+        executor.reset_version_cache()
+        state = executor._detect_nested_exec(
+            "codex", "gpt-5.5", key="driver.subagent_runner",
+            spec="codex:gpt-5.5", probe=False,
+        )
+        assert state == "unknown" and spawned == []
+        # Not cached: a real dispatch later in the same process still probes.
+        executor._detect_nested_exec(
+            "codex", "gpt-5.5", key="driver.subagent_runner", spec="codex:gpt-5.5"
+        )
+        assert len(spawned) == 1
+
+    def test_the_preflight_reports_the_leg(self, runner_env, monkeypatch):
+        """The verdict travels on the same record as version and auth."""
+        runner_env.use("codex:gpt-5.5")
+        info = executor.preflight_runner("codex:gpt-5.5")
+        assert info["nested_exec"] == "allowed"  # default host: claude-code
 
 
 @pytest.mark.config_override

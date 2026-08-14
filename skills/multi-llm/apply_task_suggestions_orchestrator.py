@@ -461,7 +461,8 @@ For each suggestion type, follow these rules precisely:
   - `files_to_modify` (list of files to change)
   - `files_to_create` (list of new files, if any)
   - `estimated_complexity` (low/medium/high)
-  - `subagent_type` (or manual type if applicable)
+  - `executor_role` — rendered as `**Executor**: agent`, or as
+    `**Type**: Manual (user action required)` when the task is for a human
   - `depends_on` (list of prerequisite task IDs, or empty)
   - Acceptance criteria (bulleted list)
 - After adding, regenerate the dependency graph and update header metadata (task count, complexity summary)
@@ -469,8 +470,10 @@ For each suggestion type, follow these rules precisely:
 ### Modification
 - Update the specified task fields (description, dependencies, acceptance criteria, etc.)
 - Modified tasks MUST preserve or explicitly update ALL canonical fields
-  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `subagent_type`,
-  acceptance criteria) — never silently drop fields
+  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `executor_role`,
+  acceptance criteria) — never silently drop fields; a task rendered as
+  `**Type**: Manual (user action required)` stays manual unless the suggestion
+  says otherwise
 - If changing `depends_on`, regenerate the dependency graph and update header metadata
 
 ### Deletion

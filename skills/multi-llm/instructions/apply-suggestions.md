@@ -444,6 +444,8 @@ Items whose decision was offloaded to Claude — via `--claude-decide`, the batc
    ```
    Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue.
 
+   **Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+
 ---
 
 ## JSON Output Structure
@@ -681,69 +683,30 @@ uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-sugges
 
 When running with `--revalidate` (without `--internal-revalidation`), the orchestrator outputs a revalidation marker.
 
-#### Reference-Based Revalidation
+#### The task file
 
-The `revalidation_tasks.json` file uses a reference-based format (small metadata file):
-```json
-{
-  "batches": [
-    {
-      "batch_index": 0,
-      "group_indices": [0, 2, 5],
-      "output_path": "{plan}/review-plan/validation_batch_0.json"
-    }
-  ],
-  "grouped_file": "{plan}/review-plan/grouped.json",
-  "plan_file": "/absolute/path/to/plan.md",
-  "item_indices": [0, 2, 5],
-  "reaggregate_command": "uv run ... multi_llm.py apply-suggestions ... --reaggregate"
-}
-```
+`revalidation_tasks.json` carries `tasks_schema_version: 2` and one complete task
+per batch under `batches` — each with `prompt`, `output_name`, the derived
+`output_path`, `result_channel: file`, `context_mode: inline`, `capability_tier`,
+`executor_role` and `task_id`. The plan excerpt and this batch's suggestion
+records travel **inside** `prompt`; `item_indices` and `original_validation` stay
+on the file for the merge step.
+
+**For each task in the file, run `task.prompt` as a subagent, then write the JSON
+it returns to `task.output_path`.** That is the whole contract — do not assemble a
+prompt, and do not tell the subagent to write the file itself.
+
+A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
+`inputs` hashes no longer match their sources, is refused with exit 3: re-run the
+phase with `--force` to re-materialize it.
 
 #### Single Batch: `[REVALIDATION_PENDING]`
 
 If `[REVALIDATION_PENDING]` marker is present:
-1. Read `revalidation_tasks.json` from `{plan}/review-plan/` (small metadata file)
-2. Spawn a single revalidation subagent that reads source files directly:
-
-   ```
-   Spawn one subagent with:
-     description: "Revalidate failed suggestions"
-     prompt: |
-       Revalidate suggestion groups that previously failed validation.
-
-       Read these files:
-       - Grouped suggestions: {grouped_file from revalidation_tasks.json}
-       - Plan context: {plan_file from revalidation_tasks.json}
-
-       Revalidate ONLY these groups (use group_hash from grouped.json to identify each):
-       {for each i: "  index {group_indices[i]} (group_hash: {group_ids[i]})" from batches[N]}
-       You MUST output EXACTLY {len(group_indices)} results — one per requested group.
-       Do NOT revalidate or include results for any other groups.
-
-       For each group, determine:
-       - "valid": Issue is real, should be addressed
-       - "invalid": False positive, not applicable
-       - "needs-human-decision": Requires human judgment
-
-       Write the results (with your host's file-write, not Bash) to: {output_path from batches[N]}
-
-       Output format:
-       {
-         "groups": [
-           {"group_index": 0, "group_hash": "<copy from group's group_hash field>", "status": "valid|invalid|needs-human-decision", "reason": "...", "confidence": 0.0-1.0}
-         ],
-         "metadata": {"model": "claude", "timestamp": "ISO", "schema_version": "2.1"}
-       }
-
-       IMPORTANT: Copy the exact group_hash value from each group in grouped.json into your output.
-
-       CRITICAL: Your entire response MUST be a single brief line, e.g.:
-       "Done: wrote 3 revalidation results to /path/to/output.json"
-       Do NOT include reasoning, analysis, or explanation in your response.
-   ```
-
-3. After the subagent writes the result file, run the orchestrator again (without `--revalidate`)
+1. Read `revalidation_tasks.json` from `{plan}/review-plan/`
+2. Run the single task's `prompt` as a subagent and write its JSON reply to that
+   task's `output_path`
+3. After the result file is written, run the orchestrator again (without `--revalidate`)
 
 #### Multiple Batches: `[REVALIDATION_BATCHES_PENDING]`
 
@@ -753,9 +716,9 @@ If `[REVALIDATION_BATCHES_PENDING]` marker is present:
 
 **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-For each batch in `batches` array, spawn a Task agent using the same prompt template above, but with that batch's `group_indices` and `output_path`.
+For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
 
-**Run all batches in parallel** (one batch of parallel subagent spawns).
+**Run all batches in parallel** (single message with multiple subagent calls).
 
 **Strategy B: Wave-based parallel spawning (> 4 batches)**
 

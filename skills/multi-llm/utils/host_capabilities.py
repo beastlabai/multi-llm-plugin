@@ -8,10 +8,13 @@ Three things live here, and nothing else:
 * **Resolving a host id** — ``--host <id>`` (baked into a shim at install time),
   else ``$MULTI_LLM_HOST``, else ``claude-code``. An unknown id is exit 3 listing
   the ones that exist; Python **never sniffs the environment to guess its host**.
-* **Rendering the three verb sentences** for an entry — one fixed phrasing per
-  enum value. This is the whole point of the indirection: the verb the core names
-  is resolved to one concrete imperative *here*, at render time, so the driving
-  agent resolves nothing and the matrix is never on an agent read path.
+* **Rendering the sentences a host's capability decides** — the three verb
+  sentences a shim bakes in (one fixed phrasing per enum value) and, on the same
+  principle, the recovery instruction a failed batch prints (:func:`retry_instruction`,
+  addressed by ``multi_turn`` to whoever that host leaves able to follow it).
+  This is the whole point of the indirection: the capability is resolved to one
+  concrete imperative *here*, in Python, so the driving agent resolves nothing
+  and the matrix is never on an agent read path.
 
 ``providers.yaml`` ``driver.*`` is user config and always wins over anything here;
 this file states *facts about hosts* and ships with the skill.
@@ -182,6 +185,65 @@ def require_executor_runner(host_id: str, base: Optional[str] = None) -> None:
     )
 
 
+#: The three lists every ``env_guards`` block declares (D3c/D5b).
+ENV_GUARD_LISTS: Tuple[str, ...] = ("guards", "session_scoped", "passthrough")
+
+
+def env_guards(host_id: str, base: Optional[str] = None) -> Dict[str, List[str]]:
+    """This host's declared child-env guards (D3c/D5b), always three lists.
+
+    ``guards`` are the nested-session markers a dispatched runner must not
+    inherit, ``session_scoped`` the ids that would make a child join or overwrite
+    the parent's session, and ``passthrough`` the names the host *sanctions* for
+    the runner (a credential the runner legitimately needs), which therefore
+    survive the strip. Literal names only — the schema rejects a ``*``, because a
+    prefix sweep would take the runner's own credentials with it.
+    """
+    declared = entry(host_id, base).get("env_guards") or {}
+    return {
+        name: [str(value) for value in (declared.get(name) or ())]
+        for name in ENV_GUARD_LISTS
+    }
+
+
+#: The three independent ways a host can stop a dispatched runner (D3c), in the
+#: order every consumer reports them.
+NESTED_EXEC_LEGS: Tuple[str, ...] = ("spawn", "network", "credentials")
+
+
+def nested_exec(host_id: str, base: Optional[str] = None) -> Dict[str, str]:
+    """This host's declared ``nested_exec`` verdict, always the three legs + notes.
+
+    ``spawn`` is "may this host's shell start a third-party agent CLI at all",
+    ``network`` is "can that CLI reach its provider API from inside the sandbox",
+    ``credentials`` is "can it read its own auth store" — each
+    ``allowed | needs-config | denied | unknown``, with ``notes`` naming the flag
+    or setting that grants it. A missing or unreadable block reads as ``unknown``
+    on every leg rather than as ``allowed``: the executor's preflight probes an
+    ``unknown`` leg with a throwaway dispatch (D3c), and defaulting to ``allowed``
+    would silently skip exactly that probe.
+    """
+    declared = entry(host_id, base).get("nested_exec") or {}
+    states = {
+        leg: str(declared.get(leg) or "unknown") for leg in NESTED_EXEC_LEGS
+    }
+    states["notes"] = str(declared.get("notes") or "").strip()
+    return states
+
+
+def is_multi_turn(host_id: str, base: Optional[str] = None) -> bool:
+    """Does this host leave the driving agent able to act on a command's output?
+
+    ``multi_turn`` is one boolean over two mechanisms — a further tool call
+    inside the same invocation, or a conversation the next invocation resumes —
+    because every consumer asks the same single question: *after this command
+    returns, is an agent still there to read it and do something?* Either
+    mechanism answers that yes; a host that answers no ends its invocation with
+    the command it ran, so the output is read by a human and by nobody else.
+    """
+    return bool(entry(host_id, base)["multi_turn"])
+
+
 def is_free_text_ask(host_id: str, base: Optional[str] = None) -> bool:
     return entry(host_id, base)["ask"] == "free-text"
 
@@ -300,3 +362,54 @@ def verb_sentences(host_id: str, base: Optional[str] = None) -> List[str]:
 def verb_block(host_id: str, base: Optional[str] = None) -> str:
     """The three sentences as the markdown list a shim embeds."""
     return "\n".join(f"- {line}" for line in verb_sentences(host_id, base))
+
+
+# ---------------------------------------------------------------------------
+# Recovery wording — a failed run's instruction goes to whoever can follow it
+# ---------------------------------------------------------------------------
+# Same fix, two addressees, chosen by ``multi_turn``. The resolution happens
+# *here*, in Python, from the ``--host`` id the shim baked into the command that
+# is failing — the same rule as the verb sentences, and for the same reason: the
+# agent reads a finished sentence, never the matrix. Telling the agent of a host
+# with no follow-up turn to "re-invoke to retry" is an instruction nobody in that
+# run is able to follow, which is how a failed batch becomes a silently abandoned
+# one; naming the human is the honest form of the same fix.
+
+_RETRY_LEAD: Dict[bool, str] = {
+    True: (
+        "Re-invoke to retry only the failures ({failed}) — completed tasks are "
+        "skipped by their result files:"
+    ),
+    False: (
+        "This host ends its run with the command that just failed, so no agent "
+        "turn follows this output — a human has to act on it. Re-invoke the "
+        "phase to retry only the failures ({failed}); completed tasks are "
+        "skipped by their result files:"
+    ),
+}
+
+#: Printed when the caller has no resolved command to name. The retry *is* the
+#: same invocation, so "the same command" is always true, on either host.
+_RETRY_FALLBACK = "  (re-run the same command; completed tasks are skipped)"
+
+
+def retry_instruction(
+    host_id: str,
+    *,
+    failed_ids: str = "",
+    retry_command: Optional[str] = None,
+    base: Optional[str] = None,
+) -> List[str]:
+    """The retry block a failed batch prints, addressed to whoever can act.
+
+    Never raises. An unknown host id or unreadable capability data is a broken
+    install, and dropping the retry command over it would cost a caller more
+    than the wrong addressee does: the fallback is the reference host's answer,
+    which is the wording this path printed before the field had a consumer.
+    """
+    try:
+        multi_turn = is_multi_turn(host_id, base)
+    except Exception:  # pragma: no cover - unknown host / unreadable data
+        multi_turn = True
+    lead = _RETRY_LEAD[multi_turn].format(failed=failed_ids or "none recorded")
+    return [lead, f"  {retry_command}" if retry_command else _RETRY_FALLBACK]

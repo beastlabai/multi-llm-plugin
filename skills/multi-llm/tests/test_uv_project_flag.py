@@ -9,6 +9,7 @@ changes cwd, causing full relative paths to double up:
 """
 
 import os
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -18,14 +19,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import cli_common
-from utils.validation import prepare_batched_validation_tasks
+from utils.validation import (
+    prepare_batched_validation_tasks,
+    resolved_reaggregate_command,
+)
 
 SKILL_DIR = "${CLAUDE_SKILL_DIR}"
 DOUBLED_PATH = f"{SKILL_DIR}/{SKILL_DIR}/"
 
 
 class TestReaggregateCommandUsesProject:
-    """Verify reaggregate_command in prepare_batched_validation_tasks uses --project."""
+    """Verify the follow-up command rebuilt from a batched validation task
+    file uses --project (the file itself stores only mode + plan, D1c)."""
 
     def _make_groups(self):
         return [
@@ -45,7 +50,7 @@ class TestReaggregateCommandUsesProject:
                 plan_file="/tmp/plan.md",
                 orchestrator="review_plan_orchestrator.py",
             )
-            cmd = result["reaggregate_command"]
+            cmd = resolved_reaggregate_command(result)
             assert "--project" in cmd, f"Expected --project in: {cmd}"
             assert "--directory" not in cmd, f"Found --directory in: {cmd}"
 
@@ -58,7 +63,7 @@ class TestReaggregateCommandUsesProject:
                 plan_file="/tmp/plan.md",
                 orchestrator="review_plan_orchestrator.py",
             )
-            cmd = result["reaggregate_command"]
+            cmd = resolved_reaggregate_command(result)
             assert DOUBLED_PATH not in cmd, f"Doubled path found in: {cmd}"
 
     def test_reaggregate_contains_full_script_path(self):
@@ -70,11 +75,16 @@ class TestReaggregateCommandUsesProject:
                 plan_file="/tmp/plan.md",
                 orchestrator="review_plan_orchestrator.py",
             )
-            cmd = result["reaggregate_command"]
+            cmd = resolved_reaggregate_command(result)
             # Fully resolved from __file__ (no ${CLAUDE_SKILL_DIR} a shell has
-            # to expand) and routed through the single entry point.
+            # to expand) and routed through the single entry point. Asserted
+            # through `shlex.split` rather than against a quoting style: the
+            # command is POSIX-shell-encoded (`cli_common._quote`), so a path
+            # needing no quoting is emitted bare and one that does is quoted
+            # however the encoder chooses — what must hold is that the script
+            # path arrives as exactly one argv element.
             resolved = cli_common.skill_dir()
-            assert f'"{resolved / "multi_llm.py"}"' in cmd
+            assert str(resolved / "multi_llm.py") in shlex.split(cmd)
             assert "CLAUDE_SKILL_DIR" not in cmd
 
 

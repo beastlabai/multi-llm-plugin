@@ -216,6 +216,35 @@ class TestShim:
             "default on every host that is not the interactive reference host"
         )
 
+    def test_interactive_is_a_substitution_for_yes_never_a_second_flag(
+        self, host_id, path
+    ):
+        """D6b's other half: `--interactive` *replaces* the baked `--yes`.
+
+        A shim that bakes `--yes` and then tells the agent to pass the user's flags
+        through verbatim renders `--yes --interactive`, which the dispatcher rejects
+        with exit 3 — so interactive mode is unreachable on exactly the hosts whose
+        gates only render under `--interactive`. Read through the installer's own
+        helpers so `--check` and this guard cannot disagree.
+        """
+        from utils import host_install
+
+        entry = caps.entry(host_id)
+        if not entry["installable"]:
+            return
+        rendered = _rendered(host_id, path)
+        commands = "\n".join(host_install.dispatcher_commands(rendered))
+        assert "--interactive" not in commands, (
+            f"{path.name} bakes --interactive into the dispatcher command; with "
+            "--yes already baked the pair is exit 3, and --interactive is only ever "
+            "a substitution the agent makes for a user-typed flag"
+        )
+        assert host_install.substitution_rule(rendered), (
+            f"{path.name} bakes --yes but never says that a user-typed "
+            "--interactive replaces it; passing both is exit 3, so without the rule "
+            "interactive mode cannot be reached on this host"
+        )
+
     # -- commands resolve ------------------------------------------------
     def test_every_mode_word_the_shim_names_exists(self, host_id, path):
         text = path.read_text(encoding="utf-8")

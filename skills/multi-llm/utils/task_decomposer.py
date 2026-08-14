@@ -117,6 +117,36 @@ class Task:
         )
 
 
+#: The rendered forms that mean "no invoker ever dispatches this task" (D2h).
+#: ``update_plan_tasks.generate_tasks_markdown`` writes the first one for every
+#: ``executor_role == "human"`` record, and ``tasks.md`` is the only thing
+#: :meth:`TaskDecomposer.parse_plan` ever sees — a marker missed here turns a
+#: manual step into a subagent dispatch and leaves the D6 rows 8/9 machinery
+#: (``--force-strategy``, ``--human-task``, ``skip-dependents``) with an empty
+#: human-task set to work on. The second and third forms are the executor line a
+#: hand-written plan may carry and the pre-D2h ``subagent_type`` rendering that
+#: files already on disk still use.
+HUMAN_TASK_PATTERNS = (
+    # **Type**: Manual (user action required)
+    re.compile(
+        r'(?:^|\n)\s*(?:[-*]\s+)?\*{0,2}type\*{0,2}\s*:\s*\*{0,2}manual\b',
+        re.IGNORECASE,
+    ),
+    # **Executor**: human  /  **Executor role**: human
+    re.compile(
+        r'(?:^|\n)\s*(?:[-*]\s+)?\*{0,2}executor(?:\s+role)?\*{0,2}\s*:\s*'
+        r'\*{0,2}human\b',
+        re.IGNORECASE,
+    ),
+    # **Subagent**: human  /  **Subagent type**: human  (legacy renderings)
+    re.compile(
+        r'(?:^|\n)\s*(?:[-*]\s+)?\*{0,2}subagent(?:\s+type)?\*{0,2}\s*:\s*'
+        r'\*{0,2}human\b',
+        re.IGNORECASE,
+    ),
+)
+
+
 class TaskDecomposer:
     """Decomposes plans into executable tasks with dependency management."""
 
@@ -167,6 +197,7 @@ class TaskDecomposer:
             files_to_modify = self._extract_files(description, "modify")
             files_to_create = self._extract_files(description, "create")
             estimated_complexity = self._estimate_complexity(description)
+            executor_role = self._extract_executor_role(description)
 
             # Strip metadata sections to keep only narrative content
             clean_description = self._strip_metadata_sections(description)
@@ -180,8 +211,9 @@ class TaskDecomposer:
                 files_to_create=files_to_create,
                 estimated_complexity=estimated_complexity,
                 acceptance_criteria=acceptance_criteria,
-                # executor_role defaults to "agent"; task generation marks the
-                # manual steps as "human".
+                # Recovered from the rendered manual marker; everything else is
+                # an "agent" task any invoker may dispatch.
+                executor_role=executor_role,
             )
             tasks.append(task)
             self.tasks[task.id] = task
@@ -273,6 +305,26 @@ class TaskDecomposer:
                 return "low"
 
         return "medium"
+
+    def _extract_executor_role(self, description: str) -> str:
+        """Recover a rendered task's executor role from its markdown (D2h).
+
+        ``tasks.md`` is the round trip: ``update_plan_tasks`` renders a human
+        task as ``**Type**: Manual (user action required)`` and this is the only
+        path that reads it back, so the marker has to survive the round trip or
+        the manual step is dispatched to a subagent like any other.
+
+        Args:
+            description: Raw task description markdown, before metadata sections
+                are stripped.
+
+        Returns:
+            ``"human"`` when a manual marker is present, ``"agent"`` otherwise.
+        """
+        for pattern in HUMAN_TASK_PATTERNS:
+            if pattern.search(description):
+                return "human"
+        return "agent"
 
     def _extract_acceptance_criteria(self, description: str) -> List[str]:
         """Extract acceptance criteria items from a task description.

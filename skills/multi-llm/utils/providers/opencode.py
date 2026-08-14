@@ -60,6 +60,11 @@ class OpenCodeProvider(LLMProvider):
     supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
+    # `opencode auth list` prints the credentials it has stored (and nothing
+    # else): no model call, no session, so it is the cheap non-generating probe
+    # the once-per-run auth preflight needs (D3c).
+    auth_check = ("opencode", "auth", "list")
+    login_cmd = "opencode auth login"
     version_cmd = ("opencode", "--version")
     min_version = "1.17.15"
     verified_version = "1.18.12"

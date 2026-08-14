@@ -1214,7 +1214,17 @@ class TestProcessControlFacade:
         finally:
             first.release()
         assert process_control.lock_is_free(path)
-        assert not os.path.exists(path)
+        # Releasing drops the lock and *keeps* the file: unlock-then-unlink would
+        # let a second process take this inode in the gap, the unlink would strip
+        # its pathname, and a third would create and lock a new file at the same
+        # path — two holders of "the" phase lock.
+        assert os.path.exists(path), "the lock file is durable; the lock is not"
+        second = process_control.PhaseLock(path)
+        second.acquire({"run_id": "successor"})
+        try:
+            assert process_control.read_lock_holder(path)["run_id"] == "successor"
+        finally:
+            second.release()
 
     def test_lock_is_released_when_the_holder_dies(self, tmp_path):
         """Held on an open fd, so a crash releases it even though the file stays."""

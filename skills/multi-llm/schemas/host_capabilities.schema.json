@@ -31,6 +31,12 @@
       "type": "string",
       "minLength": 1
     },
+    "install_path": {
+      "description": "One directory an installer may write into: rooted at a supported token ($HOME, ${HOME}, %USERPROFILE%, ~, $XDG_CONFIG_HOME, ${XDG_CONFIG_HOME}) or relative to the project root, with forward slashes and no '..' segment. Absolute and parent-relative entries are rejected because the expansion normalizes through abspath, so either one silently writes outside the root the entry names; host_install.checked_entry enforces the same rule at expansion, this is CI's half of it.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:(?:\\$HOME|\\$\\{HOME\\}|%USERPROFILE%|\\$XDG_CONFIG_HOME|\\$\\{XDG_CONFIG_HOME\\}|~)(?:/(?!\\.\\.(?:/|$))[^/\\\\]+)*|(?!\\.\\.(?:/|$))[^/\\\\]+(?:/(?!\\.\\.(?:/|$))[^/\\\\]+)*)$"
+    },
     "host": {
       "type": "object",
       "additionalProperties": false,
@@ -74,14 +80,21 @@
           "additionalProperties": false,
           "required": ["project", "global", "legacy"],
           "properties": {
-            "project": {"type": "array", "items": {"type": "string"}},
-            "global": {"type": "array", "items": {"type": "string"}},
-            "legacy": {"type": "array", "items": {"type": "string"}}
+            "project": {"type": "array", "items": {"$ref": "#/definitions/install_path"}},
+            "global": {"type": "array", "items": {"$ref": "#/definitions/install_path"}},
+            "legacy": {
+              "description": "Compatibility locations: detected and reported, never written. Unlike the writable scopes, an entry here names the FILE rather than the directory — a deprecated layout's file name is the host's own old convention, not ours, so composing shim.installed's basename onto it would probe a path no install ever created. List a location only where an install of an older vintage really loads; a directory the host does not scan would rank ahead of the real install in host_install.locations() and report it shadowed.",
+              "type": "array",
+              "items": {"$ref": "#/definitions/install_path"}
+            }
           }
         },
         "reload": {"enum": ["none", "new-session", "restart"]},
         "arguments": {"enum": ["placeholder", "trailing-text", "none"]},
-        "multi_turn": {"type": "boolean"},
+        "multi_turn": {
+          "description": "Whether this host leaves the driving agent able to act on a dispatcher command's output: after that command returns, does the agent get another turn in which to read it and do something. True covers either mechanism that produces one — further tool calls inside the same invocation, or a conversation the next invocation resumes — because every consumer asks the same single question ('is an agent still there to act on this?') and either mechanism answers it yes. False means the invocation ends with the command it ran, so this run's output is read by a human and by nobody else. It decides whom a failed batch's recovery instruction is addressed to (subagent_executor.continue_past_marker: 're-invoke to retry the failures' is unfollowable where no turn follows) and the D3b host-driven vs. self-contained default.",
+          "type": "boolean"
+        },
         "subagents": {
           "description": "native -> the tool named in native_tool.subagents, executor unused; executor -> --exec-subagents; none -> --exec-subagents, or the run is refused when nested_exec denies the spawn.",
           "enum": ["native", "executor", "none"]

@@ -445,6 +445,8 @@ uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-s
 
 This ensures subsequent phases (e.g., `--implement`) recognize that task suggestions have been applied.
 
+**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+
 ---
 
 ## JSON Output Structure
@@ -758,7 +760,7 @@ uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-s
 ### Full Workflow Mode
 ```bash
 # Task review and apply happen as sequential phases in the full workflow
-/multi-llm:multi-llm --full-workflow plans/my-feature.md
+/multi-llm:multi-llm --full plans/my-feature.md
 # Phase 3b reviews tasks, Phase 3c applies task suggestions automatically
 ```
 

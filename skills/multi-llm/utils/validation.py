@@ -16,10 +16,11 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from .llm_client import invoke_for_json
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from .cli_common import reaggregate_command_for_script as build_reaggregate_command
+    from .cli_common import durable_reaggregate_fields, reaggregate_command
     from .subagent_prompts import build_validation_prompt
     from .subagent_tasks import (
         PromptBudget,
+        TaskFileError,
         build_inputs,
         make_task,
         make_task_file,
@@ -28,12 +29,11 @@ try:
 except ImportError:
     from utils.llm_client import invoke_for_json
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from utils.cli_common import (
-        reaggregate_command_for_script as build_reaggregate_command,
-    )
+    from utils.cli_common import durable_reaggregate_fields, reaggregate_command
     from utils.subagent_prompts import build_validation_prompt
     from utils.subagent_tasks import (
         PromptBudget,
+        TaskFileError,
         build_inputs,
         make_task,
         make_task_file,
@@ -46,12 +46,30 @@ except ImportError:
 #: re-truncation would both bloat the file and break prompt determinism.
 VALIDATION_CONTEXT_LIMIT = 30000
 
+#: The documented per-file ceiling on a phase's **materialized total** (D2f).
+#: Embedding prompts reverses the reference-based design at a stated cost: the
+#: one shared excerpt is duplicated into every batch, so the file grows with
+#: batch count (D2f's own worked example is ~300–400 KB for ten batches). The
+#: lever that shrinks it is a *larger* ``max_per_batch`` — fewer batches means
+#: fewer copies of the excerpt — bounded above by the D2d per-task budget.
+#: Crossing this ceiling is **reported, not resolved**: D2f's remedy is a
+#: downgrade to ``context_mode: workspace-read``, which no generator in this
+#: codebase emits (recorded as a deviation in
+#: ``plans/host-harness-portability.md``), and failing a phase outright would
+#: throw away a completed fan-out over a scratch file being large.
+VALIDATION_TASKS_TOTAL_CHARS_CEILING = 2_000_000
+
 
 def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
     """Return the one shared context excerpt a phase's batches all embed."""
     if len(context) <= limit:
         return context
     return context[:limit] + "\n\n[... truncated ...]"
+
+
+def materialized_total_chars(tasks: List[Dict[str, Any]]) -> int:
+    """Prompt characters a phase's task file will carry — the D2f file total."""
+    return sum(len(task.get("prompt", "")) for task in tasks)
 
 
 # Error type constants - ALWAYS use these constants, never raw strings
@@ -940,6 +958,31 @@ def build_validation_batch_records(
     return records
 
 
+def resolved_reaggregate_command(document: Dict[str, Any]) -> Optional[str]:
+    """Rebuild a task document's follow-up command from the *running* skill dir.
+
+    ``validation_tasks.json`` stores the durable, rebindable pair
+    (``reaggregate_mode`` + ``plan_file``) and never the resolved
+    skill-dir-absolute command (D1c). Resolution therefore happens here, at
+    print time, exactly as :func:`utils.detach.resolved_reaggregate_command`
+    does for ``.status.json``: printing an absolute path is safe because it is
+    session-scoped, persisting one is not.
+
+    Returns ``None`` when the document carries neither the durable pair nor a
+    legacy resolved command (an empty phase, which owes no follow-up).
+    """
+    mode = document.get("reaggregate_mode")
+    plan = document.get("plan_file")
+    if mode and plan:
+        return reaggregate_command(str(mode), str(plan))
+    # Written before the durable pair existed. Its stored command is only as
+    # good as the skill dir it was written under — precisely the staleness this
+    # key stopped persisting — but honouring it is never worse than the build
+    # that wrote it, and it keeps an in-flight phase resumable across the change.
+    legacy = document.get("reaggregate_command")
+    return str(legacy) if legacy else None
+
+
 def prepare_batched_validation_tasks(
     groups: List[Dict[str, Any]],
     context: str,
@@ -1002,7 +1045,10 @@ def prepare_batched_validation_tasks(
         - tasks_schema_version, kind, inputs: the D2g file envelope
         - total_batches: Number of batches
         - batching_stats: Statistics about the batching
-        - grouped_file, plan_file, phase_dir, reaggregate_command, base_ref
+        - grouped_file, plan_file, phase_dir, base_ref
+        - reaggregate_mode: the durable half of the follow-up command; the
+          resolved string is rebuilt at print time by
+          :func:`resolved_reaggregate_command`, never persisted (D1c)
     """
     grouped_file = str(Path(output_dir) / "grouped.json")
     inputs = build_inputs(
@@ -1070,7 +1116,24 @@ def prepare_batched_validation_tasks(
                 pending.insert(0, (first, is_high))
                 continue
             # Unsplittable and over budget: fail loudly with the actionable fix.
-            budget.resolution(prompt, splittable=False)
+            # `resolution` raises for a runner with no workspace-read capability,
+            # but *returns* "workspace-read" for one that has it — and this kind
+            # cannot take that downgrade: its tasks pin `context_mode: inline`
+            # (D2c), so materializing one any other way is schema-invalid.
+            # Acting on the return value is what keeps that from falling through
+            # into a silently over-budget inline prompt.
+            resolution = budget.resolution(prompt, splittable=False)
+            raise TaskFileError(
+                f"A {kind} batch holding a single group materializes a prompt of "
+                f"{budget.units(prompt)} UTF-16 code units against the runner's "
+                f"{budget.max_units}-unit {budget.transport} budget, so it can be "
+                f"neither split nor sent. The '{resolution}' resolution is not "
+                f"available to this kind — a materialized {kind} task pins "
+                f"context_mode: inline (D2c) and the schema rejects any other "
+                f"value — so configure a runner with a stdin/file prompt "
+                f"transport (driver.subagent_runner). The prompt is never "
+                f"truncated."
+            )
 
         output_name = f"validation_batch_{next_index}.json"
         batch_tasks.append(make_task(
@@ -1095,20 +1158,34 @@ def prepare_batched_validation_tasks(
 
     stats = estimate_validation_batching_stats(groups, max_per_batch)
 
-    # Build the reaggregate command hint. Fully resolved from __file__ — a
-    # literal skill-dir placeholder no shell expands is the bug — and routed
-    # through the single entry point so the instruction layer and printed
-    # follow-ups name one script. Still `uv run …`-prefixed, so Claude Code's
-    # Bash(uv:*) allow rule keeps matching.
-    reaggregate_command = build_reaggregate_command(orchestrator, plan_file)
+    # D2f's per-file ceiling on the materialized total. Reported rather than
+    # enforced — see VALIDATION_TASKS_TOTAL_CHARS_CEILING for why a phase that
+    # crosses it is still written.
+    total_chars = materialized_total_chars(batch_tasks)
+    if total_chars > VALIDATION_TASKS_TOTAL_CHARS_CEILING:
+        print(
+            f"[VALIDATION_TASKS_OVERSIZE] {kind}: {len(batch_tasks)} batches "
+            f"materialize {total_chars} prompt chars, over the "
+            f"{VALIDATION_TASKS_TOTAL_CHARS_CEILING}-char per-file ceiling "
+            f"(D2f). The shared context excerpt is embedded once per batch, so "
+            f"raise max_per_batch (currently {max_per_batch}) to cut the number "
+            f"of copies, or validate fewer groups. Writing it anyway.",
+            file=sys.stderr,
+        )
 
+    # The follow-up command is stored in its **durable, rebindable** form (mode
+    # word + plan path), never as the resolved skill-dir-absolute string: this
+    # document outlives the run that wrote it, and the Claude plugin cache is
+    # keyed by commit hash, so a persisted absolute command names a directory
+    # the next plugin update deletes (D1c). `resolved_reaggregate_command()`
+    # rebuilds it at print time from the *running* skill dir — the same split
+    # `.status.json` already makes via `cli_common.durable_reaggregate_fields`.
     extra: Dict[str, Any] = {
         "total_batches": len(batch_tasks),
         "batching_stats": stats,
         "grouped_file": grouped_file,
-        "plan_file": plan_file,
         "phase_dir": output_dir,
-        "reaggregate_command": reaggregate_command,
+        **durable_reaggregate_fields(orchestrator, plan_file),
         "model_hint": model,
         "base_ref": base_ref,
     }

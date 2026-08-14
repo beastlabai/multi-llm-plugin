@@ -112,12 +112,21 @@ hosts:
            format: markdown+frontmatter}
     installable: true
     install_paths:
+      # A preferred entry names the directory to write into (the file name comes
+      # from `shim.installed`); a legacy entry names the FILE, because a
+      # deprecated layout's file name is the host's own old convention and not
+      # ours. Deprecated Codex prompts were `~/.codex/prompts/<command>.md`, so
+      # the copy to detect is `multi-llm.md` — probing `prompts/SKILL.md` would
+      # be a path no install of any vintage ever created.
       project: [".codex/skills/multi-llm"]
       global: ["$HOME/.codex/skills/multi-llm"]
-      legacy: ["$HOME/.codex/prompts"]
+      legacy: ["$HOME/.codex/prompts/multi-llm.md"]
     reload: new-session
     arguments: placeholder
-    multi_turn: true
+    multi_turn: true                 # documented, not observed: `codex exec`
+                                     # runs a tool loop and `codex exec resume`
+                                     # continues the session — either would give
+                                     # the agent the follow-up turn.
     subagents: executor              # agents are GA in the TUI; spawn-from-exec is
                                      # unconfirmed, and the failure is
                                      # silent-then-fatal, so the exec profile is
@@ -173,7 +182,14 @@ hosts:
     install_paths:
       project: [".opencode/commands"]
       global: ["$XDG_CONFIG_HOME/opencode/commands", "$HOME/.config/opencode/commands"]
-      legacy: [".opencode/command"]
+      # Empty on purpose, and `.opencode/command` is the entry that is NOT here:
+      # OpenCode never scans the singular directory, so a file sitting in it is
+      # not a copy that loads. Listing it would make `--check` report — and, as
+      # the highest-precedence project location, *rank first* — a file the host
+      # will never discover, marking the real install shadowed. A compatibility
+      # location is a place an install of an older vintage really works, never
+      # a place a file might merely exist.
+      legacy: []
     reload: new-session
     arguments: placeholder           # $ARGUMENTS / $1 — verified: the message
                                      # text reaches the command body.
@@ -184,7 +200,10 @@ hosts:
     # `--` separator is mandatory headless. Harmless in the TUI, where
     # `/multi-llm --ask …` needs no separator.
     headless_invocation: 'opencode run --command multi-llm -- "<args>"'
-    multi_turn: false
+    multi_turn: true                 # measured: its agent takes further tool
+                                     # turns inside one `opencode run` and acts
+                                     # on what they printed — see the promotion
+                                     # note below.
     subagents: executor              # `mode: subagent` dispatch is documented only;
                                      # dispatch is instructed in the command body,
                                      # never via frontmatter `subtask:` (which the
@@ -217,7 +236,12 @@ hosts:
     # installed command was discovered by name in a new session, its uv
     # preflight ran ahead of the first `uv run`, the baked prefix resolved, and
     # a `--detach`ed `ask` fan-out was polled through `status --wait` to a
-    # terminal `done` and its answers file read back. Everything that run did
+    # terminal `done` and its answers file read back. That same run settles
+    # `multi_turn`, which had shipped `false` on nothing: its agent took four
+    # tool turns inside a single `opencode run` — `command -v uv`, then
+    # `util instructions status`, then `status`, then a read of the answers —
+    # and followed `MULTI_LLM_RESULT.next` on its own initiative, which is
+    # precisely the follow-up turn the field claims. Everything that run did
     # not exercise stays where it was — in particular `subagents` (no subagent
     # was dispatched) and `ask` (nothing was asked), which is what keeps the
     # conservative resolution in force.
@@ -228,7 +252,7 @@ hosts:
       reload: verified
       arguments: verified
       headless_invocation: verified
-      multi_turn: documented
+      multi_turn: verified
       subagents: documented
       ask: documented
       detach: verified

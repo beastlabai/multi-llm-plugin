@@ -28,6 +28,10 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_VERSION: Version string `--version` prints (default: the per-provider
         release each shipped parser fixture was captured from). Drives the D3m
         minimum-version refusal path in tests.
+    MOCK_LLM_LOGGED_OUT: When "1", an `auth_check` probe (D3c: `codex login
+        status`, `opencode auth list`) answers with a login notice and a non-zero
+        exit instead of a credential listing. Drives the executor preflight's
+        refusal of a logged-out runner *before* it spawns any child.
     MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
         read-only sentinel test can prove a runner that ignores its profile is
         detectable (a genuinely read-only runner never sets this).
@@ -45,6 +49,13 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_WRITE_RESULT: JSON object the mock prints as the D3g batch result
         (``status``/``ids``/``files_touched``/``summary``/``notes``). Defaults are
         derived from MOCK_LLM_EDITS so the common case needs only that.
+    MOCK_LLM_WRITE_IDS: JSON array of the ids the derived result attests to. A
+        compliant runner reports which of the batch's ``expected_ids`` it applied
+        — a batch that moves bytes and attests to none of them is a *partial
+        application*, not a success — and the mock cannot see the task, so the
+        scenario supplies them. Extra ids are ignored by the classifier, so one
+        superset covers a multi-batch run. Unset (the default) is the negative
+        case: the unattested reply.
     MOCK_LLM_PROSE: When "1", print prose instead of result JSON — the negative
         case for "a runner that returns prose fails the task instead of being
         counted as applied".
@@ -422,9 +433,13 @@ def write_batch_result(applied: List[Dict[str, Any]]) -> str:
         return override
     touched = [entry["path"] for entry in applied if entry["mode"] != "delete"]
     touched += [entry["path"] for entry in applied if entry["mode"] == "delete"]
+    try:
+        ids = json.loads(os.environ.get("MOCK_LLM_WRITE_IDS") or "[]")
+    except json.JSONDecodeError:
+        ids = []
     return json.dumps({
         "status": "applied" if applied else "no-op",
-        "ids": [],
+        "ids": [str(item) for item in ids] if isinstance(ids, list) else [],
         "files_touched": touched,
         "summary": (
             f"edited {len(touched)} file(s): {', '.join(touched)}"[:200]
@@ -882,6 +897,48 @@ def print_version(provider: str) -> None:
     print(override if override else VERSION_STRINGS.get(provider, "0.0.0"))
 
 
+#: The `auth_check` subcommand each runner-eligible adapter declares, minus the
+#: launcher name (`utils/providers/*.py`). The D3c preflight probes it once per
+#: distinct runner per run, so the mock must answer it as its own step — before
+#: prompt parsing, the call log and the edit/sentinel side effects, none of which
+#: a login-status probe performs on a real CLI.
+AUTH_PROBE_ARGS = {
+    "codex": ("login", "status"),
+    "opencode": ("auth", "list"),
+}
+
+#: What each probe prints when the CLI is logged in.
+AUTH_OK_STRINGS = {
+    "codex": "Logged in using ChatGPT",
+    "opencode": "Credentials\n  anthropic  oauth",
+}
+
+
+def is_auth_probe(argv: List[str]) -> bool:
+    """Whether this invocation is an adapter's `auth_check`, not a dispatch."""
+    positional = tuple(arg for arg in argv if not arg.startswith("-"))
+    return any(
+        positional[: len(expected)] == expected
+        for expected in AUTH_PROBE_ARGS.values()
+    )
+
+
+def print_auth_status(provider: str) -> int:
+    """Answer an `auth_check` probe; return the exit code the CLI would use.
+
+    ``MOCK_LLM_LOGGED_OUT=1`` is the negative case: a login notice on stderr plus
+    a non-zero exit, which is what the executor's preflight must refuse *before*
+    it spawns the first child. The notice is deliberately one of the generic
+    phrases in ``auth_error_patterns`` rather than a claim about any real CLI's
+    exact wording.
+    """
+    if os.environ.get("MOCK_LLM_LOGGED_OUT") == "1":
+        print("Not logged in. Run the login command first.", file=sys.stderr)
+        return 1
+    print(AUTH_OK_STRINGS.get(provider, "Logged in"))
+    return 0
+
+
 def read_stdin_prompt() -> str:
     """Read the prompt from stdin (the executor's non-argv transport, D2d).
 
@@ -924,6 +981,13 @@ def main() -> int:
     if "--version" in sys.argv[1:] or "-V" in sys.argv[1:]:
         print_version(provider)
         return 0
+
+    # An `auth_check` probe (D3c) is answered the same way, and for the same
+    # reason: the preflight runs it once per distinct runner, and it is not a
+    # dispatch — so it must not touch the sentinel, apply mock edits or land in
+    # the call log.
+    if is_auth_probe(sys.argv[1:]):
+        return print_auth_status(provider)
 
     # Parse arguments based on provider
     args, prompt = parse_provider_args(provider)

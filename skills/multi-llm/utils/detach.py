@@ -268,8 +268,9 @@ def build_worker_argv(
     * ``--detach`` is **replaced** by the reserved ``--internal-worker`` (plus the
       run id the invoker minted), so the child cannot detach recursively and the
       handshake has something to match on.
-    * ``--yes`` is written out rather than left implied — a detached run has no one
-      to ask, so the implication is part of the recorded argv.
+    * ``--yes`` and ``--exec-subagents`` are written out rather than left implied
+      (D4c) — a detached run has no one to ask and no one to continue it past a
+      dispatch marker, so both implications are part of the recorded argv.
     * path flags are made absolute.
     * launcher-only flags (the ceiling, ``--if-not-running``) are dropped.
     """
@@ -304,6 +305,11 @@ def build_worker_argv(
         t.split("=", 1)[0] in ("--yes", "-y", "--non-interactive") for t in out
     ):
         out.append("--yes")
+    if not any(t.split("=", 1)[0] == "--exec-subagents" for t in out):
+        # The worker is the only actor left: without this it would exit 0 at
+        # [VALIDATION_PENDING]/[SALVAGE_NEEDED] with the phase unfinished, and a
+        # poller would read run.state: done.
+        out.append("--exec-subagents")
     out += ["--internal-worker", "--internal-run-id", run_id]
     return out
 
@@ -355,6 +361,27 @@ def child_env(*, base: Optional[Path] = None) -> Dict[str, str]:
     return env
 
 
+def _spec_binary(spec: str, anchor: Optional[str] = None) -> Optional[str]:
+    """The CLI ``spec`` would launch, per the adapter that would launch it.
+
+    ``None`` when nothing can say — an unparseable spec, a provider name with no
+    built-in adapter, an adapter that refuses to render a command. An adapter that
+    cannot say is not evidence of absence.
+    """
+    try:
+        from .provider_registry import get_provider, parse_model_spec
+    except Exception:  # pragma: no cover - import guard
+        return None
+    try:
+        provider_name, model = parse_model_spec(spec, anchor=anchor)
+        provider = get_provider(provider_name)
+        if provider is None:
+            return None
+        return provider.build_command("preflight", model)[0] or None
+    except Exception:
+        return None
+
+
 def missing_provider_binaries(
     model_specs: Optional[Sequence[str]], *, anchor: Optional[str] = None
 ) -> Dict[str, str]:
@@ -369,22 +396,62 @@ def missing_provider_binaries(
     missing: Dict[str, str] = {}
     if not model_specs:
         return missing
-    try:
-        from .provider_registry import get_provider, parse_model_spec
-    except Exception:  # pragma: no cover - import guard
-        return missing
     for spec in model_specs:
-        try:
-            provider_name, model = parse_model_spec(spec, anchor=anchor)
-            provider = get_provider(provider_name)
-            if provider is None:
-                continue
-            binary = provider.build_command("preflight", model)[0]
-        except Exception:
-            continue  # an adapter that cannot say is not evidence of absence
+        binary = _spec_binary(spec, anchor)
         if binary and shutil.which(binary) is None:
             missing[spec] = binary
     return missing
+
+
+def configured_runner_specs(anchor: Optional[str] = None) -> List[str]:
+    """The subagent runner specs this run could dispatch through, primary first.
+
+    ``driver.subagent_runner`` then ``driver.subagent_runner_cheap`` (deduped):
+    the executor resolves a task's runner from its ``capability_tier``, so both
+    are binaries the run may need.
+    """
+    try:
+        from .provider_registry import get_subagent_runner
+    except Exception:  # pragma: no cover - import guard
+        return []
+    specs: List[str] = []
+    for tier in ("full", "cheap"):
+        try:
+            spec = get_subagent_runner(tier, anchor=anchor)
+        except Exception:
+            continue  # a config that cannot resolve is D3's refusal, not ours
+        if spec and str(spec) not in specs:
+            specs.append(str(spec))
+    return specs
+
+
+def missing_runner_binaries(anchor: Optional[str] = None) -> Dict[str, str]:
+    """``{runner_spec: binary}`` for every configured runner CLI not on PATH.
+
+    The second half of D4c step 3's ``shutil.which`` pre-flight: ``--detach``
+    implies ``--exec-subagents``, so the run dispatches its own subagents and a
+    configured-but-uninstalled ``driver.subagent_runner`` is exactly as knowable
+    before the fork as an absent model provider — and exactly as invisible after
+    it, where it surfaces only as a ``spawn_failed`` batch inside the log.
+    """
+    missing: Dict[str, str] = {}
+    for spec in configured_runner_specs(anchor):
+        binary = _spec_binary(spec, anchor)
+        if binary and shutil.which(binary) is None:
+            missing[spec] = binary
+    return missing
+
+
+def exec_subagents_in_effect(args: Any = None, argv: Sequence[str] = ()) -> bool:
+    """Whether this run will drive its own subagents.
+
+    Read from the parsed flag, with the recorded argv as a second source so a
+    caller that hands over a bare namespace (a direct ``launch`` call, a test)
+    still gets the pre-flight the flag asks for.
+    """
+    if bool(getattr(args, "exec_subagents", False)):
+        return True
+    return any(str(token).split("=", 1)[0] == "--exec-subagents" for token in argv)
 
 
 def launch_key(mode: str, plan_path: str, phase_dir: str) -> str:
@@ -408,19 +475,39 @@ VERDICT_ABORTED = RUN_STATE_ABORTED
 TERMINAL_VERDICTS = (VERDICT_DONE, VERDICT_FAILED, VERDICT_ABORTED)
 
 
-def heartbeat_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
-    """Seconds since the last heartbeat, or ``None`` when none was recorded."""
+def _elapsed_since(stamp: Any, now: Optional[float] = None) -> Optional[float]:
+    """Seconds since an ISO timestamp, or ``None`` when it is absent/unreadable."""
     from datetime import datetime
 
-    stamp = run.get("heartbeat_at")
     if not stamp:
         return None
     try:
-        beat = datetime.fromisoformat(str(stamp))
+        when = datetime.fromisoformat(str(stamp))
     except ValueError:
         return None
     reference = datetime.now() if now is None else datetime.fromtimestamp(now)
-    return max((reference - beat).total_seconds(), 0.0)
+    return max((reference - when).total_seconds(), 0.0)
+
+
+def heartbeat_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
+    """Seconds since the last heartbeat, or ``None`` when none was recorded."""
+    return _elapsed_since(run.get("heartbeat_at"), now)
+
+
+def effective_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
+    """How old this run is, for the expiry decision: heartbeat, else ``started_at``.
+
+    A record whose ``heartbeat_at`` is missing or unparseable still has to be able
+    to reach a terminal state — otherwise a provably dead run is reported ``stale``
+    forever and the phase dir never closes out, which is the condition D4b's
+    close-out exists to prevent. ``started_at`` is written by the worker's very
+    first record on the same clock, so it bounds the run's age whenever the beat
+    cannot be read.
+    """
+    age = heartbeat_age(run, now)
+    if age is not None:
+        return age
+    return _elapsed_since(run.get("started_at"), now)
 
 
 def classify_run(
@@ -473,7 +560,18 @@ def classify_run(
     identity = process_control.probe(run.get("pid"), run.get("process_start_time"))
     view["identity"] = identity
 
-    if age is not None and age > HEARTBEAT_STALE_AFTER_S and identity == process_control.DEAD:
+    # The expiry clock falls back to `started_at` when the beat cannot be read,
+    # and — when neither timestamp is usable — a provably dead run that is past
+    # `starting` is expired on the spot: it published `running`, so it beat at
+    # least once, and nothing that is gone will ever beat again.
+    age_for_expiry = effective_age(run, now)
+    expired = (
+        age_for_expiry > HEARTBEAT_STALE_AFTER_S
+        if age_for_expiry is not None
+        else identity == process_control.DEAD and run_state != RUN_STATE_STARTING
+    )
+
+    if expired and identity == process_control.DEAD:
         if close_out:
             close_out_dead_run(phase_dir, reason="heartbeat_timeout")
             refreshed = status_file.read_run(phase_dir)
@@ -490,16 +588,30 @@ def classify_run(
         # It never came up and its process is gone: nothing will ever beat.
         if close_out:
             close_out_dead_run(phase_dir, reason="worker_never_started")
+            # Read back rather than assert: the compare-and-set is refused when a
+            # new run claimed the dir between the read above and the close-out,
+            # and rendering that fresh, live run as failed would send a poller to
+            # exit 3 on a run that is only just starting.
             refreshed = status_file.read_run(phase_dir)
             view["run"] = dict(refreshed)
             view["run_state"] = refreshed.get("state")
-        view["verdict"] = VERDICT_FAILED
+            view["verdict"] = refreshed.get("state") or VERDICT_FAILED
+            view["lock_held"] = not process_control.lock_is_free(lock_path(phase_dir))
+        else:
+            view["verdict"] = VERDICT_FAILED
         view["reason"] = "worker_never_started"
         return view
 
-    if age is not None and age > HEARTBEAT_STALE_AFTER_S:
+    if age is not None:
+        clock = f"heartbeat {age:.0f}s old"
+    elif age_for_expiry is not None:
+        clock = f"no readable heartbeat, started {age_for_expiry:.0f}s ago"
+    else:  # pragma: no cover - a dead run with neither stamp expired above
+        clock = "no readable heartbeat and no recorded start time"
+
+    if expired:
         view["verdict"] = VERDICT_STALE
-        view["reason"] = f"heartbeat {age:.0f}s old; process probe {identity}"
+        view["reason"] = f"{clock}; process probe {identity}"
         return view
 
     if identity == process_control.DEAD:
@@ -511,12 +623,9 @@ def classify_run(
         # expires — which is the two bullets of D4b working exactly as written.
         view["verdict"] = VERDICT_STALE
         view["reason"] = (
-            "process is gone (pid/creation-time probe says dead) but its "
-            f"heartbeat is only {age:.0f}s old; it closes out as "
-            f"failed(heartbeat_timeout) after "
+            f"process is gone (pid/creation-time probe says dead) but {clock}; "
+            "it closes out as failed(heartbeat_timeout) after "
             f"{HEARTBEAT_STALE_AFTER_S:.0f}s"
-            if age is not None else
-            "process is gone and no heartbeat was ever recorded"
         )
         return view
 
@@ -538,11 +647,16 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
     if not run_id or run.get("state") in TERMINAL_RUN_STATES:
         return False
     pid = run.get("pid")
-    if pid:
+    pgid = run.get("pgid")
+    if pid or pgid:
         try:
+            # The leader is normally already dead here — that is what "close out"
+            # means — so the recorded process group is the only handle left on the
+            # provider CLIs it spawned.
             process_control.kill_tree(
-                int(pid),
+                int(pid) if pid else 0,
                 start_time=run.get("process_start_time"),
+                pgid=int(pgid) if pgid else None,
                 escalate_after_s=1.0,
             )
         except Exception:
@@ -595,7 +709,9 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
         return {"result": "needs_force", "run": run, "phase_dir": str(phase_dir)}
 
     kill_verdict = process_control.kill_tree(
-        int(pid), start_time=None if force else run.get("process_start_time")
+        int(pid),
+        start_time=None if force else run.get("process_start_time"),
+        pgid=int(run["pgid"]) if run.get("pgid") else None,
     )
     wrote = status_file.update_run(
         phase_dir,
@@ -695,10 +811,19 @@ class RunHandle:
         global _ACTIVE
         self._acquire_lock()
         identity = process_control.identity()
+        # Recorded, never re-derived: after the double spawn the group leader is
+        # the exited intermediate, so once this worker dies nothing can ask the
+        # OS which group its provider children are in — and that group is what
+        # the close-out signals to stop providers burning quota on a crashed run.
+        # Only a *detached* worker owns its group (`setsid` gave it a session of
+        # its own); a foreground run's group belongs to the shell or harness that
+        # started it, and recording that would license a group kill of the host.
+        pgid = process_control.process_group_id() if self.detached else None
         record = {
             "run_id": self.run_id,
             "pid": identity["pid"],
             "process_start_time": identity["process_start_time"],
+            "pgid": pgid,
             "detached": self.detached,
             "host": self.host,
             "mode": self.mode,
@@ -720,6 +845,7 @@ class RunHandle:
                 "run_id": self.run_id,
                 "pid": identity["pid"],
                 "process_start_time": identity["process_start_time"],
+                "pgid": pgid,
                 "plan_file": self.plan_file,
                 "phase_dir": self.phase_dir,
                 "mode": self.mode,
@@ -756,33 +882,40 @@ class RunHandle:
             return
         except process_control.LockUnavailable as exc:
             holder = exc.holder or {}
-            verdict = process_control.probe(
-                holder.get("pid"), holder.get("process_start_time")
-            )
+            # An unreadable payload is `unknown`, not `dead`: the lock is held by
+            # *somebody* (that is why we are here) and the payload is written
+            # after the lock is taken, so "nothing to read" is a live holder we
+            # cannot name — never a licence to break the lock.
+            verdict = process_control.holder_verdict(exc.holder)
             if verdict == process_control.DEAD:
-                print(
-                    f"WARNING: breaking a stale {LOCK_NAME} left by run "
-                    f"{holder.get('run_id')} (pid {holder.get('pid')} is gone).",
-                    file=sys.stderr,
-                )
-                process_control.break_lock(lock_path(self.phase_dir))
-                self._lock = process_control.PhaseLock(lock_path(self.phase_dir))
-                try:
-                    self._lock.acquire(payload)
-                    return
-                except process_control.LockUnavailable:
-                    pass
+                # And even then the break has to prove it: break_lock refuses a
+                # lock that is still held, so a payload naming a dead predecessor
+                # cannot displace the live holder that overwrote it.
+                if process_control.break_lock(lock_path(self.phase_dir)):
+                    print(
+                        f"WARNING: breaking a stale {LOCK_NAME} left by run "
+                        f"{holder.get('run_id')} (pid {holder.get('pid')} is gone).",
+                        file=sys.stderr,
+                    )
+                    self._lock = process_control.PhaseLock(lock_path(self.phase_dir))
+                    try:
+                        self._lock.acquire(payload)
+                        return
+                    except process_control.LockUnavailable:
+                        pass
             run = status_file.read_run(self.phase_dir)
             age = heartbeat_age(run)
             raise DetachError(
                 "ERROR: another run owns this phase dir "
                 f"({self.phase_dir}).\n"
-                f"       holder run_id: {holder.get('run_id')}\n"
-                f"       holder pid:    {holder.get('pid')} ({verdict})\n"
+                f"       holder run_id: {holder.get('run_id') or 'unrecorded'}\n"
+                f"       holder pid:    {holder.get('pid') or 'unrecorded'} "
+                f"({verdict})\n"
                 f"       last heartbeat: "
                 f"{'never' if age is None else f'{age:.0f}s ago'}\n"
-                "       Wait for it, abort it (status <plan> --abort --run-id "
-                f"{holder.get('run_id')}), or pass --force to break the lock."
+                "       Wait for it, abort it (status <plan> --abort"
+                + (f" --run-id {holder.get('run_id')}" if holder.get("run_id") else "")
+                + "), or pass --force to break the lock."
             )
 
     # -- heartbeat ------------------------------------------------------
@@ -801,8 +934,9 @@ class RunHandle:
             # Our record was closed out (or taken over) while we were away. Do
             # not resurrect it: exit and leave the terminal record standing.
             print(
-                "ERROR: this run's record in .status.json no longer belongs to "
-                f"run {self.run_id}; exiting without overwriting it.",
+                "ERROR: this run's record in .status.json is no longer ours to "
+                f"write (run {self.run_id} was closed out, or the phase dir was "
+                "taken over); exiting without overwriting it.",
                 file=sys.stderr,
             )
             self._stop.set()
@@ -821,10 +955,16 @@ class RunHandle:
         status_file.update_progress(self.phase_dir, updates)
 
     def resolution(self, site: str, decision: str) -> None:
+        """Append one auto-resolution to ``run.resolutions``. Records, never prints.
+
+        The announcement is the *unattended* layer's (``unattended.record_resolution``
+        prints ``[AUTO_RESOLVED] <site>: <decision>`` before delegating here), and it
+        is the only caller of this path. Printing again would put the marker in a
+        detached run's log twice for every resolution, which reads as two decisions.
+        """
         status_file.append_resolution(
             self.phase_dir, run_id=self.run_id, site=site, decision=decision
         )
-        print(f"[AUTO_RESOLVED] {site}: {decision}")
 
     # -- shutdown -------------------------------------------------------
     def finish(
@@ -1068,6 +1208,36 @@ def launch(
             file=sys.stderr,
         )
 
+    # -- the subagent runner: same check, other half of D4c step 3 ------
+    # A detached run drives its own subagents, so its runner CLI is as load-
+    # bearing as a model provider's — and, unlike a provider, an absent one is
+    # not a partial aggregate: every dispatch lands on rung 1 (spawn_failed) and
+    # fails the whole batch inside a log nobody is watching.
+    if exec_subagents_in_effect(args, argv):
+        runners = configured_runner_specs(anchor=plan_file)
+        missing_runners = missing_runner_binaries(anchor=plan_file)
+        primary = runners[0] if runners else None
+        if primary and primary in missing_runners:
+            raise DetachError(
+                "ERROR: this run dispatches its own subagents "
+                "(--exec-subagents), and the configured runner's CLI is not "
+                "installed, so every dispatch would fail as spawn_failed:\n"
+                f"       driver.subagent_runner {primary} -> "
+                f"{missing_runners[primary]} (not on PATH)\n"
+                "       Install it, or point driver.subagent_runner at a runner "
+                f"you have ({dispatcher_command('init')})."
+            )
+        if missing_runners:
+            print(
+                "WARNING: a configured subagent runner has no CLI on PATH; only "
+                "the tasks that resolve to it will fail:\n"
+                + "\n".join(
+                    f"       {spec} -> {binary} (not on PATH)"
+                    for spec, binary in missing_runners.items()
+                ),
+                file=sys.stderr,
+            )
+
     # -- re-attach beats relaunch --------------------------------------
     existing = classify_run(phase_dir, close_out=True)
     if existing["verdict"] in (VERDICT_RUNNING, VERDICT_STARTING, VERDICT_STALE):
@@ -1106,24 +1276,34 @@ def launch(
     # -- lock pre-check (authoritative acquisition happens in the worker) --
     lock = lock_path(phase_dir)
     if not process_control.lock_is_free(lock):
-        holder = process_control.read_lock_holder(lock) or {}
-        verdict = process_control.probe(
-            holder.get("pid"), holder.get("process_start_time")
-        )
+        recorded = process_control.read_lock_holder(lock)
+        holder = recorded or {}
+        # `unknown`, not `dead`, when the payload could not be read: the lock is
+        # held and its label is written after the lock is taken, so an empty or
+        # half-written file names a live holder we cannot identify.
+        verdict = process_control.holder_verdict(recorded)
+        broke = False
         if verdict == process_control.DEAD or force:
-            print(
-                f"WARNING: breaking a stale {LOCK_NAME} left by run "
-                f"{holder.get('run_id')} (pid {holder.get('pid')}: {verdict}).",
-                file=sys.stderr,
-            )
-            process_control.break_lock(lock)
-        else:
+            # break_lock proves the holder is gone by taking the lock (and only
+            # `--force` skips that proof), so a stale payload in front of a live
+            # holder leaves us here with `broke` False and fails in the
+            # foreground rather than forking a second writer for this dir.
+            broke = process_control.break_lock(lock, force=force)
+            if broke:
+                print(
+                    f"WARNING: breaking a stale {LOCK_NAME} left by run "
+                    f"{holder.get('run_id') or 'unrecorded'} "
+                    f"(pid {holder.get('pid') or 'unrecorded'}: {verdict}).",
+                    file=sys.stderr,
+                )
+        if not broke:
             run = status_file.read_run(phase_dir)
             age = heartbeat_age(run)
             raise DetachError(
-                f"ERROR: {lock} is held by run {holder.get('run_id')} "
-                f"(pid {holder.get('pid')}, {verdict}, last heartbeat "
-                f"{'never' if age is None else f'{age:.0f}s ago'}).\n"
+                f"ERROR: {lock} is held by run "
+                f"{holder.get('run_id') or 'an unrecorded holder'} "
+                f"(pid {holder.get('pid') or 'unrecorded'}, {verdict}, last "
+                f"heartbeat {'never' if age is None else f'{age:.0f}s ago'}).\n"
                 "       Two orchestrators must not interleave .status.json "
                 "merges and result files in one phase dir.\n"
                 "       Abort the holder or pass --force to break the lock."
@@ -1184,6 +1364,27 @@ def launch(
             + (f"       Last log lines:\n{tail}" if tail else "")
         )
 
+    observed_state = observed.get("state")
+    if observed_state in (RUN_STATE_FAILED, RUN_STATE_ABORTED):
+        # The handshake accepts any published record, terminal ones included, so
+        # a worker that died inside the window is knowable *here* — on the
+        # caller's terminal, with the log still at hand. Reporting it now is the
+        # launch contract; the started banner plus exit 0 would defer a failure
+        # that has already happened to the caller's first status poll. Exit 3 is
+        # what `status` maps a terminal failed/aborted run onto
+        # (`run_status.exit_code_for`), so the launch and that first poll agree
+        # whatever status the worker itself handed the OS.
+        tail = _log_tail(log, 20)
+        raise DetachError(
+            f"ERROR: the detached worker for run {run_id} ended as "
+            f"{observed_state} before the launch returned (recorded exit_code "
+            f"{observed.get('exit_code')}).\n"
+            f"       {observed.get('error') or 'no reason recorded'}\n"
+            f"       log: {log}\n"
+            + (f"       Last log lines:\n{tail}" if tail else ""),
+            exit_code=EXIT_NEEDS_HUMAN,
+        )
+
     status_cmd = status_command_for(
         plan_file, phase=phase, run_id=run_id if ask_slug else None
     )
@@ -1235,17 +1436,24 @@ def _await_handshake(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
     The POSIX double-spawn produces three pids and only the final worker is
     authoritative, so the invoker never guesses ``run.pid``: it waits for the
     worker's own record. If that never appears, the launch failed and says so.
+
+    D4b's handshake is exactly two facts — ``run.run_id`` matching the id this
+    invoker minted **and** ``run.state`` at ``running`` (or already past it) —
+    so a record that claimed the dir and stalled at ``starting`` is not a
+    launched run however plausible its ``pid`` looks. Returning it would have
+    the launch banner-print a worker that never came up; ``None`` sends the
+    caller down the kill-and-report path instead.
     """
     deadline = time.time() + handshake_timeout()
-    while time.time() < deadline:
+    while True:
         run = status_file.read_run(phase_dir)
         if run.get("run_id") == run_id and run.get("state") in (
             RUN_STATE_RUNNING, *TERMINAL_RUN_STATES
         ):
             return run
+        if time.time() >= deadline:
+            return None
         time.sleep(0.05)
-    run = status_file.read_run(phase_dir)
-    return run if run.get("run_id") == run_id and run.get("pid") else None
 
 
 def _log_tail(path: str, lines: int) -> str:

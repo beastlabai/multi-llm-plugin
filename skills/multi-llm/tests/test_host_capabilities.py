@@ -153,6 +153,21 @@ class TestSchema:
             "required instead."
         )
 
+    #: Fields a consumer *branches on*. A branch needs a stated meaning: without
+    #: one nobody can say what a value claims, and a capability nobody can define
+    #: is a capability nobody can falsify — which is how `multi_turn` shipped
+    #: `false` for a host whose recorded run had already contradicted it.
+    BRANCHING_KEYS = {"multi_turn", "subagents", "ask", "detach"}
+
+    def test_every_branching_field_states_what_it_claims(self):
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        properties = schema["definitions"]["host"]["properties"]
+        for key in sorted(self.BRANCHING_KEYS):
+            assert properties[key].get("description", "").strip(), (
+                f"'{key}' selects a code path but the schema states no meaning "
+                "for its values"
+            )
+
     def test_every_optional_key_is_provenance_tracked(self):
         """Optional does not mean unattributed."""
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -316,12 +331,15 @@ class TestConservativeResolution:
     #: opencode, 1.18.12, 2026-08-08: installed shim discovered by name in a new
     #: session; uv preflight ran ahead of the first `uv run`; baked prefix
     #: resolved; `--` separator confirmed necessary headless; a detached `ask`
-    #: fan-out polled through `status --wait` to terminal `done`. No subagent was
-    #: dispatched and nothing was asked, so `subagents` and `ask` stay documented.
+    #: fan-out polled through `status --wait` to terminal `done`; and four tool
+    #: turns inside that single `opencode run`, the agent acting on each one's
+    #: output and following `MULTI_LLM_RESULT.next` unprompted — which is the
+    #: whole of the `multi_turn` claim. No subagent was dispatched and nothing
+    #: was asked, so `subagents` and `ask` stay documented.
     RECORDED_SMOKES = {
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",
-            "headless_invocation", "detach",
+            "headless_invocation", "detach", "multi_turn",
         },
     }
 
@@ -507,6 +525,62 @@ class TestVerbResolution:
             caps.verb_sentence("claude-code", "subagents", str(root))
         assert excinfo.value.exit_code == 3
         assert "native_tool.subagents" in str(excinfo.value)
+
+
+class TestRecoveryInstruction:
+    """`multi_turn` decides whom a failed batch's retry instruction addresses."""
+
+    def test_the_recorded_run_makes_opencode_multi_turn(self):
+        """Four tool turns inside one `opencode run`, acted on by its agent."""
+        assert caps.is_multi_turn("opencode") is True
+        assert HOSTS["opencode"]["provenance"]["multi_turn"] == "verified"
+
+    def test_a_multi_turn_host_is_told_to_re_invoke(self):
+        lines = caps.retry_instruction(
+            "claude-code", failed_ids="t-1", retry_command="uv run … --force"
+        )
+        assert lines[0].startswith("Re-invoke to retry only the failures (t-1)")
+        assert lines[1] == "  uv run … --force"
+
+    def test_a_single_turn_host_addresses_the_human(self, fixture_tree):
+        """The instruction must not be addressed to an agent that never reads it."""
+        root, write = fixture_tree
+        document = yaml.safe_load(
+            (root / caps.CAPABILITIES_FILE).read_text(encoding="utf-8")
+        )
+        document["hosts"]["opencode"]["multi_turn"] = False
+        write(document)
+        lines = caps.retry_instruction(
+            "opencode", failed_ids="t-1", retry_command="uv run … --force",
+            base=str(root),
+        )
+        assert "no agent turn follows" in lines[0]
+        assert "a human has to act on it" in lines[0]
+        assert not lines[0].startswith("Re-invoke")
+        # Same fix either way: the command is the payload, and it survives.
+        assert lines[1] == "  uv run … --force"
+
+    def test_an_unresolvable_host_still_names_the_retry_command(self):
+        """A broken install must not cost the caller the command to re-run."""
+        lines = caps.retry_instruction(
+            "no-such-host", failed_ids="t-1", retry_command="uv run … --force"
+        )
+        assert lines[1] == "  uv run … --force"
+
+    def test_a_missing_command_falls_back_rather_than_dangling(self):
+        lines = caps.retry_instruction("claude-code", failed_ids="t-1")
+        assert "re-run the same command" in lines[1]
+
+    @pytest.mark.parametrize("host_id", HOST_IDS)
+    def test_neither_addressee_is_told_to_consult_the_matrix(self, host_id):
+        """The addressee is resolved here; the agent reads a finished sentence."""
+        for line in caps.retry_instruction(
+            host_id, failed_ids="t-1", retry_command="cmd"
+        ):
+            lowered = line.lower()
+            for banned in ("capabilities.yaml", "host-capabilities.md",
+                           "if your host", "consult", "depending on"):
+                assert banned not in lowered, (host_id, line)
 
 
 # ===========================================================================

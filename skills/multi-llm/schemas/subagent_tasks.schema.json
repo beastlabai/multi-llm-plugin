@@ -248,7 +248,7 @@
             "required": ["repo_root"],
             "properties": {
               "capability_tier": {"const": "full"},
-              "context_mode": {"enum": ["inline", "workspace-read"]}
+              "context_mode": {"const": "workspace-read"}
             }
           }
         },

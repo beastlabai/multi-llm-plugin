@@ -433,7 +433,12 @@ class TestFullWorkflowUnattended:
         payload = result_of(completed)
         assert payload["mode"] == "full" and payload["exit"] == 3
         assert payload["state"] == "needs-human"
-        assert payload["next"].endswith("--resume")
+        # `next` is the *next* command to run, which here is the phase's own
+        # prerequisite: resuming before it re-materializes the same pending state
+        # and points back at resume, so a host following `next` mechanically would
+        # loop. The prose names both, in order.
+        assert payload["next"].endswith("--reaggregate"), payload["next"]
+        assert "review-plan" in payload["next"]
 
 
 class TestContradictionsAndEmptyAnswers:

@@ -326,7 +326,9 @@ Follow the full apply-code-fixes instruction file to process batches, generate t
 
 ### 7. Report Combined Results
 
-After all phases complete, provide a comprehensive summary:
+After all phases complete, provide a comprehensive summary. The two reporting
+rules in `references/summary-format.md` apply here too — every path comes from the
+run's own output, and `MULTI_LLM_RESULT.next` is copied verbatim:
 
 ```markdown
 ## Full Workflow Complete
