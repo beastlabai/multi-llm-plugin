@@ -195,11 +195,18 @@ def sweep(
         elif age is not None and age > prune_after_days:
             action = "pruned"
             if kill:
-                process_control.kill_tree(
+                # `skipped` is a real outcome here: a week-old entry whose
+                # identity probe came back `unknown` (the /proc or ps read
+                # failed) is a pid we cannot corroborate, and signalling its
+                # process group would hit whatever recycled that pid. The entry
+                # is still pruned; it is just not reported as killed.
+                kill_verdict = process_control.kill_tree(
                     entry.get("pid") or 0,
                     start_time=entry.get("process_start_time"),
+                    pgid=entry.get("pgid"),
                 )
-                action = "killed"
+                if kill_verdict in ("killed", "survived"):
+                    action = "killed"
             _close_out_phase_dir(entry)
             remove_entry(project_root, entry.get("run_id", ""))
         rows.append(

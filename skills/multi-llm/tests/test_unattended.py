@@ -47,7 +47,7 @@ import modes as mode_table
 import multi_llm
 from utils import unattended as un
 from utils.apply_orchestrator_base import apply_unattended_defaults
-from utils.cli_common import build_parent_parser, parse_result_line
+from utils.cli_common import build_parent_parser, flag_value, parse_result_line
 from utils.filtering import should_bypass_no_selection_confirmation
 from utils.state_manager import StateManager
 
@@ -584,8 +584,11 @@ class TestImplementGate:
         )
         out = capsys.readouterr().out
         assert "[PREREQUISITE_SKIPPED] implement:" in out
-        # It got past the gate; what stops it now is the missing task list.
-        assert code == 0 and "[TASKS_MISSING]" in out
+        # It got past the gate; what stops it now is the missing task list —
+        # under --yes that is exit 3 naming the generate-tasks re-invocation, not
+        # an exit 0 that would report "done" for a run that implemented nothing.
+        assert code == 3 and "[TASKS_MISSING]" in out
+        assert "[PREREQUISITE_UNMET] implement: no task list" in out
         state = StateManager(plan_with_unapplied_suggestions)
         assert state.is_phase_skipped("apply-suggestions")
 
@@ -828,10 +831,36 @@ class TestNoHostSniffing:
         ["review-plan", "p.md", "--yes", "--interactive"],
         ["review-plan", "p.md", "--non-interactive", "-i"],
         ["ask", "p.md", "q", "-y", "--interactive"],
+        # No parser in the skill passes `allow_abbrev=False`, so argparse binds
+        # `--y`/`--intera` to the full options: a rule that scanned for the exact
+        # spelling only was bypassable by typing three fewer characters.
+        ["review-plan", "p.md", "--y", "--intera"],
+        ["review-plan", "p.md", "--non-inter", "--interact"],
     ])
     def test_contradictions_are_exit_three_never_precedence(self, argv, capsys):
         assert multi_llm.main(argv) == 3
         assert "contradictory" in capsys.readouterr().err
+
+    def test_an_abbreviated_detach_is_refused_like_the_full_spelling(self, capsys):
+        """The one contradiction with no second layer behind it.
+
+        `--yes --interactive` is caught again in `resolve_models`; an unsupported
+        `--detach` is caught **only** here, so an abbreviation that slipped past
+        ran the mode with a flag that does nothing at all.
+        """
+        assert multi_llm.main(["status", "p.md", "--det"]) == 3
+        assert "--detach is not available" in capsys.readouterr().err
+
+    def test_flag_value_reads_the_last_occurrence_like_a_store_action(self):
+        """Argparse's last-wins, so a repeated flag cannot hide its real value."""
+        repeated = ["--force-strategy", "skip-dependents",
+                    "--force-strategy", "pause-and-ask"]
+        assert flag_value(repeated, "--force-strategy") == "pause-and-ask"
+        assert flag_value(["--force-strat=pause-and-ask"],
+                          "--force-strategy") == "pause-and-ask"
+        # A longer real option never reads as an abbreviation of a shorter one.
+        assert flag_value(["--force-strategy-extra", "x"],
+                          "--force-strategy") is None
 
 
 # ---------------------------------------------------------------------------

@@ -463,6 +463,8 @@ See: [Applied Fixes Report](./my-feature/my-feature_applied_fixes.md)
 <!-- CODE_FIXES_APPLIED_END -->
 ```
 
+**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+
 ---
 
 ## JSON Output Structure

@@ -46,6 +46,12 @@ class CodexProvider(LLMProvider):
     supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
+    # `codex login status` prints the account it is logged in as, or "Not logged
+    # in"; it generates nothing and contacts no model, which is what makes it
+    # cheap enough for the once-per-run preflight probe (D3c). The credential
+    # store it reads is ~/.codex/auth.json (or CODEX_API_KEY / OPENAI_API_KEY).
+    auth_check = ("codex", "login", "status")
+    login_cmd = "codex login"
     version_cmd = ("codex", "--version")
     min_version = "0.144.0"
     verified_version = "0.146.0"
@@ -123,7 +129,17 @@ class CodexProvider(LLMProvider):
         if profile != PROFILE_AGENT_READONLY:
             return super().build_agent_command(prompt, model, profile)
         cmd = self.build_command(prompt, model)
-        return ["read-only" if arg == "workspace-write" else arg for arg in cmd]
+        # Rewrite the sandbox *value* by position — the element right after the
+        # first `--sandbox` — never by sweeping argv for "workspace-write". The
+        # prompt is the final element and a model string is arbitrary text, so a
+        # value sweep would silently rewrite either one if it happened to equal
+        # "workspace-write", leaving a stray "read-only" positional that codex
+        # would take as the prompt (and that
+        # `base.build_agent_command_for_transport` could no longer recognise at
+        # argv[-1]).
+        sandbox_at = cmd.index("--sandbox")
+        cmd[sandbox_at + 1] = "read-only"
+        return cmd
 
     def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
         """Read usage off the terminal turn event of ``codex exec --json`` (D3j).

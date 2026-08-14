@@ -65,7 +65,9 @@ any host, a plain terminal, or CI.
    state (the script prints both), plus any notice it emitted (see below). If it
    refused to overwrite an existing file, relay that and offer `--force`. If it
    backed up a previous config, relay the backup path prominently and remind the
-   user to port any custom settings from the backup into the new file.
+   user to port any custom settings from the backup into the new file. Use the
+   report shape in `references/summary-format.md`, omitting the rows this mode has
+   nothing to fill (it has no plan and no state file).
 
 ## What gets written
 

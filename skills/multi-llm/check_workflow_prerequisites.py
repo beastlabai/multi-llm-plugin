@@ -56,7 +56,7 @@ from utils.cli_common import (
 # One table owns the phase vocabulary: the dispatcher resolves a `--mode`/
 # `--phase` word against the same rows (`modes.py`), so `review-code` (the mode
 # word) and `code-review` (the phase name) can never drift apart per host.
-from modes import PREREQUISITE_PHASES
+from modes import PREREQUISITE_PHASES, phase_from_selector, resolve as resolve_mode
 from utils import unattended as unattended_mod
 from utils.state_manager import StateManager
 from utils.output_handler import get_output_dir
@@ -325,6 +325,16 @@ SKIPPABLE_PREREQUISITES: Tuple[str, ...] = (
     "apply-suggestions", "apply-task-suggestions",
 )
 
+#: The prerequisites that are a *review* phase rather than an apply phase
+#: (``apply-suggestions`` needs ``review-plan``, ``apply-code-fixes`` needs
+#: ``code-review``, ``apply-task-suggestions`` needs ``review-tasks``). Nothing
+#: has been *produced* yet in this case, so there are no unapplied suggestions to
+#: name and no artifact to point at — and, being outside
+#: ``SKIPPABLE_PREREQUISITES``, nothing ``--skip-prerequisites`` may skip either.
+REVIEW_PREREQUISITES: Tuple[str, ...] = (
+    "review-plan", "review-tasks", "code-review",
+)
+
 #: Mode -> the D6 row it is gated by, so one table owns the mapping.
 GATE_ROW: Dict[str, int] = {
     "generate-tasks": 5,
@@ -356,6 +366,17 @@ def collect_missing(state: StateManager, plan_dir: Path, mode: str) -> List[dict
                     "reason": phase_check["reason"],
                 })
     return missing
+
+
+def _mode_word(phase: str) -> str:
+    """The dispatcher word for *phase*.
+
+    Mode word and phase name differ for exactly one row (mode ``review-code``,
+    phase ``code-review``), so a command is rendered from the table rather than
+    from the phase name a prerequisite entry happens to carry.
+    """
+    mode = resolve_mode(phase)
+    return mode.name if mode is not None else phase
 
 
 def _breakdown_text(entry: dict) -> str:
@@ -395,6 +416,22 @@ def build_unmet_message(
                 + dispatcher_command("generate-tasks", plan_abs, "--yes"),
                 "     then re-run              — "
                 + dispatcher_command(mode, plan_abs, "--yes"),
+            ]
+            continue
+        if phase in REVIEW_PREREQUISITES:
+            # The unmet prerequisite is the *review itself*: nothing has been
+            # produced, so there is no `validation.json` to cite and no
+            # "suggestions were not applied" to count. There is no
+            # `--skip-prerequisites` option here either — `ensure_prerequisites`
+            # refuses it for anything outside SKIPPABLE_PREREQUISITES, so
+            # printing it would be a command the agent copies and gets exit 3 on.
+            lines += [
+                f"{UNMET_MARKER} {mode}: {phase} has not been run for "
+                f"{plan_abs}.",
+                "  1) Run it first — "
+                + dispatcher_command(_mode_word(phase), plan_abs, "--yes"),
+                "     then re-run  — "
+                + dispatcher_command(_mode_word(mode), plan_abs, "--yes"),
             ]
             continue
         source = str((Path(plan_dir) / "review-plan" / "validation.json").resolve()) \
@@ -578,15 +615,31 @@ def ensure_prerequisites(
                 met=True, auto_ran=tuple(auto_ran),
                 notices=upstream_skip_notices(state),
             )
+        reasons = "; ".join(m.get("reason", "") for m in remaining)
+        if auto_ran:
+            headline = (
+                f"{UNMET_MARKER} {mode}: the apply phase ran once and the "
+                f"re-check still reports the prerequisite unmet ({reasons}). "
+                "Stopping here rather than retrying."
+            )
+        else:
+            # Nothing was auto-run: every missing prerequisite is outside
+            # SKIPPABLE_PREREQUISITES, so the loop above skipped it. Claiming an
+            # apply phase ran would send a reader debugging a phase that never
+            # executed. Exit 3 is still the right answer — the gate is unmet and
+            # the workflow may not repair it on its own.
+            unrunnable = ", ".join(m.get("phase", "") for m in remaining)
+            headline = (
+                f"{UNMET_MARKER} {mode}: nothing was auto-run — {unrunnable} is "
+                f"not a prerequisite the workflow may satisfy on its own "
+                f"({reasons}). Stopping here."
+            )
         return PrereqOutcome(
             met=False,
             exit_code=EXIT_NEEDS_HUMAN,
             missing=remaining,
             message=(
-                f"{UNMET_MARKER} {mode}: the apply phase ran once and the "
-                "re-check still reports the prerequisite unmet "
-                f"({'; '.join(m.get('reason', '') for m in remaining)}). "
-                "Stopping here rather than retrying.\n"
+                headline + "\n"
                 + build_unmet_message(mode, plan_path, plan_dir, remaining)
             ),
             auto_ran=tuple(auto_ran),
@@ -691,13 +744,32 @@ def main(argv=None) -> int:
     parser.add_argument("--status", action="store_true",
                         help="Show current workflow state")
     parser.add_argument("--mode", "--phase", required=False,
-                        choices=list(PREREQUISITE_PHASES),
-                        help="Mode to check prerequisites for")
+                        help="Mode word or phase name to check prerequisites "
+                             "for (either vocabulary: e.g. review-code or "
+                             "code-review). One of: "
+                             + ", ".join(PREREQUISITE_PHASES))
     parser.add_argument("--skip", action="store_true",
                         help="Mark the phase as skipped (requires --mode and --reason)")
     parser.add_argument("--reason", type=str, default="",
                         help="Reason for skipping the phase (used with --skip)")
     args = parser.parse_args(argv)
+
+    # `--mode`/`--phase` takes either vocabulary and resolves through the one
+    # table that owns both (`modes.py`), so `review-code` (the mode word) and
+    # `code-review` (the phase name) select the same gate and cannot drift. An
+    # unresolvable word is exit **3** ("this run needs a human"), not argparse's
+    # exit 2, which this skill reserves for "nothing to do / already complete".
+    # The message goes to stderr so stdout stays pure JSON.
+    if args.mode:
+        resolved_phase = phase_from_selector(args.mode)
+        if resolved_phase not in PREREQUISITE_PHASES:
+            print(
+                f"ERROR: unknown phase or mode '{args.mode}'. Valid phases: "
+                + ", ".join(PREREQUISITE_PHASES),
+                file=sys.stderr,
+            )
+            return EXIT_NEEDS_HUMAN
+        args.mode = resolved_phase
 
     plan_path = Path(args.plan_file).resolve()
 

@@ -106,8 +106,9 @@ def _timeout_cell(host: Dict[str, Any]) -> str:
         for name, value in override.items()
         if value != "none"
     ]
-    raised = ", ".join(channels) if channels else "not raisable"
-    return f"{ceiling} s (raise via {raised})"
+    if not channels:
+        return f"{ceiling} s (not raisable)"
+    return f"{ceiling} s (raise via {', '.join(channels)})"
 
 
 def _verified_cell(host: Dict[str, Any]) -> str:
@@ -117,7 +118,7 @@ def _verified_cell(host: Dict[str, Any]) -> str:
     return ", ".join(f"`{f}`" for f in verified) if verified else "*none yet*"
 
 
-def _matrix(hosts: Dict[str, Any]) -> List[str]:
+def _matrix(hosts: Dict[str, Any], base: Optional[str] = None) -> List[str]:
     rows = list(_MATRIX_HEAD)
     for host_id in sorted(hosts):
         host = hosts[host_id]
@@ -143,7 +144,7 @@ def _matrix(hosts: Dict[str, Any]) -> List[str]:
     return rows
 
 
-def _sections(hosts: Dict[str, Any]) -> List[str]:
+def _sections(hosts: Dict[str, Any], base: Optional[str] = None) -> List[str]:
     lines: List[str] = ["", "## Per-host notes and stripped variables", ""]
     for host_id in sorted(hosts):
         host = hosts[host_id]
@@ -151,8 +152,14 @@ def _sections(hosts: Dict[str, Any]) -> List[str]:
         lines.append("")
         lines.append(
             f"- Installable: `{str(host['installable']).lower()}`; "
-            f"reload after install: `{host['reload']}`; "
-            f"multi-turn session: `{str(host['multi_turn']).lower()}`"
+            f"reload after install: `{host['reload']}`"
+        )
+        lines.append(
+            "- Driving agent gets a turn after a command returns "
+            f"(`multi_turn`): `{str(host['multi_turn']).lower()}` — "
+            f"{host['provenance']['multi_turn']}. A `false` here is what "
+            "addresses a failed batch's retry instruction to the human rather "
+            "than to an agent that will never read it."
         )
         tiers = host["subagent_tiers"]
         if tiers is None:
@@ -167,7 +174,7 @@ def _sections(hosts: Dict[str, Any]) -> List[str]:
                 f"- Subagent tiers: full `{tiers['full']}`, cheap `{cheap}`"
             )
         lines.append("- Verb sentences a rendered shim carries:")
-        for sentence in caps.verb_sentences(host_id):
+        for sentence in caps.verb_sentences(host_id, base):
             lines.append(f"  - {sentence}")
         for scope in ("project", "global", "legacy"):
             paths = host["install_paths"][scope]
@@ -211,8 +218,8 @@ def render(base: Optional[str] = None) -> str:
     """The whole document, deterministically ordered."""
     hosts = caps.load(base).get("hosts", {})
     body = [_HEADER, ""]
-    body += _matrix(hosts)
-    body += _sections(hosts)
+    body += _matrix(hosts, base)
+    body += _sections(hosts, base)
     return "\n".join(body).rstrip("\n") + "\n"
 
 

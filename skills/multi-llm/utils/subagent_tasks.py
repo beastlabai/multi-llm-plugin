@@ -345,8 +345,9 @@ def make_task(
         executor_role: ``agent`` or ``human``.
         result_channel: Always ``file`` for a materialized task.
         subagent_type: Optional Claude-Code-only metadata; derived from
-            ``executor_role`` when omitted. Pass ``""`` to omit it entirely (the
-            normal case for a host with no agent-type vocabulary).
+            ``executor_role`` when omitted, which is what every producer does —
+            so the field is written on every task on every host (see the
+            emit site below). Pass ``""`` to omit it entirely.
         model_hint: Free-form model string or ``auto``; keeps its historical
             meaning. ``full``/``cheap`` belong to ``capability_tier`` alone.
         extra: Per-kind fields (``batch_index``, ``group_ids``, ``group_id``,
@@ -373,6 +374,14 @@ def make_task(
         "executor_role": executor_role,
         "inputs": dict(inputs),
     }
+    # D2h: the derived value is emitted unconditionally, on every host. D2h has a
+    # host with no agent-type vocabulary (``subagents: executor``) receiving task
+    # files without the field, and ``subagent_type=""`` is that path — but no
+    # producer threads a host id in to take it, because the field is metadata no
+    # reader consults and host-dependent task bytes would make a phase
+    # materialized under one host and resumed under another differ for nothing.
+    # Recorded as a deviation in ``plans/host-harness-portability.md``; the
+    # release that drops the field deletes it here rather than in every producer.
     if subagent_type is None:
         task["subagent_type"] = subagent_type_for_role(executor_role)
     elif subagent_type:

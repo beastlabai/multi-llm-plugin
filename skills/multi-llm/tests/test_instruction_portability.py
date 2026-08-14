@@ -59,6 +59,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -587,8 +588,16 @@ class TestPrintedFollowUps:
          "code_review_orchestrator.py"],
     )
     def test_validation_reaggregate_command(self, script, fixture_skill_dir, tmp_path):
-        """``utils/validation.py``'s reaggregate hint (the ``:956`` site)."""
-        from utils.validation import prepare_batched_validation_tasks
+        """``utils/validation.py``'s reaggregate hint (the ``:956`` site).
+
+        The task document stores only the durable ``reaggregate_mode`` + plan
+        pair (D1c); the resolved command is rebuilt at print time, so that
+        rebuild is what has to be clean.
+        """
+        from utils.validation import (
+            prepare_batched_validation_tasks,
+            resolved_reaggregate_command,
+        )
 
         plan = tmp_path / "a plan.md"
         plan.write_text("# plan\n", encoding="utf-8")
@@ -603,7 +612,11 @@ class TestPrintedFollowUps:
             plan_file=str(plan),
             orchestrator=script,
         )
-        command = result["reaggregate_command"]
+        assert "reaggregate_command" not in result, (
+            "a persisted task document must never store a skill-dir-absolute "
+            "command: the plugin cache is keyed by commit hash (D1c)"
+        )
+        command = resolved_reaggregate_command(result)
         _assert_command_is_clean("validation.py", command, str(fixture_skill_dir))
         argv = shlex.split(command)
         assert argv[argv.index("--") + 2] == str(fixture_skill_dir / "multi_llm.py")
@@ -626,6 +639,46 @@ class TestPrintedFollowUps:
         _assert_command_is_clean("code_review_orchestrator.py", command,
                                  str(fixture_skill_dir))
         assert " review-code " in command
+
+    def test_paths_are_shell_data_never_shell_source(self, tmp_path, monkeypatch):
+        """A printed command may not re-enter the shell through its own paths.
+
+        Both halves are filesystem-derived — the skill dir the plugin cache
+        handed us, the plan path the user typed — so a checkout under
+        ``/tmp/$(id).d`` has to round-trip as *that literal directory name*.
+        Double quoting (what this replaced) does not: ``$VAR``, backticks and
+        ``$(…)`` all stay live inside them, which turned a copy-pasteable
+        follow-up into arbitrary command execution.
+        """
+        base = tmp_path / "skill $(id) `whoami` dir"
+        base.mkdir(parents=True)
+        (base / "multi_llm.py").write_text("# fixture\n", encoding="utf-8")
+        monkeypatch.setattr(cli_common, "_SKILL_DIR", base)
+        plan = tmp_path / "a $(touch pwned) plan.md"
+
+        command = cli_common.reaggregate_command("review-code", str(plan))
+        argv = shlex.split(command)
+        assert argv[argv.index("--project") + 1] == str(base)
+        assert argv[argv.index("--") + 2] == str(base / "multi_llm.py")
+        assert str(plan) in argv
+
+        # `shlex.split` does not expand, so the decisive check is a real shell:
+        # every argument must reach argv byte-identical, and nothing may run.
+        bash = shutil.which("bash")
+        if bash is None:  # pragma: no cover - POSIX shell absent (native Windows)
+            pytest.skip("no POSIX shell available to check expansion")
+        for hostile in (str(base), str(plan), "$HOME", "`id`", "a'b\"c", "x; id"):
+            proc = subprocess.run(
+                [bash, "-c", f"printf %s {cli_common._quote(hostile)}"],
+                capture_output=True, text=True, cwd=str(tmp_path),
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stdout == hostile, (
+                f"{hostile!r} was rewritten by the shell to {proc.stdout!r}"
+            )
+        assert not (tmp_path / "pwned").exists(), (
+            "the plan path's command substitution executed"
+        )
 
     def test_no_production_print_emits_a_placeholder(self):
         """A stdout-wide scan: no ``print`` may carry a skill-dir placeholder.

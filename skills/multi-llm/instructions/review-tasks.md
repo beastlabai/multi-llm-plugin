@@ -182,7 +182,7 @@ If `[VALIDATION_PENDING]` marker is present:
 1. Read `validation_tasks.json` from `{plan}/review-tasks/`
 2. Run the single task's `prompt` as a subagent and write its JSON reply to that
    task's `output_path`
-3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
 #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -205,11 +205,11 @@ For each task in the `batches` array, run `task.prompt` as a subagent and write 
 
 Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
-3. After ALL batches complete, run reaggregation using `reaggregate_command`
+3. After ALL batches complete, run the reaggregation command below (rebuilt from `reaggregate_mode` + `plan_file`)
 
 #### Reaggregation (After Validation)
 
-After validation completes, run the `reaggregate_command` from validation_tasks.json:
+After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
 ```bash
 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --reaggregate
@@ -219,7 +219,7 @@ uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks
 
 ### 7. Report Results
 
-Report all generated files in `{plan}/review-tasks/`:
+Report following `references/summary-format.md`, including all generated files in `{plan}/review-tasks/`:
 - `report.html` - Interactive HTML report
 - `report.md` - Markdown review report
 - `grouped.json` - Grouped findings

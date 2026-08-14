@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -48,8 +49,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from . import process_control
     from .json_extractor import extract_json_from_text
-    from .llm_client import _resolve_executable
+    from .llm_client import _CMD_UNSAFE_CHARS, _resolve_executable
     from .provider_registry import (
         get_max_concurrent_subagents,
         get_provider,
@@ -64,6 +66,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
+        matches_any,
     )
     from .schema_validator import (
         validate_human_decision_verdicts,
@@ -78,8 +81,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         tasks_of,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils import process_control
     from utils.json_extractor import extract_json_from_text
-    from utils.llm_client import _resolve_executable
+    from utils.llm_client import _CMD_UNSAFE_CHARS, _resolve_executable
     from utils.provider_registry import (
         get_max_concurrent_subagents,
         get_provider,
@@ -94,6 +98,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
+        matches_any,
     )
     from utils.schema_validator import (
         validate_human_decision_verdicts,
@@ -184,6 +189,23 @@ MAX_CAPTURE_BYTES = 64 * 1024
 #: half-parsed into a plausible-looking result.
 MAX_STREAM_BYTES = 32 * 1024 * 1024
 
+#: Grace between the SIGTERM and the SIGKILL of a timed-out dispatch's process
+#: group (D3k rung 2). Short on purpose: the child has already spent its entire
+#: ``subagent_timeout_s``, so this is teardown, not one more chance to finish.
+TIMEOUT_KILL_GRACE_S = 0.5
+
+#: Ceiling on the post-kill drain. A grandchild the kill did not reach still
+#: holds the inherited stdout pipe, so the drain must be bounded — an unbounded
+#: one is the hang that turns a timed-out task into a wedged batch.
+TIMEOUT_DRAIN_S = 5.0
+
+#: The smallest slice of the per-task budget worth *starting* a retry with
+#: (D3i). ``subagent_timeout_s`` is the task's total wall-clock budget, so a
+#: retry gets what is left of it — and a runner handed under a second would
+#: spend it on process start-up and be killed for the same reason the previous
+#: attempt was, having only added a spawn and a kill to the batch.
+MIN_ATTEMPT_BUDGET_S = 1.0
+
 STATUS_OK = "ok"
 STATUS_TIMEOUT = "timeout"
 STATUS_RATE_LIMITED = "rate_limited"
@@ -216,6 +238,17 @@ RETRYABLE_STATUSES = frozenset({STATUS_TIMEOUT, STATUS_RUNNER_ERROR, STATUS_UNPA
 #: Rate limiting is retried with backoff+jitter and does **not** consume the
 #: retry budget (D3i) — it is not a transport failure.
 BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
+
+#: The only statuses ``_classify_failed_run`` may reclassify (D3k). Rungs 4 and 5
+#: mean "the run produced nothing usable", which is exactly the condition under
+#: which a 429 or a login notice is the *real* explanation. Rung 6 is deliberately
+#: absent: a ``schema_invalid`` result **parsed** — it is a deterministic
+#: disagreement with the kind's result shape that is never retried — and its
+#: streams carry the model's own prose, which routinely quotes "rate limit",
+#: "429" or "unauthorized" straight out of the plan or diff under review. Matching
+#: those substrings there would launder a schema disagreement into backoff retries
+#: or, worse, into a batch-failing ``auth_failed``.
+RECLASSIFIABLE_STATUSES = frozenset({STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE})
 
 #: Rungs that fail the whole batch immediately: every sibling would fail
 #: identically, so continuing would only burn the retry budget N times.
@@ -266,7 +299,15 @@ OUTPUT_NAME_PATTERN_BY_KIND = {
     # the pattern accepts both spellings rather than the kind's own name.
     "revalidation": re.compile(r"^(?:re)?validation_batch_\d+\.json$"),
     "consolidation": re.compile(r"^consolidation_batch_\d+\.json$"),
-    "human_decision_judge": re.compile(r"^human_decision_batch_\d+\.json$"),
+    # A judge verdict file is keyed by the judged item's stable ``group_id``
+    # (``human_decisions.verdict_output_name``), not by a batch index, so that a
+    # resumed judging phase — which materializes only the *remaining* items —
+    # cannot have one group's task adopt another group's already-written verdict
+    # as its own completed output. The token is therefore any basename-safe id;
+    # older ``_<n>`` names still match.
+    "human_decision_judge": re.compile(
+        r"^human_decision_batch_[A-Za-z0-9][A-Za-z0-9._-]*\.json$"
+    ),
     "task_generation": re.compile(r"^task_generation_result\.json$"),
     "salvage": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.json$"),
     # Write kinds (D3g): the batch result JSON. One distinct pattern per kind, so a
@@ -301,11 +342,24 @@ RESERVED_OUTPUT_NAMES = frozenset({
     "subagent_dry_run.json",
     "prior_changes.jsonl",
     "write_batch_report.json",
+    # The two materialized task files the list above was missing: the write half's
+    # (``write_phase_bridge.WRITE_TASK_FILENAME``, spelled out rather than imported
+    # only to keep this module's import graph unchanged) and ``generate-tasks``'s
+    # single-task envelope. A result landing on either would overwrite the very
+    # file the phase is dispatching from, which ``salvage``'s deliberately broad
+    # "any plain .json basename" pattern would otherwise permit.
+    "write_tasks.json",
+    "task_generation_tasks.json",
 })
 
 #: Basename prefixes an executor write may never land on (a task file, a salvage
 #: request, a rotated log).
 RESERVED_OUTPUT_PREFIXES = ("salvage_", "error_", "orchestrator-run.")
+
+#: Basename suffixes an executor write may never land on. Every materialized task
+#: file is ``<phase>_tasks.json``, so the suffix — not the enumeration above — is
+#: what keeps a later phase's task file safe without a second edit here.
+RESERVED_OUTPUT_SUFFIXES = ("_tasks.json",)
 
 #: Statuses mirrored into ``.status.json`` under ``progress`` (display only).
 _STATUS_MIRROR_KEY = "subagents"
@@ -620,7 +674,71 @@ _REASON_EXPLANATION = {
     "binary_absent": (
         "the adapter is implemented but its CLI is not on PATH"
     ),
+    "not_authenticated": (
+        "the CLI is installed but not logged in — installed is not authenticated, "
+        "and no retry can fix a missing credential"
+    ),
+    "nested_exec_denied": (
+        "this host's capability data declares that a third-party agent CLI cannot "
+        "be run from inside it at all — the executor refuses the run naming the "
+        "field rather than dispatching into a sandbox that eats the failure"
+    ),
+    "nested_exec_spawn": (
+        "the host's sandbox denied the spawn: the throwaway preflight dispatch "
+        "could not start the runner as a child of this host's own shell"
+    ),
+    "nested_exec_network": (
+        "the runner started inside this host but could not reach its provider "
+        "API — the host's egress rules, not the runner, are what failed"
+    ),
+    "nested_exec_credentials": (
+        "the runner started inside this host but could not read its own "
+        "credential store — a login notice from inside a sandbox is a host "
+        "condition as often as a logged-out CLI, and neither is retryable"
+    ),
 }
+
+#: Substrings that identify a *host-side egress* failure in a nested probe's
+#: streams (D3c ``nested_exec.network``). Deliberately narrower than the adapters'
+#: own classifier sets: these are matched only on a throwaway probe whose entire
+#: expected output is one fixed token, and every entry names a transport
+#: condition a model answer has no reason to contain. Matched through
+#: ``matches_any`` (boundary-aware), never as bare substrings.
+NETWORK_DENIAL_PATTERNS: Tuple[str, ...] = (
+    "network is unreachable",
+    "no route to host",
+    "connection refused",
+    "connection reset by peer",
+    "connection timed out",
+    "could not connect",
+    "unable to connect",
+    "failed to connect",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "getaddrinfo",
+    "eai_again",
+    "econnrefused",
+    "enetunreach",
+    "certificate verify failed",
+    "self signed certificate",
+    "tls handshake",
+    "proxy connect",
+    "blocked by proxy",
+    "egress blocked",
+)
+
+#: The throwaway prompt the nested-exec probe dispatches (D3c). Trivial on
+#: purpose: it is a real, billed turn, so it asks for one token and nothing that
+#: needs the workspace, and it runs under ``agent-readonly`` regardless of the
+#: profile the batch itself will use — a probe must never hold write access.
+NESTED_PROBE_PROMPT = (
+    "Reply with exactly this token and nothing else: MULTI_LLM_NESTED_EXEC_OK"
+)
+
+#: Wall-clock budget for that probe. Long enough for a cold agent CLI start plus
+#: one trivial turn, short enough that a wedged sandbox fails the preflight
+#: rather than consuming the batch's own budget.
+NESTED_PROBE_TIMEOUT_S = 120.0
 
 
 def _render_runner_rejection(
@@ -679,8 +797,11 @@ def preflight_runner(
     key: str = "driver.subagent_runner",
     anchor: Optional[str] = None,
     check_version: bool = True,
+    check_auth: bool = True,
+    check_nested: bool = True,
+    probe_nested: bool = True,
 ) -> Dict[str, Any]:
-    """Validate one runner spec and detect its version, once per run (D3c/D3m).
+    """Validate one runner spec; detect version, auth and nested-exec (D3c/D3m).
 
     Checks, earliest wins: the provider has an adapter, the model spec is valid
     for that provider, the adapter declares the requested profile, and (for a
@@ -691,8 +812,34 @@ def preflight_runner(
     faster than the CLIs do), and unparseable output is recorded ``unknown`` with
     the same warning.
 
+    The adapter's ``auth_check`` runs in the same preflight and is cached the same
+    way (D3c): **installed is not authenticated** — every ``is_available()`` is a
+    bare ``shutil.which``, so a logged-out CLI passes detection and would
+    otherwise be discovered one spawned child at a time, once per task in the
+    batch. A recognized login notice is exit 3 here, before anything is
+    dispatched; anything the probe cannot read (no ``auth_check`` declared, the
+    subcommand missing, the probe itself failing) is recorded ``unknown`` and
+    never blocks, leaving the reactive ``auth_error_patterns`` path (rung 1) to
+    catch it.
+
+    Last comes the host's own ``nested_exec`` verdict (D3c), because presence,
+    version and auth all describe the *runner* and none of them answers whether
+    this host lets a third-party CLI run inside it with network and credentials
+    intact. A declared ``denied`` leg is exit 3 naming the field — dispatching
+    into a sandbox that eats the failure would spend the retry budget on every
+    task in the batch — and a leg the data records as ``unknown`` or
+    ``needs-config`` is *probed*, once per distinct host/runner/run, with one
+    throwaway ``agent-readonly`` dispatch whose recognized denials (a refused
+    spawn, an egress block, a credential notice from inside the sandbox) are the
+    same exit 3 before anything is scheduled. An inconclusive probe is recorded
+    ``unknown`` and never blocks, exactly like the version and auth probes.
+    ``probe_nested=False`` keeps the declared verdict and suppresses only that
+    throwaway dispatch — it is what ``--dry-run-subagents`` passes, because the
+    probe is a real turn and "start no child" (D3l) means it.
+
     Returns:
-        ``{"provider", "model", "version", "usage_support", "profile"}``.
+        ``{"provider", "model", "version", "auth", "nested_exec",
+        "usage_support", "profile"}``.
 
     Raises:
         RunnerRejected: exit 3, through the one rejection formatter.
@@ -728,9 +875,23 @@ def preflight_runner(
         "profile": profile,
         "usage_support": provider.usage_support,
         "version": "unknown",
+        "auth": "unknown",
+        "nested_exec": "unknown",
     }
     if check_version:
         info["version"] = _detect_version(provider_name, key=key, spec=spec, profile=profile)
+    if check_auth:
+        info["auth"] = _detect_auth(provider_name, key=key, spec=spec, profile=profile)
+    if check_nested:
+        info["nested_exec"] = _detect_nested_exec(
+            provider_name, model,
+            key=key, spec=spec,
+            # The version probe already started this CLI as a child of the host's
+            # own shell, so a parsed version is a *spawn* observation and the
+            # throwaway dispatch has one less leg to answer for.
+            spawn_observed=info["version"] != "unknown",
+            probe=probe_nested,
+        )
     return info
 
 
@@ -738,10 +899,32 @@ def preflight_runner(
 #: dispatch (D3m).
 _VERSION_CACHE: Dict[str, str] = {}
 
+#: The same, for the D3c auth probe: ``ok`` | ``unknown`` per provider. A failed
+#: probe is never cached — it raises, and the run ends.
+_AUTH_CACHE: Dict[str, str] = {}
+
+#: The same, for the D3c nested-exec verdict, keyed by ``<host id>|<runner spec>``
+#: rather than by provider: the question is about the *pair*, and a host that
+#: denies one runner's egress may hand another its own bundled CLI. A denial is
+#: never cached either — it raises.
+_NESTED_CACHE: Dict[str, str] = {}
+
 
 def reset_version_cache() -> None:
-    """Clear the per-process runner-version cache (tests)."""
+    """Clear the per-process runner-version, auth and nested-exec caches (tests)."""
     _VERSION_CACHE.clear()
+    _AUTH_CACHE.clear()
+    _NESTED_CACHE.clear()
+
+
+def reset_auth_cache() -> None:
+    """Clear the per-process runner-auth cache (tests)."""
+    _AUTH_CACHE.clear()
+
+
+def reset_nested_exec_cache() -> None:
+    """Clear the per-process nested-exec cache (tests)."""
+    _NESTED_CACHE.clear()
 
 
 def _version_tuple(text: str) -> Tuple[int, ...]:
@@ -750,6 +933,28 @@ def _version_tuple(text: str) -> Tuple[int, ...]:
         match = re.match(r"^(\d+)", chunk)
         parts.append(int(match.group(1)) if match else 0)
     return tuple(parts) or (0,)
+
+
+def _run_probe(argv: Sequence[str]) -> Optional["subprocess.CompletedProcess"]:
+    """Run one cheap preflight argv (``version_cmd`` / ``auth_check``).
+
+    Returns ``None`` when the probe could not be run at all, which every caller
+    reads as "unknown": a preflight probe reports, it never blocks on its own
+    failure.
+    """
+    launcher, _ = _resolve_executable(argv[0])
+    try:
+        return subprocess.run(
+            [*launcher, *argv[1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _detect_version(
@@ -763,22 +968,11 @@ def _detect_version(
     version = "unknown"
     argv = list(getattr(provider, "version_cmd", ()) or ())
     if argv:
-        launcher, _ = _resolve_executable(argv[0])
-        try:
-            completed = subprocess.run(
-                [*launcher, *argv[1:]],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                stdin=subprocess.DEVNULL,
-            )
+        completed = _run_probe(argv)
+        if completed is not None:
             parsed = provider.parse_version(completed.stdout, completed.stderr)
             if parsed:
                 version = parsed
-        except (OSError, subprocess.SubprocessError):
-            version = "unknown"
 
     minimum = getattr(provider, "min_version", "") or ""
     verified = getattr(provider, "verified_version", "") or ""
@@ -811,6 +1005,319 @@ def _detect_version(
 
     _VERSION_CACHE[provider_name] = version
     return version
+
+
+def _detect_auth(
+    provider_name: str, *, key: str, spec: str, profile: str
+) -> str:
+    """Run ``auth_check`` once per provider and refuse a logged-out CLI (D3c).
+
+    Returns ``"ok"`` or ``"unknown"``; a recognized login/credential notice raises
+    instead, because every sibling task in the batch would fail identically and no
+    retry can fix a missing credential. ``unknown`` is the honest answer for a CLI
+    that declares no probe (claude-code has no non-interactive status subcommand)
+    or whose probe could not be read — never an assumption of success.
+    """
+    if provider_name in _AUTH_CACHE:
+        return _AUTH_CACHE[provider_name]
+
+    provider = get_provider(provider_name)
+    argv = list(getattr(provider, "auth_check", ()) or ())
+    if not argv:
+        _AUTH_CACHE[provider_name] = "unknown"
+        return "unknown"
+
+    completed = _run_probe(argv)
+    verdict: Optional[bool] = None
+    if completed is not None:
+        try:
+            verdict = provider.classify_auth_probe(
+                completed.stdout, completed.stderr, completed.returncode
+            )
+        except Exception:  # noqa: BLE001 - a probe must never break a preflight
+            verdict = None
+    if verdict is False:
+        login = getattr(provider, "login_cmd", "") or f"{argv[0]} login"
+        tail = _tail(
+            (completed.stderr or completed.stdout) if completed else "", 500
+        ).strip()
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: not_authenticated) — "
+            f"{_REASON_EXPLANATION['not_authenticated']}. "
+            f"`{' '.join(argv)}` reported: {tail!r}. "
+            f"Fix: run `{login}`, then re-run this phase. Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="not_authenticated",
+        )
+
+    state = "ok" if verdict else "unknown"
+    _AUTH_CACHE[provider_name] = state
+    return state
+
+
+def _host_nested_exec() -> Optional[Tuple[str, Dict[str, str], str]]:
+    """``(host_id, {leg: state}, notes)`` for the running host, or ``None``.
+
+    ``None`` means the capability data could not be read at all (a partial
+    install, a direct script run without ``utils`` importable). That is the one
+    case where the nested-exec leg is skipped outright rather than probed: a
+    throwaway dispatch is a real billed turn, and "I do not know which host I am
+    on" is not a reason to spend one — nor to refuse, since the legs it would
+    have answered are exactly the ones the reactive D3k ladder still catches.
+    """
+    try:
+        from . import host_capabilities as caps
+    except ImportError:  # pragma: no cover - direct script runs
+        try:
+            import host_capabilities as caps  # type: ignore
+        except ImportError:
+            return None
+    try:
+        host_id = caps.resolve_host_id(sys.argv[1:])
+        declared = caps.nested_exec(host_id)
+    except Exception:  # pragma: no cover - unknown host / missing data
+        return None
+    notes = str(declared.pop("notes", "") or "").strip()
+    legs = {
+        leg: str(declared.get(leg) or "unknown")
+        for leg in caps.NESTED_EXEC_LEGS
+    }
+    return host_id, legs, notes
+
+
+def _detect_nested_exec(
+    provider_name: str,
+    model: str,
+    *,
+    key: str,
+    spec: str,
+    spawn_observed: bool = False,
+    probe: bool = True,
+) -> str:
+    """Can a runner really run *inside this host*? Once per host/runner (D3c).
+
+    Presence, version and auth are all facts about the runner; this is the one
+    preflight leg about the **host**. Three verdicts:
+
+    * a declared ``denied`` leg → exit 3 naming the field and its notes, before
+      anything is scheduled. Every task in the batch would fail identically, and
+      a sandbox that denies a spawn or an egress usually eats the failure into
+      something the D3k ladder reads as generic runner noise and *retries*.
+    * every leg ``allowed`` → ``"allowed"``, with no child spawned. The data has
+      already answered; a probe would only spend a billed turn re-confirming it.
+    * anything ``unknown`` or ``needs-config`` → one throwaway ``agent-readonly``
+      dispatch, cached per ``host|spec`` for the process, whose recognized
+      denials are the same exit 3 and whose inconclusive outcomes are
+      ``"unknown"`` (a preflight probe reports; it never blocks on its own
+      failure).
+    """
+    resolved = _host_nested_exec()
+    if resolved is None:
+        return "unknown"
+    host_id, legs, notes = resolved
+
+    denied = [leg for leg in legs if legs[leg] == "denied"]
+    if denied:
+        raise RunnerRejected(
+            f"Refusing to dispatch: host {host_id!r} declares nested_exec "
+            f"{', '.join(denied)} denied (reason: nested_exec_denied) — "
+            f"{_REASON_EXPLANATION['nested_exec_denied']}. "
+            + (f"{notes} " if notes else "")
+            + f"Fix: drop --exec-subagents and let this host's own subagent "
+            f"mechanism run the phase, or run it from a host whose nested_exec "
+            f"permits a nested CLI. Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="nested_exec_denied",
+        )
+
+    cache_key = f"{host_id}|{spec}"
+    cached = _NESTED_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    unresolved = [leg for leg in legs if legs[leg] != "allowed"]
+    if spawn_observed and unresolved == ["spawn"]:
+        # The version probe already ran this CLI as a child of this host's shell,
+        # which is the whole of the spawn leg. Nothing else is open, so there is
+        # nothing left for a billed turn to answer.
+        unresolved = []
+    if not unresolved:
+        _NESTED_CACHE[cache_key] = "allowed"
+        return "allowed"
+    if not probe:
+        # Deliberately uncached: the declared verdict has not been answered, and a
+        # later real dispatch in this same process must still get its probe.
+        return "unknown"
+
+    state = _probe_nested_exec(
+        provider_name, model,
+        key=key, spec=spec, host_id=host_id, legs=unresolved, notes=notes,
+    )
+    _NESTED_CACHE[cache_key] = state
+    return state
+
+
+def _probe_nested_exec(
+    provider_name: str,
+    model: str,
+    *,
+    key: str,
+    spec: str,
+    host_id: str,
+    legs: Sequence[str],
+    notes: str,
+) -> str:
+    """The throwaway dispatch behind an ``unknown``/``needs-config`` leg (D3c).
+
+    One trivial ``agent-readonly`` turn, through the *same* :func:`_spawn` the
+    batch uses — same argv builder, same composed environment, same host env
+    guards — because a probe that composed its own child would answer a question
+    about a process the batch never runs. Only a recognized denial refuses:
+
+    * the child could not be started at all → the spawn leg, exit 3;
+    * a login/credential notice → the credentials leg, exit 3 (from inside a
+      sandbox this is as often the host's doing as a logged-out CLI, and neither
+      is retryable);
+    * an egress failure → the network leg, exit 3.
+
+    Everything else — a timeout, a non-zero exit with nothing recognized, a
+    silent zero-byte success, an adapter that will not render the probe — is
+    ``unknown`` plus one warning line. The reactive ladder still covers those,
+    and blocking a batch on an unreadable probe would be worse than the dispatch
+    the probe exists to save.
+    """
+    provider = get_provider(provider_name)
+    if provider is None:  # pragma: no cover - presence is checked before this
+        return "unknown"
+    opened = "/".join(legs)
+    try:
+        capture = _spawn(
+            provider=provider,
+            model=model,
+            prompt=NESTED_PROBE_PROMPT,
+            # Always read-only, never the batch's own profile: a preflight has no
+            # result to write, so it has no reason to hold write access.
+            profile=PROFILE_AGENT_READONLY,
+            transport=preferred_prompt_transport(provider_name),
+            timeout=NESTED_PROBE_TIMEOUT_S,
+            cwd=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - a probe reports, it never blocks
+        print(
+            f"multi-llm warning: could not render the nested-exec probe for "
+            f"{spec} on host {host_id} ({exc}) — recording nested_exec "
+            f"'unknown' for {opened}.",
+            file=sys.stderr,
+        )
+        return "unknown"
+
+    trailer = (
+        f"Host: {host_id} (nested_exec {opened} was not recorded as allowed). "
+        + (f"{notes} " if notes else "")
+    )
+
+    if capture.launch_error is not None:
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: nested_exec_spawn) "
+            f"— {_REASON_EXPLANATION['nested_exec_spawn']}: "
+            f"{capture.launch_error}. {trailer}"
+            f"Fix: grant this host's sandbox permission to start the runner, or "
+            f"run the phase without --exec-subagents. Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="nested_exec_spawn",
+        )
+
+    streams = f"{capture.stdout or ''}\n{capture.stderr or ''}".lower()
+
+    if capture.timed_out:
+        print(
+            f"multi-llm warning: the nested-exec probe for {spec} on host "
+            f"{host_id} did not finish within {NESTED_PROBE_TIMEOUT_S:.0f}s — "
+            f"recording nested_exec 'unknown' for {opened}. A wedged sandbox "
+            f"will resurface as a per-task timeout (D3k rung 2).",
+            file=sys.stderr,
+        )
+        return "unknown"
+
+    classified = _classify_failed_run(provider, capture)
+    if classified is not None and classified[0] == STATUS_AUTH_FAILED:
+        login = getattr(provider, "login_cmd", "") or f"{provider_name} login"
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: "
+            f"nested_exec_credentials) — "
+            f"{_REASON_EXPLANATION['nested_exec_credentials']}. "
+            f"Probe tail: {_tail(capture.stderr or capture.stdout, 500).strip()!r}. "
+            f"{trailer}"
+            f"Fix: run `{login}` from outside this host, or allow the runner to "
+            f"read its credential store from inside it. Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="nested_exec_credentials",
+        )
+
+    if matches_any(NETWORK_DENIAL_PATTERNS, streams):
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: "
+            f"nested_exec_network) — "
+            f"{_REASON_EXPLANATION['nested_exec_network']}. "
+            f"Probe tail: {_tail(capture.stderr or capture.stdout, 500).strip()!r}. "
+            f"{trailer}"
+            f"Fix: allow this host's sandbox to reach the provider API (a domain "
+            f"allow-list entry, a proxy setting), or run the phase without "
+            f"--exec-subagents. Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="nested_exec_network",
+        )
+
+    if capture.exit_code == 0 and streams.strip():
+        return "allowed"
+
+    print(
+        f"multi-llm warning: the nested-exec probe for {spec} on host {host_id} "
+        f"was inconclusive (exit {capture.exit_code}, "
+        f"{len(streams.strip())} byte(s) of output) — recording nested_exec "
+        f"'unknown' for {opened}. Dispatching anyway; a real denial will land on "
+        f"the D3k ladder.",
+        file=sys.stderr,
+    )
+    return "unknown"
+
+
+def _host_env_guards() -> Tuple[List[str], List[str]]:
+    """``(strip, passthrough)`` from the running host's ``env_guards`` (D3c/D5b).
+
+    Under ``subagents: executor`` the runner is a *grandchild* — the host's shell
+    tool spawned this dispatcher, this dispatcher spawns the runner — so the child
+    inherits the host's injected variables on top of the runner's own: the
+    nested-session marker that makes a same-binary runner refuse to start, and the
+    session/skill ids that make it join or overwrite the parent's session instead
+    of running its own turn. The adapter's ``get_remove_env()`` only knows about
+    the *runner*, so the strip list is the union of the two, composed here at the
+    single spawn site.
+
+    Deliberately non-fatal, like :func:`_host_ceiling`: a partial install that
+    cannot answer falls back to the adapter's own list rather than failing a
+    dispatch.
+    """
+    try:
+        from . import host_capabilities as caps
+    except ImportError:  # pragma: no cover - direct script runs
+        try:
+            import host_capabilities as caps  # type: ignore
+        except ImportError:
+            return [], []
+    try:
+        declared = caps.env_guards(caps.resolve_host_id(sys.argv[1:]))
+    except Exception:  # pragma: no cover - unknown host / missing data
+        return [], []
+    return (
+        [*declared["guards"], *declared["session_scoped"]],
+        list(declared["passthrough"]),
+    )
 
 
 def _host_ceiling() -> Optional[int]:
@@ -858,7 +1365,9 @@ def effective_ceiling(
     provider_limits: Dict[str, Optional[int]] = {}
     for spec in dict.fromkeys(runners):
         provider_name, _ = parse_model_spec(spec, anchor=anchor)
-        provider_limits[provider_name] = get_provider_max_concurrent(provider_name)
+        provider_limits[provider_name] = get_provider_max_concurrent(
+            provider_name, anchor=anchor
+        )
 
     candidates = [driver_gate]
     if host_max is not None:
@@ -925,8 +1434,10 @@ def resolve_output_target(task: Dict[str, Any], phase_dir: str) -> Path:
             "or UNC prefix, no alternate data stream)",
             name,
         )
-    if name in RESERVED_OUTPUT_NAMES or any(
-        name.startswith(prefix) for prefix in RESERVED_OUTPUT_PREFIXES
+    if (
+        name in RESERVED_OUTPUT_NAMES
+        or any(name.startswith(prefix) for prefix in RESERVED_OUTPUT_PREFIXES)
+        or any(name.endswith(suffix) for suffix in RESERVED_OUTPUT_SUFFIXES)
     ):
         raise _reject(
             "it collides with an orchestrator-owned artifact (the task file, "
@@ -976,15 +1487,24 @@ def resolve_output_target(task: Dict[str, Any], phase_dir: str) -> Path:
 
     declared = task.get("output_path")
     if isinstance(declared, str) and declared:
-        declared_resolved = Path(declared)
-        if not declared_resolved.is_absolute():
-            declared_resolved = resolved_dir / declared_resolved
-        if os.path.normpath(str(declared_resolved)) != os.path.normpath(
-            str(resolved_dir / name)
-        ):
+        declared_path = Path(declared)
+        if not declared_path.is_absolute():
+            declared_path = resolved_dir / declared_path
+        # Resolve BOTH sides (D1c: asymmetry is the bug). ``make_task`` derives
+        # ``output_path`` from the *unresolved* phase-dir string, so whenever that
+        # path crosses a symlink — a symlinked repo root, macOS ``/tmp`` →
+        # ``/private/tmp``, a CI workspace link — a normpath-only comparison
+        # differs from the resolved candidate and every task in the phase is
+        # refused before dispatch. D3f accepts an absolute ``output_path`` that
+        # RESOLVES to the same file, which is what this compares.
+        try:
+            declared_resolved = declared_path.resolve()
+        except OSError:  # pragma: no cover - unresolvable path is a mismatch
+            declared_resolved = Path(os.path.normpath(str(declared_path)))
+        if declared_resolved != candidate:
             raise _reject(
                 "the task's absolute output_path does not resolve to "
-                f"{resolved_dir / name} (names are authoritative, paths are a "
+                f"{candidate} (names are authoritative, paths are a "
                 "convenience field)",
                 declared,
             )
@@ -1303,7 +1823,7 @@ def _spawn(
     prompt: str,
     profile: str,
     transport: str,
-    timeout: int,
+    timeout: float,
     cwd: Optional[str],
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
@@ -1318,12 +1838,27 @@ def _spawn(
     argv, stdin_text = provider.build_agent_command_for_transport(
         prompt, model, profile, transport
     )
+    # The batch-shim flag is consumed pre-dispatch by `_prompt_over_budget`, which
+    # resolves argv[0] the same way: it applies cmd.exe's 8,191-unit cap and
+    # refuses a metacharacter-bearing prompt (rung 7, nothing spawned) before this
+    # runs, so by here the prompt is already known to be safe for this launcher.
     launcher, _is_batch_shim = _resolve_executable(argv[0])
     argv = [*launcher, *argv[1:]]
     capture.argv = list(argv)
 
     provider_env = provider.get_env(model)
-    remove_env = provider.get_remove_env()
+    host_guards, passthrough = _host_env_guards()
+    # The union, not the adapter's list alone (D3c): the adapter guards against
+    # its own nesting marker, the host entry declares what *this* host injects
+    # into every child. A name the host sanctions for the runner (`passthrough`,
+    # e.g. an API key it owns) is re-admitted last, because over-stripping turns a
+    # working runner into an auth failure — which is the outcome the guards exist
+    # to avoid, not a safe default.
+    remove_env = [
+        name
+        for name in dict.fromkeys([*(provider.get_remove_env() or ()), *host_guards])
+        if name not in passthrough
+    ]
     if provider_env or remove_env:
         env = {**os.environ, **provider_env}
         for key in remove_env:
@@ -1332,37 +1867,111 @@ def _spawn(
         env = None
 
     start = time.time()
+    # `Popen`, not `subprocess.run`: the timeout has to kill the child *with its
+    # process group* (D3k rung 2), and `run` neither hands out the pid nor kills
+    # anything but the direct child. An agentic runner is not a leaf — its tool
+    # children (a shell, a nested provider CLI) inherit both the group and this
+    # stdout pipe — so `run`'s leader-only kill leaves them running against a
+    # task nobody is reading, and its own post-kill drain is unbounded on
+    # Windows: a timed-out task wedges the whole batch instead of failing on
+    # rung 2.
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             env=env,
             cwd=cwd,
-            **(
-                {"input": stdin_text}
-                if stdin_text is not None
-                else {"stdin": subprocess.DEVNULL}
-            ),
+            **process_control.new_process_group_kwargs(),
         )
-        capture.duration = time.time() - start
-        capture.stdout = completed.stdout or ""
-        capture.stderr = completed.stderr or ""
-        capture.exit_code = completed.returncode
-        return capture
-    except subprocess.TimeoutExpired as exc:
-        capture.duration = time.time() - start
-        capture.timed_out = True
-        capture.stdout = _decode(exc.stdout)
-        capture.stderr = _decode(exc.stderr)
-        return capture
     except OSError as exc:
         capture.duration = time.time() - start
         capture.launch_error = str(exc)
         return capture
+
+    # Read the group now, while the child is alive: `os.getpgid` stops answering
+    # the moment the leader is reaped, and the group — the thing that still holds
+    # the tool children — outlives it. `None` on Windows, where `kill_tree` walks
+    # the tree instead.
+    pgid = process_control.process_group_id(proc.pid)
+    try:
+        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+        capture.duration = time.time() - start
+        capture.stdout = _decode(stdout)
+        capture.stderr = _decode(stderr)
+        capture.exit_code = proc.returncode
+        return capture
+    except subprocess.TimeoutExpired as exc:
+        _kill_timed_out(proc, pgid)
+        stdout, stderr = _drain_after_kill(proc, exc)
+        capture.duration = time.time() - start
+        capture.timed_out = True
+        capture.stdout = stdout
+        capture.stderr = stderr
+        return capture
+    except OSError as exc:
+        _kill_timed_out(proc, pgid)
+        _drain_after_kill(proc, None)
+        capture.duration = time.time() - start
+        capture.launch_error = str(exc)
+        return capture
+
+
+def _kill_timed_out(proc: Any, pgid: Optional[int]) -> None:
+    """SIGTERM → SIGKILL the child *and its group*, through the one facade.
+
+    ``start_time=None`` is how an unverified kill is *requested* (see
+    ``process_control.kill_tree``): this pid is not a record read off disk, it is
+    a child this process is still holding open, so there is nothing to
+    corroborate and nothing to recycle. The verdict is advisory — the child is
+    an unreaped zombie until :func:`_drain_after_kill` collects it, so the probe
+    that decides it cannot see the difference; what matters is that the signals
+    reached the group.
+    """
+    try:
+        process_control.kill_tree(
+            proc.pid,
+            start_time=None,
+            pgid=pgid,
+            escalate_after_s=TIMEOUT_KILL_GRACE_S,
+            poll_interval_s=0.05,
+        )
+    except Exception:  # noqa: BLE001 - teardown must never mask the timeout
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _drain_after_kill(
+    proc: Any, exc: Optional[subprocess.TimeoutExpired]
+) -> Tuple[str, str]:
+    """Collect the killed child's output and reap it, without ever hanging.
+
+    A second ``communicate()`` returns everything buffered, including what the
+    first one had already read before it timed out. If even *that* blocks, a
+    grandchild the kill did not reach is still holding the pipe: fall back to the
+    partial capture the ``TimeoutExpired`` carries and let the descriptors go,
+    because a diagnostic tail is never worth wedging the batch for.
+    """
+    try:
+        stdout, stderr = proc.communicate(timeout=TIMEOUT_DRAIN_S)
+        return _decode(stdout), _decode(stderr)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except (OSError, ValueError):  # pragma: no cover - best effort
+                pass
+        return (
+            _decode(getattr(exc, "stdout", None)),
+            _decode(getattr(exc, "stderr", None)),
+        )
 
 
 def _decode(value: Any) -> str:
@@ -1399,6 +2008,12 @@ def dispatch_task(
     but failed schema validation is **never** retried: that is a deterministic
     disagreement a retry would only launder. A retried task keeps its ``task_id``,
     so the task-keyed result map and reaggregation are unaffected.
+
+    ``timeout`` (or ``driver.subagent_timeout_s``) is the task's **total**
+    wall-clock budget, not a per-attempt one: a monotonic deadline is fixed at
+    entry, every attempt is spawned with what is left of it, backoff sleeps are
+    spent from it, and a retry is refused once no usable slice remains. So a
+    dispatch is bounded by the configured ceiling however many times it retries.
 
     Args:
         prompt: The prompt to dispatch, overriding ``task["prompt"]``. This is the
@@ -1491,7 +2106,27 @@ def dispatch_task(
     attempt_index = 0
     transport_retries_left = budget
     rate_limit_attempts = 0
-    total_duration = 0.0
+    # D3j: the recorded duration is wall-clock across *every* attempt, including
+    # the backoff sleeps between them — not the sum of the children's own
+    # runtimes. The sum is also what made D3i's "bounded by a total per-task
+    # wall-clock budget" below bound nothing: a task that slept through four
+    # exponential backoffs would report only the seconds its children ran and
+    # never reach `effective_timeout`. Monotonic, so a clock step cannot rewind
+    # the budget mid-task.
+    started_at = time.monotonic()
+    # D3i: `effective_timeout` is the *task's* wall-clock budget, not one budget
+    # per attempt. Every spawn below is given what is LEFT of this deadline and
+    # every retry decision is taken against it, so a task with N retries can
+    # never run for (N+1) × the configured ceiling plus its backoff sleeps —
+    # which is what would push a dispatch past the host's own ceiling and delay
+    # a detached run's failure detection by the same multiple.
+    deadline = started_at + effective_timeout
+
+    def elapsed() -> float:
+        return time.monotonic() - started_at
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
 
     while True:
         attempt_index += 1
@@ -1517,18 +2152,30 @@ def dispatch_task(
             except ResultRejected as exc:
                 outcome.status = exc.status
                 outcome.reason = exc.message
-                outcome.duration_seconds = total_duration
+                outcome.duration_seconds = elapsed()
                 return outcome
+        attempt_budget = remaining()
+        if attempt_budget <= 0:
+            # The first attempt always has the whole budget, so this is the
+            # `before_attempt` leg (a large pre-batch snapshot) having consumed
+            # what a retry was admitted with. Spawning here would hand a runner
+            # a budget it cannot use and record the kill as its own timeout;
+            # the budget is the task's, so its exhaustion is the task's outcome.
+            status, error = STATUS_TIMEOUT, (
+                f"the per-task wall-clock budget of {effective_timeout}s was "
+                f"exhausted after {attempt_index - 1} attempt(s); attempt "
+                f"{attempt_index} was never started"
+            )
+            break
         capture = _spawn(
             provider=provider,
             model=model,
             prompt=prompt,
             profile=profile,
             transport=transport,
-            timeout=effective_timeout,
+            timeout=attempt_budget,
             cwd=cwd,
         )
-        total_duration += capture.duration
         usage = _safe_parse_usage(provider, capture)
         status, error = _classify_pre_parse(capture)
 
@@ -1551,7 +2198,7 @@ def dispatch_task(
                         usage=usage,
                     ))
                     outcome.status = STATUS_OK
-                    outcome.duration_seconds = total_duration
+                    outcome.duration_seconds = elapsed()
                     _accumulate_usage(outcome, usage)
                     if after_result is not None:
                         # D3g: the model's claim is never the verdict. The
@@ -1571,7 +2218,7 @@ def dispatch_task(
                             "exit_code": capture.exit_code,
                             "stderr_tail": _tail(capture.stderr, 2000),
                             "usage": usage,
-                            "duration_seconds": total_duration,
+                            "duration_seconds": outcome.duration_seconds,
                             "outcome": outcome,
                         })
                         if not outcome.ok:
@@ -1588,11 +2235,14 @@ def dispatch_task(
                             f"{_tail(capture.stderr, 2000)!r}"
                         )
                     return outcome
-            else:
+            elif status in RECLASSIFIABLE_STATUSES:
                 # Only a run with no usable result may be reclassified as
                 # rate-limited or unauthenticated: the classifier matches on the
-                # captured streams, and a successful answer routinely quotes plan
-                # text that would trip those patterns.
+                # captured streams, and both a successful answer and a
+                # schema-invalid one routinely quote plan text that would trip
+                # those patterns. Rung 6 therefore never reaches this branch —
+                # it is never retried (D3k), so laundering it into rung 3's
+                # backoff or rung 1's batch-wide auth failure would be pure loss.
                 reclassified = _classify_failed_run(provider, capture)
                 if reclassified is not None:
                     status, error = reclassified
@@ -1627,33 +2277,54 @@ def dispatch_task(
             # Backoff + jitter, bounded by the same per-task wall-clock budget;
             # does NOT consume the transport retry budget (D3i).
             rate_limit_attempts += 1
+            delay = _backoff_delay(rate_limit_attempts)
             if (
                 rate_limit_attempts > 3
-                or total_duration >= effective_timeout
+                or remaining() - delay < MIN_ATTEMPT_BUDGET_S
             ):
+                # The sleep itself is inside the budget: waiting past the ceiling
+                # only to dispatch one more attempt is spending the budget twice.
+                # And a slice the next attempt could not use is not worth waiting
+                # for either — the sleep would only delay the same outcome.
                 break
-            napper(_backoff_delay(rate_limit_attempts))
+            napper(delay)
             continue
         if status in RETRYABLE_STATUSES and transport_retries_left > 0:
+            if remaining() < MIN_ATTEMPT_BUDGET_S:
+                # The retry budget is not the only budget: a retry runs inside
+                # the task's remaining wall clock, never on a fresh copy of it.
+                error = (
+                    f"{error} (no retry: the per-task wall-clock budget of "
+                    f"{effective_timeout}s is exhausted, "
+                    f"{transport_retries_left} retr"
+                    f"{'y' if transport_retries_left == 1 else 'ies'} unused)"
+                )
+                break
             transport_retries_left -= 1
             continue
         break
 
     outcome.status = status
     outcome.reason = error
-    outcome.duration_seconds = total_duration
+    outcome.duration_seconds = elapsed()
     return outcome
 
 
 def _prompt_over_budget(
     provider: Any, model: str, prompt: str, transport: str, profile: str
 ) -> Optional[str]:
-    """Why ``prompt`` exceeds the runner's transport budget, or ``None`` (D2d).
+    """Why ``prompt`` cannot travel this runner's argv, or ``None`` (D2d).
 
     The budget is a Windows command-line constraint, so a ``stdin``/``file``
     transport is unbounded and this is a no-op there. For an argv-only runner it
     measures the *rendered* non-prompt argv too, because that is what Windows
-    actually limits.
+    actually limits — and it resolves ``argv[0]`` exactly as :func:`_spawn` does,
+    because an npm ``.cmd``/``.bat`` shim is run by cmd.exe and therefore carries
+    the 8,191-unit cap rather than ``CreateProcess``'s 32,767. The same resolution
+    answers the second cmd.exe hazard: the shim's command line is *reparsed*, so a
+    metacharacter-bearing prompt is refused here rather than handed to that
+    reparse (BatBadBut / CVE-2024-24576 class), mirroring ``llm_client``'s guard
+    on the fan-out path.
     """
     try:
         from .subagent_tasks import prompt_budget_utf16, utf16_units
@@ -1666,28 +2337,75 @@ def _prompt_over_budget(
         argv = provider.build_agent_command(prompt, model, profile)
     except Exception:  # noqa: BLE001 - a budget probe must not mask a refusal
         return None
-    non_prompt = [arg for arg in argv if arg != prompt]
-    ceiling = prompt_budget_utf16(transport=transport, non_prompt_argv=non_prompt)
+    try:
+        launcher, is_batch_shim = _resolve_executable(argv[0])
+    except OSError:  # pragma: no cover - PATH probe failure is not a refusal
+        launcher, is_batch_shim = [argv[0]], False
+    if is_batch_shim:
+        unsafe = sorted(set(prompt) & _CMD_UNSAFE_CHARS)
+        if unsafe:
+            chars = ", ".join(repr(ch) for ch in unsafe)
+            return (
+                f"{provider.name} resolves to a cmd.exe batch shim "
+                f"({launcher[0]}) and delivers the prompt on argv, but the "
+                f"prompt contains cmd.exe metacharacters ({chars}). cmd.exe "
+                f"reparses the shim's command line, so these characters could "
+                f"corrupt the prompt or escape into executed commands "
+                f"(BatBadBut / CVE-2024-24576 class). Install a native "
+                f"executable for this runner, or configure a runner with a "
+                f"stdin/file prompt transport (driver.subagent_runner). "
+                f"Nothing was dispatched."
+            )
+    # Measure the argv `_spawn` will actually run: the resolved launcher, not the
+    # adapter's bare command name.
+    rendered = [*launcher, *argv[1:]]
+    non_prompt = [arg for arg in rendered if arg != prompt]
+    ceiling = prompt_budget_utf16(
+        transport=transport,
+        non_prompt_argv=non_prompt,
+        is_batch_shim=is_batch_shim,
+    )
     if ceiling is None:
         return None
     units = utf16_units(prompt)
     if units <= ceiling:
         return None
+    launcher_kind = (
+        "a .cmd/.bat shim run via cmd.exe (8,191-unit command-line cap)"
+        if is_batch_shim
+        else "a native executable (32,767-unit CreateProcess cap)"
+    )
     return (
         f"its prompt is {units} UTF-16 code units but {provider.name} delivers "
-        f"the prompt on argv, where this platform allows {ceiling}. Configure a "
-        f"runner with a stdin/file prompt transport (driver.subagent_runner). "
-        f"The prompt is never truncated. Nothing was dispatched."
+        f"the prompt on argv through {launcher_kind}, where this platform allows "
+        f"{ceiling}. Configure a runner with a stdin/file prompt transport "
+        f"(driver.subagent_runner). The prompt is never truncated. Nothing was "
+        f"dispatched."
     )
 
 
 def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff with jitter, honoring the test fast-backoff switch."""
+    """Exponential backoff **plus jitter**, honoring the test fast-backoff switch.
+
+    ``get_backoff_delay`` is only the test hook — it returns its argument
+    unchanged outside ``MULTI_LLM_TEST_FAST_BACKOFF`` — so the jitter D3i
+    specifies has to be added here. Without it the N sibling tasks a shared
+    provider throttled at the same moment re-attempt in lockstep and re-trip the
+    same limit together, which is the failure the backoff exists to avoid.
+
+    "Equal jitter": half the exponential step is deterministic and half is
+    random, so a retry is never immediate and never longer than the step itself.
+    The jitter is applied to the *base* and the test hook is the outer call, which
+    keeps ``MULTI_LLM_TEST_FAST_BACKOFF=1`` an exact 10 ms — a jittered test suite
+    would be both slower and nondeterministic.
+    """
     try:
         from .review_orchestrator_base import get_backoff_delay
     except ImportError:  # pragma: no cover
         from utils.review_orchestrator_base import get_backoff_delay
-    return get_backoff_delay(min(2.0 ** attempt, 30.0))
+    step = min(2.0 ** attempt, 30.0)
+    half = step / 2.0
+    return get_backoff_delay(half + random.random() * half)
 
 
 def _safe_parse_usage(provider: Any, capture: _Capture) -> Optional[Dict[str, Any]]:
@@ -1919,6 +2637,71 @@ def _run_sync(coro):
         return pool.submit(asyncio.run, coro).result()
 
 
+class _ProviderBackpressure:
+    """D3i's rate-limit backpressure, applied at the provider's in-flight slots.
+
+    A 429 belongs to the *provider*, not to the task that happened to draw it:
+    every sibling dispatched into the same limit will hit it too, burn its own
+    (budget-free but bounded) rate-limit attempts and then fail. D3i's answer is
+    to degrade the batch instead — "the executor narrows that provider's
+    in-flight slots for the rest of the batch instead of failing sibling tasks".
+
+    This is a *narrowing* gate, never a second dispatch pool: it is acquired
+    inside ``run_tasks_concurrent``'s per-provider and global semaphores, so the
+    effective concurrency is the minimum of the two layers and the D3i three-way
+    ceiling still bounds the batch from above. Acquisition order is therefore the
+    same for every task (provider semaphore → global semaphore → this gate) and a
+    holder always already owns the outer two, so narrowing can queue tasks but
+    cannot deadlock them.
+    """
+
+    #: A throttled provider is halved, never closed: one in-flight slot is the
+    #: floor, because zero would strand the rest of the batch behind a provider
+    #: whose only way back is a successful attempt.
+    MIN_SLOTS = 1
+
+    def __init__(self, limits: Dict[str, int]) -> None:
+        self._limits = dict(limits)
+        self._in_flight: Dict[str, int] = {}
+        self._condition = asyncio.Condition()
+
+    async def acquire(self, provider: str) -> None:
+        if provider not in self._limits:
+            return
+        async with self._condition:
+            while self._in_flight.get(provider, 0) >= self._limits[provider]:
+                await self._condition.wait()
+            self._in_flight[provider] = self._in_flight.get(provider, 0) + 1
+
+    async def release(self, provider: str) -> None:
+        if provider not in self._limits:
+            return
+        async with self._condition:
+            self._in_flight[provider] = max(0, self._in_flight.get(provider, 0) - 1)
+            self._condition.notify_all()
+
+    async def narrow(self, provider: str) -> Optional[int]:
+        """Halve ``provider``'s slots. Returns the new count, or ``None`` at the floor."""
+        async with self._condition:
+            current = self._limits.get(provider)
+            if current is None or current <= self.MIN_SLOTS:
+                return None
+            self._limits[provider] = max(self.MIN_SLOTS, current // 2)
+            # Nothing to wake: narrowing only ever removes capacity.
+            return self._limits[provider]
+
+
+def _saw_rate_limit(outcome: TaskOutcome) -> bool:
+    """Did any attempt of this task draw a 429/quota response (D3i)?
+
+    A task that was throttled and then *succeeded* on a later attempt still
+    proves the provider is throttling this batch, so it narrows the slots too.
+    """
+    if outcome.status == STATUS_RATE_LIMITED:
+        return True
+    return any(attempt.status == STATUS_RATE_LIMITED for attempt in outcome.attempts)
+
+
 async def _gather(
     tasks: Sequence[Dict[str, Any]],
     *,
@@ -1937,6 +2720,43 @@ async def _gather(
 
     fatal = {"hit": False}
 
+    # The starting slot count per provider: its own `max_concurrent`, bounded by
+    # the batch's effective ceiling (a provider limit above it could never be
+    # reached through the global gate anyway). Passed to `run_tasks_concurrent` as
+    # the explicit `provider_limits` it takes for exactly this purpose, and used to
+    # seed the gate that narrows them from there.
+    provider_limits: Dict[str, int] = {}
+    per_task_budget = 0.0
+    for spec in dict.fromkeys(runners.values()):
+        provider_name, _ = parse_model_spec(spec, anchor=anchor)
+        declared = get_provider_max_concurrent(provider_name, anchor=anchor)
+        provider_limits[provider_name] = max(
+            1, min(declared or max_parallel, max_parallel)
+        )
+        per_task_budget = max(
+            per_task_budget, get_subagent_timeout(provider_name, anchor=anchor)
+        )
+    backpressure = _ProviderBackpressure(provider_limits)
+
+    # The batch cap must be derived from the budget a dispatch actually runs on.
+    # Left to itself, `run_tasks_concurrent` computes it from
+    # `get_provider_timeout` — the *model-call* timeout, which says nothing about
+    # `driver.subagent_timeout_s`. Configure a subagent budget above the
+    # provider's model timeout (agentic runners routinely need one) and the
+    # batch-level `wait_for` cancels tasks that are still healthily inside their
+    # own deadline; they come back with no result file, are recorded
+    # `incomplete` by `run_tasks` and fail the phase with exit 3 while every
+    # runner was behaving. `dispatch_task` bounds one task by
+    # `get_subagent_timeout(provider)` **in total** — retries and rate-limit
+    # backoff are spent inside that same deadline, so the retry budget no longer
+    # multiplies it — and the gate serializes the batch into
+    # ceil(tasks / effective parallelism) waves, so that product is the batch's
+    # own ceiling. `run_tasks_concurrent` still doubles it and adds the stagger,
+    # which is the headroom for queueing, kill grace and drain.
+    lanes = max(1, max_parallel)
+    waves = (len(tasks) + lanes - 1) // lanes
+    batch_timeout = per_task_budget * waves if per_task_budget > 0 else None
+
     async def per_task(task: Dict[str, Any], runner: str, index: int) -> TaskOutcome:
         if fatal["hit"]:
             return TaskOutcome(
@@ -1949,16 +2769,29 @@ async def _gather(
                     "the whole batch (every sibling would fail identically)"
                 ),
             )
-        outcome = await asyncio.to_thread(
-            dispatch_task,
-            task,
-            phase_dir=phase_dir,
-            runner=runner,
-            anchor=anchor,
-            cwd=cwd,
-        )
+        provider_name, _ = parse_model_spec(runner, anchor=anchor)
+        await backpressure.acquire(provider_name)
+        try:
+            outcome = await asyncio.to_thread(
+                dispatch_task,
+                task,
+                phase_dir=phase_dir,
+                runner=runner,
+                anchor=anchor,
+                cwd=cwd,
+            )
+        finally:
+            await backpressure.release(provider_name)
         if outcome.fatal:
             fatal["hit"] = True
+        if _saw_rate_limit(outcome):
+            narrowed = await backpressure.narrow(provider_name)
+            if narrowed is not None:
+                print(
+                    f"[exec-subagents] {provider_name} reported a rate limit — "
+                    f"narrowing it to {narrowed} in-flight slot(s) for the rest "
+                    f"of the batch"
+                )
         return outcome
 
     def skip_done(task: Dict[str, Any], runner: str, index: int) -> Optional[TaskOutcome]:
@@ -1979,8 +2812,10 @@ async def _gather(
         list(tasks),
         per_task,
         runner_for_task=lambda task: runners[str(task.get("task_id", ""))],
+        timeout=batch_timeout,
         max_parallel=max_parallel,
         skip_predicate=skip_done,
+        provider_limits=provider_limits,
     )
 
 
@@ -2025,6 +2860,73 @@ def _mirror_status(phase_dir: str, report: BatchReport) -> None:
         pass
 
 
+#: The provenance a task file records about itself: the document key naming a
+#: source file → the ``inputs`` key its hash was recorded under. This is what
+#: makes the default read path able to re-bind a file nobody handed it: every
+#: producer writes the source paths next to the hashes (validation and
+#: consolidation their ``plan_file``/``grouped_file``, salvage its
+#: ``salvage_request_path``). ``diff_sha256``/``items_sha256`` are deliberately
+#: absent — their source is not a file on disk, so they stay unchecked rather
+#: than spuriously refused (:func:`subagent_tasks.check_task_file_inputs`
+#: compares only keys present in both blocks).
+_INPUT_SOURCE_KEYS = {
+    "plan_file": "plan_sha256",
+    "grouped_file": "grouped_sha256",
+    "salvage_request_path": "salvage_request_sha256",
+}
+
+
+def _recomputed_inputs(
+    document: Dict[str, Any], phase_dir: str, anchor: Optional[str]
+) -> Dict[str, str]:
+    """Re-hash the inputs this task file's own recorded provenance still names.
+
+    Freshly computed hashes are what turn ``read_task_file``'s inputs guard on —
+    without them it version- and schema-checks the file and binds nothing. A
+    caller that already knows its inputs passes them in; this is the fallback for
+    one that only has the file, and it reads the sources *the document itself*
+    names so a re-hash can never bind the file to something it was not
+    materialized from.
+
+    A source that cannot be read is skipped rather than hashed to ``""``: a
+    missing file would compare as "changed" and refuse a phase dir that was
+    merely moved, and an input nobody can recompute is exactly the case
+    ``check_task_file_inputs`` documents as "simply does not check it". A
+    recorded hash that is *already* ``""`` is skipped for the mirror-image
+    reason — that is ``file_content_hash``'s "the producer had no such file"
+    (every salvage task file records ``plan_sha256: ""``), so re-hashing
+    something in its place would refuse a file that was never bound to it.
+    """
+    try:
+        from .subagent_tasks import file_content_hash
+    except ImportError:  # pragma: no cover
+        from utils.subagent_tasks import file_content_hash
+
+    recorded = document.get("inputs")
+    if not isinstance(recorded, dict):
+        return {}
+    sources: Dict[str, Any] = {
+        key: document.get(key) for key in _INPUT_SOURCE_KEYS
+    }
+    # The salvage files record no `plan_file` (the request is what their prompt is
+    # built from), but they do record `plan_sha256`, and the dispatching caller
+    # already threads the plan path through as `anchor` — which is a plan file or
+    # a repo directory, so it only stands in when it is really a file.
+    if not sources.get("plan_file") and anchor and os.path.isfile(anchor):
+        sources["plan_file"] = anchor
+
+    current: Dict[str, str] = {}
+    for source_key, input_key in _INPUT_SOURCE_KEYS.items():
+        source = sources.get(source_key)
+        if not recorded.get(input_key) or not isinstance(source, str) or not source:
+            continue
+        path = source if os.path.isabs(source) else os.path.join(phase_dir, source)
+        if not os.path.isfile(path):
+            continue
+        current[input_key] = file_content_hash(path)
+    return current
+
+
 def run_task_file(
     task_file: str,
     *,
@@ -2033,6 +2935,7 @@ def run_task_file(
     anchor: Optional[str] = None,
     cwd: Optional[str] = None,
     document: Optional[Dict[str, Any]] = None,
+    current_inputs: Optional[Dict[str, str]] = None,
     host_max: Optional[int] = None,
     resume: bool = True,
     only_task_ids: Optional[Iterable[str]] = None,
@@ -2043,16 +2946,49 @@ def run_task_file(
     it in rather than re-reading — the version/inputs guards belong to
     ``utils/subagent_tasks.read_task_file`` and must not be bypassed here.
 
+    ``current_inputs`` is the freshly recomputed hash block for the read path.
+    It is optional but the binding is **not**: ``read_task_file`` only enforces
+    the inputs guard when it is given one, so passing nothing would silently
+    downgrade the default read to a version-and-schema check — and a phase dir
+    outlives the run that wrote it, so a plan or a salvage request edited between
+    a crash and the resume would produce a confidently stale prompt against text
+    nobody is reviewing any more (D2g). When it is omitted the hashes are
+    recomputed from the provenance the document records (:func:`_recomputed_inputs`).
+
     Human tasks are filtered out rather than dispatched: ``executor_role: human``
     means no invoker ever runs them, and they route to the D6 human-task pause.
+
+    Raises:
+        ExecutorError: exit 3 — the file is the wrong version, the wrong shape,
+            or was materialized from inputs that have since moved. Raised as the
+            executor's own refusal so both invokers' handlers (which exit 3 on
+            the fan-out path and skip the one non-fatal salvage dispatch) see it
+            rather than a bare traceback. Nothing is dispatched either way.
     """
     resolved_dir = phase_dir or os.path.dirname(os.path.abspath(task_file))
     if document is None:
         try:
-            from .subagent_tasks import read_task_file
+            from .subagent_tasks import (
+                TaskFileError,
+                check_task_file_inputs,
+                read_task_file,
+            )
         except ImportError:  # pragma: no cover
-            from utils.subagent_tasks import read_task_file
-        document = read_task_file(task_file, phase_dir=resolved_dir)
+            from utils.subagent_tasks import (
+                TaskFileError,
+                check_task_file_inputs,
+                read_task_file,
+            )
+        try:
+            document = read_task_file(task_file, phase_dir=resolved_dir)
+            bound = (
+                current_inputs if current_inputs is not None
+                else _recomputed_inputs(document, resolved_dir, anchor)
+            )
+            if bound:
+                check_task_file_inputs(document, task_file, resolved_dir, bound)
+        except TaskFileError as exc:
+            raise ExecutorError(str(exc)) from exc
 
     tasks = [
         task for task in tasks_of(document)
@@ -2233,8 +3169,14 @@ def dry_run_report(
                 info = preflight_runner(
                     runner, profile=entry["profile"], anchor=anchor,
                     key="driver.subagent_runner",
+                    # D3l: a dry run renders commands and starts no child, so the
+                    # declared nested_exec verdict still refuses a `denied` host
+                    # but the throwaway dispatch behind an `unknown` leg does not
+                    # run — it is a real turn, and this flag promises none.
+                    probe_nested=False,
                 )
                 entry["runner_version"] = info["version"]
+                entry["nested_exec"] = info["nested_exec"]
             except ExecutorError as exc:
                 reason = exc.message
         if reason is not None:
@@ -2270,6 +3212,31 @@ def dry_run_report(
 # ---------------------------------------------------------------------------
 # D3b — the self-contained continuation past a marker
 # ---------------------------------------------------------------------------
+
+def _retry_instruction(
+    args: Any, *, failed_ids: str, retry_command: Optional[str]
+) -> List[str]:
+    """The failed batch's recovery block, addressed to whoever can follow it.
+
+    ``--host`` is already on this run's own namespace — a shim bakes it into
+    every command it renders — so the addressee is resolved at the point host
+    capability is *already known*, in Python, and the agent is handed a finished
+    sentence. Nothing here asks an agent to consult the capability matrix
+    mid-run (D5); the matrix stays off every agent read path.
+
+    Two imports, no third fallback: ``host_capabilities`` sits beside this module
+    in the same package, so if neither spelling resolves this module's own
+    top-level imports have already failed.
+    """
+    try:
+        from . import host_capabilities as caps
+    except ImportError:  # pragma: no cover - direct script runs
+        import host_capabilities as caps  # type: ignore
+    host_id = caps.resolve_host_id(explicit=getattr(args, "host", None))
+    return caps.retry_instruction(
+        host_id, failed_ids=failed_ids, retry_command=retry_command
+    )
+
 
 def continue_past_marker(
     args: Any,
@@ -2348,10 +3315,12 @@ def continue_past_marker(
         # Resume IS the retry-only-the-failures path: a task counts as done iff
         # its result file exists, parses and validates, so re-invoking the phase
         # skips every completed task and re-dispatches exactly the failed set
-        # ({failed_ids}) under its original task_id.
-        f"Re-invoke to retry only the failures ({failed_ids}) — completed tasks "
-        f"are skipped by their result files:",
-        f"  {retry_command}" if retry_command else
-        "  (re-run the same command; completed tasks are skipped)",
+        # ({failed_ids}) under its original task_id. Who is being asked to
+        # re-invoke is the host's `multi_turn` answer, not an assumption: a host
+        # that ends its run with this command leaves no agent able to follow the
+        # instruction, so it is addressed to the human instead.
+        *_retry_instruction(
+            args, failed_ids=failed_ids, retry_command=retry_command
+        ),
     ]
     raise BatchFailed("\n".join(lines), report)

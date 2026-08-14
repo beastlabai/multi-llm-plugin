@@ -172,6 +172,12 @@ _HOME_TOKENS: Tuple[str, ...] = ("$HOME", "${HOME}", "%USERPROFILE%", "~")
 
 _XDG_TOKENS: Tuple[str, ...] = ("$XDG_CONFIG_HOME", "${XDG_CONFIG_HOME}")
 
+#: A native-absolute entry, in either platform's spelling: a leading separator, a
+#: drive prefix (``C:\…``) or a UNC root. Rejected for the same reason ``..`` is —
+#: an ``install_paths`` entry names a directory *under* the token it starts with
+#: or under the project root, and neither form does.
+_ABSOLUTE_RE = re.compile(r"^(?:[/\\]|[A-Za-z]:[/\\]?)")
+
 
 def user_home(env: Optional[Dict[str, str]] = None) -> Path:
     """The per-user root a ``$HOME``/``~``/``%USERPROFILE%`` token expands to.
@@ -204,23 +210,66 @@ def expand_path_tokens(
     collapse to one path and are de-duplicated by :func:`locations`).
 
     A relative entry is a project-scope path and resolves against *project_root*.
+    A token is only a token when the entry *is* it or continues with a separator,
+    so ``$XDG_CONFIG_HOMEx`` is not an XDG path, and the entry itself is checked
+    (:func:`checked_entry`) before any of it is joined.
     """
     env = os.environ if env is None else env
-    text = raw.strip()
+    text = checked_entry(raw)
     home = user_home(env)
     for token in _XDG_TOKENS:
-        if text.startswith(token):
+        if text == token or text.startswith(token + "/"):
             configured = (env.get("XDG_CONFIG_HOME") or "").strip()
             root = Path(configured) if configured else home / ".config"
             return _join(root, text[len(token):])
     for token in _HOME_TOKENS:
         if text == token or text.startswith(token + "/"):
             return _join(home, text[len(token):])
-    candidate = Path(text)
-    if candidate.is_absolute():
-        return candidate
     root = Path(project_root) if project_root is not None else Path.cwd()
     return _join(root, text)
+
+
+def checked_entry(raw: str) -> str:
+    """The stripped ``install_paths`` entry, or :class:`Refused`.
+
+    An entry names a directory *under* the token it starts with, or under the
+    project root — nothing else is expressible, and both other shapes are silent
+    rather than loud: :func:`_join` normalizes through ``os.path.abspath``, so a
+    single ``..`` segment relocates the write outside the root the entry names,
+    and a native-absolute entry ignores the root entirely. The schema states the
+    same rule (``install_path``), but the schema is CI's guard while this is the
+    runtime one — an entry reaching expansion is the last moment a bad path is
+    still a message instead of a file in the wrong directory.
+    """
+    text = raw.strip()
+    if not text:
+        raise Refused(
+            "ERROR: an install_paths entry is empty.\n"
+            "       Each entry names one directory, token-rooted ($HOME, "
+            "%USERPROFILE%, $XDG_CONFIG_HOME, ~) or relative to the project "
+            "root. Fix the entry in hosts/capabilities.yaml."
+        )
+    remainder, rooted = text, False
+    for token in _XDG_TOKENS + _HOME_TOKENS:
+        if text == token or text.startswith(token + "/"):
+            remainder, rooted = text[len(token):], True
+            break
+    if any(segment == ".." for segment in re.split(r"[/\\]", remainder)):
+        raise Refused(
+            f"ERROR: install_paths entry '{text}' contains a '..' segment.\n"
+            "       An entry names a directory under the token it starts with "
+            "(or under the project root); a parent-directory segment would move "
+            "the write outside it. Fix the entry in hosts/capabilities.yaml."
+        )
+    if not rooted and _ABSOLUTE_RE.match(text):
+        raise Refused(
+            f"ERROR: install_paths entry '{text}' is an absolute path.\n"
+            "       An entry is token-rooted ($HOME, ${HOME}, %USERPROFILE%, ~, "
+            "$XDG_CONFIG_HOME, ${XDG_CONFIG_HOME}) or relative to the project "
+            "root, so that one entry expands correctly on every OS. Fix the "
+            "entry in hosts/capabilities.yaml."
+        )
+    return text
 
 
 def _join(root: Path, remainder: str) -> Path:
@@ -275,6 +324,15 @@ def locations(
     over a legacy one. A legacy entry belongs to the scope its own token implies —
     rooted at the user's home (or XDG) means global, relative means project — so
     the classification stays data-driven too.
+
+    The two kinds of entry compose differently, and that is the one deviation
+    worth spelling out: a **preferred** entry names the directory to write into
+    and takes its file name from ``shim.installed``, while a **legacy** entry
+    names the *file*. A deprecated layout's file name is the host's own old
+    convention rather than ours (Codex's ``~/.codex/prompts/multi-llm.md`` is a
+    prompt file, not a skill directory), so joining our basename onto it would
+    probe a path no install of any vintage ever created — detection that can only
+    ever miss.
     """
     entry = caps.entry(host_id, base)
     paths = entry["install_paths"]
@@ -295,10 +353,13 @@ def locations(
             for raw, is_writable in buckets[scope]:
                 if is_writable is not writable:
                     continue
-                directory = expand_path_tokens(
+                expanded = expand_path_tokens(
                     raw, env=env, project_root=project_root
                 )
-                path = directory / name
+                # Preferred: a directory, plus our own file name. Legacy: the
+                # file itself (see the docstring).
+                directory = expanded if writable else expanded.parent
+                path = expanded / name if writable else expanded
                 if str(path) in seen:
                     continue
                 seen.add(str(path))
@@ -596,6 +657,84 @@ GIT_BASH_MISSING = (
     "Install it from https://git-scm.com/download/win and re-run."
 )
 
+#: The directories a Windows ``bash`` on ``PATH`` may resolve to *without* being a
+#: POSIX shell: ``%SystemRoot%\\System32\\bash.exe`` is WSL's launcher, installed
+#: by enabling the feature, and it starts a Linux VM whose filesystem is not the
+#: one the baked ``C:\\…`` prefix names. A bare ``which("bash")`` accepts it and
+#: reports the prerequisite as met on exactly the PowerShell-only machine
+#: ``references/uv-check.md`` tells the agent to stop on.
+_NOT_GIT_BASH_DIRS: Tuple[str, ...] = ("system32", "syswow64")
+
+#: Where Git for Windows keeps its shell, relative to the install root, and where
+#: that root sits relative to a ``git`` found on ``PATH``
+#: (``<root>\\cmd\\git.exe``, ``<root>\\bin\\git.exe``, ``<root>\\mingw64\\bin\\git.exe``).
+_GIT_BASH_RELATIVE: Tuple[Tuple[str, ...], ...] = (
+    ("bin", "bash.exe"), ("usr", "bin", "bash.exe"),
+)
+_GIT_ROOT_PARENTS: Tuple[int, ...] = (1, 2)
+
+#: The default install roots, for a Git that is installed but not on ``PATH``.
+_GIT_ROOT_ENV: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("ProgramFiles", ("Git",)),
+    ("ProgramW6432", ("Git",)),
+    ("ProgramFiles(x86)", ("Git",)),
+    ("LOCALAPPDATA", ("Programs", "Git")),
+)
+
+
+def git_bash(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The POSIX shell a rendered shim runs under, or ``None``.
+
+    Same probe ``references/uv-check.md`` (D6c) describes — look for ``bash`` on
+    ``PATH`` — with the one correction that document's own "Supported shells"
+    section already states in prose: on Windows the answer must be *Git Bash*.
+    With WSL enabled, ``bash`` on ``PATH`` is ``%SystemRoot%\\System32\\bash.exe``,
+    so a bare ``which`` reports the prerequisite as met on precisely the machine
+    that has no POSIX shell for the shim. When ``PATH``'s answer is that launcher
+    (or there is none), Git's own installation is asked instead — Git for Windows
+    ships ``bash.exe`` inside its root — which is what the row claims to assert.
+    """
+    env = os.environ if env is None else env
+    found = shutil.which("bash")
+    if found and not _is_wsl_launcher(found):
+        return os.path.abspath(found)
+    for candidate in _git_bash_candidates(env):
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+def _is_wsl_launcher(path: str) -> bool:
+    # Split on both separators rather than through ``os.path``: the Windows seam
+    # is asserted on POSIX too, and there ``dirname`` treats a backslash as an
+    # ordinary character, which would hide the very path this rejects.
+    parts = [part for part in re.split(r"[/\\]", path) if part]
+    return len(parts) > 1 and parts[-2].lower() in _NOT_GIT_BASH_DIRS
+
+
+def _git_bash_candidates(env: Dict[str, str]) -> List[str]:
+    """Every place Git for Windows' own ``bash.exe`` may sit, PATH's git first."""
+    roots: List[Path] = []
+    git = shutil.which("git")
+    if git:
+        parents = Path(os.path.abspath(git)).parents
+        roots.extend(
+            parents[index] for index in _GIT_ROOT_PARENTS if index < len(parents)
+        )
+    for name, tail in _GIT_ROOT_ENV:
+        value = (env.get(name) or "").strip()
+        if value:
+            roots.append(Path(value).joinpath(*tail))
+    seen: set = set()
+    candidates: List[str] = []
+    for root in roots:
+        for relative in _GIT_BASH_RELATIVE:
+            candidate = str(root.joinpath(*relative))
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+    return candidates
+
 
 @dataclass
 class Row:
@@ -665,6 +804,12 @@ def check(
     installable = bool(entry["installable"])
     root = str(base) if base else str(skill_dir())
 
+    # A host fact, not a file fact, so it is reported before anything is read —
+    # a check that cannot find a shim at all still names the knob (below).
+    knob = timeout_note(host_id, base)
+    if knob:
+        result.notes.append(knob)
+
     subject: Optional[Path]
     if not installable:
         subject = Path(root) / entry["shim"]["installed"]
@@ -713,7 +858,11 @@ def check(
     if subject is None or not subject.is_file():
         # Rows 2-4 read the file; without one they are unanswerable rather than
         # failed, and row 5 is still worth reporting.
-        result.rows.append(_environment_row(host_id, base=base, windows=windows))
+        result.rows.append(
+            _environment_row(
+                host_id, base=base, project_root=project_root, windows=windows
+            )
+        )
         return result
 
     text = subject.read_text(encoding="utf-8")
@@ -722,7 +871,11 @@ def check(
         result.rows.append(_prefix_row(host_id, text, root, base))
     result.rows.append(_shape_row(host_id, text, base))
     result.rows.append(_generation_row(host_id, text, base, installable))
-    result.rows.append(_environment_row(host_id, base=base, windows=windows))
+    result.rows.append(
+        _environment_row(
+            host_id, base=base, project_root=project_root, windows=windows
+        )
+    )
 
     if installable and local_edit(text):
         result.notes.append(
@@ -764,6 +917,60 @@ def reload_note(host_id: str, base: Optional[str] = None) -> str:
     )
 
 
+#: The three surfaces a host's command-timeout ceiling can move through (D5b
+#: ``timeout_override``), in the order they are reported.
+TIMEOUT_CHANNELS: Tuple[str, ...] = ("frontmatter", "env", "config")
+
+
+def timeout_note(host_id: str, base: Optional[str] = None) -> str:
+    """The host's own timeout-raise knob, reported — empty when it has none.
+
+    ``timeout_ceiling_s`` is how long one *foreground* command may run before the
+    host kills it; ``timeout_override`` records the channels that ceiling moves
+    through — ``none`` where the host has no such surface at all (OpenCode's V2
+    frontmatter has no ``timeout`` field, so rendering one would be ignored
+    rather than honored) and ``unknown`` until a smoke confirms the key.
+
+    Only a *named* channel is actionable, so only a named channel is reported,
+    and where the channel is an environment variable the line to export is
+    printed rather than described. An ``unknown`` channel stays silent: an
+    install that told the user to export ``unknown`` would be worse than saying
+    nothing. Both shipped hosts are ``unknown`` on every raisable channel today,
+    so this returns ``""`` for them until one is confirmed.
+    """
+    entry = caps.entry(host_id, base)
+    declared = entry.get("timeout_override") or {}
+    named: List[str] = []
+    for channel in TIMEOUT_CHANNELS:
+        value = str(declared.get(channel) or "none").strip()
+        if value in ("", "none", "unknown"):
+            continue
+        if channel == "env":
+            named.append(
+                f"export {value}=<seconds> in the shell that starts {host_id}"
+            )
+        elif channel == "config":
+            named.append(f"set `{value}` in {host_id}'s own config")
+        else:
+            named.append(f"the shim's `{value}:` frontmatter key")
+    if not named:
+        return ""
+    try:
+        ceiling = int(entry.get("timeout_ceiling_s") or 0)
+    except (TypeError, ValueError):  # pragma: no cover - schema keeps this an int
+        ceiling = 0
+    cap = (
+        f"caps one foreground command at {ceiling}s"
+        if ceiling
+        else "documents no command-timeout cap"
+    )
+    return (
+        f"host '{host_id}' {cap}; the entry names how that ceiling is raised — "
+        + "; ".join(named)
+        + ". install-host reports the knob and never writes it for you."
+    )
+
+
 def _prefix_row(
     host_id: str, text: str, root: str, base: Optional[str]
 ) -> Row:
@@ -792,6 +999,58 @@ def _prefix_row(
             f"run `{repair_line(host_id, base)}`",
         )
     return Row(ROW_PREFIX, True, prefix)
+
+
+#: The one dispatcher command a shim renders: ``… multi_llm.py" <mode> …``.
+_DISPATCHER_RE = re.compile(r'multi_llm\.py"?\s+<mode>')
+
+
+def dispatcher_commands(text: str) -> List[str]:
+    """Every dispatcher command in *text*, one logical command per entry.
+
+    Row 3's assertions about the command a host actually *runs* have to read that
+    command, not the file: the same shim bakes in verb sentences that discuss the
+    unattended default in prose ("… which implies ``--yes``"), so a whole-file
+    substring test still passes on a shim whose dispatcher lost the flag. A
+    trailing backslash continues a command onto the next line.
+    """
+    lines = text.splitlines()
+    commands: List[str] = []
+    for index, line in enumerate(lines):
+        if not _DISPATCHER_RE.search(line):
+            continue
+        command = [line]
+        cursor = index
+        while command[-1].rstrip().endswith("\\") and cursor + 1 < len(lines):
+            cursor += 1
+            command.append(lines[cursor])
+        commands.append("\n".join(command))
+    return commands
+
+
+#: The substitution words that make ``--interactive`` a replacement, not an extra.
+_SUBSTITUTES_RE = re.compile(r"replac\w*|in place of|instead of|substitut\w*", re.I)
+
+
+def substitution_rule(text: str) -> bool:
+    """Does *text* tell the agent to swap ``--interactive`` **for** ``--yes`` (D6b)?
+
+    Every non-reference shim bakes ``--yes``; the user's ``--interactive`` is the
+    one flag that may not simply pass through alongside it, because the dispatcher
+    rejects the pair with exit 3 and interactive mode would be unreachable on a
+    ``ask: free-text`` host. The rule has to be *stated* in the shim — one sentence
+    naming both flags and the substitution — so this reads sentences rather than
+    the whole file: naming the two flags paragraphs apart is not a rule.
+    """
+    flat = " ".join(text.split())
+    for sentence in re.split(r"(?<=[.;:])\s", flat):
+        if (
+            "--interactive" in sentence
+            and "--yes" in sentence
+            and _SUBSTITUTES_RE.search(sentence)
+        ):
+            return True
+    return False
 
 
 def shape_problems(
@@ -824,7 +1083,7 @@ def shape_problems(
     for slot in sorted(set(_SLOT_RE.findall(text))):
         problems.append(f"the slot {slot} was never filled")
 
-    dispatchers = re.findall(r'multi_llm\.py"?\s+<mode>', text)
+    dispatchers = _DISPATCHER_RE.findall(text)
     if len(dispatchers) != 1:
         problems.append(
             f"expected exactly one dispatcher command block, found "
@@ -862,11 +1121,28 @@ def shape_problems(
                 f"{text.count(sentence)} times; exactly one per verb, byte-"
                 "identical to the capability data's own render"
             )
-    if bool(entry["installable"]) and "--yes" not in text:
-        problems.append(
-            "an installable shim never passes --yes; unattended is the default on "
-            "every host that is not the interactive reference host"
-        )
+    if bool(entry["installable"]):
+        commands = "\n".join(dispatcher_commands(text))
+        if "--yes" not in commands:
+            problems.append(
+                "the dispatcher command never passes --yes; unattended is the "
+                "default on every host that is not the interactive reference host. "
+                "(A verb sentence mentioning --yes is prose about the flag, not the "
+                "command the host runs, so the assertion reads the command itself.)"
+            )
+        if "--interactive" in commands:
+            problems.append(
+                "the dispatcher command bakes --interactive alongside --yes; the "
+                "two together are exit 3, so --interactive is only ever a "
+                "substitution the agent makes for the user-typed flag"
+            )
+        elif not substitution_rule(text):
+            problems.append(
+                "no rule tells the agent to substitute --interactive for the baked "
+                "--yes (D6b): without it a user who types --interactive gets "
+                "`--yes --interactive`, which the dispatcher rejects with exit 3, "
+                "and interactive mode is unreachable on this host"
+            )
     return problems
 
 
@@ -912,6 +1188,7 @@ def _environment_row(
     host_id: str,
     *,
     base: Optional[str] = None,
+    project_root: Optional[Path] = None,
     windows: Optional[bool] = None,
 ) -> Row:
     """Row 5 — the install-time half of the uv bootstrap (D6c layer 1).
@@ -920,8 +1197,11 @@ def _environment_row(
     ``uv run``, so on a machine with no uv the shell fails with exit 127 before any
     Python could print the message. A host installed successfully has therefore
     already been told about uv, and no run reaches the 127 case.
+
+    The runner leg is :func:`_runner_facts`, which resolves the runner this
+    project would really dispatch — never the capability entry's default read on
+    its own — and reports the four facts that decide whether it can serve a phase.
     """
-    entry = caps.entry(host_id, base)
     problems: List[str] = []
     details: List[str] = []
     uv = find_uv()
@@ -930,25 +1210,19 @@ def _environment_row(
     else:
         details.append(f"uv={uv}")
 
-    runner = str(entry["default_subagent_runner"])
-    provider = runner.split(":", 1)[0]
-    if not runner_available(provider):
-        problems.append(
-            f"the runner CLI for this host's default subagent runner "
-            f"'{runner}' is not installed, so every phase that dispatches a "
-            f"subagent would fail. Install the '{provider}' CLI (or point "
-            "`driver.subagent_runner` in providers.yaml at one you have) and "
-            "re-check."
-        )
-    else:
-        details.append(f"runner={runner}")
+    runner_problems, runner_details = _runner_facts(
+        host_id, base=base, project_root=project_root
+    )
+    problems.extend(runner_problems)
+    details.extend(runner_details)
 
     is_windows = os.name == "nt" if windows is None else bool(windows)
     if is_windows:
-        if shutil.which("bash") is None:
+        shell = git_bash()
+        if shell is None:
             problems.append(GIT_BASH_MISSING)
         else:
-            details.append("bash=found")
+            details.append(f"bash={shell}")
 
     if problems:
         return Row(
@@ -957,6 +1231,190 @@ def _environment_row(
             f"`{repair_line(host_id, base)} --check`",
         )
     return Row(ROW_ENVIRONMENT, True, ", ".join(details))
+
+
+#: The config key row 5 reports on, spelled the way the executor's own rejections
+#: spell it, so the string a user greps for is the same in both places.
+RUNNER_KEY = "driver.subagent_runner"
+
+#: The three independent ways a host can stop a dispatched runner (D3c), each
+#: declared per host in ``nested_exec``.
+NESTED_EXEC_LEGS: Tuple[str, ...] = ("spawn", "network", "credentials")
+
+
+def configured_runner(
+    host_id: str,
+    *,
+    base: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> Tuple[str, str]:
+    """The runner this project would really dispatch, and the layer that set it.
+
+    Row 5 has to ask the question the **executor** asks — ``get_subagent_runner``
+    with this host id and this project as the discovery anchor (D3o) — never the
+    capability entry's ``default_subagent_runner`` read on its own. That entry
+    value is only the middle rung of the ladder: an explicit
+    ``driver.subagent_runner`` in ``<git-root>/.multi-llm/providers.yaml`` or in
+    ``MULTI_LLM_PROVIDERS_CONFIG`` outranks it, and the host default is itself
+    skipped when its own CLI is not detected. Checking the entry default alone
+    therefore reports green on a project whose configured runner is absent,
+    logged out or too old, and red on a project over a default that nothing
+    running there would ever dispatch.
+
+    The layer is reported alongside the spec because "I set it and nothing
+    changed" is otherwise a support question (D3o).
+    """
+    try:
+        from .provider_registry import resolve_subagent_runner
+    except ImportError:  # pragma: no cover - direct script runs
+        from provider_registry import resolve_subagent_runner  # type: ignore
+    anchor = str(project_root) if project_root is not None else None
+    # The resolver reports the layer it actually took, so the middle rung is named
+    # as itself: re-deriving the provenance here would let the check and the
+    # dispatch disagree, and reporting the host default as `base` would point a
+    # reader at a file that did not supply the value.
+    spec, layer = resolve_subagent_runner("full", anchor=anchor, host_id=host_id)
+    return str(spec).strip(), layer
+
+
+def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
+    """Auth and version for one runner spec, through the executor's own preflight.
+
+    The very call the executor makes once per phase (``preflight_runner``:
+    profile support, ``version_cmd`` against ``min_version``, the adapter's
+    ``auth_check``), so a green ``--check`` and the first dispatch cannot
+    disagree about the same CLI. **Installed is not authenticated** (D3c): every
+    ``is_available()`` is a bare ``shutil.which``, so a logged-out runner passes
+    detection here and is otherwise discovered one spawned child at a time, once
+    per task in the batch.
+
+    Nothing a probe cannot answer blocks — an adapter declaring no ``auth_check``,
+    a CLI that dropped ``--version``, a probe that fails to run all report
+    ``unknown`` — but a recognized refusal (no read-only profile, a build below
+    the minimum this release parses, a login notice) is exactly what row 5 exists
+    to surface before a batch discovers it.
+
+    Returns:
+        ``{"auth", "version", "problem"}``; ``problem`` is empty when the
+        preflight passed.
+    """
+    unknown = {"auth": "unknown", "version": "unknown", "problem": ""}
+    try:
+        try:
+            from .subagent_executor import (
+                PROFILE_AGENT_READONLY,
+                RunnerRejected,
+                preflight_runner,
+            )
+        except ImportError:  # pragma: no cover - direct script runs
+            from subagent_executor import (  # type: ignore
+                PROFILE_AGENT_READONLY,
+                RunnerRejected,
+                preflight_runner,
+            )
+    except Exception:  # pragma: no cover - a partial install never fails a check
+        return dict(unknown)
+    try:
+        info = preflight_runner(
+            spec, profile=PROFILE_AGENT_READONLY, key=RUNNER_KEY, anchor=anchor
+        )
+    except RunnerRejected as exc:
+        if getattr(exc, "reason_code", "") == "binary_absent":
+            # Presence is `runner_available`'s verdict — the two ask the same
+            # question of the same adapter, and row 5 reports it once.
+            return dict(unknown)
+        return {"auth": "unknown", "version": "unknown", "problem": str(exc)}
+    except Exception:  # pragma: no cover - a probe reports; it never blocks
+        return dict(unknown)
+    return {
+        "auth": str(info.get("auth") or "unknown"),
+        "version": str(info.get("version") or "unknown"),
+        "problem": "",
+    }
+
+
+def _runner_facts(
+    host_id: str,
+    *,
+    base: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> Tuple[List[str], List[str]]:
+    """Row 5's runner leg: four facts about the runner this project resolves.
+
+    Present, authenticated, version and nested-exec — because "on PATH" answers
+    none of the other three, and each of them fails *quietly* at dispatch: a
+    logged-out CLI prints a login notice and exits, a CLI below ``min_version``
+    emits an event stream the adapter was not written against, and a host whose
+    ``nested_exec`` says ``denied`` cannot exec a runner at all.
+    """
+    entry = caps.entry(host_id, base)
+    try:
+        spec, layer = configured_runner(
+            host_id, base=base, project_root=project_root
+        )
+    except Exception as exc:  # a broken override layer is an environment miss
+        return (
+            [
+                f"the configured subagent runner could not be resolved: {exc}. "
+                f"Fix `{RUNNER_KEY}` in providers.yaml (or in the file "
+                "MULTI_LLM_PROVIDERS_CONFIG points at) and re-check."
+            ],
+            [],
+        )
+
+    problems: List[str] = []
+    details: List[str] = []
+    native = str(entry["subagents"]) == "native"
+    scope = (
+        " (this host dispatches subagents natively, so the runner is consulted "
+        "only under --exec-subagents)"
+        if native else ""
+    )
+    provider = spec.split(":", 1)[0]
+    version = "unknown"
+    if not runner_available(provider):
+        problems.append(
+            f"the CLI for the configured subagent runner '{spec}' (supplied by "
+            f"{layer}) is not installed, so every phase that dispatches a "
+            f"subagent would fail{scope}. Install the '{provider}' CLI (or point "
+            f"`{RUNNER_KEY}` in providers.yaml at one you have) and re-check."
+        )
+    else:
+        facts = probe_runner(
+            spec, anchor=str(project_root) if project_root is not None else None
+        )
+        problem = str(facts.get("problem") or "")
+        if problem:
+            problems.append(problem)
+        version = str(facts.get("version") or "unknown")
+        details.append(f"runner={spec} (supplied by {layer}){scope}")
+        details.append(f"auth={facts.get('auth') or 'unknown'}")
+        details.append(f"version={version}")
+
+    nested = entry.get("nested_exec") or {}
+    states = {leg: str(nested.get(leg) or "unknown") for leg in NESTED_EXEC_LEGS}
+    denied = [leg for leg in NESTED_EXEC_LEGS if states[leg] == "denied"]
+    if denied:
+        notes = str(nested.get("notes") or "").strip()
+        line = (
+            f"this host's nested_exec declares {', '.join(denied)} denied, so a "
+            f"runner dispatched from inside it cannot run at all — the executor "
+            f"refuses the run naming the field rather than dispatching into a "
+            f"sandbox that eats the failure. {notes}"
+        ).strip()
+        # A `denied` leg is fatal only where the executor *is* the dispatch path:
+        # a native host resolves the verb to its own subagents, and `denied` there
+        # says only that its opt-in `--exec-subagents` fallback is unavailable.
+        (details if native else problems).append(line)
+    details.append(
+        "nested_exec=" + "/".join(f"{leg}:{states[leg]}" for leg in NESTED_EXEC_LEGS)
+    )
+    if version != "unknown" and states["spawn"] == "unknown":
+        # The version probe *is* a spawn probe: the runner CLI started as a child
+        # of this host's own shell, which is the one nested_exec leg a check can
+        # observe without dispatching a real, billed turn.
+        details.append("spawn probed here: the runner CLI started under this host")
+    return problems, details
 
 
 def runner_available(provider: str) -> bool:
@@ -989,19 +1447,33 @@ def runner_available(provider: str) -> bool:
 def atomic_write(target: Path, text: str) -> None:
     """Render into the target directory, ``fsync``, then ``os.replace``.
 
+    The text is encoded here rather than handed to a newline-translating stream,
+    which is the same guarantee ``newline="\\n"`` used to give: the bytes are
+    identical on every platform (idempotency and the body hash both depend on
+    that).
+    """
+    atomic_write_bytes(target, text.encode("utf-8"))
+
+
+def atomic_write_bytes(target: Path, data: bytes) -> None:
+    """The same write, for bytes that must land exactly as they were read.
+
     Same volume by construction, which is what makes ``os.replace`` atomic on
-    Windows too, and ``newline="\\n"`` so the bytes are identical on every
-    platform (idempotency and the body hash both depend on that). Directories come
-    from ``mkdir(parents=True, exist_ok=True)`` — no symlink, no junction, no
-    elevation.
+    Windows too. Directories come from ``mkdir(parents=True, exist_ok=True)`` —
+    no symlink, no junction, no elevation.
+
+    A backup and a rollback cannot go through the text path: reading a file with
+    ``read_text`` translates CRLF/CR to LF, so round-tripping a user's edited
+    shim through it would rewrite the line endings of the very bytes D7a
+    promises to preserve.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(
         dir=str(target.parent), prefix=".multi-llm-shim-", suffix=".tmp"
     )
     try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
@@ -1011,6 +1483,32 @@ def atomic_write(target: Path, text: str) -> None:
         except OSError:  # pragma: no cover - best-effort cleanup
             pass
         raise
+
+
+def _as_text(data: bytes) -> str:
+    """Decode an existing file the way every other reader in this module does.
+
+    ``read_text`` — which ``check``'s row 3 and the header parser both go
+    through — translates CRLF/CR to LF, so hashing and comparison must see the
+    same translation or an install would disagree with the ``--check`` that
+    follows it. Undecodable bytes are replaced rather than raised on: a file
+    that is not UTF-8 is certainly not a pristine shim of ours, and it belongs
+    in ``_guard_existing``'s refusal, not in a traceback.
+    """
+    return (
+        data.decode("utf-8", errors="replace")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+
+
+class _VerifyFailed(Exception):
+    """A post-replace verification failure, on its way to one rollback site.
+
+    Both a failed ``--check`` row and a probe that raised have to restore the
+    previous bytes before they surface (D7a); routing them through one exception
+    keeps that from being two rollback calls that can drift apart.
+    """
 
 
 def install(
@@ -1038,9 +1536,22 @@ def install(
         host_id, scope, base=base, env=env, project_root=project_root
     )
     target = location.path
+    if target.exists() and not target.is_file():
+        raise Refused(
+            f"ERROR: {target} exists and is not a regular file, so the shim "
+            "cannot be written there.\n"
+            "       install-host writes one file per host and never replaces a "
+            "directory or anything else it did not write. Move whatever is at "
+            "that path aside, or fix the install_paths entry for "
+            f"'{host_id}' in hosts/capabilities.yaml."
+        )
+    previous_bytes: Optional[bytes] = None
     previous: Optional[str] = None
-    if target.exists():
-        previous = target.read_text(encoding="utf-8")
+    if target.is_file():
+        # The bytes are what the backup and the rollback restore; the decoded
+        # text is only ever hashed or compared.
+        previous_bytes = target.read_bytes()
+        previous = _as_text(previous_bytes)
         _guard_existing(host_id, target, previous, force)
 
     rendered = render_installed(host_id, base=base)
@@ -1049,37 +1560,49 @@ def install(
         # rollback is possible, and the verification below still runs.
         print(f"[SHIM_UNCHANGED] {target}")
     else:
-        if previous is not None and force and not _is_pristine_shim(previous):
+        if previous_bytes is not None and force and not _is_pristine_shim(previous):
             # Anything --force had to override — a hand-edited shim or a file that
-            # was never ours — is preserved rather than destroyed. A pristine shim
-            # of ours needs no backup: re-rendering it reproduces it exactly.
+            # was never ours — is preserved rather than destroyed, byte for byte.
+            # A pristine shim of ours needs no backup: re-rendering it reproduces
+            # it exactly.
             backup = Path(str(target) + ".local.bak")
-            atomic_write(backup, previous)
+            atomic_write_bytes(backup, previous_bytes)
             print(f"[SHIM_EDIT_PRESERVED] {backup}")
         atomic_write(target, rendered)
         print(f"[SHIM_INSTALLED] {target}")
-    record_artifact(target)
 
-    result = check(
-        host_id, base=base, env=env, project_root=project_root, path=target,
-        windows=windows,
-    )
-    print_check(result)
-    byte_failures = [row for row in result.failures if row.number != ROW_ENVIRONMENT]
-    if byte_failures:
-        _rollback(target, previous)
-        raise Refused(
-            f"ERROR: the shim written to {target} did not verify, so the install "
-            "failed and was rolled back "
-            + ("(the previous file was restored)" if previous is not None
-               else "(nothing was left behind)")
-            + ".\n"
-            + "\n".join(
-                f"       row {row.number} ({row.name}): {row.detail}"
-                for row in byte_failures
-            )
+    # Everything from here to the reload note runs against bytes already on disk,
+    # so every way out of it — a failed row, an unreadable file, a probe that
+    # raised — is one failed install with one rollback (D7a).
+    try:
+        record_artifact(target)
+        result = check(
+            host_id, base=base, env=env, project_root=project_root, path=target,
+            windows=windows,
         )
-    _report_neighbours(result, location)
+        print_check(result)
+        byte_failures = [
+            row for row in result.failures if row.number != ROW_ENVIRONMENT
+        ]
+        if byte_failures:
+            raise _VerifyFailed(
+                "did not verify:\n"
+                + "\n".join(
+                    f"       row {row.number} ({row.name}): {row.detail}"
+                    for row in byte_failures
+                )
+            )
+        _report_neighbours(result, location)
+    except Exception as error:
+        expected = isinstance(error, _VerifyFailed)
+        detail = str(error) if expected else (
+            f"could not be verified — {type(error).__name__}: {error}"
+        )
+        outcome = _rollback(target, previous_bytes)
+        raise Refused(
+            f"ERROR: the shim written to {target} {detail}\n"
+            f"       The install failed and was rolled back ({outcome})."
+        ) from (None if expected else error)
     print(reload_note(host_id, base))
     if result.failures:
         raise Refused(
@@ -1133,14 +1656,26 @@ def _guard_existing(
         )
 
 
-def _rollback(target: Path, previous: Optional[str]) -> None:
-    if previous is None:
-        try:
-            target.unlink()
-        except OSError:  # pragma: no cover - nothing to remove
-            pass
-        return
-    atomic_write(target, previous)
+def _rollback(target: Path, previous: Optional[bytes]) -> str:
+    """Undo the write, and report what actually happened.
+
+    The refusal quotes this clause verbatim, so it only ever claims the cleanup
+    that succeeded: telling a user nothing was left behind when the unlink
+    failed sends them looking in the wrong place for a file that is still there.
+    """
+    if previous is not None:
+        atomic_write_bytes(target, previous)
+        return "the previous file was restored"
+    try:
+        target.unlink()
+    except FileNotFoundError:  # pragma: no cover - nothing to remove
+        pass
+    except OSError as error:
+        return (
+            f"except that {target} could not be removed and must be deleted by "
+            f"hand: {error}"
+        )
+    return "nothing was left behind"
 
 
 def _report_neighbours(result: CheckResult, written: Location) -> None:
@@ -1305,18 +1840,28 @@ def _installed_hosts(
     base: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     project_root: Optional[Path] = None,
-) -> List[Tuple[str, str]]:
-    """``(host_id, scope)`` for every installable host that has a shim on disk."""
-    found: List[Tuple[str, str]] = []
+) -> List[Location]:
+    """Every writable location holding a shim, for every installable host.
+
+    **Every** scope, not just the one that loads: a host installed in both scopes
+    has two copies with the same baked prefix, and a plugin update staled both. If
+    ``--all`` stopped at the highest-precedence copy, the global one would keep its
+    dead prefix forever and load stale in every *other* project — the exact repair
+    ``--all`` exists to perform, silently skipped. One entry per scope, because a
+    scope's write target is its first preferred path however many of that scope's
+    locations happen to hold a file.
+    """
+    found: List[Location] = []
     for host_id in sorted(caps.host_ids(base)):
         if not caps.entry(host_id, base)["installable"]:
             continue
+        seen: set = set()
         for location in existing_copies(
             host_id, base=base, env=env, project_root=project_root
         ):
-            if location.writable:
-                found.append((host_id, location.scope))
-                break
+            if location.writable and location.scope not in seen:
+                seen.add(location.scope)
+                found.append(location)
     return found
 
 
@@ -1362,8 +1907,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--all", dest="every", action="store_true",
-        help="Every installable host that already has a shim on disk. This is "
-             "the one command to run after a plugin update.",
+        help="Every installable host that already has a shim on disk, in every "
+             "scope that holds one. This is the one command to run after a "
+             "plugin update.",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -1401,18 +1947,22 @@ def _run_install(args: argparse.Namespace) -> int:
         )
 
     if args.every:
-        pairs = _installed_hosts(project_root=project_root)
-        if not pairs:
+        installed = _installed_hosts(project_root=project_root)
+        if not installed:
             print(
                 "[SHIM_NOT_FOUND] no installed shim to re-render. Install one "
                 "first: `install-host <host>`."
             )
             return EXIT_NOTHING_TO_DO
         worst = EXIT_OK
-        for host_id, scope in pairs:
+        for location in installed:
+            # `path` pins the check to *this* copy: the default search asserts
+            # rows 2-4 against the copy that loads, which would pass a stale
+            # global shim off as verified whenever a fresh project one shadows it.
             code = _one_install(
-                host_id, scope=scope, check_only=args.check, force=args.force,
-                project_root=project_root,
+                location.host_id, scope=location.scope, check_only=args.check,
+                force=args.force, project_root=project_root,
+                path=location.path,
             )
             worst = code if code != EXIT_OK else worst
         return worst
@@ -1431,10 +1981,11 @@ def _one_install(
     check_only: bool,
     force: bool,
     project_root: Optional[Path],
+    path: Optional[Path] = None,
 ) -> int:
     caps.entry(host_id)  # exit 3 on an unknown id, before anything is touched
     if check_only:
-        result = check(host_id, project_root=project_root)
+        result = check(host_id, project_root=project_root, path=path)
         print_check(result)
         if result.ok:
             return EXIT_OK

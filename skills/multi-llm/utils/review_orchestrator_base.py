@@ -65,6 +65,7 @@ from .state_manager import (
 from .validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
+    resolved_reaggregate_command,
 )
 from .subagent_tasks import (
     TaskFileError,
@@ -234,18 +235,47 @@ def dispatch_subagent_tasks(
 ) -> bool:
     """Run a materialized batch through the executor, or decline (D3b).
 
-    Returns ``False`` when ``--exec-subagents`` is off (the caller then prints its
-    marker and follow-up command exactly as before), ``True`` when every task
-    produced a schema-valid result file and the caller may continue in-process.
-    A partial batch exits **3** here — even under ``--yes`` — rather than letting
-    the phase reaggregate a short set.
+    Returns ``False`` when neither ``--exec-subagents`` nor ``--dry-run-subagents``
+    was requested (the caller then prints its marker and follow-up command exactly
+    as before), ``True`` when every task produced a schema-valid result file and
+    the caller may continue in-process. A partial batch exits **3** here — even
+    under ``--yes`` — rather than letting the phase reaggregate a short set.
+
+    ``--dry-run-subagents`` is an executor request **in its own right** (D3l), the
+    same way the write twin ``write_batch_scheduler.run_write_phase`` treats it:
+    it renders the preflight report and returns ``False``, so the phase still
+    prints its native marker. Gating it behind ``--exec-subagents`` would make a
+    standalone dry run silently fall back to the native marker on every read,
+    generation, consolidation and judging phase — no child *and* no report, which
+    is the one outcome the flag must never produce.
     """
-    if not exec_subagents_requested(args):
+    dry_run = bool(getattr(args, "dry_run_subagents", False))
+    if not exec_subagents_requested(args) and not dry_run:
         return False
-    from .subagent_executor import BatchFailed, ExecutorError, continue_past_marker
+    from .subagent_executor import (
+        BatchFailed,
+        ExecutorError,
+        continue_past_marker,
+        dry_run_report,
+    )
 
     project_root = get_project_root(plan_path) if plan_path else None
     try:
+        if dry_run:
+            report = dry_run_report(
+                task_file,
+                phase_dir=phase_dir,
+                phase=phase,
+                document=document,
+                anchor=plan_path,
+                cwd=project_root,
+            )
+            print(
+                f"[dry-run-subagents] {report} — every {label} command rendered, "
+                f"no child started, nothing else changed. This phase still prints "
+                f"its marker and its follow-up command."
+            )
+            return False
         return continue_past_marker(
             args,
             task_file=task_file,
@@ -1780,6 +1810,10 @@ async def reaggregate_from_existing_files(
             print(f"\nValidation prepared for Claude Code subagent.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
 
+            # Resolved here, from the running skill dir, because the task file
+            # stores only the durable mode + plan pair (D1c).
+            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
             # D3b: with --exec-subagents this process continues past the marker
             # instead of exiting — dispatch the batch, then fall through to the
             # merge below and finish the phase in one invocation. The marker is
@@ -1793,18 +1827,18 @@ async def reaggregate_from_existing_files(
                 document=batched_tasks,
                 plan_path=str(plan_path),
                 label="validation",
-                retry_command=batched_tasks.get("reaggregate_command"),
+                retry_command=reaggregate_cmd,
             ):
                 validated_groups_for_report = merge_validation_batches(
                     phase_dir, batched_tasks, grouped, validation_path
                 )
             else:
                 print("\nAfter validation completes, run:")
-                print(f"  {batched_tasks.get('reaggregate_command', '')}")
+                print(f"  {reaggregate_cmd or ''}")
                 # The single follow-up a native-subagent host is owed, also
                 # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
                 # that cannot parse prose does not have to regex-mine stdout.
-                record_next(batched_tasks.get('reaggregate_command') or None)
+                record_next(reaggregate_cmd or None)
                 return
     else:
         print("\nSkipping validation (--skip-validation flag set)")
@@ -2262,6 +2296,10 @@ async def run_review_orchestration(
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
 
+                # Resolved here, from the running skill dir, because the task
+                # file stores only the durable mode + plan pair (D1c).
+                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
                 # D3b: self-contained mode continues past the marker in this same
                 # process — dispatch, merge, and finish the phase in one
                 # invocation. Host-driven mode (the default) is unchanged below.
@@ -2273,7 +2311,7 @@ async def run_review_orchestration(
                     document=batched_tasks,
                     plan_path=str(plan_path),
                     label="validation",
-                    retry_command=batched_tasks.get("reaggregate_command"),
+                    retry_command=reaggregate_cmd,
                 ):
                     validation_path = os.path.join(phase_dir, "validation.json")
                     validated_groups_for_report = merge_validation_batches(
@@ -2281,11 +2319,12 @@ async def run_review_orchestration(
                     )
                 else:
                     print("\nAfter validation completes, run:")
-                    print(f"  {batched_tasks.get('reaggregate_command', '')}")
-                    record_next(batched_tasks.get('reaggregate_command') or None)
+                    print(f"  {reaggregate_cmd or ''}")
+                    record_next(reaggregate_cmd or None)
 
                     # The follow-up command is persisted in its **durable,
-                    # rebindable** form (mode word + plan path), never as the
+                    # rebindable** form (mode word + plan path) — in the task
+                    # file above and here alike — never as the
                     # resolved skill-dir-absolute string the same run prints: the
                     # Claude plugin cache is keyed by commit hash, so a stored
                     # absolute command points at a directory that no longer

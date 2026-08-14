@@ -10,7 +10,7 @@ this module owns both ends:
   and the Evaluation-Criteria / Approve-vs-Salvage-vs-Skip rules inlined verbatim
   rather than pointed at (a reference file is a path a headless runner may not be
   able to open).
-* **Consumer** — reads the ``human_decision_batch_<n>.json`` verdict files the
+* **Consumer** — reads the ``human_decision_batch_<group_id>.json`` verdict files the
   invoker persisted, validates each against
   ``schemas/human_decision_verdicts.schema.json`` naming the offending file and
   index, maps verdicts by **stable ``group_id``** (never batch or list position,
@@ -34,6 +34,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -70,6 +71,7 @@ __all__ = [
     "VerdictIngest",
     "judge_item_from_group",
     "group_id_of",
+    "verdict_output_name",
     "build_judge_tasks",
     "write_judge_tasks",
     "read_verdict_files",
@@ -80,7 +82,14 @@ __all__ = [
 
 
 JUDGE_TASKS_FILENAME = "human_decision_tasks.json"
+#: Glob over every verdict file in a phase dir. The token after the prefix is the
+#: judged item's stable id (see :func:`verdict_output_name`), never its position,
+#: so the glob is deliberately wider than ``_\d+``.
 VERDICT_FILE_PATTERN = "human_decision_batch_*.json"
+
+#: The basename charset ``schemas/subagent_tasks.schema.json`` allows for
+#: ``output_name``. A token outside it is hashed rather than rejected.
+_SAFE_VERDICT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 DECISION_APPROVE = "approve"
 DECISION_SALVAGE = "salvage"
@@ -147,6 +156,28 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
 # Producer: materialize the judging tasks
 # ---------------------------------------------------------------------------
 
+def verdict_output_name(token: str) -> str:
+    """Return the verdict basename for one judging task, keyed by *token*.
+
+    The token is the item's stable ``group_id`` — **never its position** in the
+    materialized list. ``build_judge_tasks`` is called with whatever items are
+    still unjudged, so a re-enumerated index names a *different* group's verdict
+    file on the next invocation; and because a task counts as done iff its
+    ``output_name`` exists, parses and validates, the resumed task would read the
+    previous round's already-ingested verdict, never be dispatched, and leave its
+    own group unjudged (silently skipped under ``--yes``) — while a native
+    invoker would instead overwrite the earlier group's file. Keying by
+    ``group_id`` is what makes "resume by id" true of the filenames too.
+
+    A token outside the task schema's basename charset is hashed rather than
+    rejected, so an exotic id still names exactly one stable file.
+    """
+    token = str(token or "")
+    if not _SAFE_VERDICT_TOKEN.match(token):
+        token = content_hash(token)
+    return f"human_decision_batch_{token}.json"
+
+
 def build_judge_tasks(
     *,
     items: Sequence[Dict[str, Any]],
@@ -185,11 +216,16 @@ def build_judge_tasks(
         prompt = build_human_decision_judge_prompt([item])
         if not budget.fits(prompt):
             budget.resolution(prompt, splittable=False)
+        # Both identities key off the item, never off its position: this function
+        # is called with the *remaining* items, so `index` is reassigned to a
+        # different group on every invocation. An item with no id at all falls
+        # back to a hash of its own prompt, which is stable for the same reason.
+        token = group_id or content_hash(prompt)
         tasks.append(make_task(
             kind="human_decision_judge",
-            task_id=f"human_decision_judge-{group_id or index}",
+            task_id=f"human_decision_judge-{token}",
             prompt=prompt,
-            output_name=f"human_decision_batch_{index}.json",
+            output_name=verdict_output_name(token),
             inputs=inputs,
             phase_dir=phase_dir,
             extra={

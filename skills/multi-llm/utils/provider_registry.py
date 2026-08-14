@@ -750,14 +750,27 @@ def validate_driver_block(driver: object) -> None:
                 "it must be an explicit provider:model spec (a bare model name "
                 "cannot be resolved for a runner)",
             ))
+        # Canonical spelling is part of the check, because dispatch-time
+        # `parse_model_spec` does NOT strip: a spec like "codex :gpt-5" would
+        # pass a stripped lookup here and then be rejected at preflight as
+        # unknown_provider — exactly the mid-phase surprise load-time
+        # validation exists to prevent.
+        canonical = f"{provider_name.strip()}:{model.strip()}"
+        if value != canonical:
+            raise ConfigError(_driver_runner_error(
+                key, value,
+                f"it carries whitespace around the provider:model spec, which "
+                f"dispatch does not strip (the same value is later rejected as "
+                f"unknown_provider) — write it as {canonical!r}",
+            ))
         # Deliberately NOT warn-and-filter: a filtered runner spec silently
         # degrades to "no runner configured" and resurfaces mid-phase, so the
         # driver validator raises where the fan-out path warns. The fan-out
         # behavior (_provider_has_adapter's warn-once) is untouched.
-        if get_provider(provider_name.strip()) is None:
+        if get_provider(provider_name) is None:
             raise ConfigError(_driver_runner_error(
                 key, value,
-                f"provider {provider_name.strip()!r} has no built-in adapter "
+                f"provider {provider_name!r} has no built-in adapter "
                 f"(reason code: unknown_provider) — run --init to refresh a "
                 f"stale config",
             ))
@@ -823,6 +836,39 @@ def _validate_path_policy(key: str, value: object) -> None:
                 f"expected a list of non-empty glob strings (e.g. "
                 f'["src/**", "docs/*.md"]).'
             )
+        for pattern in patterns:
+            _validate_path_glob(key, name, pattern)
+
+
+def _validate_path_glob(key: str, name: str, pattern: str) -> None:
+    """Reject a non-relative ``write_paths`` entry at load time (D3).
+
+    The policy is matched against **repo-relative POSIX paths** resolved under
+    the pinned repo root, so an absolute entry — the natural way to restate the
+    shipped deny set by hand (``/home/me/repo/.git/**``) — matches nothing and
+    silently leaves the user with no protection at all. A ``..`` segment cannot
+    name anything under the pinned root for the same reason. Both are rejected
+    here rather than at match time, where the failure is invisible.
+    """
+    normalized = pattern.strip().replace("\\", "/")
+    drive_prefixed = (
+        len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha()
+    )
+    if normalized.startswith("/"):
+        reason = "an absolute path"
+    elif drive_prefixed:
+        reason = "a drive-prefixed absolute path"
+    elif ".." in normalized.split("/"):
+        reason = "a parent-traversal ('..') path"
+    else:
+        return
+    raise ConfigError(
+        f"multi-llm config error: driver.{key}.{name} entry {pattern!r} is "
+        f"{reason} — entries are matched against repo-relative POSIX paths "
+        f"under the pinned repo root, so it can never match and the rule would "
+        f"silently be no rule at all. Write it relative to the repo root (e.g. "
+        f'".git/**", "**/.env").'
+    )
 
 
 def get_driver_config(anchor: Optional[Union[str, Path]] = None) -> dict:
@@ -866,21 +912,161 @@ def get_driver_provenance(
     return "default"
 
 
-def get_subagent_runner(
-    tier: str = "full", anchor: Optional[Union[str, Path]] = None
-) -> str:
-    """The configured runner spec for a capability tier (D2e/D3).
+#: The override layers that count as an operator *opinion* about a ``driver.*``
+#: value (D3o). ``base`` and :data:`DRIVER_FALLBACKS` are ours, not the user's, so
+#: they must never outrank the running host's own declared default: a fully
+#: populated base would otherwise shadow every host entry and put `claude` back on
+#: the hard-prerequisite list for a zero-config Codex or OpenCode install.
+EXPLICIT_DRIVER_LAYERS: Tuple[str, ...] = ("env", "project")
 
-    ``cheap`` resolves to ``driver.subagent_runner_cheap`` and falls back to
-    ``driver.subagent_runner``; every other tier resolves to
-    ``driver.subagent_runner``.
+
+def _host_capabilities():
+    """The capability reader, imported lazily and never fatally.
+
+    Deferred rather than imported at module scope because ``host_capabilities``
+    imports ``cli_common`` (which imports this module's siblings) and because most
+    invocations never need the yaml parse at all.
+    """
+    try:
+        from . import host_capabilities
+    except ImportError:  # pragma: no cover - partial install / direct script run
+        try:
+            import host_capabilities  # type: ignore
+        except ImportError:
+            return None
+    return host_capabilities
+
+
+def host_default_runner(
+    tier: str = "full", host_id: Optional[str] = None
+) -> Optional[str]:
+    """The running host's own ``default_subagent_runner``, when its CLI is there.
+
+    The middle rung of D3o's ladder — explicit ``MULTI_LLM_PROVIDERS_CONFIG`` →
+    explicit ``<git-root>/.multi-llm/providers.yaml`` → **this** → base
+    ``claude-code:sonnet``. Without it the fully-populated base shadows every
+    host's own default and a zero-config Codex or OpenCode install dispatches
+    Claude Code, reintroducing the extra CLI, login and billing prerequisite the
+    capability records exist to remove.
+
+    It is *not* a fourth config layer: it is consulted only when no override layer
+    expressed an opinion, so user config still always wins. Selection is gated on
+    the runner's CLI being detected (D3c) — an undetected same-host CLI falls
+    through to base rather than turning a zero-config run into a refusal — and the
+    host id is *declared* (``--host`` on this invocation's argv, else
+    ``$MULTI_LLM_HOST``, else the reference host), never sniffed. Returns ``None``
+    whenever the data cannot answer, so a partial install degrades to base instead
+    of failing a dispatch.
+    """
+    caps = _host_capabilities()
+    if caps is None:
+        return None
+    try:
+        if not host_id:
+            # The shim bakes `--host <id>` into the command line; there is no
+            # in-process channel carrying it down to config resolution, so the
+            # declaration is read back off argv exactly as the dispatcher reads it.
+            host_id = caps.resolve_host_id(sys.argv[1:])
+        entry = caps.entry(host_id)
+    except Exception:  # pragma: no cover - unknown host / unreadable data
+        return None
+
+    spec = entry.get("default_subagent_runner")
+    if not isinstance(spec, str) or ":" not in spec:
+        return None
+    provider_name, _, model = spec.strip().partition(":")
+    provider_name, model = provider_name.strip(), model.strip()
+    if not provider_name or not model:
+        return None
+    provider = get_provider(provider_name)
+    if provider is None:
+        return None
+    try:
+        if not provider.is_available():
+            return None
+    except Exception:  # pragma: no cover - a detection probe never blocks
+        return None
+
+    if tier == "cheap":
+        tiers = entry.get("subagent_tiers")
+        if isinstance(tiers, dict):
+            cheap = tiers.get("cheap")
+            if isinstance(cheap, str) and cheap.strip():
+                return f"{provider_name}:{cheap.strip()}"
+    return f"{provider_name}:{model}"
+
+
+#: The layer name reported for a value the running host's capability entry
+#: supplied (D3o). Deliberately *not* spelled like a config file: the entry is a
+#: shipped fact consulted only when no override layer expressed an opinion, and
+#: pointing a reader at ``providers.yaml`` for a value no file in this repo
+#: contains is the support question this reporting exists to end.
+HOST_DEFAULT_LAYER = "host capabilities"
+
+
+def resolve_subagent_runner(
+    tier: str = "full",
+    anchor: Optional[Union[str, Path]] = None,
+    host_id: Optional[str] = None,
+) -> Tuple[str, str]:
+    """The resolved runner spec **and the layer that supplied it** (D2e/D3/D3o).
+
+    The one implementation of D3o's ladder, so the value a dispatch uses and the
+    value ``status`` / ``install-host --check`` report can never be resolved two
+    different ways. Per key, highest precedence first: the value an **explicit**
+    override layer supplied (``env`` then ``project``) → the running host's
+    ``default_subagent_runner`` from ``hosts/capabilities.yaml``, when its CLI is
+    detected (:func:`host_default_runner`) → the merged (``base``/``default``)
+    value.
+
+    ``cheap`` reads ``driver.subagent_runner_cheap`` — and the host's own
+    ``subagent_tiers.cheap`` when the host default is what answers — falling back
+    to ``driver.subagent_runner`` last, as before. Tracking *where* a value came
+    from is what keeps base's ``claude-code:sonnet`` from silently outranking a
+    Codex or OpenCode host's own runner while still letting any user-set value win.
+
+    Returns:
+        ``(spec, layer)``, where ``layer`` is one of ``env``, ``project``,
+        :data:`HOST_DEFAULT_LAYER`, ``base`` or ``default``.
     """
     driver = get_driver_config(anchor=anchor)
-    if tier == "cheap":
-        cheap = driver.get("subagent_runner_cheap")
-        if isinstance(cheap, str) and cheap.strip():
-            return cheap
-    return str(driver.get("subagent_runner") or DRIVER_FALLBACKS["subagent_runner"])
+    key = "subagent_runner_cheap" if tier == "cheap" else "subagent_runner"
+    configured = driver.get(key)
+    layer = get_driver_provenance(key, anchor=anchor)
+    if (
+        isinstance(configured, str)
+        and configured.strip()
+        and layer in EXPLICIT_DRIVER_LAYERS
+    ):
+        return configured.strip(), layer
+
+    host_spec = host_default_runner(tier, host_id=host_id)
+    if host_spec:
+        return host_spec, HOST_DEFAULT_LAYER
+
+    if tier == "cheap" and isinstance(configured, str) and configured.strip():
+        return configured.strip(), layer
+    fallback_layer = (
+        layer if key == "subagent_runner"
+        else get_driver_provenance("subagent_runner", anchor=anchor)
+    )
+    return (
+        str(driver.get("subagent_runner") or DRIVER_FALLBACKS["subagent_runner"]),
+        fallback_layer,
+    )
+
+
+def get_subagent_runner(
+    tier: str = "full",
+    anchor: Optional[Union[str, Path]] = None,
+    host_id: Optional[str] = None,
+) -> str:
+    """The resolved runner spec for a capability tier (D2e/D3/D3o).
+
+    The dispatch-side spelling of :func:`resolve_subagent_runner`, which owns the
+    ladder and also names the layer that answered.
+    """
+    return resolve_subagent_runner(tier, anchor=anchor, host_id=host_id)[0]
 
 
 def get_max_concurrent_subagents(anchor: Optional[Union[str, Path]] = None) -> int:
@@ -937,13 +1123,21 @@ def get_subagent_timeout(
     return get_provider_timeout(provider_name)
 
 
-def get_provider_max_concurrent(provider_name: str) -> Optional[int]:
+def get_provider_max_concurrent(
+    provider_name: str, anchor: Optional[Union[str, Path]] = None
+) -> Optional[int]:
     """Get the max concurrent limit for a provider, if configured.
 
     Returns None if no limit is set, meaning the provider uses only the global
     semaphore (unlimited concurrency within it).
+
+    Args:
+        anchor: Optional plan-file path or target-repo directory, threaded
+            through to ``load_config`` exactly like the ``driver`` accessors so a
+            project-local ``.multi-llm/providers.yaml`` still binds when the run
+            starts outside that project. Omitted, discovery falls back to CWD.
     """
-    config = load_config()
+    config = load_config(anchor=anchor)
     providers = config.get("providers", {})
     if provider_name in providers:
         return providers[provider_name].get("max_concurrent")

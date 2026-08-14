@@ -369,8 +369,8 @@ One row per host **and scope**, not one path per host. `install-host` writes onl
 | Host | Global (preferred) | Project (preferred) | Compatibility (detected, never written) |
 |---|---|---|---|
 | `claude-code` | *n/a* — the plugin's own `SKILL.md` | *n/a* | `.claude/skills/multi-llm`, `$HOME/.claude/skills/multi-llm` (non-plugin install) |
-| `codex` | `$HOME/.codex/skills/multi-llm` | `.codex/skills/multi-llm` | `$HOME/.codex/prompts` |
-| `opencode` | `$XDG_CONFIG_HOME/opencode/commands`, `$HOME/.config/opencode/commands` | `.opencode/commands` | `.opencode/command` |
+| `codex` | `$HOME/.codex/skills/multi-llm` | `.codex/skills/multi-llm` | `$HOME/.codex/prompts/multi-llm.md` |
+| `opencode` | `$XDG_CONFIG_HOME/opencode/commands`, `$HOME/.config/opencode/commands` | `.opencode/commands` | — |
 
 ### After a plugin update
 

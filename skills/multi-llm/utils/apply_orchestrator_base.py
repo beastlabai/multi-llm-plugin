@@ -586,6 +586,24 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self._setup()
             self._load_and_parse_inputs()
             self._apply_user_feedback()
+            # The detach boundary (D4) — "after all pre-flight, before the first
+            # child". It sits HERE, not further down in _write_outputs(), because
+            # _handle_human_decisions() is a child-starting step too: under
+            # `--exec-subagents` (which `--detach` implies) it dispatches the
+            # judge subagents synchronously. Crossing after it would leave the
+            # invoker blocked on judging — minutes of agent work — instead of
+            # forking and returning the log/status lines immediately, and the
+            # judging would run outside the worker's `.status.json` claim, where
+            # `status` cannot see it.
+            #
+            # Everything that can fail on the caller's terminal with no child and
+            # no log still runs above: flags, inputs, loading, filtering, the
+            # no-selection confirmation and the no-items early exit. Batching and
+            # output assembly are pure Python over data already loaded, so the
+            # worker is the right place for them.
+            detached = self.maybe_detach_write_phase()
+            if detached is not None:
+                return detached
             self._handle_human_decisions()
             self._prepare_batches()
             return self._write_outputs()
@@ -1557,15 +1575,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             json.dump(output, f, indent=2)
         print(f"[OUTPUT_FILE] {output_path}", file=sys.stderr)
 
-        # Step 33a: the detach boundary (D4). It sits HERE — after every
-        # pre-flight (flags, inputs, loading, filtering, batching, phase-dir
-        # creation) and before the write executor can start a child — so a bad flag
-        # or an unresolvable runner fails on the caller's terminal with no child and
-        # no log. The write phases became long-running when the executor landed;
-        # before that, `--detach` on them was a loud exit 3 at the dispatcher.
-        detached = self.maybe_detach_write_phase()
-        if detached is not None:
-            return detached
+        # Step 33a: the detach boundary (D4) is NOT here. It is crossed in run(),
+        # before _handle_human_decisions(), because that step starts children too
+        # (the judge subagents under `--exec-subagents`) and D4 puts the boundary
+        # before the *first* child, not before the last one. By the time control
+        # reaches this line the process is either the ordinary foreground run or
+        # the detached worker that already owns the phase dir.
 
         # Step 33b: the write executor (D3n). Strictly additive — with neither
         # `--exec-subagents` nor `--dry-run-subagents` this returns None and the
@@ -1613,9 +1628,22 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         fan-out modes use: one spawn implementation, one handshake, one
         ``.status.json`` claim, so a write run is observable through exactly the
         same ``status`` command.
+
+        Called from :meth:`run` *before* ``_handle_human_decisions`` — the first
+        step that can start a child — and therefore before batching and output
+        assembly, which the worker does.
         """
         if not (getattr(self.args, "detach", False)
                 or getattr(self.args, "internal_worker", False)):
+            return None
+        # A dry run prints its report and exits before any child exists, so the
+        # invoker has nothing to daemonize: keep that report on the caller's
+        # terminal rather than forking a worker whose entire run is one report
+        # written to a log. The worker leg is untouched (it must still claim the
+        # phase dir) because the invoker never launches one for a dry run.
+        if getattr(self.args, "dry_run", False) and not getattr(
+            self.args, "internal_worker", False
+        ):
             return None
         from .review_orchestrator_base import maybe_detach
 

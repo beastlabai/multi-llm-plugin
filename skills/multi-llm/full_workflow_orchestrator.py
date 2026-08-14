@@ -96,6 +96,23 @@ SKIPPED = "skipped"
 ALREADY = "already-complete"
 FAILED = "failed"
 
+#: The phases whose real work is a **batch loop an invoker runs**, mapped to the
+#: directory each leaves that loop's instruction document in. They are the one
+#: place ``state.json`` cannot answer "did it happen?" on its own:
+#: ``apply-suggestions`` (``marks_phase_completed = True``) and ``implement``
+#: record themselves completed the moment the document is written — before a
+#: single edit exists — so a recorded completion here is a *claim about work
+#: handed out*, not about work done. ``apply-code-fixes``'s mode word is not its
+#: phase dir: the orchestrator's own ``phase_name`` is ``apply-fixes``.
+WRITE_PHASE_DIRS: Dict[str, str] = {
+    "apply-suggestions": "apply-suggestions",
+    "apply-task-suggestions": "apply-task-suggestions",
+    "apply-code-fixes": "apply-fixes",
+}
+
+#: The fourth write phase. Its document is ``--output``, not a plan-dir file.
+IMPLEMENT_PHASE = "implement"
+
 
 @dataclass
 class StepReport:
@@ -336,10 +353,19 @@ class FullWorkflow:
         return []
 
     def apply_flags(self) -> List[str]:
-        """The apply phases' unattended answers (rows 10/11)."""
-        flags = ["--no-confirm"]
+        """The apply phases' unattended answers (rows 10/11).
+
+        Both flags are gated the same way, because both *are* the unattended
+        dispositions of those two rows — the core appends ``--claude-decide
+        --no-confirm`` only under ``--yes``. Attended, the no-selection
+        confirmation stays a real gate: the phase prints ``confirmation_needed``
+        and records nothing, which this driver reads as "did not finish" and ends
+        at exit 3 naming the phase (row 14). Silently applying every valid item
+        nobody selected is the one thing an attended run must not do.
+        """
+        flags: List[str] = []
         if self.unattended:
-            flags += ["--claude-decide"]
+            flags += ["--claude-decide", "--no-confirm"]
         if getattr(self.args, "resume", False):
             flags += ["--resume"]
         return flags
@@ -487,10 +513,24 @@ class FullWorkflow:
 
         child = argparse.Namespace(**vars(self.args))
         child.reaggregate = False
-        child.force = False  # `full --force` re-runs phases, never re-dispatches
+        # `full --force` re-runs phases; it never re-invokes the models — with one
+        # exception, and it is the one the phase's own failure message names. A
+        # `task_generation_result.json` a native invoker persisted can be
+        # schema-invalid, and the resume branch re-consumes it forever: every
+        # `--resume` *and* `--force` would fail identically at consume time while
+        # the printed fix ("re-run with --force to re-dispatch") pointed at a flag
+        # this driver swallowed. So when the phase has no recorded completion,
+        # `--force` travels: there is no earlier progress a re-dispatch could
+        # discard. Once it *is* recorded, force means "re-run the phase" again.
+        child.force = bool(getattr(self.args, "force", False)) and (
+            self._recorded("generate-tasks") is None
+        )
         child.detach = False
         child.internal_worker = False
-        print(f"\n$ {dispatcher_command('generate-tasks', self.plan_path, *self.common_flags())}")
+        extra = list(self.common_flags())
+        if child.force:
+            extra += ["--force"]
+        print(f"\n$ {dispatcher_command('generate-tasks', self.plan_path, *extra)}")
         self._clear_next()
         try:
             code = generate_tasks.run_generate_tasks(
@@ -581,6 +621,100 @@ class FullWorkflow:
     # ------------------------------------------------------------------
     # The driver
     # ------------------------------------------------------------------
+    def _write_phase_document(self, phase: str) -> Optional[Path]:
+        """Where *phase* left its batches for an invoker, or ``None``.
+
+        ``None`` for every read/analyze phase: they have no batch loop, so there is
+        nothing for this check to look at.
+        """
+        subdir = WRITE_PHASE_DIRS.get(phase)
+        if subdir:
+            return self.plan_dir / subdir / "orchestrator_output.json"
+        if phase != IMPLEMENT_PHASE:
+            return None
+        # `implement` writes its batches to `--output`, which this driver never
+        # passes — so the phase used its own default. Recomputed through the
+        # phase's own function (never a second spelling of that path) and only
+        # once its git-root precondition holds, so the probe cannot exit for it.
+        try:
+            import implement_orchestrator
+
+            if not implement_orchestrator.get_project_root(str(self.plan_path)):
+                return None
+            return Path(
+                implement_orchestrator.resolve_default_output(
+                    Path(self.plan_path).resolve()
+                )
+            )
+        except (ImportError, SystemExit):  # pragma: no cover - defensive
+            return None
+
+    def _unexecuted_batches(self, phase: str) -> int:
+        """How many batches *phase* emitted that nothing in this run could apply.
+
+        ``full`` runs every phase **inside this one process**: there is no invoker
+        between a phase and the next one, so the only thing that can execute a
+        write phase's batches here is the write scheduler under
+        ``--exec-subagents`` (which finalizes — and therefore completes the phase —
+        only after every batch verified, D3n). Without it the batches are handed to
+        an invoker that never arrives, and the two phases that mark themselves
+        completed at emit time would otherwise report that as progress.
+
+        Zero is the answer whenever there is no evidence of a pending loop — no
+        document, an unreadable one, one belonging to another plan, or one
+        declaring no batches (the honest "nothing to apply" completion this must
+        not turn into a failure).
+        """
+        if getattr(self.args, "exec_subagents", False):
+            return 0
+        document = self._write_phase_document(phase)
+        if document is None or not document.is_file():
+            return 0
+        try:
+            payload = json.loads(document.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return 0
+        if not isinstance(payload, dict):
+            return 0
+        declared = payload.get("plan_file")
+        if declared and os.path.realpath(str(declared)) != os.path.realpath(
+            str(self.plan_path)
+        ):
+            # `implement`'s default output lives in a shared `.multi-llm/tmp/`;
+            # a document for another plan says nothing about this phase.
+            return 0
+        batches = payload.get("batches")
+        return len(batches) if isinstance(batches, list) else 0
+
+    def _unexecuted_write_phase(self, phase: str, pending: int) -> str:
+        """Print the row-14 explanation for *phase*, and return the report detail."""
+        follow_up = dispatcher_command(
+            phase, self.plan_path, *(["--yes"] if self.unattended else []),
+        )
+        document = self._write_phase_document(phase)
+        print(
+            "\n".join([
+                f"[WRITE_PHASE_NOT_EXECUTED] {phase} recorded itself completed "
+                f"after writing {pending} batch(es) to",
+                f"       {document}",
+                "       — but nothing applied them: `full` runs every phase "
+                "inside this one process,",
+                "       so with --exec-subagents unset there is no invoker "
+                "between this phase and the",
+                "       next. Run the phase on its own, so your host's subagents "
+                "execute its batches,",
+                "       then resume the workflow — or re-run the whole workflow "
+                "with --exec-subagents,",
+                "       which applies the batches in process.",
+            ]),
+            file=sys.stderr,
+        )
+        record_next(follow_up)
+        return (
+            f"exited 0 and recorded itself completed, but the {pending} batch(es) "
+            f"it emitted were never executed"
+        )
+
     def _verify(self, phase: str, code: int) -> Tuple[str, str, Optional[int]]:
         """A phase counts as progress only if *it* recorded itself (D2i's rule).
 
@@ -589,9 +723,20 @@ class FullWorkflow:
         ``[VALIDATION_PENDING]`` exits 0 with the phase deliberately incomplete —
         and marching on from there would review, implement and code-review against
         output nobody produced.
+
+        A write phase needs the *second* artifact check
+        (:meth:`_unexecuted_batches`), because its record is not that evidence: two
+        of the four mark themselves completed when they emit their batch document,
+        which is before any edit exists. Trusting it there would generate tasks
+        from a plan whose suggestions were never applied and code-review an
+        unimplemented tree — the same claim-vs-artifact failure, one phase further
+        on.
         """
         recorded = self._recorded(phase)
         if code in (EXIT_OK, EXIT_NOTHING_TO_DO) and recorded:
+            pending = self._unexecuted_batches(phase)
+            if pending:
+                return FAILED, self._unexecuted_write_phase(phase, pending), code
             return DONE, recorded, code
         if code in (EXIT_OK, EXIT_NOTHING_TO_DO):
             return (
@@ -629,7 +774,12 @@ class FullWorkflow:
         self._record_progress(current=step.phase or step.label,
                               failed=step.phase or step.label)
         unattended_mod.mark_needs_human(MODE_NAME)
-        record_next(resume)
+        # The machine-readable follow-up is the *next* command to run, and when the
+        # phase printed a prerequisite of its own that is that one — resuming
+        # before it re-materializes the same pending state and points back here, so
+        # a host that follows `next` mechanically would loop. The prose above still
+        # names both, in order.
+        record_next(pending or resume)
         return EXIT_NEEDS_HUMAN
 
     def run(self) -> int:

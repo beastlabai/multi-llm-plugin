@@ -8,11 +8,14 @@ state-machine phases.
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --ask <plan_path> "<free text question>" [--models provider:model ...] [--quick] [--interactive] [--force]
+/multi-llm:multi-llm --ask <plan_path> "<free text question>" [--models provider:model ...] [--quick] [--interactive] [--force] [--rerun-all]
 ```
 
-- `--force` re-asks **all** models even when prior answer files exist (use after
-  editing the plan, or to get a fresh round of opinions).
+- `--force` bypasses the resume guards (e.g. acts on a stale-plan warning) but
+  **keeps** existing answers: only models still missing an `answer_<model>.md`
+  are asked.
+- `--rerun-all` re-asks **all** models, discarding existing per-model answers
+  (use after editing the plan, or to get a fresh round of opinions).
 
 ## Question argument parsing rule (exact)
 
@@ -144,11 +147,12 @@ plans/todo/my-feature/ask/<question-slug>-<hash8>/
 
 - Re-asking the **byte-for-byte identical** question maps to the same directory
   and resumes: models with a non-empty `answer_<model>.md` are skipped and
-  `answers.md` is regenerated from all current answers. Use `--force` to re-ask
-  every model.
+  `answers.md` is regenerated from all current answers. Use `--rerun-all` to
+  re-ask every model; `--force` on its own only bypasses the resume guards and
+  still keeps existing answers.
 - On resume, if the plan file changed since the answers were generated, the
-  orchestrator prints a stale-plan warning recommending `--force` (it does not
-  auto-invalidate answers).
+  orchestrator prints a stale-plan warning recommending `--rerun-all` (it does
+  not auto-invalidate answers).
 
 ## Exit Status
 

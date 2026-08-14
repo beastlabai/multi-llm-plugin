@@ -114,6 +114,13 @@ def repo(tmp_path, monkeypatch):
     registry._config_key = None
 
 
+#: What a *compliant* runner attests to: an implement task's `expected_ids` is
+#: `[task_id]`, and a batch that moves bytes while attesting to none of its
+#: expected ids is a partial application, not a success (D3g/D3n). Extra ids are
+#: ignored by the classifier, so one superset serves every batch of the run.
+IMPLEMENT_WRITE_IDS = json.dumps(["T001", "T002", "T003"])
+
+
 def _phase_dir(repo) -> Path:
     from utils.output_handler import get_phase_dir
 
@@ -137,6 +144,7 @@ class TestImplementOrchestratorWiring:
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
         ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
         code = implement_orchestrator.main([
             "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
         ])
@@ -225,6 +233,7 @@ class TestImplementOrchestratorWiring:
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
         ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
 
         original = implement_orchestrator.TaskDecomposer
 
@@ -260,6 +269,7 @@ class TestImplementOrchestratorWiring:
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
         ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
         original = implement_orchestrator.TaskDecomposer
 
         class SeededDecomposer(original):
@@ -568,6 +578,7 @@ class TestFullStackDetachedImplement:
             "MOCK_LLM_EDITS": json.dumps([
                 {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
             ]),
+            "MOCK_LLM_WRITE_IDS": IMPLEMENT_WRITE_IDS,
         }
         launch = subprocess.run(
             [sys.executable, str(skill_root / "multi_llm.py"), "implement",
@@ -614,6 +625,7 @@ class TestFullStackDetachedImplement:
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# t1\n"}
         ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
         phase_dir = _phase_dir(repo)
         from utils.write_batch_scheduler import WriteBatchScheduler
         from utils.write_phase_bridge import materialize_write_tasks

@@ -28,7 +28,19 @@ REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 # otherwise be an unrestricted write primitive. Both are passed because an
 # allow-list alone is a *permission* statement, while the deny-list survives a
 # future default that widens the allowed set.
-READONLY_ALLOWED_TOOLS = ("Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite")
+#
+# The web tools are denied on this profile, not merely left out of the allow-list.
+# Every read/analyze prompt this profile ever runs is `context_mode: inline` or
+# `workspace-read` — its inputs travel inside the prompt or come off the pinned
+# repo root — so nothing here needs the network, while the text it is fed
+# (plans, diffs, review comments) is exactly the untrusted material a prompt
+# injection arrives in. With egress available, a `WebFetch` to an
+# attacker-named URL carrying repository content in the query string is an
+# exfiltration channel that needs no write tool at all. Denying it also puts
+# this runner on the same egress footing as the codex read-only profile, whose
+# `--sandbox read-only` denies network by default: one task class, one policy,
+# whichever runner `driver.subagent_runner` happens to name.
+READONLY_ALLOWED_TOOLS = ("Read", "Grep", "Glob", "TodoWrite")
 READONLY_DENIED_TOOLS = (
     "Edit",
     "MultiEdit",
@@ -36,6 +48,8 @@ READONLY_DENIED_TOOLS = (
     "NotebookEdit",
     "Bash",
     "Task",
+    "WebFetch",
+    "WebSearch",
 )
 
 # The `agent-write` tool policy (D3g/D3l). `--permission-mode acceptEdits` is
@@ -98,6 +112,12 @@ class ClaudeCodeProvider(LLMProvider):
     supports_file_edits = True
     supports_workspace_reads = True
     usage_support = USAGE_FULL
+    # No `auth_check`: the CLI ships no non-interactive login-status subcommand
+    # (`/status` is an in-session slash command, and `claude setup-token` starts a
+    # login flow), and inventing one out of a throwaway generating dispatch would
+    # cost a model call per run. The auth state is therefore recorded `unknown`
+    # (D3c) and a login notice is still caught reactively by auth_error_patterns.
+    login_cmd = "claude login"
     version_cmd = ("claude", "--version")
     min_version = "2.0.0"
     verified_version = "2.1.224"

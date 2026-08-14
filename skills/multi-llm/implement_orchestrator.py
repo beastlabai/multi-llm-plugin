@@ -612,6 +612,46 @@ def format_batches_for_output(
     return output_batches
 
 
+def maybe_detach_implement_phase(
+    args: argparse.Namespace, *, plan_path: Path
+) -> Optional[int]:
+    """The one detach boundary ``implement`` crosses (D4), or ``None``.
+
+    Deliberately *outside* the ``--exec-subagents`` gate, exactly as the apply
+    phases separate ``maybe_detach_write_phase`` from ``run_write_executor``:
+    ``modes.py`` registers ``implement`` with ``supports_detach=True``, so the
+    dispatcher accepts ``--detach`` for every implement invocation, not only the
+    executor-backed one. Leaving the check under the gate made
+    ``implement <plan> --detach --yes`` run in the foreground with no worker, no
+    ``.status.json`` and no ``[DETACHED_RUN]`` handshake — a flag that silently
+    does nothing, which is what the dispatcher's own ``supports_detach`` refusal
+    exists to prevent, and a host polling ``status`` would wait forever for a run
+    that was never recorded.
+
+    It sits after every pre-flight — plan loaded, prerequisites gated, tasks
+    decomposed, human-task strategy resolved, task JSON written — and before any
+    child is dispatched, so a bad flag fails on the caller's terminal with no
+    child and no log.
+
+    Returns ``None`` to keep running in this process (the ordinary foreground run,
+    and also the detached worker once it owns the phase dir) or an exit code the
+    caller must return immediately (the invoker, after forking; or a launch
+    failure).
+    """
+    if not (getattr(args, "detach", False)
+            or getattr(args, "internal_worker", False)):
+        return None
+
+    from utils.review_orchestrator_base import maybe_detach
+
+    phase_dir = str(get_phase_dir(plan_path, "implement"))
+    Path(phase_dir).mkdir(parents=True, exist_ok=True)
+    return maybe_detach(
+        args=args, mode="implement", phase_dir=phase_dir,
+        plan_file=str(plan_path.absolute()), phase="implement",
+    )
+
+
 def run_implement_write_phase(
     args: argparse.Namespace,
     *,
@@ -633,13 +673,17 @@ def run_implement_write_phase(
     per-batch snapshot/classify/append/record cycle, and finalization
     (``mark_phase_completed`` + ``finalize_tracking`` + the implementation summary
     + the plan-side reference). Its exit code is the phase's.
+
+    The detach boundary is **not** here: it is
+    :func:`maybe_detach_implement_phase`, which the caller crosses just above this
+    call so ``--detach`` works on every implement invocation rather than only the
+    executor-backed one.
     """
     if not (getattr(args, "exec_subagents", False)
             or getattr(args, "dry_run_subagents", False)):
         return None
 
     from utils.write_batch_scheduler import WriteBatchScheduler
-    from utils.review_orchestrator_base import maybe_detach
     from utils.write_phase_bridge import (
         materialize_write_tasks,
         write_task_file_for_phase,
@@ -648,18 +692,6 @@ def run_implement_write_phase(
     phase_dir = str(get_phase_dir(plan_path, "implement"))
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
     plan_file = str(plan_path.absolute())
-
-    # The detach boundary (D4): after every pre-flight — plan loaded, prerequisites
-    # gated, tasks decomposed, human-task strategy resolved, phase dir created — and
-    # before any child is dispatched, so a bad flag fails on the caller's terminal
-    # with no child and no log.
-    if getattr(args, "detach", False) or getattr(args, "internal_worker", False):
-        detached = maybe_detach(
-            args=args, mode="implement", phase_dir=phase_dir,
-            plan_file=plan_file, phase="implement",
-        )
-        if detached is not None:
-            return detached
 
     tasks = materialize_write_tasks(
         kind="implement",
@@ -741,10 +773,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     plan_content = plan_path.read_text(encoding="utf-8")
     print(f"Loaded plan: {plan_path}")
 
-    # Initialize state manager
+    # Initialize state manager. Constructing it only *reads* (or synthesizes in
+    # memory) the document — the first `save()` deliberately waits until the row-6
+    # gate below has been cleared, so an unmet gate really does leave nothing
+    # behind, exactly as its comment claims.
     state = get_or_create_state(plan_path)
     print(f"State file: {state.state_file}")
-    state.save()
 
     # Load plan preamble for task prompts
     plan_preamble = state.get("plan_preamble") or ""
@@ -764,7 +798,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     #   --yes                 -> exit 3, one message naming both fixes
     #   neither               -> today's [PREREQUISITE_CHECK] payload, exit 0
     # Nothing has been produced at this point: no phase dir, no tasks, no
-    # state.json mutation, so an unmet gate leaves no half-generated artifact.
+    # state.json mutation (the first `state.save()` is below this block, not
+    # above it), so an unmet gate leaves no half-generated artifact.
     apply_check = check_apply_suggestions_prerequisite(state, plan_dir)
     if not apply_check["met"]:
         missing = [{
@@ -804,6 +839,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(prereq_info, indent=2))
             sys.exit(0)
 
+    # The gate is cleared (or explicitly skipped, which recorded its own save):
+    # only now does this run own a state.json on disk.
+    state.save()
+
     # Check for unapplied task suggestions (soft advisory — does NOT block)
     task_suggestions_check = check_apply_task_suggestions_prerequisite(state, plan_dir)
     if not task_suggestions_check["met"]:
@@ -833,10 +872,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "skipped; apply-task-suggestions recorded as skipped",
             )
 
-    # Check if generate-tasks phase has been completed
+    # Check if generate-tasks phase has been completed. Two endings, decided by
+    # the same rule the row-6 gate above uses:
+    #   attended    -> today's [TASKS_MISSING] payload, exit 0 — the driving agent
+    #                  reads the marker and runs generate-tasks itself.
+    #   --yes       -> exit 3 naming the generate-tasks re-invocation. There is no
+    #                  agent to read a marker on this path, and exit 0 would report
+    #                  MULTI_LLM_RESULT state "done" for a run that implemented
+    #                  nothing — a silent no-op reported as success.
     if not state.is_phase_completed("generate-tasks"):
         print("[TASKS_MISSING]")
         print(json.dumps({"marker": "TASKS_MISSING", "reason": "No implementation tasks found"}))
+        if unattended:
+            missing = [{
+                "phase": "generate-tasks",
+                "reason": "No implementation tasks found",
+            }]
+            print(build_unmet_message("implement", plan_path, plan_dir, missing))
+            unattended_mod.mark_needs_human("implement")
+            print(json.dumps({
+                "marker": "PREREQUISITE_UNMET",
+                "mode": "implement",
+                "state": "needs-human",
+                "exit": EXIT_NEEDS_HUMAN,
+                "missing": missing,
+            }, indent=2))
+            sys.exit(EXIT_NEEDS_HUMAN)
         sys.exit(0)
 
     # Check for external tasks file reference
@@ -1019,6 +1080,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_temp_dir_gitignore(output_path.parent)
     output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
+
+    # --- the detach boundary (D4) ---------------------------------------------
+    # Crossed here, before the write executor and independently of it: `implement`
+    # is registered `supports_detach=True`, so `--detach` must produce a worker and
+    # a `.status.json` whether or not `--exec-subagents` was passed.
+    detached = maybe_detach_implement_phase(args, plan_path=plan_path)
+    if detached is not None:
+        return detached
 
     # --- the write executor (D3n): schedule the batches in this process --------
     # Strictly additive: with neither flag set this returns None and everything

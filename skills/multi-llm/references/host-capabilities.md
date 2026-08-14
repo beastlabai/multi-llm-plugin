@@ -25,15 +25,16 @@ sentence when it is installed.
 
 | Host | Shim (repo → installed) | `arguments` | *spawn subagents* | *ask the user* | *run detached* | Default runner | `nested_exec` (spawn/network/creds) | Max subagents | Timeout ceiling | Verified |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `claude-code` | *not rendered* → `SKILL.md` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | allowed/allowed/allowed | 10 | 600 s (raise via not raisable) | `arguments`, `ask`, `default_subagent_runner`, `detach`, `installable`, `multi_turn`, `native_tool`, `shim_max_lines`, `subagent_tiers`, `subagents` |
+| `claude-code` | *not rendered* → `SKILL.md` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | allowed/allowed/allowed | 10 | 600 s (not raisable) | `arguments`, `ask`, `default_subagent_runner`, `detach`, `installable`, `multi_turn`, `native_tool`, `shim_max_lines`, `subagent_tiers`, `subagents` |
 | `codex` | `hosts/codex/shim.md.tmpl` → `SKILL.md` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | unknown/unknown/unknown | 4 | none documented | *none yet* |
-| `opencode` | `hosts/opencode/shim.md.tmpl` → `commands/multi-llm.md` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | unknown/unknown/unknown | 4 | 120 s (raise via env: `unknown`, config: `unknown`) | `arguments`, `detach`, `headless_invocation`, `install_paths`, `installable`, `reload`, `shim` |
+| `opencode` | `hosts/opencode/shim.md.tmpl` → `commands/multi-llm.md` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | unknown/unknown/unknown | 4 | 120 s (raise via env: `unknown`, config: `unknown`) | `arguments`, `detach`, `headless_invocation`, `install_paths`, `installable`, `multi_turn`, `reload`, `shim` |
 
 ## Per-host notes and stripped variables
 
 ### `claude-code`
 
-- Installable: `false`; reload after install: `none`; multi-turn session: `true`
+- Installable: `false`; reload after install: `none`
+- Driving agent gets a turn after a command returns (`multi_turn`): `true` — verified. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: full `sonnet`, cheap `haiku`
 - Verb sentences a rendered shim carries:
   - **Spawn subagents** — call your host's own subagent tool `Task`: pass `task.prompt` verbatim, take the role from `task.subagent_type` when your tool needs one, and write the JSON it returns to `task.output_path`. Never pass `--exec-subagents` on this host.
@@ -52,7 +53,8 @@ sentence when it is installed.
 
 ### `codex`
 
-- Installable: `true`; reload after install: `new-session`; multi-turn session: `true`
+- Installable: `true`; reload after install: `new-session`
+- Driving agent gets a turn after a command returns (`multi_turn`): `true` — documented. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: resolved from `providers.yaml` `driver.subagent_runner{,_cheap}` (this host does not dispatch subagents natively)
 - Verb sentences a rendered shim carries:
   - **Spawn subagents** — run the dispatcher with `--exec-subagents`: it dispatches every materialized task itself and continues past each marker in the same process. Never spawn a subagent by hand on this host.
@@ -60,7 +62,7 @@ sentence when it is installed.
   - **Run detached** — pass `--detach` (which implies `--yes`) and poll `status <plan> --view run`; the foreground stays legal for short calls. Never combine `--detach` with a host background mechanism — pick one.
 - Install paths (project): `.codex/skills/multi-llm`
 - Install paths (global): `$HOME/.codex/skills/multi-llm`
-- Install paths (legacy): `$HOME/.codex/prompts`
+- Install paths (legacy): `$HOME/.codex/prompts/multi-llm.md`
 - Runners:
   - `claude-code`: bundled=`false`, needs_auth=`true` (`claude login`), profiles=[generate, agent-readonly, agent-write], usage=`full`
   - `codex`: bundled=`true`, needs_auth=`false`, profiles=[generate, agent-readonly, agent-write], usage=`full`
@@ -71,7 +73,8 @@ sentence when it is installed.
 
 ### `opencode`
 
-- Installable: `true`; reload after install: `new-session`; multi-turn session: `false`
+- Installable: `true`; reload after install: `new-session`
+- Driving agent gets a turn after a command returns (`multi_turn`): `true` — verified. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: resolved from `providers.yaml` `driver.subagent_runner{,_cheap}` (this host does not dispatch subagents natively)
 - Verb sentences a rendered shim carries:
   - **Spawn subagents** — run the dispatcher with `--exec-subagents`: it dispatches every materialized task itself and continues past each marker in the same process. Never spawn a subagent by hand on this host.
@@ -79,7 +82,7 @@ sentence when it is installed.
   - **Run detached** — pass `--detach` (which implies `--yes`) on every fan-out mode and poll `status <plan> --view run`. This host caps a single shell command below a fan-out's runtime, so no foreground fan-out path is offered.
 - Install paths (project): `.opencode/commands`
 - Install paths (global): `$XDG_CONFIG_HOME/opencode/commands`, `$HOME/.config/opencode/commands`
-- Install paths (legacy): `.opencode/command`
+- Install paths (legacy): *none*
 - Runners:
   - `claude-code`: bundled=`false`, needs_auth=`true` (`claude login`), profiles=[generate, agent-readonly, agent-write], usage=`full`
   - `opencode`: bundled=`true`, needs_auth=`false`, profiles=[generate, agent-readonly, agent-write], usage=`full`

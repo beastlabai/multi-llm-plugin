@@ -177,6 +177,28 @@ class TestJudgeTaskMaterialization:
             assert task["executor_role"] == "agent"
             assert task["prompt"]
             assert task["output_name"].startswith("human_decision_batch_")
+        assert [t["output_name"] for t in tasks] == [
+            f"human_decision_batch_{GROUP_A}.json",
+            f"human_decision_batch_{GROUP_B}.json",
+        ]
+
+    def test_output_name_survives_a_partially_judged_resume(self, tmp_path):
+        """A leftover item keeps its own verdict filename on re-materialization.
+
+        The producer is called with the *remaining* items, so an index-keyed
+        ``output_name`` would hand round two's task round one's verdict file —
+        which the executor's resume rule (exists + parses + validates) reads as
+        "already done", leaving that group judged by nobody.
+        """
+        first = build_judge_tasks(
+            items=[judge_item_from_group(_group(g)) for g in (GROUP_A, GROUP_B)],
+            phase_dir=str(tmp_path),
+        )
+        resumed = build_judge_tasks(
+            items=[judge_item_from_group(_group(GROUP_B))], phase_dir=str(tmp_path)
+        )
+        assert tasks_of(resumed)[0]["output_name"] == tasks_of(first)[1]["output_name"]
+        assert tasks_of(resumed)[0]["output_name"] != tasks_of(first)[0]["output_name"]
 
     def test_the_item_details_travel_inside_the_prompt(self, tmp_path):
         group = _group(GROUP_A, title="Retry uploads", desc="A 503 loses the file.")

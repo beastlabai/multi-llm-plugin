@@ -5,12 +5,13 @@
   "description": "The document a task_generation subagent prints and the invoker persists under the phase dir. Validated before anything is written to the plan; the semantic rules utils/task_decomposer.py owns (unique T### ids, depends_on naming only declared ids, acyclic, at least one dependency-free task) run in Python immediately after this schema check. A document that fails either is a schema_invalid failure and is not retried.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "tasks"],
+  "required": ["schema_version", "plan_preamble", "tasks"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "plan_preamble": {
       "type": "string",
-      "description": "3-5 sentences of shared context injected into every task prompt."
+      "minLength": 1,
+      "description": "3-5 sentences of shared context injected into every task prompt. Required, and non-empty: the task_generation reply contract emits it unconditionally, and a document that omits it would validate cleanly while every downstream implement prompt silently loses its shared context."
     },
     "tasks": {
       "type": "array",

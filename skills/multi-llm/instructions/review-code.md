@@ -234,7 +234,7 @@ Items with `needs-human-decision` status are included in the report for the user
    ```
    Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
-   3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+   3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -257,11 +257,11 @@ Items with `needs-human-decision` status are included in the report for the user
 
    Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
-   3. After ALL batches complete, run reaggregation using `reaggregate_command`
+   3. After ALL batches complete, run the reaggregation command below (rebuilt from `reaggregate_mode` + `plan_file`)
 
    #### Reaggregation (After Validation)
 
-   After validation completes, run the `reaggregate_command` from validation_tasks.json:
+   After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
    ```bash
    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --reaggregate
@@ -380,7 +380,7 @@ After spawning subagents to apply fixes:
    **Date**: [timestamp]
    ```
 
-6. **Report results** including files in `{plan}/code-review/`:
+6. **Report results** following `references/summary-format.md`, including files in `{plan}/code-review/`:
 
    Generate resource usage:
    ```bash

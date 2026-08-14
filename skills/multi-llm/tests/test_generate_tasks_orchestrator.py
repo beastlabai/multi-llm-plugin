@@ -560,6 +560,58 @@ class TestResume:
         assert "[resume]" not in out
         assert gto.PENDING_MARKER in out
 
+    def test_force_moves_the_stale_result_out_of_the_executors_way(
+        self, tmp_path, capsys
+    ):
+        """Skipping the consume branch is not enough (D3i).
+
+        The executor's resume rule is defined by the same artifact — a task is
+        done iff its result file exists, parses and validates — so a schema-valid
+        result left in place makes the re-dispatch a silent no-op and the
+        consumer ingests exactly the stale document ``--force`` was invoked to
+        replace. It is archived rather than deleted: a result that cost a
+        dispatch is never thrown away silently.
+        """
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        phase_dir = _phase_dir(plan)
+
+        assert multi_llm.main(["generate-tasks", str(plan), "--force"]) == 0
+
+        out = capsys.readouterr().out
+        assert f"[force] archived the previous {RESULT_NAME}" in out
+        assert not (phase_dir / RESULT_NAME).exists(), (
+            "a surviving result file re-arms the executor's resume rule"
+        )
+        archived = [
+            p for p in phase_dir.iterdir()
+            if p.name.startswith(Path(RESULT_NAME).stem) and p.name != RESULT_NAME
+        ]
+        assert len(archived) == 1, f"expected one archived result, got {archived}"
+        assert json.loads(archived[0].read_text(encoding="utf-8"))
+
+    def test_dry_run_subagents_keeps_the_result_it_would_not_replace(
+        self, tmp_path, capsys
+    ):
+        """D3l: the flag's promise is that nothing else changes.
+
+        This run starts no child, so there is nothing to replace the old result
+        with — archiving it would mutate the phase dir under a flag whose whole
+        point is that it does not.
+        """
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--force", "--dry-run-subagents"]
+        ) == 0
+
+        out = capsys.readouterr().out
+        assert "[dry-run-subagents] keeping the existing" in out
+        assert (_phase_dir(plan) / RESULT_NAME).exists()
+
     def test_reaggregate_without_a_persisted_result_is_exit_three(
         self, tmp_path, capsys
     ):

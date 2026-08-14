@@ -30,6 +30,7 @@ from utils.validation import (
     ERROR_TYPE_PARSING,
     ERROR_TYPE_TIMEOUT,
     ERROR_TYPE_UNKNOWN,
+    resolved_reaggregate_command,
 )
 
 
@@ -204,13 +205,19 @@ class TestPrepareBatchedValidationTasks:
                 output_dir=tmpdir,
                 plan_file="/path/to/plan.md"
             )
-            # Reference-based format: includes grouped_file, plan_file, phase_dir, reaggregate_command
+            # Reference-based format: includes grouped_file, plan_file,
+            # phase_dir and the *durable* half of the follow-up command
+            # (reaggregate_mode + plan_file), never a resolved skill-dir path.
             required_keys = [
                 "batches", "total_batches", "batching_stats", "model_hint",
-                "grouped_file", "plan_file", "phase_dir", "reaggregate_command"
+                "grouped_file", "plan_file", "phase_dir", "reaggregate_mode"
             ]
             for key in required_keys:
                 assert key in result, f"Missing key: {key}"
+            assert "reaggregate_command" not in result, (
+                "a persisted task document must not carry a skill-dir-absolute "
+                "command (D1c): the plugin cache is keyed by commit hash"
+            )
 
     def test_single_batch_for_small_groups(self, sample_context):
         """Single batch when groups <= max_per_batch."""
@@ -406,7 +413,7 @@ class TestPrepareBatchedValidationTasks:
             assert result["phase_dir"] == tmpdir
 
     def test_reaggregate_command_generated(self, sample_groups, sample_context):
-        """Reaggregate command is generated correctly."""
+        """Reaggregate command is rebuilt correctly from the durable fields."""
         with tempfile.TemporaryDirectory() as tmpdir:
             result = prepare_batched_validation_tasks(
                 groups=sample_groups,
@@ -415,7 +422,8 @@ class TestPrepareBatchedValidationTasks:
                 plan_file="/path/to/plan.md",
                 orchestrator="review_plan_orchestrator.py"
             )
-            cmd = result["reaggregate_command"]
+            assert result["reaggregate_mode"] == "review-plan"
+            cmd = resolved_reaggregate_command(result)
             # The printed follow-up names the single entry point and the mode
             # word, never a second orchestrator path (D1d "not dual-surface").
             assert "multi_llm.py" in cmd
@@ -434,7 +442,8 @@ class TestPrepareBatchedValidationTasks:
                 plan_file="/path/to/plan.md",
                 orchestrator="code_review_orchestrator.py"
             )
-            cmd = result["reaggregate_command"]
+            assert result["reaggregate_mode"] == "review-code"
+            cmd = resolved_reaggregate_command(result)
             assert "review-code" in cmd
             assert "review-plan" not in cmd
             assert "code_review_orchestrator.py" not in cmd

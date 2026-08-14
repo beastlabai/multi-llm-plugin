@@ -27,7 +27,11 @@ one, all on by default:
   — never a shared workspace temp path — so concurrent or resumed batches cannot
   clobber each other's rollback point, and a partial application leaves
   recoverable bytes. The snapshot is also the *verdict*: the model's claim is
-  never trusted, byte comparison decides.
+  never trusted, byte comparison decides. It covers the declared set at
+  ``take`` time and grows by :meth:`TaskSnapshot.adopt` for the paths the
+  scheduler's post-run sweep observed *outside* that set — the only paths the
+  post-run policy check can actually fail on, and therefore the ones a rollback
+  point has to exist for.
 * **Dispatch-time disjointness admission** (D3h). Parallel write dispatch is
   admitted only when the in-flight tasks' declared file sets are pairwise
   disjoint; a task declaring no file set runs alone. Checked executor-side rather
@@ -51,10 +55,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -200,13 +205,17 @@ def contain_under_root(candidate: str, root: str, *, what: str = "path") -> Path
 
 
 def _looks_like_a_windows_escape(text: str) -> bool:
-    """Drive-relative (``C:foo``), UNC (``\\\\host\\share``) or an ADS (``a:b``)."""
+    """Drive-relative (``C:foo``), UNC (``\\\\host\\share``) or an ADS (``a.json:b``)."""
     if text.startswith("\\\\") or text.startswith("//"):
         return True
     if re.match(r"^[A-Za-z]:[^\\/]", text):
         return True
-    # An NTFS alternate data stream: a colon that is not a drive separator.
-    return bool(re.search(r"(?<![A-Za-z]):(?=[^\\/])", text[2:] if len(text) > 2 else ""))
+    # An NTFS alternate data stream: *any* colon left once the drive prefix has
+    # been sliced off, mirroring ``subagent_executor._is_unsafe_windows_path``.
+    # The standard shape is ``name.ext:stream``, whose colon is preceded by a
+    # letter — a rule that exempted those would flag nothing that matters (D3f).
+    remainder = text[2:] if re.match(r"^[A-Za-z]:", text) else text
+    return ":" in remainder
 
 
 def relative_to_root(path: str, root: str) -> str:
@@ -351,7 +360,13 @@ class WritePolicy:
 
 @dataclass
 class SnapshotEntry:
-    """One snapshotted file: where it was, what it hashed to, where the copy is."""
+    """One snapshotted file: where it was, what it hashed to, where the copy is.
+
+    ``declared`` separates the two ways an entry gets here: ``take`` records the
+    batch's declared set, :meth:`TaskSnapshot.adopt` records a write the post-run
+    sweep observed outside it. Both are restorable; only the first was ever
+    promised, so the classification's prose must not confuse them.
+    """
 
     relative: str
     absolute: str
@@ -359,6 +374,7 @@ class SnapshotEntry:
     sha256: Optional[str]
     size: int
     payload: Optional[str]
+    declared: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -368,6 +384,7 @@ class SnapshotEntry:
             "sha256_before": self.sha256,
             "size_before": self.size,
             "payload": self.payload,
+            "declared": self.declared,
         }
 
     @classmethod
@@ -379,6 +396,8 @@ class SnapshotEntry:
             sha256=data.get("sha256_before"),
             size=int(data.get("size_before") or 0),
             payload=data.get("payload"),
+            # Absent in a v1 manifest, where every entry was a declared file.
+            declared=bool(data.get("declared", True)),
         )
 
 
@@ -449,6 +468,73 @@ class TaskSnapshot:
         snapshot.save()
         return snapshot
 
+    def adopt(
+        self,
+        relative: str,
+        *,
+        existed: bool,
+        sha256: Optional[str] = None,
+        size: int = 0,
+        payload_source: Optional[str] = None,
+        save: bool = True,
+    ) -> Optional[SnapshotEntry]:
+        """Record a rollback point for a path the batch touched but never declared.
+
+        ``take`` covers the declared set, and that set is the one thing the
+        post-run policy check can never fail on — it passed the byte-identical
+        pre-dispatch check. The paths that *can* fail it are the ones a runner
+        wrote outside what it declared, and a violation the executor can name but
+        not undo is half a control. The scheduler's containment sweep retains
+        those files' pre-run bytes in a content-addressed store; adopting one
+        here puts it in the same manifest :meth:`changed`, :meth:`restore` and
+        ``util restore-batch`` already read, so an undeclared write rolls back
+        exactly like a declared one.
+
+        Args:
+            payload_source: The retained pre-run bytes. Required when
+                ``existed`` — an entry claiming a rollback point it has no copy
+                for is worse than an honest ``None``, which is what this returns
+                instead.
+            save: Off when a caller adopts a batch of paths and saves once; the
+                manifest is rewritten whole, so per-path saves are quadratic.
+
+        Returns:
+            The entry, or ``None`` when no rollback point could be recorded.
+        """
+        resolved = contain_under_root(relative, self.root, what="observed write")
+        key = relative_to_root(str(resolved), self.root)
+        existing = self.entry_for(key)
+        if existing is not None:
+            return existing
+        # `existed=False` needs no bytes at all: the rollback for a file the
+        # runner created is deletion, which `restore` already does for an entry
+        # with no payload.
+        payload: Optional[str] = None
+        if existed:
+            if not payload_source or not Path(payload_source).is_file():
+                return None
+            payload = f"{len(self.entries):03d}-{_safe_component(key)}"
+            payload_dir = Path(self.directory) / PAYLOAD_DIRNAME
+            payload_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(payload_source), str(payload_dir / payload))
+        entry = SnapshotEntry(
+            relative=key,
+            absolute=str(resolved),
+            existed=existed,
+            sha256=sha256,
+            size=size,
+            payload=payload,
+            declared=False,
+        )
+        self.entries.append(entry)
+        if save:
+            self.save()
+        return entry
+
+    def declared_entries(self) -> List[SnapshotEntry]:
+        """Only the entries ``take`` recorded — what the batch said it would edit."""
+        return [entry for entry in self.entries if entry.declared]
+
     def save(self) -> str:
         path = Path(self.directory) / MANIFEST_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -505,6 +591,7 @@ class TaskSnapshot:
                 "sha256_after": file_sha256(entry.absolute),
                 "existed_before": entry.existed,
                 "exists_after": Path(entry.absolute).is_file(),
+                "declared": entry.declared,
             }
         return out
 
@@ -525,6 +612,15 @@ class TaskSnapshot:
     ) -> Dict[str, str]:
         """Restore snapshot bytes for ``paths`` (default: everything snapshotted).
 
+        Every destination is re-derived from the pinned root and revalidated
+        component by component before anything is written (see
+        :func:`_revalidated_target`). The manifest's ``absolute`` is a claim about
+        the tree as it was *before* a write-capable runner had it, so following it
+        now — which ``shutil.copy2`` onto the destination would do — is how a
+        rollback ends up writing the saved bytes through a symlink the runner left
+        behind, into a file outside the repository. The path *entry* is replaced or
+        unlinked instead; neither operation follows a link.
+
         Args:
             expected: ``relative -> sha256`` the audit recorded at completion. A
                 file whose current hash no longer matches is **refused** rather
@@ -542,10 +638,33 @@ class TaskSnapshot:
             if entry is None:
                 report[relative] = "skipped: not in this task's snapshot"
                 continue
+            restoring = bool(entry.existed and entry.payload)
+            try:
+                target = _revalidated_target(
+                    self.root, entry.relative, create_parents=restoring
+                )
+            except WriteSafetyError as exc:
+                report[relative] = f"skipped: {exc.message}"
+                continue
+            except OSError as exc:
+                report[relative] = f"skipped: {exc}"
+                continue
+            if target is None:
+                # The delete leg, with a parent directory already gone.
+                report[relative] = "deleted (already absent)"
+                continue
+            symlinked = _is_symlink(target)
             if expected is not None and not force:
                 recorded = expected.get(relative, "__missing__")
                 if recorded != "__missing__":
-                    current = file_sha256(entry.absolute)
+                    if symlinked:
+                        report[relative] = (
+                            "skipped: the path is a symlink now, not the file "
+                            "that was snapshotted — pass --force to replace the "
+                            "link itself (its target is never written through)"
+                        )
+                        continue
+                    current = file_sha256(str(target))
                     if current != recorded:
                         report[relative] = (
                             "skipped: changed after the run (recorded "
@@ -553,18 +672,23 @@ class TaskSnapshot:
                             "--force to overwrite anyway"
                         )
                         continue
-            if entry.existed and entry.payload:
+            if restoring:
                 source = Path(self.directory) / PAYLOAD_DIRNAME / entry.payload
                 if not source.is_file():
                     report[relative] = "skipped: snapshot payload is missing"
                     continue
-                Path(entry.absolute).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), entry.absolute)
+                try:
+                    _replace_with_payload(source, target)
+                except OSError as exc:
+                    report[relative] = f"skipped: {exc}"
+                    continue
                 report[relative] = "restored"
             else:
                 # Absent before the batch: the correct rollback is deletion.
+                # `os.unlink` removes the entry itself, so a symlink left in the
+                # file's place is removed rather than followed.
                 try:
-                    Path(entry.absolute).unlink()
+                    os.unlink(str(target))
                     report[relative] = "deleted"
                 except FileNotFoundError:
                     report[relative] = "deleted (already absent)"
@@ -575,6 +699,117 @@ class TaskSnapshot:
 
 def _short(digest: Optional[str]) -> str:
     return (digest or "absent")[:12]
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(str(path)).st_mode)
+    except OSError:
+        return False
+
+
+def _revalidated_target(
+    root: str,
+    relative: str,
+    *,
+    create_parents: bool,
+) -> Optional[Path]:
+    """Re-derive ``relative`` under ``root``, checking every component no-follow.
+
+    Rollback runs *after* a write-capable runner had the working tree, so the
+    snapshot's absolute path is a claim about the past: the file it names can have
+    become a symlink into ``$HOME`` since, and so can any directory above it. Each
+    component below the pinned root is therefore re-checked with ``os.lstat``
+    (never ``stat``, which answers about a link's target, and never
+    ``Path.resolve``, which follows one silently) and a symlinked or non-directory
+    parent is refused. The path ``take`` recorded was canonicalized at snapshot
+    time, so a symlink on this walk is always something that appeared afterwards.
+
+    Args:
+        create_parents: On for the restore leg, which may have to recreate a
+            directory the batch removed — each level with ``os.mkdir``, which
+            fails rather than silently accepting an existing symlink the way
+            ``mkdir(parents=True, exist_ok=True)`` would. Off for the delete leg,
+            which returns ``None`` for a missing parent: nothing left to delete.
+
+    Raises:
+        PathEscape: any component is a symlink, or the path is not a plain
+            repo-relative one.
+    """
+    if not root:
+        raise PathEscape(
+            f"the snapshot manifest records no repo root, so {relative} cannot be "
+            f"revalidated before writing"
+        )
+    resolved_root = Path(root).resolve()
+    if not resolved_root.is_dir():
+        raise PathEscape(
+            f"the pinned repo root {resolved_root} is gone, so {relative} cannot "
+            f"be revalidated before writing"
+        )
+    text = str(relative).replace("\\", "/")
+    parts = [part for part in PurePosixPath(text).parts if part != "."]
+    if (
+        Path(relative).is_absolute()
+        or PurePosixPath(text).is_absolute()
+        or _looks_like_a_windows_escape(str(relative))
+        or not parts
+        or any(part == ".." for part in parts)
+    ):
+        raise PathEscape(
+            f"{relative!r} is not a plain path under the pinned repo root "
+            f"{resolved_root}"
+        )
+    current = resolved_root
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            info = os.lstat(str(current))
+        except FileNotFoundError:
+            if not create_parents:
+                return None
+            os.mkdir(str(current))
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            raise PathEscape(
+                f"{current} is a symlink now, so rolling {relative} back through "
+                f"it would leave the pinned repo root {resolved_root}"
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            raise PathEscape(
+                f"{current} is not a directory, so {relative} cannot be restored "
+                f"under the pinned repo root {resolved_root}"
+            )
+    return current / parts[-1]
+
+
+def _replace_with_payload(source: Path, target: Path) -> None:
+    """Write ``source``'s bytes as a new file and ``os.replace`` it over ``target``.
+
+    Never ``shutil.copy2`` onto the destination: it opens the destination for
+    writing and follows it, so a snapshotted regular file that has since become a
+    symlink would have the saved bytes written *through* the link. ``os.replace``
+    swaps the directory entry itself — atomic, and no-follow — and the temp file is
+    created ``O_EXCL`` in the same revalidated directory, so it cannot land on an
+    existing symlink and the rename cannot cross a filesystem.
+    """
+    tmp = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            with open(str(source), "rb") as payload:
+                shutil.copyfileobj(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # What `copy2` preserved, minus the destination-following write.
+        shutil.copystat(str(source), str(tmp))
+        os.replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
 
 
 def _safe_component(text: str) -> str:

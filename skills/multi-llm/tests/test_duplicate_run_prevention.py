@@ -682,9 +682,13 @@ class TestPartialCompletionGuard:
             timeout=15,
             encoding="utf-8",
         )
-        # Should NOT exit with code 3 (--force bypasses partial guard)
-        assert result.returncode != 3
+        # --force bypasses the partial guard: the run reaches the fan-out instead
+        # of stopping at the guard. `test:model` resolves to no provider, so every
+        # model then fails and D6 row 3's zero-result path is the exit 3 that
+        # follows — the *guard's* exit 3 is what this test rules out.
         assert "Partial completion detected" not in result.stdout
+        assert "Running code review" in result.stdout
+        assert "ERROR: All models failed" in result.stdout
 
     def test_auto_heals_when_report_and_validation_exist(self, temp_plan):
         """Auto-heals legacy state when report + validation exist but phase not marked."""

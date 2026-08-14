@@ -343,6 +343,60 @@ def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
     return dispatcher_command(mode, str(plan_path), "--force")
 
 
+def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:
+    """The one selector-carrying ``--abort`` spelling for a single listed run."""
+    run_id = str(view["run"].get("run_id") or "")
+    if run_id:
+        return detach.abort_command_for(str(plan_path), run_id=run_id)
+    phase = view.get("phase") or os.path.basename(view["phase_dir"])
+    return dispatcher_command("status", str(plan_path), "--abort", "--phase", str(phase))
+
+
+def render_runner_text(
+    plan_path: Path, host_id: Optional[str] = None
+) -> List[str]:
+    """The resolved subagent runner, its layer of origin, and who consults it (D3o).
+
+    "I set ``driver.subagent_runner`` and nothing changed" has three different
+    answers — a higher layer won, no layer expressed an opinion so the running
+    host's own ``default_subagent_runner`` answered, or this host dispatches
+    subagents natively and never consults the key outside ``--exec-subagents`` —
+    and a merged value printed on its own distinguishes none of them. So the
+    layer is printed with the value, resolved through the *same*
+    ``resolve_subagent_runner`` a dispatch takes rather than re-derived here.
+
+    It is reported, never resolved: ``status`` writes nothing, takes no lock and
+    must stay sub-second, so a config layer that cannot be read (a ``ConfigError``
+    from a broken override, an unknown ``--host``, a partial install) prints
+    nothing at all rather than failing a poll. Text only — the ``--json`` views
+    stay exactly two keys, ``workflow`` and ``runs``, because this is a config
+    fact and blending it into either state view is what ``--view`` exists to
+    prevent.
+    """
+    try:
+        from . import host_capabilities as caps
+        from .provider_registry import resolve_subagent_runner
+
+        resolved_host = caps.resolve_host_id(sys.argv[1:], explicit=host_id)
+        spec, layer = resolve_subagent_runner(
+            "full", anchor=str(plan_path), host_id=resolved_host
+        )
+        native = str(caps.entry(resolved_host).get("subagents")) == "native"
+    except Exception:
+        return []
+    scope = (
+        f"{resolved_host} dispatches subagents natively, so it is consulted "
+        "only under --exec-subagents"
+        if native
+        else f"every subagent {resolved_host} dispatches runs through it"
+    )
+    return [
+        "driver.subagent_runner — what a dispatched subagent would run:",
+        f"  {spec}  (supplied by {layer})",
+        f"  {scope}",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -417,7 +471,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def _resolve_phase(word: Optional[str]) -> Optional[str]:
-    """Resolve ``--phase``/``--mode`` through the mode table (mode word or phase)."""
+    """Resolve ``--phase``/``--mode`` through the mode table (mode word or phase).
+
+    An unknown selector is a *usage* error, so it exits **3** like every other
+    "this run cannot proceed without a human" case (D1a, and this command's own
+    epilog) rather than the exit 1 a string-valued ``SystemExit`` would be mapped
+    to — a shim must be able to tell a mistyped ``--phase`` from a status command
+    that genuinely failed to read the phase dir. The message goes to stderr
+    because ``--json``'s stdout has to stay parseable.
+    """
     if not word:
         return None
     from .cli_common import _modes
@@ -425,10 +487,12 @@ def _resolve_phase(word: Optional[str]) -> Optional[str]:
     modes = _modes()
     resolved = modes.phase_from_selector(word)
     if resolved is None:
-        raise SystemExit(
+        print(
             f"ERROR: unknown phase or mode '{word}'. Valid phases: "
-            + ", ".join(modes.phase_names())
+            + ", ".join(modes.phase_names()),
+            file=sys.stderr,
         )
+        raise SystemExit(EXIT_NEEDS_HUMAN)
     return resolved
 
 
@@ -506,6 +570,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args),
         )
+        runner = render_runner_text(plan_path, host_id=getattr(args, "host", None))
+        if runner:
+            lines.append("")
+            lines += runner
         print("\n".join(lines))
 
     for view in views:
@@ -544,12 +612,46 @@ def _wait_for_terminal(
     return views
 
 
+def _abort_selector_given(args: argparse.Namespace) -> bool:
+    """Did the caller name what to abort? (D4h: ``--phase``/``--run-id``/``--all``)."""
+    return bool(args.phase or args.question or args.run_id or args.include_all)
+
+
 def _run_abort(plan_path: Path, args: argparse.Namespace) -> int:
-    """``status <plan> --abort`` — idempotent, and it says which case it hit."""
+    """``status <plan> --abort`` — idempotent, and it says which case it hit.
+
+    D4h spells the verb with an explicit selector and D4b's rule for a plan whose
+    runs are ambiguous is that the candidates are *listed*, never silently
+    resolved. A bare ``--abort`` therefore kills a single live run (the case a
+    shim's cleanup step means) but refuses to fan out over several: the phase dirs
+    under one plan can hold runs a different shim, or a different session,
+    launched, and "stop the run I started" must not become "stop everything".
+    """
     views = _collect(plan_path, args)
     if not views:
         print("Nothing to abort: no run recorded for this plan.")
         return EXIT_NOTHING_TO_DO
+    live = [v for v in views if v["verdict"] not in detach.TERMINAL_VERDICTS]
+    if len(live) > 1 and not _abort_selector_given(args):
+        print(
+            f"{len(live)} live runs under this plan and no selector: naming which "
+            "one to abort is the caller's job. Candidates:"
+        )
+        for view in live:
+            name = os.path.basename(view["phase_dir"])
+            run_id = str(view["run"].get("run_id") or "")
+            head = f"  {name}"
+            if run_id:
+                head += f"  run {run_id[:8]}"
+            print(f"{head}  {_verdict_text(view)}")
+            if view.get("question"):
+                print(f"      question: {view['question']}")
+            print(f"      abort it with: {_abort_command(plan_path, view)}")
+        print(
+            "  abort every one of them with: "
+            + dispatcher_command("status", str(plan_path), "--abort", "--all")
+        )
+        return EXIT_NEEDS_HUMAN
     aborted = 0
     survived = 0
     needs_force = 0

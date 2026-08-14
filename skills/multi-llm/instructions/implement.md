@@ -5,7 +5,7 @@ Executes implementation tasks from a plan by spawning subagents.
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip] [--skip-prerequisites]
+<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip] [--skip-prerequisites]
 ```
 
 ## Options
@@ -134,9 +134,9 @@ There are unapplied suggestions from plan review. Parse the JSON that follows th
 
      To keep the implementation context clean, please run in order:
 
-     1. Run: `/multi-llm:multi-llm --apply-suggestions $PLAN_PATH`
+     1. Run: `<dispatcher> apply-suggestions $PLAN_PATH`
      2. Run: `/clear`
-     3. Run: `/multi-llm:multi-llm --implement $PLAN_PATH`
+     3. Run: `<dispatcher> implement $PLAN_PATH`
      ```
      **Do NOT** proceed further. Stop execution after displaying this message.
 
@@ -155,9 +155,9 @@ No implementation tasks exist. To avoid context bloat from codebase exploration,
 No implementation tasks found for this plan. To keep the implementation context clean,
 please run task generation in a separate context:
 
-1. Run: `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
+1. Run: `<dispatcher> generate-tasks $PLAN_PATH`
 2. Run: `/clear`
-3. Run: `/multi-llm:multi-llm --implement $PLAN_PATH`
+3. Run: `<dispatcher> implement $PLAN_PATH`
 
 The `/clear` step ensures the implementation phase starts with a fresh context,
 free from the codebase exploration data generated during task creation.
@@ -189,9 +189,9 @@ Handle the response:
 
   To keep the implementation context clean, please run in order:
 
-  1. Run: `/multi-llm:multi-llm --apply-task-suggestions $PLAN_PATH`
+  1. Run: `<dispatcher> apply-task-suggestions $PLAN_PATH`
   2. Run: `/clear`
-  3. Run: `/multi-llm:multi-llm --implement $PLAN_PATH`
+  3. Run: `<dispatcher> implement $PLAN_PATH`
   ```
   **Do NOT** proceed further. Stop execution after displaying this message.
 
@@ -550,7 +550,7 @@ your host.
      --summary-file-relative "$SUMMARY_FILE_RELATIVE"
    ```
 
-11. **Report results** including:
+11. **Report results** following `references/summary-format.md`, including:
    - Number of tasks completed/failed
    - Implementation summary file location
    - State file location
@@ -565,7 +565,7 @@ your host.
 ## Example Execution
 
 ```
-User: /multi-llm:multi-llm --implement plans/my-feature.md
+User: <dispatcher> implement plans/my-feature.md
 
 Agent:
 1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)" (prerequisite check)

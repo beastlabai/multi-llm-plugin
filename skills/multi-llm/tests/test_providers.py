@@ -2638,6 +2638,73 @@ class TestSubagentRunnerDeclarations:
         assert provider.verified_version, f"{name}: no verified_version"
 
 
+class TestClassifyFailure:
+    """D3i/D3k: the classifier must read a stream, not find digits in one."""
+
+    @pytest.fixture
+    def provider(self):
+        from utils.provider_registry import get_provider
+
+        return get_provider("opencode")
+
+    @pytest.mark.parametrize("stream", [
+        '{"type":"step_finish","cost":0.0429,"tokens":{"output":14290}}',
+        "total cost 1.0429 for 4290 tokens",
+        "429 things were reviewed",
+    ])
+    def test_a_bare_429_inside_a_number_is_not_a_rate_limit(self, provider, stream):
+        """A misread here is retried WITHOUT consuming the retry budget."""
+        assert provider.classify_failure(stream, "") is None
+
+    @pytest.mark.parametrize("stream", [
+        "HTTP 429 Too Many Requests",
+        '{"error":{"status":429,"message":"slow down"}}',
+        "Error: 429",
+        "Requests are throttled: status code 429",
+    ])
+    def test_a_real_429_is_still_a_rate_limit(self, provider, stream):
+        assert provider.classify_failure("", stream) == "rate_limited"
+
+    @pytest.mark.parametrize("stream", [
+        "rate limit exceeded",
+        "the provider reported rate limits",
+        "API rate-limited, retry later",
+        "quota exceeded for this model",
+        '{"type":"overloaded_error"}',
+    ])
+    def test_the_textual_rate_patterns_keep_matching(self, provider, stream):
+        assert provider.classify_failure("", stream) == "rate_limited"
+
+    @pytest.mark.parametrize("stream", [
+        "the unauthorized branch in review.py returns early",
+        "T004 adds a test for unauthorized callers",
+    ])
+    def test_prose_quoting_an_auth_word_is_not_an_auth_failure(self, provider, stream):
+        """auth_failed is batch-fatal, so a quoted word must never trigger it."""
+        assert provider.classify_failure(stream, "") is None
+
+    @pytest.mark.parametrize("stream", [
+        "Not logged in. Please log in with `codex login`.",
+        "401 Unauthorized",
+        "Error: unauthorized",
+        "authentication required",
+        "invalid api key",
+        "invalid_api_key",
+        "no credentials found for provider",
+    ])
+    def test_a_real_login_notice_is_still_auth_failed(self, provider, stream):
+        assert provider.classify_failure("", stream) == "auth_failed"
+
+    def test_an_empty_stream_classifies_nothing(self, provider):
+        assert provider.classify_failure("", "") is None
+        assert provider.classify_failure("   \n ", "") is None
+
+    def test_auth_wins_over_a_rate_limit_in_the_same_stream(self, provider):
+        assert provider.classify_failure(
+            "429 too many requests\nnot logged in", ""
+        ) == "auth_failed"
+
+
 class TestDescribeFailure:
     """The opt-in hook that recovers a failure reason from a non-zero exit."""
 

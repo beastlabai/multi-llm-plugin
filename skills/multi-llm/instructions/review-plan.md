@@ -5,16 +5,22 @@ Reviews an implementation plan using multiple LLMs and aggregates their suggesti
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --review-plan <plan_path> [model1 model2 ...] [--quick]
+/multi-llm:multi-llm --review-plan <plan_path> [--models provider:model ...] [--quick] [--interactive]
 ```
 
 ## Process
 
-1. **Model Selection**: Models can be provided as command-line arguments. If not provided, interactive selection is triggered:
-   - Tries **gum** first (provides interactive menu with multi-select)
-   - Falls back to **fzf** (fuzzy finder with TAB for multi-select)
-   - Falls back to **numeric prompt** (displays numbered list, accepts space-separated numbers)
-   - In non-interactive environments (no TTY), selection fails with an error
+1. **Model Selection**: A fixed ladder, resolved in this order. Nothing is
+   sniffed from the environment — interactivity is *requested*, never detected
+   (D6b), so omitting models does **not** trigger a picker:
+   - `--models provider:model ...` — use exactly those
+   - `--interactive` — render the picker now (gum → fzf → numbered prompt); this
+     is the only way a picker is reached
+   - `--quick` — use `quick_models` from `providers.yaml`
+   - otherwise **`defaults.models`** from the resolved config layering — the
+     normal path, with no prompt
+   - if none of those resolve, the run **fails closed with exit 3** naming the
+     flags that answer the gate (D6 row 2); a picker is never substituted for it
 2. **Run Reviews**: Execute the orchestrator with selected models
 3. **Post-processing**:
    - Group similar suggestions across models
@@ -120,7 +126,7 @@ Items with `needs-human-decision` status are included in the report for the user
 1. **Validate plan file exists**
 
 2. **Model selection:**
-   - If models provided in args (e.g., `/multi-llm:multi-llm plans/foo.md gpt-5.2 gemini-3-pro`): use those directly
+   - If models provided in args (e.g., `/multi-llm:multi-llm plans/foo.md --models provider:model-a provider:model-b`): use those directly
    - **With `--yes` (or `--non-interactive`)**: never ask. Pass no model flag at
      all and let the orchestrator resolve `defaults.models` from the config
      layering; it prints the resolved set as
@@ -162,7 +168,7 @@ Items with `needs-human-decision` status are included in the report for the user
    2. Based on `state` field, determine progress:
       - `models_running` → check which `{model}.json` files exist in `{plan}/review-plan/` (those models completed)
       - `models_complete` / `grouping_complete` → check for `grouped.json`, `validation_tasks.json`
-      - `validation_pending` → orchestrator completed normally; proceed to validation using `validation_tasks_path` from the status file, then reaggregate with the `reaggregate_command` inside that tasks file. The status file records the mode + plan path (`reaggregate_mode`, `plan_file`) rather than a resolved command, so a plugin update cannot leave a stale skill-dir path behind; `multi_llm.py status <plan> --view run` prints the command resolved against the running skill dir.
+      - `validation_pending` → orchestrator completed normally; proceed to validation using `validation_tasks_path` from the status file, then reaggregate. Both the status file and the tasks file record the mode + plan path (`reaggregate_mode`, `plan_file`) rather than a resolved command, so a plugin update cannot leave a stale skill-dir path behind; `multi_llm.py status <plan> --view run` prints the command resolved against the running skill dir.
       - `complete` → report results
    3. If no `.status.json` → fall back to existing file-based resume detection (step 3)
    4. **With `--yes` (or `--non-interactive`): always resume, never ask** (D6
@@ -217,7 +223,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` from `{plan}/review-plan/`
    2. Run the single task's `prompt` as a subagent and write its JSON reply to
       that task's `output_path`
-   3. Run reaggregation using the command from `reaggregate_command` in validation_tasks.json
+   3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
@@ -241,11 +247,11 @@ Items with `needs-human-decision` status are included in the report for the user
 
    Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
-   3. After ALL batches complete, run reaggregation using `reaggregate_command`
+   3. After ALL batches complete, run the reaggregation command below (rebuilt from `reaggregate_mode` + `plan_file`)
 
    #### Reaggregation (After Validation)
 
-   After validation completes, run the `reaggregate_command` from validation_tasks.json:
+   After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
    ```bash
    uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" --reaggregate
@@ -255,7 +261,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Legacy Mode**: To run validation inside the orchestrator (bypassing subagent delegation), add `--internal-validation` flag to the orchestrator command.
 
-8. **Report results** including all generated files in `{plan}/review-plan/`:
+8. **Report results** following `references/summary-format.md`, including all generated files in `{plan}/review-plan/`:
    - `report.md` - Consolidated review report
    - `grouped.json` - Grouped suggestions
    - `validation.json` - Validation results

@@ -53,6 +53,7 @@ from utils import (
 from utils.stream_bootstrap import bootstrap_streams
 from utils.cli_common import (
     build_parent_parser,
+    dispatcher_command,
     dispatcher_prefix,
     reaggregate_command,
     record_next,
@@ -66,13 +67,16 @@ from utils.state_manager import (
 from utils.output_handler import get_phase_dir
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
+    dispatch_salvage_tasks,
     dispatch_subagent_tasks,
+    exec_subagents_requested,
     maybe_detach,
     merge_validation_batches,
 )
 from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
+    resolved_reaggregate_command,
 )
 from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
 from utils.subagent_tasks import (
@@ -1229,7 +1233,12 @@ async def reaggregate_from_existing_files(
                 )
             except TaskFileError as task_file_error:
                 print(f"ERROR: {task_file_error}", file=sys.stderr)
-                return 3
+                # Identical to the sibling guard in review_orchestrator_base: the
+                # refusal has to reach the *process* exit code. main()'s
+                # reaggregate branch discards this coroutine's return value, so a
+                # `return 3` here would surface to a polling host as exit 0 —
+                # "done" on a run that produced no report and needs --force.
+                sys.exit(task_file_error.exit_code)
 
             validation_results = merge_batched_validation_results(
                 output_dir=str(phase_dir),
@@ -1279,6 +1288,10 @@ async def reaggregate_from_existing_files(
             print(f"\nValidation prepared for Claude Code subagent.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
 
+            # Resolved here, from the running skill dir, because the task file
+            # stores only the durable mode + plan pair (D1c).
+            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
             # D3b: with --exec-subagents this process dispatches the batch itself
             # and continues to the merge below instead of exiting at the marker.
             if dispatch_subagent_tasks(
@@ -1289,15 +1302,15 @@ async def reaggregate_from_existing_files(
                 document=batched_tasks,
                 plan_path=str(plan_path),
                 label="validation",
-                retry_command=batched_tasks.get("reaggregate_command"),
+                retry_command=reaggregate_cmd,
             ):
                 validated_groups_for_report = merge_validation_batches(
                     str(phase_dir), batched_tasks, grouped, str(validation_path)
                 )
             else:
                 print("\nAfter validation completes, run:")
-                print(f"  {batched_tasks.get('reaggregate_command', '')}")
-                record_next(batched_tasks.get('reaggregate_command') or None)
+                print(f"  {reaggregate_cmd or ''}")
+                record_next(reaggregate_cmd or None)
                 return  # Exit early - Claude Code handles validation
         else:
             print("\nSkipping validation (--skip-validation flag set)")
@@ -1576,6 +1589,16 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
+    if unattended and not args.models and not args.quick:
+        # D6 row 2, recorded rather than merely applied (see review base): an
+        # auto-selection nobody can see afterwards is indistinguishable from a
+        # silent degradation. Only under `--yes`, where it replaced a question —
+        # with `--yes` unset nothing about a run changes.
+        unattended_mod.record_resolution(
+            str(detach_phase_dir),
+            unattended_mod.row(2).site_id,
+            "defaults.models: " + ", ".join(model_specs),
+        )
     report_progress(
         str(detach_phase_dir), step="fanout",
         models_total=len(model_specs), models_done=0,
@@ -1600,8 +1623,90 @@ async def main(argv: Optional[List[str]] = None) -> int:
         phase_dir.mkdir(parents=True, exist_ok=True)
 
         # Save per-model results
+        failed_models: Dict[str, str] = {}
         for model_spec, (success, issues, error) in results.items():
-            save_model_result(prefix, model_spec, success, issues, error, phase_dir)
+            if not save_model_result(prefix, model_spec, success, issues, error, phase_dir):
+                failed_models[model_spec] = error or "Unknown error"
+
+        # D3b: a salvage task exists for every model whose output would not parse
+        # (emit_salvage_task materialized it above). With --exec-subagents this
+        # run repairs them itself, exactly as the fan-out path in
+        # review_orchestrator_base does — otherwise review-code would print
+        # [REAGGREGATE_AFTER_SALVAGE] and hand the host salvage subagents it may
+        # not have. A recovered model's issues are folded back into `results` so
+        # grouping, validation and the report all see the post-salvage truth
+        # rather than the pre-salvage one. Deliberately non-fatal: a salvage that
+        # fails leaves that model failed, which is the ordinary partial-results
+        # outcome.
+        salvaged_models = set()
+        if failed_models and exec_subagents_requested(args):
+            repaired_paths = {
+                os.path.abspath(path)
+                for path in dispatch_salvage_tasks(
+                    args,
+                    phase_dir=str(phase_dir),
+                    phase='code-review',
+                    plan_path=str(plan_path),
+                )
+            }
+            for model_spec in list(failed_models):
+                sanitized = sanitize_model_name(model_spec)
+                recovered = phase_dir / f"{sanitized}.json"
+                # The dispatcher's own outcome decides, not the mere presence of
+                # the file: under --rerun-all a stale result from an earlier run
+                # is still sitting there and must never be read as a repair.
+                if os.path.abspath(str(recovered)) not in repaired_paths:
+                    continue
+                if not (recovered.exists() and recovered.stat().st_size > 0):
+                    continue
+                try:
+                    repaired_issues = json.loads(recovered.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as read_error:
+                    print(
+                        f"[{model_spec}] salvage output unreadable, leaving failed: "
+                        f"{read_error}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if not isinstance(repaired_issues, list):
+                    print(
+                        f"[{model_spec}] salvage output is not a JSON array, "
+                        f"leaving failed: {recovered}",
+                        file=sys.stderr,
+                    )
+                    continue
+                print(f"[{model_spec}] recovered by salvage: {recovered}")
+                results[model_spec] = (True, repaired_issues, None)
+                salvaged_models.add(sanitized)
+                del failed_models[model_spec]
+
+        # D6 row 3: partial results are usable output, so a run that lost *some*
+        # models prints [PARTIAL_RESULTS: …], reports `state: "partial"` and
+        # carries on to group, validate and report what exists — never a
+        # question, never `--rerun-all`. A run where *no* model produced a result
+        # has nothing to aggregate: exit 3 naming the retry command, taken here
+        # (before the report is written and before mark_phase_completed) so a
+        # total failure is never recorded as a completed phase. Same accounting
+        # as review_orchestrator_base's fan-out, on the post-salvage truth.
+        completed_models = [m for m in model_specs if m not in failed_models]
+        if not completed_models:
+            print("\nERROR: All models failed")
+            for model_spec, reason in failed_models.items():
+                print(f"  - {model_spec}: {reason}")
+            sys.exit(unattended_mod.report_partial_results(
+                completed=completed_models,
+                failed=list(failed_models),
+                phase_dir=str(phase_dir),
+                retry_command=dispatcher_command(
+                    "review-code", plan_path, "--force"
+                ),
+            ))
+        unattended_mod.report_partial_results(
+            completed=completed_models,
+            failed=list(failed_models),
+            phase_dir=str(phase_dir),
+            unattended=unattended,
+        )
 
         # Save raw issues as JSON
         all_issues = []
@@ -1765,7 +1870,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # Check for salvage requests and print reaggregate command
     import glob as glob_module
     salvage_pattern = str(phase_dir / "salvage_*.json")
-    salvage_files = glob_module.glob(salvage_pattern)
+    # emit_salvage_task writes salvage_task_<model>.json beside each
+    # salvage_<model>.json and the glob matches both, so one failed model would
+    # be counted twice and the task file would yield a bogus model name
+    # ("task_<model>") pointing the invoker at an output filename
+    # reaggregation never reads. Only the request files are salvage requests.
+    salvage_files = [
+        path for path in glob_module.glob(salvage_pattern)
+        if not os.path.basename(path).startswith("salvage_task_")
+    ]
+
+    if salvaged_models:
+        # A model this run already repaired in-process is not pending salvage.
+        # Its request file stays on disk as the audit trail, but it must not put
+        # the host back on the salvage-then-reaggregate path.
+        salvage_files = [
+            path for path in salvage_files
+            if os.path.basename(path) not in {
+                f"salvage_{model}.json" for model in salvaged_models
+            }
+        ]
 
     if salvage_files:
         print("")

@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
 from utils.cli_common import build_parent_parser, dispatcher_prefix
+from utils.output_handler import output_dir_path
 from utils.prompt_loader import load_prompt
 from utils.provider_registry import get_all_model_specs
 from utils.review_orchestrator_base import (
@@ -44,6 +45,8 @@ from utils.review_orchestrator_base import (
     run_review_orchestration,
 )
 from utils.tasks_file import find_tasks_file
+from utils import unattended as unattended_mod
+from check_workflow_prerequisites import build_unmet_message
 
 
 # Phase configuration constants
@@ -210,12 +213,24 @@ async def main(argv: Optional[List[str]] = None) -> int:
         try:
             tasks_path = find_tasks_file(plan_path_abs)
             print(f"Tasks file: {tasks_path}")
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ValueError) as e:
+            # D6 row 13: a plan with no task list is "needs a human", not an
+            # unexpected error. `check_workflow_prerequisites` owns the gate; this
+            # is the orchestrator's own backstop for a dispatcher command invoked
+            # directly (which runs no instruction-level prereq check), so it must
+            # land on the same exit code and name the same repair — generate the
+            # tasks, then re-run — instead of a bare exit 1.
             print(f"ERROR: {e}", file=sys.stderr)
-            sys.exit(1)
-        except ValueError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            sys.exit(1)
+            return unattended_mod.fail_closed(
+                build_unmet_message(
+                    "review-tasks",
+                    Path(plan_path_abs),
+                    output_dir_path(Path(plan_path_abs)),
+                    [{"phase": "generate-tasks", "reason": str(e)}],
+                ),
+                site_id="no-tasks-to-review",
+                mode="review-tasks",
+            )
 
     effective_prefix = derive_prefix(plan_path_abs)
 
