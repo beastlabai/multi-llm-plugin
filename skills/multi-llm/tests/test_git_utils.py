@@ -174,8 +174,8 @@ class TestGetModifiedFiles:
         Git status --porcelain format: XY filename
         where XY is 2-char status and filename starts at position 3.
 
-        Note: Using 'M ' (modified in index) instead of ' M' (modified in worktree)
-        because stdout.strip() in the implementation removes leading spaces.
+        'M ' is modified-in-index; the worktree-only form ' M', whose leading
+        space used to be eaten, has its own regression test below.
         """
         # "M " = modification staged in index
         mock_run_git.return_value = ("M  src/main.py\n", "", 0)
@@ -204,11 +204,7 @@ class TestGetModifiedFiles:
 
     @patch("utils.git_utils._run_git")
     def test_multiple_files_with_different_statuses(self, mock_run_git):
-        """Multiple files with different statuses all appear.
-
-        Note: Using 'M ' instead of ' M' for first line because stdout.strip()
-        removes leading spaces from the entire output.
-        """
+        """Multiple files with different statuses all appear."""
         mock_run_git.return_value = (
             "M  modified.py\n"
             "A  added.py\n"
@@ -237,11 +233,7 @@ class TestGetModifiedFiles:
 
     @patch("utils.git_utils._run_git")
     def test_empty_lines_filtered_out(self, mock_run_git):
-        """Empty lines in output are filtered out.
-
-        Note: Using 'M ' instead of ' M' for first line because stdout.strip()
-        removes leading spaces from the entire output.
-        """
+        """Empty lines in output are filtered out."""
         mock_run_git.return_value = ("M  file1.py\n\nM  file2.py\n", "", 0)
 
         files = get_modified_files()
@@ -249,6 +241,106 @@ class TestGetModifiedFiles:
         assert len(files) == 2
         assert "file1.py" in files
         assert "file2.py" in files
+
+    @patch("utils.git_utils._run_git")
+    def test_worktree_only_change_on_first_line_keeps_its_first_character(
+        self, mock_run_git
+    ):
+        """A leading ' M' on the FIRST line must not shift the filename.
+
+        Regression: the implementation used to call ``stdout.strip()`` on the
+        whole output, which removes the leading space of the first line only.
+        ``line[3:]`` then started one character late and returned
+        ``'rc/auth.py'`` for ``' M src/auth.py'`` -- a path that does not exist,
+        which then reached state.json and the review prompts. Every later line
+        was unaffected, which is why the bug survived.
+        """
+        mock_run_git.return_value = (
+            (
+                " M src/auth.py\n"
+                "?? .multi-llm/\n"
+                "?? src/security.py\n"
+            ),
+            "",
+            0,
+        )
+
+        files = get_modified_files()
+
+        assert files == ["src/auth.py", ".multi-llm/", "src/security.py"]
+
+    @patch("utils.git_utils._run_git")
+    def test_every_worktree_only_status_column_is_preserved(self, mock_run_git):
+        """The worktree column (' M', ' D', ' A') survives on any line."""
+        mock_run_git.return_value = (
+            (
+                " M first.py\n"
+                " D second.py\n"
+                " M third.py\n"
+            ),
+            "",
+            0,
+        )
+
+        files = get_modified_files()
+
+        assert files == ["first.py", "second.py", "third.py"]
+
+    @patch("utils.git_utils._run_git")
+    def test_renamed_file_returns_destination_path(self, mock_run_git):
+        """A rename is `XY old -> new`; only the destination exists on disk."""
+        mock_run_git.return_value = ("R  src/old.py -> src/new.py\n", "", 0)
+
+        files = get_modified_files()
+
+        assert files == ["src/new.py"]
+
+    @patch("utils.git_utils._run_git")
+    def test_renamed_and_modified_file_returns_destination_path(self, mock_run_git):
+        """'RM' (renamed in index, modified in worktree) is a rename too."""
+        mock_run_git.return_value = (
+            "RM src/old.py -> src/new.py\n M other.py\n", "", 0
+        )
+
+        files = get_modified_files()
+
+        assert files == ["src/new.py", "other.py"]
+
+    @patch("utils.git_utils._run_git")
+    def test_copied_file_returns_destination_path(self, mock_run_git):
+        """'C' (copy detection) uses the same `old -> new` rendering."""
+        mock_run_git.return_value = ("C  src/orig.py -> src/copy.py\n", "", 0)
+
+        files = get_modified_files()
+
+        assert files == ["src/copy.py"]
+
+    @patch("utils.git_utils._run_git")
+    def test_renamed_file_with_quoted_paths_returns_destination(self, mock_run_git):
+        """Git quotes a path containing a space, on either side of the arrow.
+
+        The quoting is what keeps the separator unambiguous, so the destination
+        is still recoverable when the source itself contains ' -> '.
+        """
+        mock_run_git.return_value = (
+            'R  "src/old name.py" -> "src/new name.py"\n', "", 0
+        )
+        assert get_modified_files() == ['"src/new name.py"']
+
+        mock_run_git.return_value = ('R  "src/a -> b.py" -> src/c.py\n', "", 0)
+        assert get_modified_files() == ["src/c.py"]
+
+        mock_run_git.return_value = ('R  src/a.py -> "src/b -> c.py"\n', "", 0)
+        assert get_modified_files() == ['"src/b -> c.py"']
+
+    @patch("utils.git_utils._run_git")
+    def test_truncated_lines_are_skipped(self, mock_run_git):
+        """A line too short to carry a path yields no entry (never an empty one)."""
+        mock_run_git.return_value = (" M \nM\n M kept.py\n", "", 0)
+
+        files = get_modified_files()
+
+        assert files == ["kept.py"]
 
 
 class TestGetStagedFiles:
@@ -299,6 +391,18 @@ class TestGetStagedFiles:
         files = get_staged_files()
 
         assert len(files) == 2
+
+    @patch("utils.git_utils._run_git")
+    def test_leading_whitespace_in_a_filename_is_preserved(self, mock_run_git):
+        """`--name-only` never quotes a leading space, so stripping loses it.
+
+        Same class as the get_modified_files regression: a whole-output
+        ``.strip()`` only mangles the first (and last) line, so the damage is
+        invisible in every multi-file test.
+        """
+        mock_run_git.return_value = (" leading.py\nnormal.py\n", "", 0)
+
+        assert get_staged_files() == [" leading.py", "normal.py"]
 
 
 class TestStageFiles:
@@ -682,6 +786,13 @@ class TestGetFilesChangedSinceRef:
 
         with pytest.raises(GitError):
             get_files_changed_since_ref("invalid-ref-xyz")
+
+    @patch("utils.git_utils._run_git")
+    def test_leading_whitespace_in_a_filename_is_preserved(self, mock_run_git):
+        """`--name-only` paths are unquoted, so only the newline may be dropped."""
+        mock_run_git.return_value = (" leading.py\nnormal.py\n", "", 0)
+
+        assert get_files_changed_since_ref("HEAD~1") == [" leading.py", "normal.py"]
 
 
 class TestIntegration:
@@ -1708,3 +1819,54 @@ class TestRunGitDecoding:
         kwargs = mock_run.call_args.kwargs
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
+
+
+class TestGetModifiedFilesAgainstRealGit:
+    """The porcelain parse, driven by a real `git status` rather than a mock.
+
+    The mocked tests pin the parse; these pin the *format assumption* behind it,
+    so a change in how git renders a worktree-only change or a rename is caught
+    here instead of being encoded into both sides of a mock.
+    """
+
+    def test_worktree_modification_is_reported_with_its_full_path(
+        self, temp_git_repo
+    ):
+        """The reproduction from the bug report, end to end.
+
+        ``git status --porcelain`` sorts by path, so ``src/auth.py`` (a
+        worktree-only ``' M'``) lands on the first line, which is the only line
+        a whole-output ``.strip()`` damages.
+        """
+        src = temp_git_repo / "src"
+        src.mkdir()
+        (src / "auth.py").write_text("original\n", encoding="utf-8")
+        _run(["git", "add", "src/auth.py"], temp_git_repo)
+        _run(["git", "commit", "--quiet", "-m", "add auth"], temp_git_repo)
+
+        (src / "auth.py").write_text("modified\n", encoding="utf-8")
+        (temp_git_repo / ".multi-llm").mkdir()
+        (temp_git_repo / ".multi-llm" / "state.json").write_text("{}", encoding="utf-8")
+        (src / "security.py").write_text("new\n", encoding="utf-8")
+
+        porcelain = _run(["git", "status", "--porcelain"], temp_git_repo).stdout
+        assert porcelain.startswith(" M src/auth.py"), porcelain
+
+        files = get_modified_files()
+
+        assert files == ["src/auth.py", ".multi-llm/", "src/security.py"], files
+        assert all(
+            (temp_git_repo / path.rstrip("/")).exists() for path in files
+        ), files
+
+    def test_a_rename_reports_the_path_that_exists(self, temp_git_repo):
+        """`R  old -> new` must yield the destination, the only path on disk."""
+        (temp_git_repo / "old.py").write_text("content\n", encoding="utf-8")
+        _run(["git", "add", "old.py"], temp_git_repo)
+        _run(["git", "commit", "--quiet", "-m", "add old"], temp_git_repo)
+        _run(["git", "mv", "old.py", "new.py"], temp_git_repo)
+
+        porcelain = _run(["git", "status", "--porcelain"], temp_git_repo).stdout
+        assert porcelain.strip() == "R  old.py -> new.py", porcelain
+
+        assert get_modified_files() == ["new.py"]

@@ -18,7 +18,9 @@ htmlcov/
 # Test scratch: integration tests generate fixtures under the skill's plans/ dir
 skills/multi-llm/plans/
 
-# This repo's own working plans: local scratch, never pushed
+# This repo's own working plans: local scratch, never pushed. Any comment below
+# (or in the Makefile, .dockerignore, Dockerfile, README or sources) that cites a
+# plans/*.md design doc is citing a local-only note that a fresh clone will not have.
 /plans/
 
 # Multi-LLM local config & workspace temp dir (this repo dogfoods its own skill;
@@ -38,6 +40,27 @@ skills/multi-llm/plans/
 **/plans/**/implement/
 **/plans/**/ask/
 plan_review_output.json
+
+# Containerized harness E2E (C6b rule 3 of the local-only plans/containerized-harness-e2e.md).
+# Anchored by location, never by bare filename: `auth.json` is literally opencode's
+# credential filename, so a bare `*auth.json` would also shadow the value-free seed
+# templates we must commit.
+#
+# the raw evidence bundles only — note the trailing path: `records/`, the sibling
+# holding the committed run records (C10), is deliberately not matched:
+# (contents, not the directory itself: git cannot re-include a file whose parent
+# directory is excluded, and the README that explains the directory stays tracked)
+skills/multi-llm/tests/container/runs/*
+!skills/multi-llm/tests/container/runs/README.md
+**/creds/
+*.credentials.json
+.env
+.env.*
+# credential files by the path they actually live at:
+**/.codex/auth.json
+**/.local/share/opencode/auth.json
+# ...but the value-free seed templates stay tracked:
+!skills/multi-llm/tests/container/home_seed/**
 
 # Editor / OS
 .idea/

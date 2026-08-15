@@ -2,7 +2,7 @@
 
 These tests verify that the mock_llm.py binary works correctly and can be
 used reliably for end-to-end integration tests. Tests cover:
-- CLI argument parsing for all 5 providers
+- CLI argument parsing for every mock identity
 - Provider detection via sys.argv[0]
 - Scenario-based prompt pattern matching
 - Output wire format correctness for each provider
@@ -26,10 +26,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Path to the mock_llm.py binary
 MOCK_LLM_PATH = Path(__file__).parent / "mocks" / "mock_llm.py"
 
-# All supported providers
-PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
+# The shared scenario matcher (tests/scenario_matcher.py). mock_llm.py finds it
+# through its own `__file__`, which works in place and through a symlink but not
+# from a *copy* — so a copied launcher gets it dropped beside itself.
+SCENARIO_MATCHER_PATH = Path(__file__).parent / "scenario_matcher.py"
+
+# All supported providers (launcher names, so `claude-code` appears as `claude`
+# only where a test installs it explicitly).
+PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode", "agy"]
 
 IS_WINDOWS = os.name == "nt"
+
+
+def prompt_argv(provider: str, prompt: str = "test prompt") -> List[str]:
+    """The minimal REAL argv that hands ``provider``'s mock a prompt.
+
+    Each identity's parser mirrors its own CLI rather than a house style, so
+    neither the subcommand nor the prompt's transport is uniform: opencode,
+    codex and kilocode take a subcommand before a positional prompt (`run`,
+    `exec`, `run`), and agy has no positional prompt at all — `-p` is the short
+    alias of `--print` and carries the prompt as its value (`agy --help`, 1.1.13).
+    """
+    if provider == "codex":
+        return ["exec", prompt]
+    if provider in ("opencode", "kilocode"):
+        return ["run", prompt]
+    if provider == "agy":
+        return ["-p", prompt]
+    return [prompt]
 
 
 def install_provider_launcher(provider: str, tmp_dir: Path) -> List[str]:
@@ -50,6 +74,7 @@ def install_provider_launcher(provider: str, tmp_dir: Path) -> List[str]:
     if IS_WINDOWS:
         launcher_path = tmp_dir / f"{provider}.py"
         shutil.copyfile(MOCK_LLM_PATH, launcher_path)
+        shutil.copyfile(SCENARIO_MATCHER_PATH, tmp_dir / SCENARIO_MATCHER_PATH.name)
         return [sys.executable, str(launcher_path)]
 
     launcher_path = tmp_dir / provider
@@ -60,6 +85,7 @@ def install_provider_launcher(provider: str, tmp_dir: Path) -> List[str]:
     except (OSError, NotImplementedError):
         shutil.copyfile(MOCK_LLM_PATH, launcher_path)
         launcher_path.chmod(0o755)
+        shutil.copyfile(SCENARIO_MATCHER_PATH, tmp_dir / SCENARIO_MATCHER_PATH.name)
     return [str(launcher_path)]
 
 
@@ -186,17 +212,104 @@ class TestMockLLMArgumentParsing:
 
         assert result.returncode != 0
 
+    def test_codex_accepts_config_override(self, tmp_path):
+        """`-c key=value` is what the adapter emits for a `model:effort` spec.
+
+        `codex:gpt-5.5:high` is configured in providers.yaml, so
+        `CodexProvider.build_command` really renders
+        `-c model_reasoning_effort=high` — an argv this parser used to refuse
+        with argparse exit 2.
+        """
+        result = run_mock_llm(
+            "codex",
+            [
+                "exec", "--sandbox", "workspace-write", "--json",
+                "--model", "gpt-5.5", "-c", "model_reasoning_effort=high",
+                "test prompt",
+            ],
+            tmp_dir=tmp_path,
+        )
+
+        assert result.returncode == 0
+
+    def test_codex_rejects_full_auto(self, tmp_path):
+        """`--full-auto` is a deprecation trap the real CLI only hides.
+
+        codex 0.146.0 keeps it as a hidden compatibility flag and warns on every
+        run, so the mock refuses it: a regression that reintroduces the old flag
+        must fail here rather than pass quietly.
+        """
+        result = run_mock_llm(
+            "codex",
+            ["exec", "--full-auto", "--json", "test prompt"],
+            tmp_dir=tmp_path,
+        )
+
+        assert result.returncode != 0
+
     def test_kilocode_args(self, tmp_path):
-        """Test kilocode CLI argument parsing."""
+        """Test kilocode CLI argument parsing.
+
+        The argv is `KiloCodeProvider.build_command`'s own, not an invented one:
+        the real CLI is `kilocode run --auto -m <model> [--variant <effort>]
+        <prompt>` (subcommand and options probed in
+        tests/container/runs/surface/cli-surface.json).
+        """
         result = run_mock_llm(
             "kilocode",
-            ["--auto", "--json", "test prompt"],
+            ["run", "--auto", "-m", "openrouter/z-ai/glm-5.2", "test prompt"],
             tmp_dir=tmp_path,
         )
 
         assert result.returncode == 0
         # Output should be valid JSON
         json.loads(result.stdout)
+
+    def test_kilocode_requires_run_subcommand(self, tmp_path):
+        """kilocode without `run` fails, the way the real CLI does."""
+        result = run_mock_llm(
+            "kilocode",
+            ["--auto", "test prompt"],
+            tmp_dir=tmp_path,
+        )
+
+        assert result.returncode != 0
+
+    def test_agy_args(self, tmp_path):
+        """agy takes the prompt as `-p`'s VALUE and has no positional prompt.
+
+        The argv is `AgyProvider.build_command`'s own; every flag was verified
+        against `agy --help` (agy 1.1.13).
+        """
+        result = run_mock_llm(
+            "agy",
+            [
+                "--new-project", "--dangerously-skip-permissions",
+                "--output-format", "json", "--print-timeout", "20m",
+                "--model", "Gemini 3.1 Pro (High)", "-p", "test prompt",
+            ],
+            tmp_dir=tmp_path,
+        )
+
+        assert result.returncode == 0
+        envelope = json.loads(result.stdout)
+        assert envelope["status"] == "SUCCESS"
+        assert envelope["response"]
+
+    def test_agy_rejects_mode_flag(self, tmp_path):
+        """`--mode` is a real agy flag no profile may emit, and is refused.
+
+        Without ``allow_abbrev=False`` argparse would take it as an abbreviation
+        of ``--model`` and silently swallow an execution-mode switch on an
+        adapter that declares no agent profile at all.
+        """
+        result = run_mock_llm(
+            "agy",
+            ["--mode", "accept-edits", "-p", "test prompt"],
+            tmp_dir=tmp_path,
+        )
+
+        assert result.returncode != 0
 
 
 class TestMockLLMProviderDetection:
@@ -207,17 +320,9 @@ class TestMockLLMProviderDetection:
         """Test that provider is correctly detected from symlink name."""
         call_log = tmp_path / "calls.jsonl"
 
-        # Provider-specific command args
-        if provider == "opencode":
-            args = ["run", "test prompt"]
-        elif provider == "codex":
-            args = ["exec", "test prompt"]
-        else:
-            args = ["test prompt"]
-
         result = run_mock_llm(
             provider,
-            args,
+            prompt_argv(provider),
             env_vars={"MOCK_LLM_CALL_LOG": str(call_log)},
             tmp_dir=tmp_path,
         )
@@ -516,7 +621,7 @@ class TestMockLLMOutputFormats:
         """Test kilocode outputs correct wire format."""
         result = run_mock_llm(
             "kilocode",
-            ["test prompt"],
+            ["run", "test prompt"],
             tmp_dir=tmp_path,
         )
 
@@ -530,17 +635,9 @@ class TestMockLLMOutputFormats:
     @pytest.mark.parametrize("provider", PROVIDERS)
     def test_output_is_valid_json(self, tmp_path, provider):
         """Test all providers output valid JSON/NDJSON."""
-        # Provider-specific command args
-        if provider == "opencode":
-            args = ["run", "test prompt"]
-        elif provider == "codex":
-            args = ["exec", "test prompt"]
-        else:
-            args = ["test prompt"]
-
         result = run_mock_llm(
             provider,
-            args,
+            prompt_argv(provider),
             tmp_dir=tmp_path,
         )
 

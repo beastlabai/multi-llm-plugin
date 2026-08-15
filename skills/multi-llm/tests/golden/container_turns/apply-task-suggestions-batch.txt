@@ -1,0 +1,142 @@
+Apply the following task suggestion to the tasks file.
+
+**Target file (to edit)**: /work/sample-project/plans/auth-feature/tasks/tasks.md
+**Plan file (context only)**: /work/sample-project/plans/auth-feature.md
+
+**Current tasks.md content** (for reference — read the actual file for the latest version):
+```
+# Implementation Tasks for auth-feature.md
+
+*Generated: 2026-08-14 16:33:19*
+
+**Parent Plan**: [auth-feature.md](../auth-feature.md)
+
+---
+
+## Dependency Graph
+
+```mermaid
+graph TD
+    T001["T001: Make token comparison constant time"]
+    T002["T002: Bound the login attempt store"]
+    T003["T003: Add regression tests for lockout"]
+
+    T001 --> T003
+    T002 --> T003
+
+    style T001 fill:#90ee90
+    style T002 fill:#f4a460
+    style T003 fill:#90ee90
+```
+
+---
+
+### Task T001: Make token comparison constant time
+**Dependencies**: None
+**Files to modify**: src/security.py
+**Complexity**: low
+**Executor**: agent
+
+Replace the plain equality in compare_tokens with hmac.compare_digest so refresh-token comparison does not leak timing information, and keep the existing signature.
+
+**Acceptance Criteria**:
+- [ ] compare_tokens uses hmac.compare_digest
+- [ ] the function still returns a bool for equal and unequal token pairs
+
+---
+
+### Task T002: Bound the login attempt store
+**Dependencies**: None
+**Files to modify**: src/security.py
+**Complexity**: medium
+**Executor**: agent
+
+The module level _attempts dict grows without bound. Evict entries older than WINDOW_SECONDS when recording an attempt so the store stays proportional to active users.
+
+**Acceptance Criteria**:
+- [ ] record_attempt drops entries older than WINDOW_SECONDS
+- [ ] is_locked_out still reports a lockout after MAX_ATTEMPTS recent failures
+
+---
+
+### Task T003: Add regression tests for lockout
+**Dependencies**: T001, T002
+**Files to create**: tests/test_security.py
+**Complexity**: low
+**Executor**: agent
+
+Add a test module covering the lockout threshold and the constant time comparison introduced by the earlier tasks.
+
+**Acceptance Criteria**:
+- [ ] a test asserts that MAX_ATTEMPTS recent failures lock an account out
+- [ ] a test asserts compare_tokens is true for equal tokens and false otherwise
+
+---
+
+```
+
+**Suggestion**: T003 does not name the lockout threshold under test
+**Type**: modification
+**Task reference**: T003
+**Importance**: LOW
+
+**Details**:
+T003 asks for regression tests but does not say which MAX_ATTEMPTS boundary the test pins, so two implementers would write different tests. Name the boundary in the description.
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+1. **Batch 1** (step_1): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+2. **Batch 2** (step_6): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+3. **Batch 3** (step_2): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+4. **Batch 4** (step_3): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+5. **Batch 5** (section:plan_coverage): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged., verified no file changes)
+6. **Batch 6** (section:t002): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged., verified no file changes)
+
+## Task-Specific Edit Rules
+
+For each suggestion type, follow these rules precisely:
+
+### Addition
+- Add new task(s) using `### Task T0XX:` format
+- Assign the next available ID (scan existing IDs to determine the highest, then increment)
+- New tasks MUST include ALL canonical fields:
+  - `files_to_modify` (list of files to change)
+  - `files_to_create` (list of new files, if any)
+  - `estimated_complexity` (low/medium/high)
+  - `executor_role` — rendered as `**Executor**: agent`, or as
+    `**Type**: Manual (user action required)` when the task is for a human
+  - `depends_on` (list of prerequisite task IDs, or empty)
+  - Acceptance criteria (bulleted list)
+- After adding, regenerate the dependency graph and update header metadata (task count, complexity summary)
+
+### Modification
+- Update the specified task fields (description, dependencies, acceptance criteria, etc.)
+- Modified tasks MUST preserve or explicitly update ALL canonical fields
+  (`files_to_modify`, `files_to_create`, `estimated_complexity`, `executor_role`,
+  acceptance criteria) — never silently drop fields; a task rendered as
+  `**Type**: Manual (user action required)` stays manual unless the suggestion
+  says otherwise
+- If changing `depends_on`, regenerate the dependency graph and update header metadata
+
+### Deletion
+- Remove the specified task entirely
+- Clean up `depends_on` references to the deleted task ID in ALL other tasks
+- Surviving tasks MUST NOT be renumbered — IDs are stable identifiers
+- After deletion, regenerate the dependency graph and update header metadata (task count, complexity summary)
+
+### Clarification
+- Rewrite the task description and/or acceptance criteria for clarity
+- ALL canonical fields must be preserved — do not remove or alter fields that are not being clarified
+
+## Instructions
+
+1. Read the current tasks.md file
+2. Locate the task mentioned in the reference (if applicable)
+3. Apply the suggested change following the type-specific rules above
+4. Ensure the change integrates smoothly with surrounding content
+5. Check if the tasks file already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating
+6. After any structural edit (addition, deletion, dependency change), regenerate the dependency graph and update header metadata
+7. Do NOT make any other changes beyond this specific suggestion
+
+Return a brief summary of what was changed.

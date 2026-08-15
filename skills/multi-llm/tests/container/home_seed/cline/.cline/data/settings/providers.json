@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "lastUsedProvider": "openai-compatible",
+  "providers": {
+    "openai-compatible": {
+      "settings": {
+        "provider": "openai-compatible",
+        "apiKey": "{{stub_session_key}}",
+        "model": "stub-model",
+        "baseUrl": "{{base_url}}"
+      },
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "tokenSource": "manual"
+    }
+  }
+}

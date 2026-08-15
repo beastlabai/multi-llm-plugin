@@ -1,0 +1,155 @@
+# The container provider lane's own scenario: one anchored mapping and one
+# schema-valid fixture per turn `full --quick --yes --exec-subagents` actually
+# takes (plan C4 / Phase 3).
+#
+# WHY THIS IS NOT `full_workflow.yaml` WITH MORE ROWS. That file is the pinned
+# input of the instruction-refactor golden guard, and three things about it are
+# disqualifying rather than merely dated: it has no row for `review-tasks` or
+# `apply-task-suggestions`; its generate-tasks fixture no longer validates
+# (integer ids and `context_files`/`output_files` keys against a schema that
+# requires `^T[0-9]{3}$` plus `schema_version`/`plan_preamble`/`executor_role`);
+# and its patterns cross-match (`review.*implementation` against
+# `review.*implementation plan`), separated only by list order. So the container
+# lane authors its own, and asserts the non-overlap rather than intending it
+# (`tests/test_scenario_matcher_parity.py`).
+#
+# ---------------------------------------------------------------------------
+# THREE RULES THIS FILE IS WRITTEN AROUND, ALL MEASURED RATHER THAN ASSUMED.
+#
+# 1. PATTERNS ANCHOR ON PROMPT IDENTITY, NEVER ON VERBS. Each fan-out template
+#    opens with a unique first line (`prompts/plan_review.txt`,
+#    `task_review.txt`, `code_review.txt`, `ask.txt`) and each read-kind
+#    subagent prompt is pinned byte-for-byte under `tests/golden/prompts/`, so
+#    every anchor below is stable text this repo already tests.
+#
+# 2. NOTHING MAY BE ANCHORED WITH `^` AGAINST OUR OWN TEXT. Measured on the
+#    wire: every redirected CLI wraps our prompt inside its own system prompt,
+#    so the text the stub extracts starts with *the CLI's* preamble — goose's
+#    "You are a general-purpose AI agent called goose", opencode's "You are
+#    opencode, an interactive CLI tool", codex's "<permissions instructions>",
+#    claude-code's "<system-reminder>". A pattern anchored on our first line
+#    matches on the fake-binary lane and matches nothing at all in the
+#    container.
+#
+# 3. SIX CLIs FIRE A SIDE TURN THAT QUOTES OUR PROMPT (five session-title
+#    generators plus muse's reminder observers), so every product rule below
+#    carries a negative lookahead excluding them. Measured:
+#
+#      claude-code  "Generate a concise, sentence-case title (3-7 words)…"
+#      opencode     "You are a title generator. You output ONLY a thread title."
+#      kilocode     the same string (kilocode is an opencode fork)
+#      goose        "Generate a short title (four words or less)…", with the
+#                   user text wrapped in ---BEGIN USER MESSAGES---
+#      grok         "You are tasked with generating the session title." — and
+#                   this one carries tools, so `has_tools` does NOT separate it
+#      muse         two background "reminder observer" tasks per exec
+#
+#    goose's title call embeds our prompt *in full* (5481 bytes against the
+#    5268-byte review prompt), so without the lookahead the plan-review rule
+#    would answer goose's title request with a suggestion list — the exact
+#    cross-match `on_unmatched: fail` exists to make loud. That lookahead is why
+#    each product pattern below starts with `(?s)^(?!.*(?:…))`.
+#
+# ---------------------------------------------------------------------------
+# THE ONE PAIR THAT NEEDS MORE THAN AN OPENING LINE, recorded rather than
+# discovered: `validation.txt` and `validation_code_review.txt` are
+# byte-identical for their opening 63 lines and diverge only where the
+# code-review variant appends its `file`/`line_range` paragraph. All three
+# validation phases therefore share one opening, and are separated by:
+#   * code-review — the appended "Each issue record carries `file` and
+#     `line_range`" guidance (`subagent_prompts.CODE_REVIEW_VALIDATION_GUIDANCE`);
+#   * review-plan vs review-tasks — the `group_hash` values embedded in the
+#     batch records. Those are content hashes of *this file's own* fixtures
+#     (`utils/state_manager.generate_group_id` over theme + type/section/details,
+#     with no model id in the input, so they are identical on every row). Change
+#     a suggestion's text and the hash moves; under `on_unmatched: fail` that is
+#     a first-run failure naming the prompt, never a silent mis-answer.
+# Each is answered with its OWN fixture, whose `group_id`s match the phase that
+# asked — a foreign hash is discarded by `merge_batched_validation_results` and
+# the group falls through to needs-human-decision, which is how the first draft
+# of this file turned three apply phases into a human-decision fan-out.
+
+name: "Container Full Chain"
+description: "Every turn of `full --quick --yes --exec-subagents`, one fixture each"
+
+# An unmatched prompt fails the row; it never falls through to a default. A
+# generic answer is shaped enough to look like a passing phase while proving
+# nothing — here it would mean a real CLI never exercising the fixture its row
+# claims to cover.
+on_unmatched: fail
+
+prompts:
+  # ---------------------------------------------------------------- side turns
+  # Not product turns: the CLI's own session-title generator. Answered with a
+  # plain title so the CLI proceeds to the turn we are actually testing.
+  - pattern: "Generate a concise, sentence-case title|You are a title generator\\. You output ONLY a thread title|Generate a short title \\(four words or less\\)|You are tasked with generating the session title"
+    fixture: "../responses/session_title/plain_title.txt"
+    description: "session-title generator (claude-code, opencode, kilocode, goose, grok)"
+
+  # muse fires background reminder tasks in parallel with the real turn; their
+  # output reaches no parser of ours, but under `on_unmatched: fail` they still
+  # have to be answered or every muse row fails on a turn nobody reads.
+  - pattern: "You are a reminder observer for the main agent"
+    fixture: "../responses/muse_reminder/no_reminder.md"
+    description: "muse background reminder observer"
+
+  # -------------------------------------------------------------- review-plan
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\."
+    fixture: "../responses/review_plan/raw_suggestions.json"
+    description: "review-plan fan-out: prompts/plan_review.txt"
+
+  # --------------------------------------------------------------- validation
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*Each issue record carries `file` and `line_range`"
+    fixture: "../responses/validation/code_review_valid.json"
+    description: "code-review issue validation (the guidance paragraph is the discriminator)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*(?:6779911c6f8b335b|139bdba80f54ba7d|ef911087fcf05304)"
+    fixture: "../responses/validation/task_suggestions_valid.json"
+    description: "review-tasks suggestion validation (this phase's group hashes)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*(?:c948ad24b1b8e432|1558bbe6cea433cf|a4ba681281e554b8|64ba7f164d362232)"
+    fixture: "../responses/validation/plan_suggestions_valid.json"
+    description: "review-plan suggestion validation (this phase's group hashes)"
+
+  # ------------------------------------------------------------- write phases
+  # All four dispatch the `agent-write` profile through
+  # utils/write_batch_scheduler.py. The stub emits no tool call, so each batch
+  # lands on the documented CLEAN FAILURE: status ok, write_outcome
+  # clean-failure, zero bytes moved, the loop continues. The document shape is
+  # schemas/write_batch_result.schema.json — a prose answer here is a rung-6
+  # schema_invalid, which is never retried, and the phase ends at exit 3.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?suggestions? to the plan file"
+    fixture: "../responses/write_batches/apply_suggestions.json"
+    description: "apply-suggestions batch: utils/suggestion_batcher.format_batch_for_prompt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?task suggestions? to the tasks file"
+    fixture: "../responses/write_batches/apply_task_suggestions.json"
+    description: "apply-task-suggestions batch"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are implementing a specific task from a larger plan\\."
+    fixture: "../responses/write_batches/implement.json"
+    description: "implement batch: prompts/implementation_task.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Fix the following (?:\\d+ related issues in|code issue)"
+    fixture: "../responses/write_batches/apply_code_fixes.json"
+    description: "apply-code-fixes batch: utils/code_fix_batcher.format_fix_batch_prompt"
+
+  # ----------------------------------------------------------- generate-tasks
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are decomposing the plan `[^`]+` into implementation tasks\\."
+    fixture: "../responses/generate_tasks/tasks_v1.json"
+    description: "task generation: tests/golden/prompts/task_generation.txt"
+
+  # ------------------------------------------------------------- review-tasks
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing implementation tasks that were generated from a feature plan\\."
+    fixture: "../responses/review_tasks/coverage_suggestions.json"
+    description: "review-tasks fan-out: prompts/task_review.txt"
+
+  # -------------------------------------------------------------- review-code
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing code changes that implement a feature plan\\."
+    fixture: "../responses/code_review/container_issues.json"
+    description: "review-code fan-out: prompts/code_review.txt"
+
+  # ---------------------------------------------------------------------- ask
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are answering a question about an implementation plan\\."
+    fixture: "../responses/ask/plan_question.md"
+    description: "standalone ask: prompts/ask.txt"

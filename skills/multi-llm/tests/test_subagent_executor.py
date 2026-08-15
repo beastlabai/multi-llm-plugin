@@ -52,6 +52,7 @@ from utils.subagent_tasks import (  # noqa: E402
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
+SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
 
 #: Runner specs the read path ships a real `agent-readonly` profile for. The
 #: sentinel test and the equivalence test are parametrized over all three, so a
@@ -69,18 +70,25 @@ ELIGIBLE_RUNNERS = [
 # ---------------------------------------------------------------------------
 
 def _install_launcher(bin_dir: Path, name: str) -> Path:
-    """Put a mock provider CLI called ``name`` on a temp PATH."""
+    """Put a mock provider CLI called ``name`` on a temp PATH.
+
+    A *copied* launcher cannot find ``tests/scenario_matcher.py`` through its own
+    ``__file__`` the way the real file and a symlink to it can, so the one
+    definition of what a scenario means is copied beside it.
+    """
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / name
     if os.name == "nt":  # pragma: no cover - POSIX CI
         target = bin_dir / f"{name}.py"
         shutil.copyfile(MOCK_LLM, target)
+        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
     else:
         try:
             target.symlink_to(MOCK_LLM)
         except (OSError, NotImplementedError):  # pragma: no cover
             shutil.copyfile(MOCK_LLM, target)
             target.chmod(target.stat().st_mode | stat.S_IXUSR)
+            shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
     return target
 
 

@@ -13,6 +13,20 @@ Supported Providers:
     - kilocode: Direct JSON output
     - claude-code (launcher name ``claude``): {"type": "result", "result": "...",
       "usage": {...}, "total_cost_usd": ...}
+    - agy: single JSON envelope {"conversation_id": ..., "status": "SUCCESS",
+      "response": "...", "duration_seconds": ..., "num_turns": ..., "usage": {...}}
+
+Every identity here is five parts, and no part is optional (C5): the name in
+``get_provider_name``/``SkillRunner.PROVIDERS``, an argv parser matching that
+adapter's ``build_command`` exactly, a formatter emitting the CLI's *real* wire
+format, a ``VERSION_STRINGS`` entry, and — only for an adapter declaring an
+``auth_check`` — an ``AUTH_PROBE_ARGS``/``AUTH_OK_STRINGS`` pair. Every one of
+those lookups falls back **silently** (see ``format_output``,
+``parse_provider_args``, ``VERSION_STRINGS`` and ``AUTH_PROBE_ARGS`` below), so a
+half-added identity does not fail loudly — it emits another CLI's wire format
+and hands the adapter a shape its real CLI never produces. ``tests/
+test_mock_adapter_roundtrip.py`` and ``tests/test_fake_lane_roster.py`` are what
+turn that from a convention into an assertion.
 
 Environment Variables (Legacy - for backward compatibility):
     MULTI_LLM_TEST_MODE: Must be set to "1" for the mock to run (safety check)
@@ -22,7 +36,18 @@ Environment Variables (Legacy - for backward compatibility):
     MOCK_OUTPUT_PATH: Path to write output file to (alternative to parsing from prompt)
 
 Environment Variables (New - for scenario-based testing):
-    MOCK_LLM_SCENARIO: Path to scenario YAML file for pattern-based responses
+    MOCK_LLM_SCENARIO: Path to scenario YAML file for pattern-based responses.
+        What that file *means* is defined once, in ``tests/scenario_matcher.py``,
+        which this binary imports and the container lane's HTTP stub imports too
+        (C4) — so the two can never disagree about which fixture answers which
+        prompt. A scenario declaring ``on_unmatched: fail`` makes an unanswered
+        prompt exit 8 with the prompt's sha256 on stderr instead of falling
+        through to the generic default below.
+    MOCK_LLM_TURN_INDEX: The zero-based per-session turn index the matcher's
+        second selection stage uses (pattern match -> turn index -> declared
+        fallback). The fake binary has no session of its own, so the caller
+        declares it; the HTTP stub derives the same number from the per-exec id
+        in its base URL. Ignored by any scenario that declares no ``turns:``.
     MOCK_LLM_CONFIG: JSON string with dynamic configuration
     MOCK_LLM_CALL_LOG: Path to JSONL file for logging all invocations
     MOCK_LLM_VERSION: Version string `--version` prints (default: the per-provider
@@ -107,7 +132,7 @@ def get_provider_name() -> str:
     there is no argv[0] to key on in that case).
 
     Returns:
-        The provider name (cursor-agent, gemini, opencode, codex, kilocode)
+        The provider name (cursor-agent, gemini, opencode, codex, kilocode, agy)
         or 'unknown' if not detected.
     """
     invoked = Path(sys.argv[0])
@@ -116,7 +141,9 @@ def get_provider_name() -> str:
     invoked_names = (invoked.name, invoked.stem)
 
     # Handle both direct name and any suffix/prefix variations
-    known_providers = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
+    known_providers = [
+        "cursor-agent", "gemini", "opencode", "codex", "kilocode", "agy",
+    ]
 
     # The claude-code adapter's binary is `claude`, so the launcher name and the
     # provider id differ for exactly this one.
@@ -136,50 +163,75 @@ def get_provider_name() -> str:
     return "unknown"
 
 
-def load_scenario(scenario_path: str) -> Optional[Dict[str, Any]]:
-    """Load a scenario YAML file.
+class ScenarioRefused(Exception):
+    """A scenario declaring ``on_unmatched: fail`` refused to answer this prompt.
 
-    Args:
-        scenario_path: Path to the scenario YAML file.
-
-    Returns:
-        Parsed scenario dict or None if loading fails.
+    Wraps whatever ``scenario_matcher`` raised so ``main`` can turn it into one
+    exit code without importing the matcher's exception classes at module level.
+    The message it carries is the matcher's, which names the scenario and the
+    prompt's sha256 and **never** the prompt body.
     """
-    try:
-        import yaml
-    except ImportError:
-        # yaml not available, return None
-        return None
-
-    try:
-        with open(scenario_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except (OSError, yaml.YAMLError):
-        return None
 
 
-def match_prompt_pattern(prompt: str, scenario: Dict[str, Any]) -> Optional[str]:
-    """Match prompt against scenario patterns and return fixture path.
+def _scenario_matcher():
+    """Import ``tests/scenario_matcher.py``, or exit naming where it was looked for.
 
-    Args:
-        prompt: The prompt text to match.
-        scenario: The loaded scenario dict.
+    That module is the one definition of what a scenario means (C4), shared with
+    the container lane's HTTP stub, so this file imports it instead of keeping a
+    second copy. Two locations are searched, because a provider launcher is
+    either a symlink to this file or a copy of it: ``tests/`` — the grandparent
+    of the real ``tests/mocks/mock_llm.py``, which is what ``__file__`` resolves
+    to in place *and* through a symlink — and the launcher's own directory,
+    where a copier drops the matcher beside the copy.
 
-    Returns:
-        Path to fixture file or None if no match.
+    Lazy rather than module-level, because ``mocks/__init__.py`` imports this
+    file as a library and a copied launcher that never sets
+    ``MOCK_LLM_SCENARIO`` must keep working wherever it landed. Not finding it
+    is fatal on purpose: the only alternative is a second, drifting copy of the
+    matcher here, which is precisely what extracting it prevents.
     """
-    prompts = scenario.get("prompts", [])
-    for entry in prompts:
-        pattern = entry.get("pattern", "")
-        fixture = entry.get("fixture", "")
-        if pattern and fixture:
-            try:
-                if re.search(pattern, prompt, re.IGNORECASE):
-                    return fixture
-            except re.error:
-                # Invalid regex, skip
-                continue
-    return None
+    import importlib.util
+
+    if "scenario_matcher" in sys.modules:
+        return sys.modules["scenario_matcher"]
+
+    here = Path(__file__).resolve()
+    searched = [here.parent.parent, here.parent]
+    for directory in searched:
+        module_path = directory / "scenario_matcher.py"
+        if not module_path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("scenario_matcher", module_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["scenario_matcher"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    print(
+        "MOCK SCENARIO ERROR: MOCK_LLM_SCENARIO is set but scenario_matcher.py "
+        "is in neither " + " nor ".join(str(path) for path in searched) + ". "
+        "That module is the one definition of what a scenario means, so this "
+        "binary will not guess at one: a launcher that is a copy of mock_llm.py "
+        "rather than a symlink to it must carry scenario_matcher.py beside it.",
+        file=sys.stderr,
+    )
+    sys.exit(EXIT_TEST_AUTHORING_ERROR)
+
+
+def scenario_turn_index() -> Optional[int]:
+    """The per-session turn index ``MOCK_LLM_TURN_INDEX`` declares, if any.
+
+    ``None`` (unset, or unparseable) means "this caller keeps no turn counter",
+    which skips the matcher's turn stage entirely. A fake CLI has no session, so
+    the number can only come from whoever spawned it.
+    """
+    raw = os.environ.get("MOCK_LLM_TURN_INDEX")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _unique(values: List[str]) -> List[str]:
@@ -337,6 +389,12 @@ def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
 
 EXIT_TEST_AUTHORING_ERROR = 9
 
+#: A scenario declaring ``on_unmatched: fail`` had nothing to answer with. Its
+#: own code, distinct from a provider failure (1) and from a test-authoring
+#: error (9), because it is neither: the rig is wired correctly and the CLI ran
+#: — the *scenario* does not cover the prompt the run actually produced.
+EXIT_UNMATCHED_PROMPT = 8
+
 
 def apply_mock_edits() -> List[Dict[str, Any]]:
     """Apply ``MOCK_LLM_EDITS`` relative to the invocation cwd, before answering.
@@ -448,6 +506,57 @@ def write_batch_result(applied: List[Dict[str, Any]]) -> str:
     })
 
 
+def default_response_content(provider: str) -> str:
+    """The generic answer an invocation nothing else claimed falls back to.
+
+    Kept here rather than in ``scenario_matcher`` on purpose: it is derived from
+    the *invoker's* identity (``argv[0]``), which is the one thing the shared
+    matcher's API may not depend on — the HTTP stub has no ``argv[0]`` to read.
+    It is also the reason ``on_unmatched: fail`` exists: this list is shaped
+    enough to look like a passing review phase while proving nothing.
+    """
+    return json.dumps([
+        {
+            "id": f"mock-{provider}-1",
+            "type": "suggestion",
+            "description": f"Mock suggestion from {provider}",
+            "importance": "MEDIUM",
+            "location": "mock_file.py:10"
+        }
+    ])
+
+
+def resolve_scenario_content(prompt: str) -> Optional[str]:
+    """Answer ``prompt`` from ``MOCK_LLM_SCENARIO``, or ``None`` for no answer.
+
+    Everything about *what a scenario means* — the YAML shape, fixture paths
+    relative to the scenario file, the pattern -> turn -> fallback order — lives
+    in ``scenario_matcher``, so this function is only the env-to-parameter
+    adapter the shared module deliberately refuses to be.
+
+    Raises:
+        ScenarioRefused: the scenario declares ``on_unmatched: fail`` and had
+            nothing to answer with (or named a fixture that is not on disk).
+    """
+    scenario_path = os.environ.get("MOCK_LLM_SCENARIO")
+    if not scenario_path:
+        return None
+
+    matcher = _scenario_matcher()
+    try:
+        scenario = matcher.load_scenario(scenario_path)
+        if scenario is None:
+            return None
+        resolution = scenario.resolve(
+            prompt,
+            provider=get_provider_name(),
+            turn_index=scenario_turn_index(),
+        )
+    except matcher.ScenarioError as exc:
+        raise ScenarioRefused(str(exc)) from exc
+    return resolution.content if resolution is not None else None
+
+
 def get_response_content(prompt: str) -> str:
     """Determine response content based on environment and prompt.
 
@@ -463,6 +572,12 @@ def get_response_content(prompt: str) -> str:
 
     Returns:
         Response content string.
+
+    Raises:
+        ScenarioRefused: see :func:`resolve_scenario_content`. Note this is
+            raised *past* MOCK_LLM_CONFIG and the default: a scenario that
+            declared it must answer is not silently outranked by a looser
+            source lower in the precedence list.
     """
     # Legacy: MOCK_LLM_FIXTURE takes highest precedence
     fixture_path = os.environ.get("MOCK_LLM_FIXTURE")
@@ -478,18 +593,9 @@ def get_response_content(prompt: str) -> str:
             return echoed
 
     # New: MOCK_LLM_SCENARIO for pattern-based responses
-    scenario_path = os.environ.get("MOCK_LLM_SCENARIO")
-    if scenario_path:
-        scenario = load_scenario(scenario_path)
-        if scenario:
-            fixture_rel = match_prompt_pattern(prompt, scenario)
-            if fixture_rel:
-                # Resolve fixture path relative to scenario file location
-                scenario_dir = Path(scenario_path).parent
-                fixture_full = scenario_dir / fixture_rel
-                if fixture_full.exists():
-                    with open(fixture_full, "r", encoding="utf-8") as f:
-                        return f.read()
+    scenario_content = resolve_scenario_content(prompt)
+    if scenario_content is not None:
+        return scenario_content
 
     # New: MOCK_LLM_CONFIG for dynamic configuration
     config_json = os.environ.get("MOCK_LLM_CONFIG")
@@ -505,16 +611,7 @@ def get_response_content(prompt: str) -> str:
             pass
 
     # Default response based on provider
-    provider = get_provider_name()
-    return json.dumps([
-        {
-            "id": f"mock-{provider}-1",
-            "type": "suggestion",
-            "description": f"Mock suggestion from {provider}",
-            "importance": "MEDIUM",
-            "location": "mock_file.py:10"
-        }
-    ])
+    return default_response_content(get_provider_name())
 
 
 def write_output_file(prompt: str, content: str) -> None:
@@ -746,6 +843,42 @@ def format_kilocode_output(content: str) -> str:
         return json.dumps({"output": content})
 
 
+def format_agy_output(content: str) -> str:
+    """Format output for the agy provider (Google Antigravity CLI).
+
+    Mirrors `agy --print --output-format json`: ONE JSON object on ONE stdout
+    line, the answer in `response`, and `status` carrying SUCCESS/ERROR —
+    `AgyProvider.parse_output` reads exactly those two fields and treats any
+    non-SUCCESS status as a failure carrying `error`.
+
+    PROVENANCE, because C5's one non-negotiable rule is "captured from the real
+    binary, never invented". A live capture was **not** possible here and was not
+    attempted: agy's credentials live in the OS keyring (not in `$HOME`, per the
+    Phase 1 spike's `repo_corrections` in tests/container/redirect.yaml), so any
+    print-mode run would spend the developer's own Google quota. The shape below
+    is therefore the repo's existing record of real runs — `AgyProvider`'s
+    docstring and `tests/test_providers.TestAgyProvider._envelope` — with every
+    key corroborated **offline** against the installed binary itself (agy 1.1.13,
+    `agy --version`), whose Go JSON struct tags carry `ConversationID
+    json:"conversation_id"`, `Status json:"status"`, `Response json:"response"`,
+    `DurationSeconds json:"duration_seconds"`, `NumTurns json:"num_turns"` (which
+    occurs exactly once in the whole binary) and `Usage json:"usage"`.
+
+    The `usage` block is inert here — `AgyProvider` declares `usage: none` and
+    implements no `parse_usage` — and is present only because the real envelope
+    carries it. Nothing in this repo reads it, and a future extractor must be
+    written against a real capture, not against these numbers.
+    """
+    return json.dumps({
+        "conversation_id": "conv-mock-agy",
+        "status": "SUCCESS",
+        "response": content,
+        "duration_seconds": 4.2,
+        "num_turns": 1,
+        "usage": {"input_tokens": 50, "output_tokens": 50},
+    })
+
+
 def format_output(provider: str, content: str) -> str:
     """Format output according to provider's expected wire format.
 
@@ -755,6 +888,12 @@ def format_output(provider: str, content: str) -> str:
 
     Returns:
         Formatted output string.
+
+    NOTE the fallback: an unknown provider is answered in **cursor-agent's** wire
+    format rather than refused, so a half-added identity hands its adapter a
+    shape its real CLI never emits and the row still goes green.
+    ``tests/test_fake_lane_roster.py`` asserts every rostered identity is in this
+    table for exactly that reason.
     """
     formatters = {
         "cursor-agent": format_cursor_agent_output,
@@ -763,6 +902,7 @@ def format_output(provider: str, content: str) -> str:
         "codex": format_codex_output,
         "kilocode": format_kilocode_output,
         "claude-code": format_claude_code_output,
+        "agy": format_agy_output,
     }
 
     formatter = formatters.get(provider, format_cursor_agent_output)
@@ -832,6 +972,13 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         exec_parser.add_argument("-s", "--sandbox", default=None)
         exec_parser.add_argument("--json", action="store_true")
         exec_parser.add_argument("--model", default="gpt-4")
+        # `-c key=value` config overrides. Real codex takes these (the Phase 1
+        # spike redirected the binary with `-c model_providers.*`), and the
+        # adapter emits `-c model_reasoning_effort=<effort>` for every
+        # `model:effort` spec — `codex:gpt-5.5:high` is configured in
+        # providers.yaml — so an argv the product really builds was an argparse
+        # exit 2 here until this line existed.
+        exec_parser.add_argument("-c", "--config", action="append", default=[])
         exec_parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         if args.command != "exec":
@@ -862,10 +1009,63 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         return args, args.prompt
 
     elif provider == "kilocode":
+        # `KiloCodeProvider.build_command` emits
+        #   kilocode run --auto -m <provider/model> [--variant <effort>] <prompt>
+        # and the real CLI agrees: tests/container/runs/surface/cli-surface.json
+        # records subcommand `run` and options `--auto` / `-m` probed against
+        # kilocode 7.4.19. This parser previously accepted neither `run` nor
+        # `-m`, so the adapter's own argv was an argparse exit 2 here —
+        # indistinguishable from a provider failure. `--json` is a real flag the
+        # adapter deliberately never emits (it streams every reasoning token as
+        # a full-content-so-far line); it stays accepted because it is a CLI
+        # feature, not a deprecation trap like codex's `--full-auto`.
         parser = argparse.ArgumentParser(description="Mock kilocode CLI")
-        parser.add_argument("--auto", action="store_true")
-        parser.add_argument("--json", action="store_true")
-        parser.add_argument("prompt", nargs="?", default="")
+        subparsers = parser.add_subparsers(dest="command")
+        run_parser = subparsers.add_parser("run")
+        run_parser.add_argument("--auto", action="store_true")
+        run_parser.add_argument("--json", action="store_true")
+        run_parser.add_argument("-m", "--model", default="")
+        run_parser.add_argument("--variant", default=None)
+        run_parser.add_argument("prompt", nargs="?", default="")
+        args = parser.parse_args()
+        if args.command != "run":
+            print("ERROR: Only 'run' subcommand is supported", file=sys.stderr)
+            sys.exit(1)
+        return args, args.prompt
+
+    elif provider == "agy":
+        # `AgyProvider.build_command` emits, in this order:
+        #   agy --new-project --dangerously-skip-permissions
+        #       --output-format json --print-timeout 20m --model "<Display Name>"
+        #       -p "<prompt>"
+        # Every flag verified against `agy --help` (agy 1.1.13, offline), where
+        # `-p` is the short alias of `--print`/`--prompt` and carries the prompt
+        # as its VALUE — agy has no positional prompt at all, which is why this
+        # parser declares none.
+        #
+        # allow_abbrev=False is load-bearing, not tidiness. agy's own Go flag
+        # parser does no abbreviation matching, and argparse's default would
+        # silently accept three real agy flags that no profile may emit:
+        # `--mode accept-edits|plan` as an abbreviation of `--model` (the
+        # adapter declares no agent profile, so an execution-mode flag here is a
+        # regression), and `--print`/`--prompt` as abbreviations of
+        # `--print-timeout`. `--continue`/`-c`/`--conversation` are likewise
+        # undeclared on purpose: `--new-project` exists precisely because print
+        # mode otherwise reuses a previous project whose workspace may be bound
+        # to a DIFFERENT directory, so a resumed conversation is the silent
+        # wrong-repo bug the adapter documents.
+        parser = argparse.ArgumentParser(
+            description="Mock agy CLI", allow_abbrev=False
+        )
+        parser.add_argument("--new-project", dest="new_project", action="store_true")
+        parser.add_argument(
+            "--dangerously-skip-permissions", dest="skip_permissions",
+            action="store_true",
+        )
+        parser.add_argument("--output-format", dest="output_format", default="json")
+        parser.add_argument("--print-timeout", dest="print_timeout", default=None)
+        parser.add_argument("--model", default=None)
+        parser.add_argument("-p", "--print", "--prompt", dest="prompt", default="")
         args = parser.parse_args()
         return args, args.prompt
 
@@ -888,6 +1088,12 @@ VERSION_STRINGS = {
     "cursor-agent": "2026.02.01-abcdef",
     "gemini": "0.9.0",
     "kilocode": "1.4.0",
+    # Captured from the installed binary: `agy --version` prints a bare dotted
+    # version and nothing else (agy 1.1.13). `AgyProvider` declares no
+    # `version_cmd`, so no preflight probes this today; the entry exists because
+    # the fallback below is "0.0.0", which would fail a minimum-version gate the
+    # moment agy grows one.
+    "agy": "1.1.13",
 }
 
 
@@ -902,6 +1108,12 @@ def print_version(provider: str) -> None:
 #: distinct runner per run, so the mock must answer it as its own step — before
 #: prompt parsing, the call log and the edit/sentinel side effects, none of which
 #: a login-status probe performs on a real CLI.
+#:
+#: Entries are added for an adapter declaring an ``auth_check`` and for NO other:
+#: an identity with a fabricated probe here would answer a subcommand its real
+#: CLI does not have. ``agy`` is the current example of the empty case — its auth
+#: is an OS-keyring Google OAuth session with no `login status`-class subcommand,
+#: so `AgyProvider.auth_check` is empty and this table stays silent about it.
 AUTH_PROBE_ARGS = {
     "codex": ("login", "status"),
     "opencode": ("auth", "list"),
@@ -1037,8 +1249,17 @@ def main() -> int:
         print("ERROR: Simulated timeout - operation timed out", file=sys.stderr)
         return 124  # Standard timeout exit code
 
-    # Get response content
-    content = get_response_content(prompt)
+    # Get response content. A scenario that declared `on_unmatched: fail` and
+    # found nothing to say is a **failed invocation**, not a generic answer:
+    # both invokers of the shared matcher inherit that strictness together, so
+    # the fake binary exits non-zero here for the same prompt the HTTP stub
+    # would answer with a machine-readable error. The reason names the scenario
+    # and the prompt's sha256 — never the prompt body.
+    try:
+        content = get_response_content(prompt)
+    except ScenarioRefused as exc:
+        print(f"MOCK SCENARIO ERROR: {exc}", file=sys.stderr)
+        return EXIT_UNMATCHED_PROMPT
 
     # Write to output file if specified
     write_output_file(prompt, content)

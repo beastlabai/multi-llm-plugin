@@ -51,7 +51,9 @@ import os
 import shlex
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import (
+    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Union,
+)
 
 # Absolute, symlinks preserved. Module-level because it is a pure string
 # computation on ``__file__`` — no I/O at import. Tests that need a fixture skill
@@ -503,6 +505,23 @@ def parse_result_line(text: str) -> Optional[Dict[str, Any]]:
 # argv inspection (used by the dispatcher's parse-time rejection rules)
 # ---------------------------------------------------------------------------
 
+#: Every long option this skill registers that is a **strict prefix** of another
+#: one — i.e. the only tokens whose exact spelling an abbreviation scan can
+#: misread. argparse resolves an exact match *before* it considers any
+#: abbreviation, so ``--force`` on a command line is ``--force`` and never a
+#: shorter way of typing ``--force-strategy``; without this set the scan bound the
+#: token after ``--force`` as the strategy value. Derived mechanically from every
+#: ``add_argument`` in the runtime tree (``tests/test_unattended.py`` recomputes it
+#: and fails on drift), and deliberately a union across parsers rather than the one
+#: parser argparse will really use: a name missing here just keeps the old
+#: over-reporting, which leaves a guard closed rather than open.
+_EXACT_OPTIONS: FrozenSet[str] = frozenset({
+    "--all", "--approve-all", "--consolidate", "--dry-run", "--force",
+    "--mode", "--output", "--phase", "--project", "--question",
+    "--reaggregate", "--revalidate", "--skip", "--summary", "--task",
+})
+
+
 def _flag_matches(head: str, name: str) -> bool:
     """Whether the option-name token ``head`` would bind to option ``name``.
 
@@ -527,6 +546,15 @@ def _flag_matches(head: str, name: str) -> bool:
     ``--dry-run-subagents``) is reported present here where argparse would
     instead refuse the whole command line: both end the run at exit 3, and
     over-reporting keeps the guard closed rather than open.
+
+    An **exact spelling of a different real option is not an abbreviation** —
+    argparse binds it to itself and never considers the longer name, so a command
+    line carrying ``--force`` must not read as ``--force-strategy <next token>``
+    (see :data:`_EXACT_OPTIONS`). Where the token really *is* the abbreviation
+    argparse resolves — ``--force`` on ``implement``, whose parser registers
+    ``--force-strategy`` and no ``--force`` — the mode's own post-parse check is
+    the layer that refuses it (``implement_orchestrator.main``), so nothing is
+    left ungated by scanning it the argparse way here.
     """
     if head == name:
         return True
@@ -534,6 +562,8 @@ def _flag_matches(head: str, name: str) -> bool:
         return False  # short options never abbreviate
     if not head.startswith("--") or len(head) <= 2:
         return False  # bare `--`, a short flag, or a positional
+    if head in _EXACT_OPTIONS:
+        return False  # a real option spelled in full, not a prefix of this one
     return name.startswith(head)
 
 

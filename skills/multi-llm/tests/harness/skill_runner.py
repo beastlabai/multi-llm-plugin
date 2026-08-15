@@ -102,8 +102,14 @@ class SkillRunner:
         assert result.mock_was_invoked()
     """
 
-    # Default providers to create mock launchers for
-    PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode"]
+    # Default providers to create mock launchers for. These are LAUNCHER names
+    # (what lands on PATH), which is why `claude-code` is absent: its binary is
+    # `claude`, and nothing in this suite dispatches it as a fake. `agy` is here
+    # because it is one of the two `lane: fake` rows in
+    # tests/container/redirect.yaml — the fake binary is its ONLY possible
+    # coverage, so the launcher is part of the C5 contract
+    # (tests/test_fake_lane_roster.py asserts it).
+    PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode", "agy"]
 
     # Windows only: subdirectory of bin/ holding the node trampolines the
     # provider .cmd shims dispatch to (kept out of bin/ itself so that a
@@ -218,6 +224,11 @@ class SkillRunner:
                     | stat.S_IXGRP
                     | stat.S_IXOTH
                 )
+                # A copy cannot find tests/scenario_matcher.py through its own
+                # `__file__` the way the real file and a symlink to it can, so
+                # the one definition of what a scenario means travels with it.
+                matcher = self.mock_llm_path.parent.parent / "scenario_matcher.py"
+                shutil.copyfile(matcher, self.bin_dir / matcher.name)
 
     def _setup_windows_launchers(self) -> None:
         """Install each mock provider the way an npm-installed CLI looks on Windows.

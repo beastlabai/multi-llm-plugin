@@ -1,0 +1,17 @@
+// Minimum synthesized kilocode config for a container row (Phase 1, measured).
+// The model selector is "<provider-key>/<model-key>", i.e. stub/stub-model.
+{
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Stub",
+      "options": {
+        "baseURL": "{{base_url}}",
+        "apiKey": "{{stub_session_key}}"
+      },
+      "models": {
+        "stub-model": { "name": "Stub Model" }
+      }
+    }
+  }
+}

@@ -1,0 +1,715 @@
+# The redirection matrix — Phase 1 spike output, provenance-tagged (C3).
+#
+# This repo already has a vocabulary for "how much do we actually know":
+# hosts/capabilities.yaml tags every field verified / documented / unknown and never
+# lets a `documented`-only value select the non-conservative path. The same
+# discipline applies here — except that, unlike that file, **every row below was
+# measured**, on 2026-08-14, by running the real binary against a local HTTP stub
+# with the argv the product's own adapter built (`get_provider(<name>)
+# .build_command(prompt, model)`). Nothing here is inference from documentation.
+#
+# A row that cannot be verified is NOT a failure of the plan — it drops to the
+# fake-binary lane (C5), which is exactly where it sits today. The matrix is
+# checked in so what the suite covers is legible without reading the Dockerfile.
+#
+# ---------------------------------------------------------------------------
+# HOW THE SPIKE CHANGED THE PLAN'S EXPECTATIONS
+#
+#   plan said        measured        rows
+#   ---------------  --------------  ----------------------------------------
+#   verified         verified        codex, muse
+#   documented       verified        claude-code, aider, goose, opencode,
+#                                    gemini, cline, kilocode
+#   unknown          VERIFIED        pi      <- the plan's one open row, closed
+#   none expected    VERIFIED        grok    <- a documented custom-endpoint mode
+#   none expected    none            cursor-agent, agy
+#
+# Net: 11 of 13 rows reach the provider lane, against a plan whose go/no-go was
+# five. Not one `documented` guess turned out to be wrong, and both surprises went
+# our way. The practical consequence is that the fake-binary lane's roster
+# collapses to {cursor-agent, agy} — and cursor-agent is already one of
+# mock_llm.py's six identities, so only `agy` ever needs C5's five mock parts.
+#
+# THREE FINDINGS THAT ARE STUB REQUIREMENTS, NOT CLI TRIVIA. Each one presented
+# as "redirection does not work" before it was diagnosed:
+#   * QUERY STRINGS. claude-code posts /v1/messages?beta=true and gemini signals
+#     streaming with ?alt=sse. A route table matching the raw target 501s both.
+#   * SSE TERMINATION. HTTP/1.1 with no Content-Length and no chunked framing has
+#     no defined end: claude-code retried 16 times over 90 s writing zero bytes.
+#   * `data: [DONE]` IS AN OPENAI-ISM. gemini-cli JSON.parses every frame and dies
+#     with `Unexpected token 'D'`, so the sentinel is per-surface, not global.
+#
+# AND ONE ABOUT TURN COUNTS: claude-code, opencode, kilocode and goose each fire a
+# SESSION-TITLE completion before the real turn, tool-free and on the SAME model —
+# so C4's "one non-tool message ends the run" is true of the *run* but the turn
+# count is 2-3, not 1, and `has_tools` is the only discriminator. muse is the
+# outlier at 17 (four parallel background reminder tasks, not retries).
+#
+# PHASE 3 CORRECTION, measured with a prompt-logging stub against all 11 rows:
+# it is FIVE CLIs, not four. `grok` fires one too ("You are tasked with generating
+# the session title.") and — unlike the other four — IT CARRIES TOOLS, so
+# `has_tools` separates four of the five and not the fifth. muse's extra requests
+# are "reminder observer" tasks and need answering as well. The discriminator that
+# works on all of them is the instruction's own text, which is what
+# tests/fixtures/e2e/scenarios/container_full_chain.yaml anchors on.
+#
+# AND ONE ABOUT PROMPT SHAPE, which decides how every scenario pattern is written:
+# EVERY redirected CLI wraps our prompt inside its own system prompt, so the text a
+# stub extracts starts with the CLI's preamble, not ours. A pattern anchored with
+# `^` on our first line matches on the fake-binary lane and matches NOTHING here.
+# Worse, a session-title call QUOTES the prompt it is titling (goose's carries ours
+# in full), so a product pattern without a negative lookahead answers the title
+# request with that phase's document.
+#
+# WRAPPER CONTRACT. tests/container/wrapper.py reads these keys per row:
+#   binary           the executable name, when it differs from the provider id
+#                    (`claude` -> `claude-code`). argv[0] gives the wrapper the
+#                    binary; the row and home_seed/<id>/ are keyed by the id.
+#   credential_vars  variable NAMES set to the per-exec fake stub session key
+#   base_url_vars    variable NAME -> template ({base_url} substituted per exec)
+#   config_files     path under the per-invocation root -> file body template
+#   config_roots     variable NAME -> path under the per-invocation root
+#   env_extra        static variables the CLI needs. THESE CANNOT COME FROM THE
+#                    IMAGE: the wrapper rebuilds the child environment from
+#                    scratch and carries over only PATH/TERM/LANG/LC_ALL/TZ and
+#                    MLLM_*, so an image-wide CLINE_NO_AUTO_UPDATE=1 reaches the
+#                    build and the entrypoint but never the CLI it was set for —
+#                    leaving C9's verified pins silently un-held at run time.
+#   argv_inject      {after_token, args} for a CLI whose ONLY override is argv
+#   session_prefix   whether a /s/<exec-id>/v1 base URL still works
+# NO VALUES APPEAR IN THIS FILE. Every credential is a template the wrapper fills
+# with a string that is meaningful on 127.0.0.1 and worthless anywhere else.
+
+version: 1
+measured_on: "2026-08-14"
+measured_against: "scratchpad spike stub (3 surfaces, canned answer, total logging)"
+
+clis:
+
+  # -------------------------------------------------------------------------
+  - cli: codex
+    provenance: verified
+    lane: provider
+    surface: responses
+    mechanism: "$CODEX_HOME/config.toml [model_providers.stub] + env_key"
+    model_arg: "gpt-5.5"
+    session_prefix: true
+    config_roots:
+      # $CODEX_HOME is read AHEAD of $HOME, and the directory must EXIST: codex
+      # exits 1 with "CODEX_HOME points to ... but that path does not exist".
+      CODEX_HOME: ".codex"
+    credential_vars: [STUB_API_KEY]
+    seed_files: [".codex/config.toml", ".codex/auth.json"]
+    http_log:
+      - {method: POST, path: /v1/responses, stream: true}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.021
+    first_call_s: 0.177
+    turn_s: 0.470
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 119.3
+    chain_row_timeout_s: 600
+    version_measured: "0.146.0"
+    help_invocation: "codex exec --help"
+    version_offline: true
+    notes: >
+      TWO TRAPS, both measured. (1) A RELATIVE $HOME is silently useless: codex
+      resolves ~/.codex against it, finds no config, and goes straight to the real
+      api.openai.com — which looks exactly like "redirection does not work". (2) On
+      the DEFAULT provider codex now prefers a WebSocket transport
+      (wss://api.openai.com/v1/responses) and only falls back to HTTPS after five
+      retries; a custom base_url avoids that transport entirely.
+      Also: `codex exec` refuses a cwd that is neither a git repo nor trusted
+      ("Not inside a trusted directory and --skip-git-repo-check was not
+      specified") — satisfied by seed_workspace.py's git init, which answers the
+      open C6c cell about an untrusted cwd.
+
+  # -------------------------------------------------------------------------
+  - cli: aider
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "OPENAI_API_BASE + an openai/<id> litellm spec on --model (env only)"
+    model_arg: "openai/stub-model"
+    session_prefix: true
+    base_url_vars:
+      OPENAI_API_BASE: "{base_url}"
+    credential_vars: [OPENAI_API_KEY]     # litellm refuses to start without one
+    seed_files: []
+    http_log:
+      # THE ONE NON-STREAMING ROW: --no-stream is in the adapter's own argv, so the
+      # stub's single-body chat shape is load-bearing here, not decorative.
+      - {method: POST, path: /v1/chat/completions, stream: false}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.377
+    first_call_s: 2.257
+    turn_s: 2.867
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 111.9
+    chain_row_timeout_s: 600
+    version_measured: "0.86.2"
+    help_invocation: "aider --help"
+    version_offline: true
+    egress_beyond_stub:
+      hosts: ["185.199.108-111.133 (raw.githubusercontent.com — litellm model metadata)"]
+      fatal_when_blocked: false          # actually FASTER blocked: 2.06 s vs 2.87 s
+    container_status: green
+    container_note: >
+      Green only after a wrapper fix, and the failure was worth the trip.
+      AiderProvider.get_env() sets COLUMNS=10000 precisely to stop aider
+      hard-wrapping its output; the wrapper's scrub dropped it (not in the
+      carry-over allowlist), aider wrapped at ~78 columns, and the JSON document
+      it printed came back with RAW NEWLINES INSIDE ITS STRING VALUES — invalid
+      JSON, surfaced three layers up as the uninformative "No JSON found in aider
+      output". Dropping what the product's own adapter deliberately sets means the
+      container tests a configuration the product never ships.
+      tests/test_wrapper_env_contract.py now asserts every adapter's get_env()
+      keys survive the scrub, so the next adapter to add one fails a test instead
+      of being silently scrubbed.
+    notes: >
+      The reply carries no '► **ANSWER**' marker: aider emits it only when the
+      response has reasoning content, so a plain stub answer takes
+      AiderProvider.parse_output's FALLBACK branch and never its primary one. To
+      cover the marker path the stub must emit reasoning_content — otherwise
+      aider's primary parser is untested in the image.
+
+  # -------------------------------------------------------------------------
+  - cli: goose
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "GOOSE_PROVIDER=openai + OPENAI_BASE_URL (env only)"
+    model_arg: "openai/stub-model"
+    session_prefix: true
+    base_url_vars:
+      OPENAI_BASE_URL: "{base_url}"
+    credential_vars: [OPENAI_API_KEY]
+    env_extra:
+      GOOSE_PROVIDER: "openai"
+      GOOSE_DISABLE_KEYRING: "1"
+    seed_files: []
+    http_log:
+      - {method: GET,  path: /v1/models,           stream: false}
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false,
+         note: "SESSION-TITLE call — see notes"}
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 3
+    terminates_on_text: true
+    startup_s: 0.005
+    first_call_s: 0.057
+    turn_s: 0.161
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 99.2
+    chain_row_timeout_s: 600
+    version_measured: "1.41.0"
+    help_invocation: "goose run --help"   # top-level --help lists subcommands only
+    version_offline: true
+    egress_beyond_stub: {hosts: [], fatal_when_blocked: false}
+    notes: >
+      THE LANE-DECIDING NUMBER IS 3, NOT 25. The plan flagged goose as the row most
+      likely to loop: it ships developer tools and the adapter passes --max-turns 25.
+      Measured across four independent runs, goose accepts a tool-free answer as
+      final on iteration 1 and never approaches the ceiling. C4's precondition holds.
+      THE TRAP FOR PHASE 3: one of the two completions is a SESSION-TITLE request
+      with a completely different system prompt ("Generate a short title (four words
+      or less)...", user text wrapped in ---BEGIN USER MESSAGES---). It fires even
+      under --no-session and GOOSE_DISABLE_SESSION_NAMING=1 does NOT suppress it.
+      Under `on_unmatched: fail` this call fails EVERY goose row unless
+      container_full_chain.yaml carries a pattern for it — and it is why a naive
+      per-session turn counter would hand goose's real turn the second fixture.
+
+  # -------------------------------------------------------------------------
+  - cli: cline
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "~/.cline/data/settings/providers.json -> openai-compatible.settings.baseUrl (NO env var exists)"
+    model_arg: "openai/stub-model"
+    session_prefix: true
+    seed_files: [".cline/data/settings/providers.json"]
+    seed_recipe: "cline auth -p openai -b <base_url> -k <fake> -m stub-model"
+    env_extra:
+      CLINE_NO_AUTO_UPDATE: "1"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.959
+    startup_s_egress_blocked: 8.66
+    first_call_s: 0.759
+    turn_s: 1.448
+    turn_s_egress_blocked: 8.97          # ~7.5 s of blocked-egress wait, EVERY invocation
+    row_timeout_s: 600                   # sized for the blocked-egress penalty, not the fast path
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 106.8
+    chain_row_timeout_s: 600
+    version_measured: "3.0.55"
+    help_invocation: "cline --help"      # `cline auth --help` for -b/--baseurl
+    version_offline: false
+    container_status: green
+    container_note: >
+      Green only after the seed template was replaced with the shape cline itself
+      writes. A HAND-WRITTEN config was silently ignored: the real file carries a
+      `providers` wrapper key plus `version`, `lastUsedProvider` and a
+      `settings.provider` field, none of which the spike's one-line summary
+      captured. cline then fell back to a default endpoint and reported
+      `ConnectionRefused` with ZERO stub requests — which reads exactly like a
+      broken redirect and is nothing of the kind.
+      THE RULE THIS ROW ESTABLISHES: generate a seed template with the CLI's own
+      command (`cline auth -p openai -b <url> -k <key> -m <model>`) and commit
+      what it wrote, with the values templated out. Do not hand-write a config
+      shape from a prose description of it.
+    notes: >
+      CLINE SELF-UPDATED THE INSTALLED PACKAGE MID-SPIKE (3.0.39 -> 3.0.55, global
+      node_modules rewritten while a probe ran; that run hung to the cap). C9's pin is
+      NOT honoured unless the auto-update is disabled. CLINE_NO_AUTO_UPDATE=1 cuts
+      run-time connects from ~10 to 2 but removes neither the telemetry call nor the
+      blocked-egress delay — `--network none` is what actually settles it, at the cost
+      of the ~7.5 s this row's timeout is sized for.
+      cline also spawns a BACKGROUND HUB DAEMON that can outlive the run. One
+      container per row makes that safe by construction; a shared container would not.
+
+  # -------------------------------------------------------------------------
+  - cli: kilocode
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "$HOME/.config/kilo/kilo.jsonc provider.<id> {npm: '@ai-sdk/openai-compatible', options.baseURL}"
+    model_arg: "stub/stub-model"
+    session_prefix: true
+    seed_files: [".config/kilo/kilo.jsonc"]
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false}
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 2
+    terminates_on_text: true
+    startup_s: 0.641
+    first_call_s: 1.904
+    turn_s: 4.311
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 117.9
+    chain_row_timeout_s: 600
+    version_measured: "7.4.19"
+    help_invocation: "kilocode run --help"
+    version_offline: true
+    notes: >
+      TURN COUNT DEPENDS ON EGRESS. On a fresh $HOME kilocode fetches the 3.6 MB
+      models.dev catalog; that fetch is best-effort (it still exits 0 unreachable),
+      but with the catalog missing a small no-tools pre-turn call falls back onto the
+      configured provider, so 1 request becomes 2. Under --network none the stub must
+      serve TWO POST /v1/chat/completions per exec, the first carrying no tools.
+
+  # -------------------------------------------------------------------------
+  - cli: pi
+    provenance: verified              # the plan's ONE `unknown` row, now closed
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "$HOME/.pi/agent/models.json providers.<id> {baseUrl, api: openai-completions, apiKey, models[]}"
+    model_arg: "stub/stub-model"
+    session_prefix: true
+    config_roots:
+      # Reads PI_CODING_AGENT_DIR ahead of $HOME — the config-root trap again.
+      PI_CODING_AGENT_DIR: ".pi/agent"
+    credential_vars: [STUB_API_KEY]
+    seed_files: [".pi/agent/models.json"]
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.343
+    first_call_s: 0.375
+    turn_s: 0.393                     # the fastest row measured
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 100.7
+    chain_row_timeout_s: 600
+    version_measured: "0.80.6"
+    help_invocation: "pi --help"
+    version_offline: true
+    notes: >
+      Fully documented in the shipped package (docs/models.md, docs/custom-provider.md),
+      so this is a first-class feature rather than a hack. providers.yaml's auth note
+      is correct but incomplete: it omits models.json, which is the only mechanism
+      carrying a base URL and therefore the one the container needs. `apiKey` must be
+      present even as a dummy, or the model is filtered out of the selectable set.
+
+  # -------------------------------------------------------------------------
+  - cli: grok
+    provenance: verified              # the plan predicted `none expected`
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "GROK_MODELS_BASE_URL + XAI_API_KEY (a documented custom-endpoint mode)"
+    session_prefix: true
+    base_url_vars:
+      GROK_MODELS_BASE_URL: "{base_url}"
+    # Model ids this CLI puts on the wire that are NOT the -m value: grok's
+    # session-title side call hardcodes `grok-build`. Declared so the per-row
+    # "the stub saw only this row's models" assertion can be an exact set rather
+    # than a count, which is what makes it fail in both directions.
+    side_model_ids: ["grok-build"]
+    credential_vars: [XAI_API_KEY]
+    seed_files: []
+    http_log:
+      - {method: GET,  path: /v1/models,           stream: false}
+      - {method: POST, path: /v1/responses,        stream: true,
+         note: "concurrent side call with a HARDCODED model id `grok-build`, not the -m value"}
+      - {method: POST, path: /v1/chat/completions, stream: true}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.026
+    first_call_s: 0.134
+    turn_s: 0.271
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 99.9
+    chain_row_timeout_s: 600
+    version_measured: "0.2.93"
+    help_invocation: "grok --help"
+    version_offline: true
+    notes: >
+      THE CONCURRENT /v1/responses CALL IS A SESSION-TITLE GENERATOR ("You are
+      tasked with generating the session title."), measured in Phase 3 — and it
+      carries tools, which is why has_tools cannot be used to separate it. Its
+      model id is the hardcoded `grok-build`, recorded above as side_model_ids.
+      Documented in grok's own bundled ~/.grok/README.md under "Custom Models
+      Endpoint": GROK_MODELS_BASE_URL switches it off xAI's cli-chat-proxy onto a
+      plain OpenAI-compatible base URL, and off session auth onto Authorization:
+      Bearer. TWO HARD PRECONDITIONS: the -m model must appear in the stub's
+      GET /v1/models catalog or grok exits 1 with `unknown model id`; and XAI_API_KEY
+      must be non-empty or grok opens an interactive OAuth DEVICE FLOW against
+      accounts.x.ai and blocks until timeout.
+
+  # -------------------------------------------------------------------------
+  - cli: muse
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: responses
+    mechanism: "muse exec --base-url (ARGV ONLY — no env var, no config key) + auth.json or META_API_KEY"
+    model_arg: "muse-spark-1.2"
+    session_prefix: partial            # kept on POST /s/<id>/responses, stripped on the catalog GET
+    argv_inject:
+      # The one row whose override is argv-only. Six config keys across auth.json
+      # and settings.json were proved negative — all six left the request on the
+      # real Meta endpoint with zero stub hits — and MuseProvider.build_command
+      # emits no --base-url, so the wrapper is the only place the flag can come
+      # from without putting a test concern into shipping code.
+      after_token: exec
+      args: ["--base-url", "{base_url}"]
+    credential_vars: [META_API_KEY]
+    env_extra:
+      MUSE_NO_AUTO_UPDATE: "1"
+    seed_files: [".config/muse/auth.json", ".config/muse/settings.json"]
+    http_log:
+      - {method: GET,  path: /muse-code/models, stream: false, count: 2}
+      - {method: POST, path: /responses,        stream: true,  count: 15}
+    turns: 17
+    terminates_on_text: true
+    startup_s: 0.008
+    first_call_s: 0.025
+    turn_s: 0.913
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 119.1
+    chain_row_timeout_s: 600
+    version_measured: "0.1.0"
+    help_invocation: "muse exec --help"
+    version_offline: true
+    notes: >
+      SEVENTEEN REQUESTS FOR ONE GENERATE CALL, and they are not retries: the JSONL
+      shows five tasks — the real model.meta.response plus four background
+      `reminder.agent.plugin:tbh-reminders:*` tasks fired in parallel, each making
+      ~3 calls with distinct bodies. One reminder failed without affecting the exit
+      code or the parsed answer. A per-exec turn counter advances ~15x per user turn
+      and a coarse (model, surface, pattern) tuple cannot separate them at all — so
+      this row REQUIRES the path-prefix session key, and its scenario must tolerate
+      the reminder prompts.
+      providers.yaml is WRONG that auth is not an env var: META_API_KEY is read and
+      takes precedence over auth.json.
+      The `muse` on PATH is a bash launcher, not the binary; it auto-updates from
+      api.meta.ai and updates synchronously and fatally if muse-bin-<version> is
+      missing. A container must ship the resolved binary with MUSE_NO_AUTO_UPDATE=1.
+
+  # -------------------------------------------------------------------------
+  - cli: claude-code
+    # The BINARY is `claude`; the provider id is `claude-code`. The wrapper
+    # resolves one to the other, because argv[0] gives it the binary while the
+    # row and home_seed/<id>/ are keyed by the id.
+    binary: claude
+    provenance: verified
+    lane: provider
+    surface: anthropic
+    mechanism: "ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); no config file"
+    model_arg: "haiku"
+    # The row pins the ALIAS `haiku`; claude-code resolves it to a concrete id
+    # before the request leaves, so that is what the stub records. Declared here
+    # rather than tolerated by a loose count — and it is a drift signal worth
+    # having: when Anthropic moves the alias, this row fails naming both ids
+    # instead of silently testing a different model than the one it pinned.
+    side_model_ids: ["claude-haiku-4-5-20251001"]
+    session_prefix: true
+    base_url_vars:
+      ANTHROPIC_BASE_URL: "{base_url_root}"
+    credential_vars: [ANTHROPIC_API_KEY]
+    seed_files: []
+    http_log:
+      - {method: POST, path: /v1/messages, query: "beta=true", stream: true, has_tools: false,
+         note: "session-title generator - SAME model, no tools"}
+      - {method: POST, path: /v1/messages, query: "beta=true", stream: true, has_tools: true}
+    turns: 2
+    terminates_on_text: true
+    startup_s: 0.070
+    first_call_s: 0.550
+    turn_s: 1.347
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 20.0
+    chain_row_timeout_s: 600
+    version_measured: "2.1.232"
+    help_invocation: "claude --help"
+    version_offline: true
+    notes: >
+      TWO REQUESTS PER EXEC, NOT ONE. The first is Claude Code's own session-title
+      generator - tool-free, 2.3 KB, and it uses the SAME model as the session, so
+      a stub keyed on (model, surface) alone cannot tell the two apart; has_tools
+      (0 vs 28) is the discriminator. The real turn is 142 KB.
+      THE PATH CARRIES A QUERY STRING: /v1/messages?beta=true. A route table
+      matching the raw target with endswith("/messages") 501s it - the spike's stub
+      did exactly that and Claude Code retried 16 times over 90 s without writing a
+      byte, which is indistinguishable from "redirection failed". The stub must
+      split the query before dispatch.
+      With NEITHER key variable set it fails CLOSED and fast: exit 1, zero requests,
+      "Not logged in - Please run /login". In a scratch $HOME the plan's warning
+      about an unset ANTHROPIC_API_KEY falling back to api.anthropic.com did not
+      reproduce - but that is because the scratch home carries no OAuth credential,
+      so it is not evidence against the host lane's present-and-empty assertion.
+
+  # -------------------------------------------------------------------------
+  - cli: gemini
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: gemini
+    mechanism: "GOOGLE_GEMINI_BASE_URL (read by the bundled @google/genai SDK) + GEMINI_API_KEY"
+    model_arg: "gemini-2.5-flash"
+    session_prefix: true
+    base_url_vars:
+      GOOGLE_GEMINI_BASE_URL: "{base_url_root}"
+    credential_vars: [GEMINI_API_KEY]
+    seed_files: []
+    http_log:
+      - {method: POST, path: "/v1beta/models/<model>:streamGenerateContent",
+         query: "alt=sse", stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    startup_s: 0.783
+    first_call_s: 2.226
+    turn_s: 2.257
+    row_timeout_s: 300
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 107.2
+    chain_row_timeout_s: 600
+    version_measured: "0.25.2"
+    help_invocation: "gemini --help"
+    version_offline: true
+    notes: >
+      THE VARIABLE IS NOT GEMINI-CLI'S. GOOGLE_GEMINI_BASE_URL appears nowhere in
+      @google/gemini-cli 0.25.2 or -core; it is read by the bundled @google/genai
+      SDK. It works, but it is a TRANSITIVE DEPENDENCY'S contract and therefore the
+      likeliest of every mechanism here to move under a CLI upgrade - it deserves
+      its own surface probe.
+      Three stub consequences, all measured: (1) streaming ONLY, signalled by
+      "?alt=sse" on the URL rather than a body flag or an Accept header; (2) the
+      model is in the PATH, never in the body, so a stub keying sessions on
+      body["model"] sees null for gemini; (3) NO [DONE] SENTINEL - Google's SSE
+      dialect has none and gemini-cli JSON.parses every frame, so an OpenAI-style
+      "data: [DONE]" kills the run with "Unexpected token D". That makes the
+      sentinel a PER-SURFACE behaviour, not a global one.
+      GEMINI_CLI_CONFIG_DIR is NOT consulted (the CLI names $HOME/.gemini/
+      settings.json), and gemini CRASHES if $HOME does not exist.
+      "-p/--prompt" is marked deprecated in 0.25.2 ("will be removed in a future
+      version") - the adapter's positional form is correct, and this is a live
+      drift signal worth a surface-probe row.
+
+  # -------------------------------------------------------------------------
+  - cli: opencode
+    provenance: verified
+    lane: provider
+    surface: chat
+    mechanism: "$XDG_CONFIG_HOME/opencode/opencode.json custom openai-compatible provider block"
+    model_arg: "stub/stub-model"
+    session_prefix: true
+    seed_files:
+      - ".config/opencode/opencode.json"
+      - ".config/opencode/node_modules/"
+      - ".config/opencode/package.json"
+      - ".cache/opencode/models.json"
+    env_extra:
+      OPENCODE_DISABLE_MODELS_FETCH: "1"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false,
+         note: "session-title generator"}
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 2
+    terminates_on_text: true
+    startup_s: 0.291
+    first_call_s: 0.888
+    turn_s: 1.245
+    row_timeout_s: 600
+    # Phase 3 measurement: `full --quick --yes --exec-subagents` +
+    # `ask` + `status`, one green run, wall clock including container
+    # start and the workspace seed.
+    chain_s: 51.4
+    chain_row_timeout_s: 600
+    version_measured: "1.18.18"
+    help_invocation: "opencode run --help"
+    version_offline: true
+    notes: >
+      COLD START IS A NETWORK DEPENDENCY, and it is the biggest image-level finding
+      in the spike. On a fresh home opencode npm-installs ~63 MB into
+      $XDG_CONFIG_HOME/opencode/node_modules (writing its own package.json and
+      lockfile) and fetches a ~3.6 MB models.json from models.dev. Measured at
+      >120 s, never reaching the stub. Under --network none that is a HARD FAILURE
+      unless the image PRE-BAKES both, and it presents as a redirection bug rather
+      than a missing install step. OPENCODE_DISABLE_MODELS_FETCH=1 guards the
+      catalog half.
+      "opencode auth login" is NOT needed: the key travels in the config block.
+      TWO requests per exec, same shape as claude-code - a tool-free session-title
+      call then the real one with tools.
+      THE timeout-WRAPPER HAZARD HAS A MECHANISM, AND IT IS WORSE THAN RECORDED:
+      a killed run leaves its PROJECT DIRECTORY poisoned, and every later run in
+      that directory hangs at init with zero bytes - surviving a fresh $HOME, a
+      fresh $TMPDIR, an empty process table and deletion of the .git/opencode
+      marker. A clean exit poisons nothing. So a chain may reuse
+      /work/sample-project, but a row that trips its cap burns the directory for
+      every later opencode step; recreating it is the recovery.
+      The adapter does NOT bake a "--" separator - build_command ends with a bare
+      trailing positional. Fine for prompts not starting with "-", but the yargs
+      hazard is still live for a materialized prompt beginning with "--", and
+      cli-surface.yaml must not record a separator the product does not send.
+
+  # -------------------------------------------------------------------------
+  # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE
+  # about mock_llm.py (C5): cursor-agent is already one of its six identities;
+  # `agy` is the only provider in this matrix that still needs the five mock parts.
+  # -------------------------------------------------------------------------
+  - cli: cursor-agent
+    provenance: none
+    lane: fake
+    startup_s: 0.279
+    version_measured: "2026.08.11"
+    help_invocation: "cursor-agent --help"
+    attempts: ["CURSOR_API_ENDPOINT", "-e/--endpoint", "bedrock mode"]
+    reason: >
+      The redirect itself WORKS — CURSOR_API_ENDPOINT (default https://api2.cursor.sh)
+      sent 100% of traffic to the stub and nothing reached Cursor. It is unserviceable
+      anyway: after a JSON handshake POST /auth/exchange_user_api_key, every call is
+      POST /aiserver.v1.<Service>/<Method> with content-type: application/proto and
+      connect-protocol-version: 1 — binary protobuf over Connect-RPC. None of the three
+      model-API surfaces are involved, so serving it means reimplementing Cursor's
+      protobuf schema, which is not a stub. `bedrock` mode is not an escape: its own
+      self-test validates against the backend.
+
+  - cli: agy
+    provenance: none
+    lane: fake
+    startup_s: 0.051
+    version_measured: "1.1.13"
+    help_invocation: "agy --help"
+    attempts: ["CLOUD_CODE_URL", "settings.json modelProvider + GEMINI_API_KEY"]
+    reason: >
+      CLOUD_CODE_URL is a real, working endpoint override (the binary logs
+      "Overriding CloudCodeServerURL via CLOUD_CODE_URL") and the protocol is JSON,
+      not protobuf: /v1internal:loadCodeAssist, :setUserSettings, :listExperiments.
+      Two things still block it. (a) agy never reaches a model surface — it fails at
+      the ELIGIBILITY gate on :loadCodeAssist, whose response schema is
+      Google-internal. (b) auth is not in $HOME at all but in the OS KEYRING, so
+      there is nothing to seed and a container's silent auth simply fails.
+    repo_corrections:
+      # Three things this row contradicts in the tree today.
+      - "providers.yaml and the adapter docstring say auth is persisted in
+         ~/.gemini/antigravity-cli/. It is the OS keyring: seeding $HOME does NOT
+         de-authenticate agy. Any future probe must also break the keyring
+         (DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-bus) or it silently uses
+         the developer's real Google token."
+      - "agy SELF-UPDATES with no --no-auto-update flag; the opt-out is
+         AGY_CLI_DISABLE_AUTO_UPDATE. It rewrote the developer's own binary
+         (1.1.8 -> 1.1.13) during the spike."
+      - "'Google OAuth only, no API keys at all' is true only of the DEFAULT path.
+         The binary carries a geminiAPIKeyAuth method gated on settings.json
+         modelProvider plus GEMINI_API_KEY/GOOGLE_API_KEY, alongside
+         GOOGLE_GEMINI_BASE_URL. If that path can be selected agy would speak plain
+         :generateContent — which the stub already serves — and become a
+         provider-lane candidate. Rated ~30 minutes of follow-up."

@@ -45,6 +45,7 @@ import check_workflow_prerequisites as prereq
 import implement_orchestrator
 import modes as mode_table
 import multi_llm
+from utils import cli_common
 from utils import unattended as un
 from utils.apply_orchestrator_base import apply_unattended_defaults
 from utils.cli_common import build_parent_parser, flag_value, parse_result_line
@@ -861,6 +862,47 @@ class TestNoHostSniffing:
         # A longer real option never reads as an abbreviation of a shorter one.
         assert flag_value(["--force-strategy-extra", "x"],
                           "--force-strategy") is None
+
+    def test_an_exact_option_is_never_read_as_a_longer_one(self):
+        """argparse resolves an exact match before it considers an abbreviation.
+
+        `--force` is a real option, so the token after it is that flag's
+        neighbour, never a `--force-strategy` value — reading it as one made the
+        dispatcher's guard fire on a command line that never asked for the
+        strategy at all.
+        """
+        assert flag_value(["--force", "pause-and-ask"],
+                          "--force-strategy") is None
+        assert flag_value(["--force", "--force-strategy", "pause-and-ask"],
+                          "--force-strategy") == "pause-and-ask"
+        # A genuine abbreviation still binds.
+        assert flag_value(["--force-s", "pause-and-ask"],
+                          "--force-strategy") == "pause-and-ask"
+
+    def test_the_exact_option_set_covers_every_shadowing_option(self):
+        """The set is derived data: every prefix pair the parsers really have."""
+        registered = set()
+        for path in _runtime_python_files():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "add_argument"):
+                    continue
+                for arg in node.args:
+                    if (isinstance(arg, ast.Constant)
+                            and isinstance(arg.value, str)
+                            and arg.value.startswith("--")):
+                        registered.add(arg.value)
+        shadowing = {
+            short for short in registered
+            for other in registered
+            if other != short and other.startswith(short)
+        }
+        assert shadowing == set(cli_common._EXACT_OPTIONS), (
+            "utils/cli_common._EXACT_OPTIONS must list exactly the long options "
+            "that are a strict prefix of another registered one"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+# Container-lane golden allowlist (C8).
+#
+# SHIPS EMPTY, and that is the strongest possible outcome rather than an omission:
+# it means every normalized difference between a captured container bundle and a
+# fresh run is a bug, with nothing excused.
+#
+# This file is deliberately NOT tests/golden/expected_changes.yaml. That one
+# describes one specific refactor against one pinned tag (`phase3-pre-refactor`),
+# and sharing it would break in both directions: an entry like /output_root_paths
+# would silently excuse a real container regression that happened to land under
+# it, and any entry whose diff exists only relative to that tag would fail
+# container runs for reasons that have nothing to do with the container.
+#
+# The two rules, enforced by tests/golden/bundle_compare.py:
+#   * a diff outside this list fails — that is the guard;
+#   * an entry matching NOTHING fails too — a stale exception is an unmaintained
+#     blind spot, so an entry has to keep doing work to keep its place.
+#
+# WHO READS IT: tests/test_container_full_chain.py, once per chain row, against
+# tests/golden/container/<cli>/bundle.json — the per-CLI baselines
+# tests/container/seed_container_golden.py captures on the host from a green run.
+# The wiring is asserted in plain CI by tests/test_golden_container_bundle.py, so
+# this file can never again describe a gate that nothing runs.
+#
+# Every entry needs a JSON-pointer `pointer`, a `rationale` and a `cli`. A blanket
+# `/` is refused at load: an allowlist that can match everything is not an
+# allowlist. The `cli` is refused when absent for the same reason one level down —
+# the baselines are per CLI, so an unscoped entry would excuse the same pointer on
+# the other ten rows, and the stale-entry rule (evaluated per row) could never
+# distinguish "this entry explains codex's diff" from "this entry is dead".
+#
+# An entry therefore looks like:
+#
+#   changes:
+#     - cli: codex
+#       pointer: /phases/review-plan/artifacts/grouped.json/groups/0/importance
+#       rationale: >
+#         codex 1.2 renamed …; re-capture is deferred to <issue> because …
+
+changes: []

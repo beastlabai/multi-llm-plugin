@@ -1,0 +1,50 @@
+[
+  {
+    "title": "Token comparison is not constant time",
+    "desc": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+    "importance": "medium",
+    "file": "src/security.py",
+    "line_range": [16, 18],
+    "type": "bug",
+    "anchor_text": "return a == b",
+    "suggested_fix": {
+      "format": "before_after",
+      "before": "    return a == b",
+      "after": "    return hmac.compare_digest(a, b)"
+    }
+  },
+  {
+    "title": "Attempt store grows without bound",
+    "desc": "record_attempt appends to a module level dict that is never pruned, so a process that has seen many addresses keeps every one of them for its whole lifetime. Evict entries outside WINDOW_SECONDS on write.",
+    "importance": "medium",
+    "file": "src/security.py",
+    "line_range": [10, 14],
+    "type": "improvement",
+    "anchor_text": "_attempts = {}"
+  },
+  {
+    "title": "Lockout threshold is off by one",
+    "desc": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
+    "importance": "low",
+    "file": "src/security.py",
+    "line_range": [20, 24],
+    "type": "bug",
+    "anchor_text": "return len(recent) > MAX_ATTEMPTS"
+  },
+  {
+    "title": "login does not record the lockout rejection",
+    "desc": "When is_locked_out returns True, login returns early without calling record_attempt, so a locked account's continued attempts never extend the window and the lockout expires while an attack is still running.",
+    "importance": "medium",
+    "file": "src/auth.py",
+    "line_range": [28, 34],
+    "type": "missing",
+    "anchor_text": "if is_locked_out(email):"
+  },
+  {
+    "title": "New module has no test coverage",
+    "desc": "src/security.py ships with no tests, while tests/test_auth.py covers the helpers it sits beside. Add a test module for the rate limiter before the diff lands.",
+    "importance": "low",
+    "file": "src/security.py",
+    "type": "missing"
+  }
+]

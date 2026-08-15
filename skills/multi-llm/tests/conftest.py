@@ -24,6 +24,48 @@ from .harness import (
 )
 
 
+def pytest_addoption(parser):
+    """The container host lane's empty-lane escape hatch (C6).
+
+    A host-lane invocation that executed zero credentialed rows reports `not-run`
+    and exits non-zero, because "everything skipped" and "everything passed" are
+    the two outcomes that lane must never conflate. This flag is the only way to a
+    green exit out of that state — it suppresses the failure, never the census —
+    and it exists for the contributor deliberately confirming the rig is wired up
+    without a key. It is never the default.
+    """
+    parser.addoption(
+        "--allow-empty-host-lane",
+        action="store_true",
+        default=False,
+        help="container host lane: accept an invocation that executed zero "
+             "credentialed rows (still prints and stores the census) instead of "
+             "failing it as not-run",
+    )
+
+
+#: The container modules that GRADE what other container rows produced instead of
+#: driving rows of their own. `test_container_argv.py` reads the wrapper call logs
+#: the provider lane and the full chain leave behind — and alphabetically it
+#: collects before both of them, so in one `make e2e-container` it would run with
+#: nothing on disk yet (a skip) or against the previous invocation's logs (a pass).
+#: Neither graded the run in front of it. pytest gives no ordering guarantee
+#: between modules and no ordering plugin is a dependency here, so the one hook
+#: that does exist moves these items to the end of the session, keeping them
+#: contiguous and in their collected order so their module-scoped fixtures still
+#: set up and tear down exactly once.
+_GRADES_OTHER_ROWS = ("test_container_argv.py",)
+
+
+def pytest_collection_modifyitems(items):
+    deferred = [item for item in items
+                if Path(item.nodeid.split("::", 1)[0]).name in _GRADES_OTHER_ROWS]
+    if not deferred or len(deferred) == len(items):
+        return
+    postponed = {id(item) for item in deferred}
+    items[:] = [item for item in items if id(item) not in postponed] + deferred
+
+
 @pytest.fixture(autouse=True)
 def _isolate_provider_config(request, monkeypatch):
     """Neutralize per-project config discovery for the default test suite.

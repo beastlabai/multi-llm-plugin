@@ -1,0 +1,816 @@
+# Host-lane matrix — per-host stage/list/invoke cells, credential mode, model pin,
+# and the per-row `expect` block (C6, C6c, C8).
+#
+# Installing a shim is not driving a host. Between `install-host` and an assertion
+# sit seven cells that cannot be left to "the entrypoint runs the host": how the
+# command is *listed*, the exact argv that starts a headless run, what prompt text
+# reaches the dispatcher, which directory it runs in, when a reload takes effect,
+# what bounds the run, and how its output is read.
+#
+# Same provenance key as hosts/capabilities.yaml — verified / documented / unknown —
+# plus one this rig needs that that file does not: **unmeasured**, meaning "this
+# cell requires a credential that was not available when the spike ran". That is a
+# different claim from `unknown` (nobody has looked) and from `documented` (the
+# vendor says so), and conflating them is how a lane goes green having covered
+# nothing.
+#
+# ---------------------------------------------------------------------------
+# WHAT WAS MEASURED ON 2026-08-14, AND WHAT WAS NOT
+#
+# MEASURED, offline, with no credential — the whole stage/discovery tier:
+#   * every host's stage step, run against a scratch $HOME
+#   * both executor hosts' `auth_check` probes in BOTH states, and the product's
+#     own classify_auth_probe verdict on each
+#   * the minimum synthesized credential that makes each probe pass with no real
+#     vendor login (committed value-free under home_seed/)
+#
+# ---------------------------------------------------------------------------
+# THE CREDENTIALED LANE, MEASURED 2026-08-14 (second pass, live key)
+#
+# The `--ask` row ran on all three hosts against a real OpenRouter key with the
+# fan-out still stubbed. What that settled, per host, is written into the cells
+# below with `provenance: verified` and the measurement quoted beside it. The
+# headline: **an agent has now read our shim and run our dispatcher** — receipts
+# for `util instructions <mode>`, the dispatcher command itself and the
+# `status --view run` poll, with artifacts on disk and a terminal run state.
+#
+# Four findings that were NOT in the plan, each recorded at the cell it corrects:
+#   * codex `wire_api = "chat"` is refused outright by codex-cli 0.146.0.
+#   * codex's own sandbox is bubblewrap and cannot initialize under this lane's
+#     posture, so every command the agent runs fails before it starts.
+#   * codex runs commands through `bash -lc`; a LOGIN shell re-derives PATH from
+#     /etc/profile, so the image's `ENV PATH` was invisible to the agent and its
+#     `command -v uv` preflight correctly reported uv missing.
+#   * claude-code ignores `permissions.allow` from a synthesized $HOME
+#     settings.json for Bash while still honouring it for the Skill tool; the
+#     same list passed as `--allowedTools` works.
+#
+# STILL NOT MEASURED:
+#   * every row with a subagent batch (review-plan, and the three apply rows)
+#   * the negative auth rows
+#   * `applied` bytes through a real host (the claude-code native write row)
+# ---------------------------------------------------------------------------
+
+version: 1
+measured_on: "2026-08-14"
+
+# ---------------------------------------------------------------------------
+# ONE CROSS-HOST FINDING THAT CHANGES HOW A RECEIPT IS READ (measured 2026-08-14)
+#
+# C6c says "a dispatcher invocation that emitted NO line writes a receipt with
+# result: null, which is itself a finding rather than a silent gap, because every
+# mode emits one". On a DETACHING row exactly one receipt is structurally null
+# and it is not a finding:
+#
+#   process_control.spawn_detached (POSIX) sends the worker's stdio to /dev/null
+#   and closes every inherited descriptor; the worker then opens
+#   {phase}/orchestrator-run.log ITSELF (enter_detached_worker). So the `uv`
+#   wrapper that exec'd the worker sees EOF on its pipe immediately, captures
+#   nothing, and writes `result: null` — while the worker's real
+#   MULTI_LLM_RESULT line lands in the log, where the matrix already says the
+#   verdict comes from.
+#
+# Observed on every codex and opencode row: the launcher receipt carries the
+# payload plus `run.state: running`, the worker receipt carries `result: null`,
+# and the `status` receipt carries `run.state: done, exit_code: 0`. A grader must
+# therefore count DISPATCHER receipts with a payload, not receipts, and must not
+# read the null one as "the mode emitted nothing".
+worker_receipt_is_null: structural-on-detaching-rows
+worker_receipt_is_null_provenance: verified
+# ---------------------------------------------------------------------------
+
+hosts:
+
+  # ===========================================================================
+  claude-code:
+    # `install-host claude-code` writes NOTHING, so the reference host needs a
+    # stage step of its own. `installable: false` makes install a refusal in those
+    # words, and --check reads the PLUGIN'S OWN SKILL.md under the running skill
+    # root: a green check proves the shipped shim's shape and this machine's
+    # prerequisites, and proves nothing about whether Claude Code can FIND the
+    # skill. Left implicit, every claude-code row would fail the discovery
+    # assertion behind a passing install step.
+    stage:
+      form: link
+      target: "$HOME/.claude/skills/multi-llm"
+      source: /opt/mllm/skill
+      then: "install-host claude-code --check --project-root /work/sample-project"
+      provenance: verified
+      measured: >
+        A directory symlink to the skill tree, then --check: rows 3-5 green, rows
+        1-2 reported n/a ("host 'claude-code' is not installable: its shim is the
+        plugin's own SKILL.md"), auth=unknown, exit 0. `install-host claude-code
+        --global` refuses with "`install-host claude-code` is --check-only" and
+        exit 3, exactly as capabilities.yaml declares.
+        WHAT GETS STAGED IS THE WHOLE TREE, never SKILL.md alone: every command in
+        that shim is `uv run --project "${CLAUDE_SKILL_DIR}" -- python
+        "${CLAUDE_SKILL_DIR}/multi_llm.py" ...`, so a lone file leaves the host
+        expanding the variable at a directory with no dispatcher in it.
+        A SYMLINK rather than a copy because that is the mechanism this repo
+        already runs the skill through (link-skill.sh) and the one
+        cli_common's skill-dir resolution is written for (abspath, symlinks
+        preserved, NEVER realpath, so `uv run --project` stays on the
+        pyproject.toml the host loaded). It also keeps the check honest: under a
+        link the file --check reads and the file the host loads are one inode and
+        cannot drift.
+      copy_fallback:
+        # If the host declines to traverse a symlinked skill directory. It must
+        # NOT try to carry a second uv environment: the root filesystem is
+        # read-only and the env is materialized into the image layer at build
+        # time, so the copy runs with UV_PROJECT_ENVIRONMENT pinned and no sync,
+        # and the row additionally byte-compares the copied SKILL.md against
+        # /opt/mllm/skill/SKILL.md — two files can drift where one inode cannot.
+        env: {UV_PROJECT_ENVIRONMENT: /opt/mllm/skill/.venv}
+        assert: "byte-compare copied SKILL.md against /opt/mllm/skill/SKILL.md"
+    reload: none
+    list_step:
+      form: none
+      provenance: verified
+      note: >
+        MEASURED: no credential-free listing surface exists. `claude --help` shows
+        no skills/commands listing, and `claude doctor` (which explicitly "reads
+        settings files in the current directory without a trust prompt", so it was
+        the best candidate) never names a staged skill. `claude plugin` manages
+        plugins, not skills. So discovery on this host can only be proven by a
+        PROMPTED turn, which needs a credential — and the --creds none tier
+        therefore reports this host as `discovery: unavailable-without-credential`
+        rather than passing it. A green `install-host --check` is NOT discovery:
+        it reads our own bytes at our own path.
+    # MEASURED 2026-08-14 — the permission/trust cell, and it is the ARGV flag,
+    # not the settings file. A synthesized `$HOME/.claude/settings.json` carrying
+    # `permissions.allow` was read far enough to let the **Skill** tool through
+    # (without it the host cannot even open our shim: the very first thing it
+    # does is call `Skill{skill: multi-llm}`, and a denial there sends it hunting
+    # for the file by hand until its turn budget runs out) — but every Bash rule
+    # in that same file was ignored: `command -v uv` and the shim's own
+    # `uv run --project …` were both denied, i.e. the host loaded our shim and
+    # then could not run a single command in it. The identical rule list passed
+    # as `--allowedTools` ran first time. Never a `--dangerously-*` bypass.
+    invoke_argv: ["claude", "-p", "<prompt>", "--output-format", "json",
+                  "--max-turns", "<N>", "--model", "<model>",
+                  "--allowedTools", "<allowed-tools>"]
+    invoke_provenance: verified
+    permission_form:
+      mechanism: "--allowedTools, one argv token PER RULE, and the flag must be LAST"
+      comma_join: "REFUSED IN PRACTICE — see note"
+      source: "SKILL.md's own `allowed-tools` frontmatter + Skill / Skill(multi-llm)"
+      provenance: verified
+      note: >
+        DERIVED, never invented: the grant list is the shipped shim's own
+        declaration, so the rig cannot become a second source of truth for what
+        the shim needs. The two additions are the one grant frontmatter cannot
+        carry — permission to invoke the skill at all.
+        A settings.json `permissions.allow` block is NOT a substitute (measured
+        above); it is still written, because it is what carries the trust entry
+        and the onboarding flag.
+        THE FLAG'S OWN SHAPE IS PART OF THE MEASUREMENT. `claude --help` says
+        `--allowedTools <tools...>  Comma or space-separated list`. A single
+        comma-joined token is accepted and is silently WRONG: every rule that
+        contains a space — `Bash(command -v uv)`, `Bash(PYTHONUNBUFFERED=1 uv:*)`
+        — stops matching, and the space-free rules around it (`Read`) stop
+        matching too. Measured twice: comma-joined, the host loaded the skill
+        (`Skill` has no space) and then had all seven of its tool calls denied,
+        including `uv run … util instructions ask` and a plain `Read` of the
+        instruction file; one token per rule, with `--allowedTools` last because
+        it is variadic, ran first time.
+    prompt_template: |
+      Use the multi-llm skill with exactly these arguments: {args}
+      Follow the skill's own instructions step by step and run the commands it
+      gives you. Do not summarise instead of running them.
+    cwd: /work/sample-project
+    # MEASURED: 12 was not enough. The first credentialed row burned all 12 —
+    # one on the denied Skill call, the rest hunting for the file by hand — and
+    # ended `is_error: true, stop_reason: tool_use`. A shim-following run is
+    # ~8 tool turns (skill load, uv preflight, `util instructions`, the
+    # dispatcher, a read-back), so 25 leaves headroom for one retry without
+    # turning the bound into a licence.
+    turn_bound: {kind: max-turns, value: 25}
+    parser: utils/providers/claude_code.py
+    # WHERE THE INNER MULTI_LLM_RESULT LINE LANDS — and on this host it does NOT.
+    result_line_in_stream:
+      status: absent
+      provenance: verified
+      where: "nowhere: `--output-format json` emits ONLY the final result envelope"
+      truncated: null
+      note: >
+        MEASURED 2026-08-14, and it is the strongest case in the matrix for the
+        receipt being the anchor rather than merely the primary one. The pinned
+        invocation's whole stdout is a single JSON object (`is_error`, `usage`,
+        `permission_denials`, `result`, …) with no per-turn tool results in it at
+        all, so the dispatcher's own stdout never reaches the harness. The one
+        occurrence of the string in the entire stream is the agent PARAPHRASING
+        it in its final prose: "`MULTI_LLM_RESULT.next` was `null`".
+        `--output-format stream-json` would carry the tool results — but that is
+        a different pinned cell and would still only move the line into a nested
+        escaped envelope, as it is on the other two hosts.
+    result_source: "the uv wrapper's receipt — there is no second source here"
+    credential_mode: openrouter
+    credential_provenance: verified          # measured 2026-08-14, live row
+    credential_note: >
+      MEASURED, exactly as the plan documented it: ANTHROPIC_BASE_URL =
+      https://openrouter.ai/api (the bare `/api` origin — Claude Code appends
+      `/v1/messages` itself), ANTHROPIC_AUTH_TOKEN = <key>, and
+      ANTHROPIC_API_KEY present-and-EMPTY, asserted at launch. The run's own
+      envelope confirms the routing (`modelUsage` keyed by the OpenRouter slug).
+      ONE THING TO DISTRUST IN THAT ENVELOPE: its `total_cost_usd` is WRONG on
+      this path. The row reporting `total_cost_usd: 0.2061` really spent $0.0204
+      — Claude Code prices the tokens as if they were first-party Anthropic
+      ("provider": "firstParty"), which they are not. Only the key's own `usage`
+      delta is a spend figure on this lane.
+    # The plan's original documented wiring is unchanged by the measurement
+    # above; it was right. Only the cost-envelope caveat is new.
+    model:
+      slug: "~deepseek/deepseek-v4-flash-latest"
+      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
+      provenance: verified
+      resolved_on: "2026-08-14"
+      why: >
+        OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
+        cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
+        context, tool-calling supported — about half the price of the previously
+        pinned `deepseek/deepseek-v4-flash-0731`.
+        TWO THINGS THIS TRADES AWAY, recorded rather than buried:
+        (1) It is a `~`-prefixed ALIAS. The plan pins slugs precisely so a model
+        cannot move under a run — an alias is a moving target, so a golden or a
+        cost-table row keyed to it can change meaning without a diff. Accepted
+        deliberately here; revisit if a row starts drifting for no reason.
+        (2) On `claude-code` this is a NON-ANTHROPIC model, and the OpenRouter
+        cookbook warns Claude Code "may not work correctly with other providers".
+        Tool-calling fidelity is exactly what the host lane grades, so a failure
+        on that row may be the model rather than our shim. The verified Anthropic
+        fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
+        through the skin on 2026-08-14.
+    auth_check: none
+    auth_check_note: >
+      claude-code declares no auth_check (utils/providers/claude_code.py:115), so
+      its executor preflight is `unknown` rather than refused. It is deliberately
+      absent from the positive/negative auth row pair, and its native write row
+      never crosses /opt/mllm/bin to reach that gate at all.
+    baked_flags: ["--host claude-code"]
+    # `--yes` is NOT baked (SKILL.md:87) where the two rendered shims bake it, so
+    # an unattended row must carry it itself.
+    must_type_explicitly: ["--yes"]
+    forbidden_flags:
+      # --detach is forbidden by this host's own shim, and would rewrite the row:
+      # it implies --exec-subagents, converting this plan's one native-dispatch
+      # row into an executor row.
+      - "--detach"
+      - "--exec-subagents"
+    dispatch: foreground
+    continuation:
+      who: host
+      mechanism: native Task, then re-invoke the printed `next`
+      receipts_expected: ">=2"
+      note: >
+        subagents: native means the orchestrator stops at [VALIDATION_PENDING] /
+        [CONSOLIDATION_PENDING], prints the reaggregate command as `next`, and
+        exits 0 — so its first receipt reads state: done with a NON-NULL next and
+        the phase NOT completed. A row that produced exactly one `state: done`
+        receipt with a live `next` fails as "dispatched, never continued".
+        Every one of those Task turns is real spend: native dispatch never crosses
+        /opt/mllm/bin, so "the fan-out is stubbed" is true of the provider
+        subprocesses on every host and of the SUBAGENT BATCHES only on the two
+        executor hosts.
+    rows:
+      - id: claude-code-ask
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick"
+        expect: {run: none, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        measured:
+          on: "2026-08-14"
+          verdict: pass
+          usd: 0.0204
+          host_wall_s: 295
+          host_exit: 0
+          turns: 12
+          receipts: ["util instructions ask", "ask … --host claude-code --yes --quick"]
+        note: >
+          The only claude-code row with no batch at all, hence the only cheap one.
+          MEASURED: the host read the shim, ran `util instructions ask`, ran the
+          dispatcher foreground (no --detach, as its shim forbids), and the phase
+          recorded itself completed with answers.md on disk.
+          TWO PRODUCT FINDINGS FROM THIS ROW, recorded rather than fixed:
+          (1) `ask` completes with `MULTI_LLM_RESULT.artifacts: []` — measured on
+          all three hosts, foreground and detached alike. The answers file is
+          printed on its own stdout line and named in `status`'s payload, but the
+          ask phase's own result line carries no artifacts, so C8's blanket "a
+          non-empty artifacts list" does not hold for this mode. Hence
+          `artifacts_min: 0` here rather than a silently weakened assertion.
+          (2) the shim's own `Bash(PYTHONUNBUFFERED=1 uv:*)` grant did NOT match
+          a command starting `PYTHONUNBUFFERED=1 uv run …`; that call was denied
+          and the agent recovered by dropping the prefix. AGENTS.md calls the
+          allow-rule prefix part of the contract, so a grant that does not match
+          the command it was written for is a real (if benign here) defect.
+      - id: claude-code-review-plan
+        args: '--review-plan "plans/auth-feature.md" --quick'
+        command: "review-plan plans/auth-feature.md --yes --quick"
+        expect: {run: none, exit: 0, phases: [review-plan], receipts_min: 3}
+        wall_clock_s: 900
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: "2026-08-14"
+          verdict: partial — dispatched and stopped at the marker, never continued
+          attempts:
+            - model: "~deepseek/deepseek-v4-flash-latest"
+              usd: 0.0036
+              verdict: "MODEL failure, not a shim failure"
+              detail: >
+                The agent read the shim and ran `util instructions review-plan`,
+                then the model emitted its own tool-call markup as literal text —
+                the whole final result was `</|DSML|parameter></|DSML|invoke>
+                </|DSML|tool_calls>`. DeepSeek's tool-call syntax leaking through
+                the Anthropic skin, which is precisely the OpenRouter cookbook's
+                "Claude Code may not work correctly with other providers". Retried
+                once, per the plan, on the verified Anthropic fallback.
+            - model: "anthropic/claude-haiku-4.5"
+              usd: 0.2392
+              verdict: partial
+              detail: >
+                Everything up to the marker is CORRECT and is the plan's
+                prediction, observed: the dispatcher ran foreground (this host's
+                shim forbids --detach), stopped at [VALIDATION_PENDING], printed
+                the `--reaggregate` follow-up as `next`, exited 0 with the phase
+                NOT completed, and the host then began dispatching the validation
+                batches through its own native Task tool. It did not re-invoke
+                the dispatcher, so `state.json` records no completion and only
+                `validation_tasks.json` was materialized.
+          real_spend_confirmed: >
+            THE PLAN'S COST PREDICTION FOR THIS HOST IS CONFIRMED, and it is the
+            reason the native write row was left out of this pass entirely. The
+            row's own `num_turns` is 1, but its `modelUsage` records 72,746 input
+            + 581,899 cache-read + 10,545 output tokens for the session: the
+            native Task turns are real model calls that never cross
+            /opt/mllm/bin, and they do not appear in the turn count that bounds
+            the row. $0.239 against $0.008-$0.036 for the two executor hosts'
+            equivalent rows — an order of magnitude, on the cheapest batch shape
+            there is.
+          cost_envelope_is_wrong: >
+            Claude Code reported `total_cost_usd: 1.6159` for a row that really
+            spent $0.2392. It prices tokens as first-party Anthropic
+            ("provider": "firstParty") regardless of ANTHROPIC_BASE_URL. Only the
+            dedicated key's own `usage` delta is a spend figure on this lane.
+        note: "carries a validation batch and a consolidation batch of its own — both real spend"
+      - id: claude-code-apply-native
+        command: "apply-suggestions plans/auth-feature.md --yes"
+        expect:
+          run: none
+          exit: 0
+          phases: [apply-suggestions]
+          receipts_min: 2
+          write_outcome: applied
+          bytes_must_change: true
+          paths: ["src/**"]
+        note: >
+          The ONE row on either lane where an `applied` batch is a pass rather than
+          a rig bug, and this plan's only applied-byte coverage through a real
+          host. Explicitly WITHOUT --exec-subagents: the shipped shim says "Never
+          pass --exec-subagents on this host". An all-clean-failure result is
+          reported as a FAILED row ("dispatched, nothing landed"), not a green one.
+
+  # ===========================================================================
+  codex:
+    stage:
+      form: install
+      command: "install-host codex --global"
+      target: "$HOME/.codex/skills/multi-llm/SKILL.md"
+      provenance: verified
+      measured: >
+        Green (exit 0, all five rows OK) ONLY with the synthesized
+        $CODEX_HOME/auth.json staged first. Without it the shim is still written
+        byte-correctly but row 5 (environment) fails and the command exits 3:
+        "Refusing to dispatch: driver.subagent_runner is 'codex:gpt-5.2-codex'
+        (reason: not_authenticated)". So the synthesized credential is a
+        precondition of the STAGE STEP, not only of a later batch dispatch.
+    reload: new-session
+    list_step:
+      form: none
+      provenance: verified
+      note: >
+        MEASURED: same as claude-code. codex has no skills/commands listing
+        subcommand (`exec`, `review`, `login`, `mcp`, `plugin`, `doctor`,
+        `sandbox`, `debug`, `apply`, `resume`, `archive`, ...), and `codex doctor`
+        — which diagnoses "local Codex installation, config, auth, and runtime
+        health" — never names a staged skill. Discovery needs a prompted turn.
+    # MEASURED 2026-08-14, and a correction to the plan's cell (which said
+    # `--sandbox workspace-write`). Codex's own sandbox is **bubblewrap**, and
+    # bwrap needs unprivileged user namespaces:
+    #
+    #   bwrap: No permissions to create a new namespace, likely because the
+    #   kernel does not allow non-privileged user namespaces.
+    #
+    # Under this lane's posture (--cap-drop=ALL, --security-opt
+    # no-new-privileges, read-only root) that is unavailable, so EVERY
+    # command_execution fails before it runs — the agent read nothing, dispatched
+    # nothing, and spent $0.006 across 12 turns concluding "the execution
+    # environment is broken at the sandbox level". A row that never reaches our
+    # dispatcher tests nothing about our shim.
+    #
+    # `danger-full-access` here is NOT a `--dangerously-*` bypass and is not one
+    # in spirit either: it turns off CODEX's inner sandbox inside a container
+    # that is already the sandbox (non-root, cap-drop ALL, no-new-privileges,
+    # read-only root, writes confined to tmpfs + one bind, workspace with no git
+    # remote). The confinement is the container's, and stacking a second one that
+    # cannot initialize buys nothing but a dead row.
+    #
+    # NOTE this is a HOST-lane launch cell only. It says nothing about the
+    # `agent-write` profile our own adapter builds (`--sandbox workspace-write`),
+    # which the provider lane still asserts verbatim — and which never hit bwrap
+    # there because a tool-call-free stub makes codex execute no commands at all.
+    invoke_argv: ["codex", "exec", "--json", "--sandbox", "danger-full-access",
+                  "--model", "<model>", "<prompt>"]
+    invoke_provenance: verified
+    sandbox_finding: bwrap-needs-userns
+    # The prompt is a TEMPLATE around the row's `args`, never improvised: a row
+    # that fails must be re-runnable byte-for-byte and a prompt edit must show up
+    # as a diff. `{args}` is the only substitution.
+    prompt_template: |
+      Use the multi-llm skill with exactly these arguments: {args}
+      Follow the skill's own instructions step by step and run the commands it
+      gives you. Do not summarise instead of running them.
+    cwd: /work/sample-project
+    turn_bound: {kind: wall-clock, value: 900}   # timeout_ceiling_s: 0 = none documented
+    parser: utils/providers/codex.py
+    credential_mode: openrouter
+    credential_provenance: verified          # measured 2026-08-14, live row
+    wire_api: responses
+    wire_api_provenance: verified
+    credential_note: >
+      MEASURED. ~/.codex/config.toml carries model_provider = "openrouter" and a
+      [model_providers.openrouter] block with base_url =
+      "https://openrouter.ai/api/v1", plus COMMAND-BASED auth as its own
+      sub-table — the key never lands in the file:
+
+        [model_providers.openrouter.auth]
+        command = "sh"
+        args = ["-c", "echo $OPENROUTER_API_KEY"]
+
+      WIRE_API IS `responses`, AND `chat` IS NOT A CHOICE ANY MORE. On codex-cli
+      0.146.0 `wire_api = "chat"` is refused at config load —
+      "`wire_api = \"chat\"` is no longer supported. How to fix: set
+      `wire_api = \"responses\"`" (github.com/openai/codex/discussions/7782) —
+      and codex exits 1 with an EMPTY stdout before a token is spent. OpenRouter
+      serves POST /api/v1/responses, verified directly against the pinned slug.
+      TWO OBSERVATIONS THE PLAN ASKED FOR, both against expectation:
+      (1) command-based auth did NOT suppress the fallback-metadata warning. The
+      stream still opens with `item.completed{type: error}`: "Model metadata for
+      `~deepseek/deepseek-v4-flash-latest` not found. Defaulting to fallback
+      metadata; this can degrade performance and cause issues." Harmless here —
+      the run completed normally — but the plan's third C6 bullet predicted
+      command auth would trigger the catalog refresh and remove it. It does not
+      for a non-OpenAI slug.
+      (2) the catalog refresh itself fails, on stderr, twice per run:
+      "ERROR codex_models_manager::manager: failed to refresh available models:
+      timeout waiting for child process to exit". Also non-fatal.
+    model:
+      slug: "~deepseek/deepseek-v4-flash-latest"
+      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
+      provenance: verified
+      resolved_on: "2026-08-14"
+      why: >
+        OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
+        cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
+        context, tool-calling supported — about half the price of the previously
+        pinned `deepseek/deepseek-v4-flash-0731`.
+        TWO THINGS THIS TRADES AWAY, recorded rather than buried:
+        (1) It is a `~`-prefixed ALIAS. The plan pins slugs precisely so a model
+        cannot move under a run — an alias is a moving target, so a golden or a
+        cost-table row keyed to it can change meaning without a diff. Accepted
+        deliberately here; revisit if a row starts drifting for no reason.
+        (2) On `claude-code` this is a NON-ANTHROPIC model, and the OpenRouter
+        cookbook warns Claude Code "may not work correctly with other providers".
+        Tool-calling fidelity is exactly what the host lane grades, so a failure
+        on that row may be the model rather than our shim. The verified Anthropic
+        fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
+        through the skin on 2026-08-14.
+    auth_check:
+      probe: ["codex", "login", "status"]
+      provenance: verified
+      logged_out: {stdout: "Not logged in", exit: 1, classify: false}
+      logged_in:  {stdout: "Logged in using an API key - <redacted>", exit: 0, classify: true}
+      seed: ".codex/auth.json"
+      note: >
+        Fails CLOSED, which is what makes the negative auth row meaningful on this
+        host: with the synthesized auth.json removed, preflight_runner raises
+        not_authenticated and refuses the whole batch BEFORE the first stub call,
+        so the row must fail within seconds with zero stub requests logged rather
+        than on its wall-clock bound.
+    baked_flags: ["--host codex", "--yes", "--exec-subagents"]
+    dispatch: detach            # shim step 5 adds --detach, then polls
+    continuation: {who: worker, mechanism: in-process under --exec-subagents}
+    result_source: "{phase}/orchestrator-run.log + .status.json"
+    # WHERE THE INNER MULTI_LLM_RESULT LINE ACTUALLY LANDS (measured 2026-08-14).
+    result_line_in_stream:
+      status: present-escaped-in-nested-tool-result
+      provenance: verified
+      where: "item.completed -> item.type=command_execution -> aggregated_output"
+      truncated: false
+      note: >
+        Complete and untruncated, but JSON-escaped inside a nested tool-result
+        envelope (\" for every quote), one level down from the event object — so
+        recovering it means parsing the stream and then parsing the field. The
+        agent's OWN final agent_message did not quote it: it PARAPHRASED
+        ("`MULTI_LLM_RESULT.next` was `null`; no follow-up command was named by
+        the run."). That is the case for the receipt in one line: asserting on
+        the stream would have been asserting on a model's willingness to echo a
+        string, and this model chose to summarise instead.
+    result_note: >
+      NEVER the launcher's own MULTI_LLM_RESULT: detach.launch records the log and
+      .status.json as artifacts and returns 0, so its receipt reads state: done,
+      exit: 0 BEFORE the workflow has run at all. That is the launch succeeding,
+      not the phase finishing.
+    rows:
+      - id: codex-ask
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        measured:
+          on: "2026-08-14"
+          verdict: pass
+          usd: 0.0115
+          host_wall_s: 99
+          host_exit: 0
+          receipts:
+            - "util instructions ask"
+            - "ask … --host codex --yes --exec-subagents --quick --detach (launcher: run.state running)"
+            - "the --internal-worker re-exec"
+            - "status … --view run --phase ask --run-id … (run.state done, exit_code 0)"
+          note: >
+            Same shape as opencode, and it took THREE attempts to get here — none
+            of them our shim's fault: wire_api=chat (refused at config load),
+            then codex's bwrap sandbox (every command failed before running),
+            then the login-shell PATH. Each is recorded at the cell it corrects.
+      - id: codex-review-plan
+        args: '--review-plan "plans/auth-feature.md" --quick'
+        command: "review-plan plans/auth-feature.md --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
+        wall_clock_s: 900
+        # MEASURED: without this the worker really runs and really fails —
+        # "JSON parsing failed from both file and stdout" — because a
+        # scenario-less stub answers a bare "OK", which is not a suggestions
+        # document. That is a test of the stub's default answer, not of the host.
+        # The `ask` rows need none: `ask` has no JSON schema.
+        # `container_full_chain.yaml`, not `full_workflow.yaml`: under
+        # --exec-subagents this phase also dispatches VALIDATION batches, and
+        # the narrower scenario answers those with something that is not a
+        # validation result — measured, all three batches `schema_invalid`
+        # (rung 6, never retried), run.state failed, exit 3.
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: "2026-08-14"
+          verdict: pass
+          usd: 0.0361
+          host_wall_s: 219
+          host_exit: 0
+          phases_completed: [review-plan]
+          run_state: {state: done, exit_code: 0}
+          receipts:
+            - "util instructions review-plan"
+            - "review-plan … --host codex --yes --exec-subagents --quick --detach (launcher)"
+            - "status … --view run --phase review-plan  → exit 2, run still running"
+            - "the --internal-worker re-exec"
+            - "status … again → exit 0, run.state done, exit_code 0"
+          note: >
+            THE COMPLETE HOST-LANE SHAPE, end to end, on the row that carries a
+            subagent batch: shim → core instructions → detached dispatch → poll
+            → terminal run state → artifacts. Three validation batches ran
+            through --exec-subagents onto the stub with zero failures and no
+            `failed/` directory. The one cell it corrects:
+            `{phase}/.status.json`'s own `state` reads `grouping_complete`, NOT
+            "completed" — completion is recorded in `state.json.phases_completed`
+            and in `run.state`, and grading the in-phase checkpoint would fail
+            this passing row.
+      - id: codex-apply-executor
+        command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents --detach"
+        expect:
+          run: done
+          exit: 0
+          phases: [apply-suggestions]
+          write_outcome: clean-failure
+          bytes_must_change: false
+        note: >
+          C4 option (b), chosen deliberately: a real executor CLI pointed at a
+          tool-call-free stub can only ever produce a clean failure, so the row
+          asserts that outcome instead of hoping for an applied one. An `applied`
+          batch here fails just as loudly — bytes landing from a tool-call-free
+          stub means the redirect leaked.
+      - id: codex-auth-negative
+        command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+        remove_seed: ".codex/auth.json"
+        expect: {exit: 3, reason: not_authenticated, stub_requests: 0, within_s: 30}
+
+  # ===========================================================================
+  opencode:
+    stage:
+      form: install
+      command: "install-host opencode --global"
+      target: "$HOME/.config/opencode/commands/multi-llm.md"
+      provenance: verified
+      measured: >
+        Green (exit 0, five rows OK) on a COMPLETELY FRESH $HOME with no
+        credential at all — row 5 reported `auth=ok, version=1.18.18`. See the
+        auth_check note below: that is not the same thing as being authenticated.
+        Installing also creates ~/.local/share/opencode/opencode.db, so this host
+        writes state during the stage step.
+    reload: new-session
+    list_step:
+      # THE ONE CREDENTIAL-FREE DISCOVERY ASSERTION IN THE MATRIX, and the reason
+      # the --creds none tier is worth shipping at all.
+      form: debug-config
+      command: "opencode debug config"
+      assert: 'json["command"] contains "multi-llm"'
+      provenance: verified
+      note: >
+        MEASURED offline, under --network none, with no credential and no model
+        call: `opencode debug config` emits the resolved configuration as JSON,
+        and an installed command appears under its `command` key by name. After
+        `install-host opencode --global` the key list is exactly ["multi-llm"],
+        carrying the shim's own description.
+        This is strictly better than the previously recorded fallback
+        (`opencode run --command multi-llm -- "--help"`), which is an AGENT
+        invocation: it needs a model, so it costs a credential and cannot run in
+        the free tier. That form is still what an end user types, so it stays the
+        `invoke_argv`; it is simply not the listing.
+        NOTE `opencode debug skill` is the WRONG surface and looks right: it lists
+        *skills*, our shim installs as a *command*, and it happily returns exit 0
+        listing only the built-in `customize-opencode` — a green command that
+        proves nothing.
+    invoke_argv: ["opencode", "run", "--command", "multi-llm", "--format", "json",
+                  "--print-logs", "--log-level", "ERROR", "--model",
+                  "openrouter/<model>", "--", "<args>"]
+    # NOT a prompt: `<args>` is the argument string the shim maps to a mode, so
+    # this host takes the row's `args` verbatim with no template around it.
+    prompt_template: null
+    invoke_provenance: verified      # in-repo, capabilities.yaml headless_invocation
+    invoke_note: >
+      The `--` separator is MANDATORY headless: `opencode run` parses its message
+      with yargs, so an argument list starting with a flag (--ask ..., --review-plan
+      ... — i.e. every invocation this skill makes) is swallowed as an option and
+      the run silently prints yargs' own help instead.
+    cwd: /work/sample-project
+    turn_bound: {kind: wall-clock, value: 900}
+    parser: utils/providers/opencode.py
+    credential_mode: openrouter
+    credential_provenance: verified          # measured 2026-08-14, live row
+    credential_note: >
+      MEASURED, and it is exactly the form providers.yaml:116 documents: a STORED
+      credential, written non-interactively as
+      $HOME/.local/share/opencode/auth.json = {"openrouter": {"type": "api",
+      "key": "<key>"}} (mode 0600, in the tmpfs $HOME, never in the repo).
+      `opencode auth list` then reports it, and `opencode models` lists
+      `openrouter/~deepseek/deepseek-v4-flash-latest`. No `opencode auth login`
+      turn is needed — the file IS the credential.
+      TWO THINGS THE ROW ALSO NEEDS, neither of them a credential:
+      (1) the image's baked cold-start tree (home_seed/opencode: the
+      $XDG_CONFIG_HOME/opencode/node_modules the warm-up installs plus the
+      models.dev catalog under .cache/opencode). The host's tmpfs $HOME is seeded
+      from it, or the first `opencode run` pays a ~63 MB npm install first.
+      (2) an $HOME/.config/opencode/opencode.json declaring the pinned slug under
+      the built-in `openrouter` provider, so a slug the models.dev catalog does
+      not name still resolves — plus `permission: {bash: allow, edit: allow}`.
+      The seed's own opencode.json (the provider lane's {{base_url}} stub block)
+      is OVERWRITTEN rather than copied, or it shadows the host wiring.
+    model:
+      slug: "~deepseek/deepseek-v4-flash-latest"
+      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
+      provenance: verified
+      resolved_on: "2026-08-14"
+      why: >
+        OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
+        cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
+        context, tool-calling supported — about half the price of the previously
+        pinned `deepseek/deepseek-v4-flash-0731`.
+        TWO THINGS THIS TRADES AWAY, recorded rather than buried:
+        (1) It is a `~`-prefixed ALIAS. The plan pins slugs precisely so a model
+        cannot move under a run — an alias is a moving target, so a golden or a
+        cost-table row keyed to it can change meaning without a diff. Accepted
+        deliberately here; revisit if a row starts drifting for no reason.
+        (2) On `claude-code` this is a NON-ANTHROPIC model, and the OpenRouter
+        cookbook warns Claude Code "may not work correctly with other providers".
+        Tool-calling fidelity is exactly what the host lane grades, so a failure
+        on that row may be the model rather than our shim. The verified Anthropic
+        fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
+        through the skin on 2026-08-14.
+    auth_check:
+      probe: ["opencode", "auth", "list"]
+      provenance: verified
+      logged_out: {stdout: "0 credentials", exit: 0, classify: true}
+      logged_in:  {stdout: "1 credentials", exit: 0, classify: true}
+      seed: ".local/share/opencode/auth.json"
+      finding: >
+        THIS HOST DOES NOT FAIL CLOSED, and it is the one measured result that
+        contradicts the plan. A logged-out `opencode auth list` exits 0 and prints
+        "0 credentials", which matches NONE of the adapter's auth_error_patterns
+        ('not logged in', 'no credentials', 'unauthorized', ...), so
+        classify_auth_probe returns True — "authenticated". `install-host opencode`
+        duly reports auth=ok on a $HOME with no credential in it.
+        Consequence for Phase 4: the planned negative auth row CANNOT expect a
+        named not_authenticated refusal on opencode. The gate simply opens, and the
+        failure surfaces later at dispatch. codex and opencode therefore do NOT
+        fail the same way, and a green codex negative row proves nothing about
+        opencode.
+        This is a finding about the PRODUCT (a missing pattern, or a probe that
+        should key on the credential count), recorded here rather than fixed:
+        the rig is not a second source of truth for adapter behaviour.
+    baked_flags: ["--host opencode", "--yes", "--exec-subagents"]
+    dispatch: detach            # detach: required — timeout_ceiling_s: 120
+    dispatch_note: >
+      A foreground row on OpenCode is a WRONG row, not a slow one: detach: required
+      plus a 120 s bash ceiling is why that shim offers no foreground fan-out path
+      at all, so a --review-plan typed without --detach is killed mid-run — and
+      would be testing an invocation the product does not ship.
+    continuation: {who: worker, mechanism: in-process under --exec-subagents}
+    result_source: "{phase}/orchestrator-run.log + .status.json"
+    result_line_in_stream:
+      status: present-escaped-in-nested-tool-result
+      provenance: verified
+      where: '{"type":"tool_use"} -> part.state.output'
+      truncated: false
+      note: >
+        Same shape as codex, one field name different: complete, untruncated, and
+        JSON-escaped inside the tool part's `state.output`. No `text` event in
+        the run carried it — the agent read the answers file and summarised.
+    rows:
+      # `args` is what the OPERATOR types; `command` is the dispatcher command
+      # the shim is expected to build from it, and what the receipt is graded
+      # against. They are two different strings on purpose: the row asserts the
+      # mapping, so writing only one of them would assert nothing.
+      - id: opencode-ask
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        measured:
+          on: "2026-08-14"
+          verdict: pass
+          usd: 0.0080          # re-run after the poll fix: 0.0026
+          host_wall_s: 97
+          host_exit: 0
+          # THE FIRST TIME AN AGENT HAS READ OUR SHIM AND RUN OUR DISPATCHER.
+          receipts:
+            - "util instructions ask"
+            - "ask … --host opencode --yes --exec-subagents --quick --detach  (launcher: run.state running)"
+            - "the --internal-worker re-exec"
+            - "status … --view run --phase ask  (run.state done, exit_code 0)"
+          note: >
+            The agent followed the shim exactly: `command -v uv`, step 3's
+            `util instructions ask`, the dispatcher with --detach as step 5
+            instructs, then the status poll, then a read of answers.md. The
+            worker's own receipt carries `result: null` — see
+            worker_receipt_is_null below; that is structural, not a gap.
+      - id: opencode-review-plan
+        args: '--review-plan "plans/auth-feature.md" --quick'
+        command: "review-plan plans/auth-feature.md --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
+        wall_clock_s: 900
+        # MEASURED: without this the worker really runs and really fails —
+        # "JSON parsing failed from both file and stdout" — because a
+        # scenario-less stub answers a bare "OK", which is not a suggestions
+        # document. That is a test of the stub's default answer, not of the host.
+        # The `ask` rows need none: `ask` has no JSON schema.
+        # `container_full_chain.yaml`, not `full_workflow.yaml`: under
+        # --exec-subagents this phase also dispatches VALIDATION batches, and
+        # the narrower scenario answers those with something that is not a
+        # validation result — measured, all three batches `schema_invalid`
+        # (rung 6, never retried), run.state failed, exit 3.
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: "2026-08-14"
+          verdict: partial — the workflow completed, the SHIM was not followed
+          usd: 0.0241
+          host_wall_s: 304
+          host_exit: 0
+          phases_completed: [review-plan]
+          run_state: "none — the agent never passed --detach"
+          note: >
+            The phase really completed: fan-out, grouping, three validation
+            batches through --exec-subagents with NO failures, validation.json,
+            report.md/html, and `state.json` recording review-plan completed.
+            But the agent IMPROVISED rather than following the shim: it polled
+            `status --wait` before starting anything (exit 2), then ran
+            `review-plan --plan-file … --quick` with none of the baked flags and
+            no --detach, invented `util metrics start` (exit 1, not a command any
+            instruction names), and only then ran the real dispatch. On this
+            host `detach: required` — a foreground fan-out is a WRONG row, not a
+            slow one — so `expect.run: done` is not met and the row is not a
+            pass. This is a MODEL-following failure on a mode with a long
+            instruction core, not a shim defect: the same host followed the shim
+            exactly on `ask`.
+      - id: opencode-apply-executor
+        command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents --detach"
+        expect:
+          run: done
+          exit: 0
+          phases: [apply-suggestions]
+          write_outcome: clean-failure
+          bytes_must_change: false
+      - id: opencode-auth-negative
+        command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+        remove_seed: ".local/share/opencode/auth.json"
+        expect:
+          # NOT not_authenticated — see the auth_check finding above. This row is
+          # recorded so the difference from codex is asserted rather than assumed.
+          exit: unknown
+          reason: "probe passes while logged out; failure surfaces at dispatch"
+          provenance: unmeasured

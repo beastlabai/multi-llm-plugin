@@ -1,0 +1,270 @@
+# The image's pin set, and the evidence the build checks itself against (C9).
+#
+# A version string is not a reproducible build, so this file is not a list of CLI
+# versions. It is the whole set of inputs that can move between two builds of
+# tests/container/Dockerfile, each pinned at the depth that actually closes its
+# own drift:
+#
+#   base image        FROM ...@sha256:...          never a tag
+#   platform          the --platform the Makefile passes, restated here
+#   node + npm        whatever the base digest ships -- ASSERTED, never assumed
+#   uv                version + the release artifact's sha256, verified before it runs
+#   npm CLIs          exact version + registry integrity, via `npm ci` against the
+#                     committed package-lock.json -- never a bare `@x.y.z`, which
+#                     re-resolves the transitive tree and trusts whatever tarball
+#                     the registry serves today
+#   PyPI CLIs         a `--generate-hashes` requirements file, `--require-hashes`
+#   direct downloads  URL + sha256, verified before use
+#   the skill's env   `uv sync --locked` against the committed uv.lock
+#
+# AND THE BUILD VERIFIES WHAT IT ACTUALLY INSTALLED. verify_versions.py runs every
+# `verify.command` below in the final build layer, extracts a version with that
+# row's own `verify.pattern`, and fails the build on any mismatch -- including for
+# a CLI whose installer resolved a version we did not name. A pin is a request;
+# this check is the evidence, and it is what makes the version column of a drift
+# report trustworthy rather than a restatement of what we asked for.
+#
+# ROW FIELDS
+#   id          the row's name in a drift report
+#   binary      the name it answers to on PATH (/opt/mllm/bin/<binary>)
+#   install     npm | pypi | download | base | archive
+#   version     the pinned version, exactly as `verify.pattern` recovers it
+#   verify      {command, pattern} -- or `none` with a `reason`, so a CLI with no
+#               machine-readable version surface is a visible gap rather than one
+#               assumed away
+#   enforce     false = recorded in the drift report but never fails the build.
+#               Used only for the two Debian packages, whose patch versions move
+#               on a security update nobody chose; the drift target is the CLIs.
+#
+# MLLM_PIN_MODE=latest inverts exactly ONE thing: the `clis` rows resolve at
+# @latest and are recorded rather than enforced. base_image, platform, toolchain
+# and every artifact checksum stay pinned, which is what makes a red drift run
+# point at the CLI that moved rather than at a base-image change nobody chose.
+
+version: 1
+
+# Recorded here as well as passed on the command line: an arm64 developer and an
+# amd64 machine would otherwise compare goldens produced by different binaries,
+# and the run record (C10) has to be able to say which one it was.
+platform: linux/amd64
+arch: x86_64
+
+base_image:
+  ref: docker.io/library/node:22-bookworm-slim
+  # The multi-arch INDEX digest. `--platform` selects the child manifest from it,
+  # so this one line plus the platform above name exactly one set of bytes.
+  digest: "sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
+  amd64_manifest_digest: "sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066"
+  debian_version: "12.15"
+
+# Fetched by URL + sha256 and verified BEFORE they execute. The uv installer
+# script would otherwise be a live remote input running as root.
+artifacts:
+  uv:
+    version: "0.11.28"
+    url: "https://github.com/astral-sh/uv/releases/download/0.11.28/uv-x86_64-unknown-linux-gnu.tar.gz"
+    sha256: "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224"
+  goose:
+    version: "1.41.0"
+    url: "https://github.com/aaif-goose/goose/releases/download/v1.41.0/goose-x86_64-unknown-linux-gnu.tar.bz2"
+    sha256: "416de595f3e9e7c54a822bce06a79960b9387e3cd51a832a3eadf876237d5a1c"
+  grok:
+    version: "0.2.93"
+    url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-0.2.93-linux-x86_64"
+    sha256: "4e0738d3b5550f3c842bc0ae69f468815c6329c008a110d0c27a694dc3401135"
+  muse:
+    version: "0.1.0-R708.1"
+    # The `muse` on a developer's PATH is a bash LAUNCHER that phones
+    # api.meta.ai on every invocation and updates itself synchronously and
+    # fatally. The image installs the artifact the launcher would have
+    # downloaded, from the same public channel, and never installs the launcher
+    # -- which is what makes `muse --version` answer under --network none.
+    # Meta publishes the sha256 in the channel manifest; this is that value,
+    # confirmed byte-for-byte against a fetched artifact.
+    url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=0.1.0-R708.1&file=muse-x86-linux"
+    sha256: "50937b6470cd0edf28eb683c352a5e7af3bcb1b015cd9a3b21dbf79d22af8182"
+    manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=0.1.0-R708.1&file=manifest.json"
+    channel_url: "https://api.meta.ai/muse-code/channels/muse-stable"
+
+# The runtime under every CLI at once. A base-digest bump moves all of it, which
+# is exactly why these are asserted rather than assumed to follow from the digest.
+toolchain:
+  - id: node
+    binary: node
+    install: base
+    version: "22.23.2"
+    verify:
+      command: ["node", "--version"]
+      pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+  - id: npm
+    binary: npm
+    install: base
+    version: "10.9.8"
+    verify:
+      command: ["npm", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+  - id: uv
+    binary: uv
+    install: download
+    version: "0.11.28"
+    verify:
+      command: ["uv", "--version"]
+      pattern: "^uv (?P<version>\\S+)"
+  # Debian's own, recorded so a drift report can name them, never enforced: a
+  # security rebuild of git inside bookworm is not a signal about a coding-agent
+  # CLI, and failing a build on it would train people to ignore this file.
+  - id: python3
+    binary: python3
+    install: base
+    version: "3.11.2"
+    enforce: false
+    verify:
+      command: ["python3", "--version"]
+      pattern: "^Python (?P<version>\\S+)$"
+  - id: git
+    binary: git
+    install: base
+    version: "2.39.5"
+    enforce: false
+    verify:
+      command: ["git", "--version"]
+      pattern: "^git version (?P<version>\\S+)"
+
+# The drift target. Every row here is a CLI Phase 1 verified as redirectable at a
+# local stub; the two it could not redirect (`cursor-agent`, `agy`) are NOT in the
+# image at all -- they stay on the fake-binary lane (C5) rather than shipping a
+# binary no row can drive.
+clis:
+  - id: codex
+    binary: codex
+    install: npm
+    package: "@openai/codex"
+    version: "0.146.0"
+    verify:
+      command: ["codex", "--version"]
+      pattern: "^codex-cli (?P<version>\\S+)$"
+    note: >-
+      reads $CODEX_HOME and exits 1 when that directory does not EXIST, so the
+      verify layer and every row have to create it before the first call.
+
+  - id: claude-code
+    binary: claude
+    install: npm
+    package: "@anthropic-ai/claude-code"
+    version: "2.1.232"
+    verify:
+      command: ["claude", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+) \\(Claude Code\\)$"
+
+  - id: gemini
+    binary: gemini
+    install: npm
+    package: "@google/gemini-cli"
+    version: "0.25.2"
+    verify:
+      command: ["gemini", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+  - id: opencode
+    binary: opencode
+    install: npm
+    package: "opencode-ai"
+    version: "1.18.18"
+    verify:
+      command: ["opencode", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+  - id: cline
+    binary: cline
+    install: npm
+    package: "cline"
+    version: "3.0.55"
+    verify:
+      command: ["cline", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      AUTO-UPDATES ITSELF -- observed rewriting the global node_modules from
+      3.0.39 to 3.0.55 mid-spike, which would silently unpin the image on first
+      use. CLINE_NO_AUTO_UPDATE=1 is set image-wide, and the read-only root is
+      the second layer under it. It also spawns a background hub daemon and makes
+      ~10 outbound connects on `--version` alone (8.7 s when egress is
+      blackholed), so its verify call is the slow one.
+
+  - id: kilocode
+    binary: kilocode
+    install: npm
+    package: "@kilocode/cli"
+    version: "7.4.19"
+    verify:
+      command: ["kilocode", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      fetches a 3.6 MB models.dev catalog on a fresh $HOME; best-effort, and
+      absent under --network none.
+
+  - id: pi
+    binary: pi
+    install: npm
+    package: "@earendil-works/pi-coding-agent"
+    version: "0.80.6"
+    verify:
+      command: ["pi", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      reads PI_CODING_AGENT_DIR ahead of $HOME. It is also the one package in
+      the set that is NOT pinned all the way down: it publishes with
+      `hasShrinkwrap: true`, and its own shrinkwrap gives no `integrity` for
+      three sibling packages, so npm records those with a resolved URL and no
+      hash. The exception is named and asserted exactly in
+      tests/test_dockerfile_pins.py (UNHASHED_BY_UPSTREAM); a fourth entry, or
+      an entry upstream later fixes, fails that test.
+
+  - id: aider
+    binary: aider
+    install: pypi
+    package: "aider-chat"
+    version: "0.86.2"
+    # A `--generate-hashes` lock of the WHOLE transitive tree, installed with
+    # --require-hashes, is the PyPI twin of `npm ci` against package-lock.json.
+    requirements: "aider-requirements.txt"
+    verify:
+      command: ["aider", "--version"]
+      pattern: "^aider (?P<version>\\S+)$"
+
+  - id: goose
+    binary: goose
+    install: archive
+    artifact: goose
+    version: "1.41.0"
+    verify:
+      command: ["goose", "--version"]
+      pattern: "^\\s*(?P<version>\\d+\\.\\d+\\.\\d+)\\s*$"
+    note: zero non-loopback connects at all, measured in the Phase 1 spike.
+
+  - id: grok
+    binary: grok
+    install: download
+    artifact: grok
+    version: "0.2.93"
+    verify:
+      command: ["grok", "--version"]
+      pattern: "^grok (?P<version>\\S+)"
+    note: >-
+      GROK_MODELS_BASE_URL + XAI_API_KEY redirect it; WITHOUT a key it opens an
+      interactive OAuth device flow and blocks, so no row may reach it without
+      the wrapper's fake session key. GROK_AUTO_UPDATE is disabled image-wide for
+      the same reason cline's is.
+
+  - id: muse
+    binary: muse
+    install: download
+    artifact: muse
+    version: "0.1.0-R708.1"
+    verify:
+      command: ["muse", "--version"]
+      pattern: "^Muse Code \\S+ \\((?P<version>[^)]+)\\)$"
+    note: >-
+      Meta-proprietary, but the release channel, the manifest and the artifact
+      are all served unauthenticated and the manifest publishes the sha256 -- so
+      it is installable from a public source and is IN the image. What is not
+      installed is the bash launcher; see artifacts.muse.

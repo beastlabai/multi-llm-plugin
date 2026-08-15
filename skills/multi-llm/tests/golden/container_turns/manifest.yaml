@@ -1,0 +1,99 @@
+# The measured turn list of `full --quick --yes --exec-subagents`, and which
+# rule of `tests/fixtures/e2e/scenarios/container_full_chain.yaml` owns each one.
+#
+# WHAT THESE FILES ARE. Recorded prompts, not hand-written probes. The `turns:`
+# entries were captured from a complete mocked chain over
+# `tests/fixtures/e2e/plans/auth-feature.md` against the container lane's sample
+# workspace, with the workspace root rewritten to the container's own
+# `/work/sample-project` so nothing here is machine-specific. The `side_turns:`
+# entries were captured on the wire, from real CLIs inside the image.
+#
+# WHY THEY EXIST. `on_unmatched: fail` turns a forgotten turn into a loud
+# container failure, but it says nothing about a pattern that answers a turn it
+# does not own — and a cross-match is not a benign miss, it hands one phase's
+# answer to another phase's validator. `tests/test_scenario_matcher_parity.py`
+# cross-matches every pattern against every prompt below and fails on a second
+# match, in plain CI, with no Docker.
+#
+# WHEN A FILE HERE HAS TO CHANGE. Only when the product's prompt text changes,
+# or when a CLI upgrade changes what it puts on the wire. Re-record rather than
+# hand-edit: the point of the corpus is that it is what a run really sent.
+#
+# THE SIDE TURNS ARE THE INTERESTING HALF. Five of the eleven redirected CLIs
+# fire their own session-title completion before the real turn, and muse fires
+# background "reminder observer" tasks. Each of those prompts QUOTES the product
+# prompt it is titling — goose's carries ours in full — so without a negative
+# lookahead the plan-review rule answers goose's title request with a suggestion
+# list. The parity test also builds every (side turn x product turn) composite
+# and requires the side rule to keep winning, which is the property the lookahead
+# exists for and the one a single recorded pair would not pin.
+
+version: 1
+scenario: ../../fixtures/e2e/scenarios/container_full_chain.yaml
+
+# Recorded from the chain, in the order the chain takes them. `fixture` is the
+# scenario response that must answer this prompt — every rule names a distinct
+# one, so the fixture identifies the rule.
+turns:
+  review-plan-fanout:
+    fixture: ../responses/review_plan/raw_suggestions.json
+    note: "prompts/plan_review.txt, 1 turn"
+  validation-plan-suggestions:
+    fixture: ../responses/validation/plan_suggestions_valid.json
+    note: "tests/golden/prompts/validation.txt, 3 batches"
+  apply-suggestions-batch:
+    fixture: ../responses/write_batches/apply_suggestions.json
+    note: "utils/suggestion_batcher.format_batch_for_prompt, 4 batches"
+  task-generation:
+    fixture: ../responses/generate_tasks/tasks_v1.json
+    note: "tests/golden/prompts/task_generation.txt, 1 turn"
+  review-tasks-fanout:
+    fixture: ../responses/review_tasks/coverage_suggestions.json
+    note: "prompts/task_review.txt, 1 turn"
+  validation-task-suggestions:
+    fixture: ../responses/validation/task_suggestions_valid.json
+    note: "same template as the plan validation; separated by this phase's group hashes, 2 batches"
+  apply-task-suggestions-batch:
+    fixture: ../responses/write_batches/apply_task_suggestions.json
+    note: "apply_task_suggestions_orchestrator._generate_single_batch_prompt, 3 batches"
+  implement-batch:
+    fixture: ../responses/write_batches/implement.json
+    note: "prompts/implementation_task.txt, 3 batches"
+  review-code-fanout:
+    fixture: ../responses/code_review/container_issues.json
+    note: "prompts/code_review.txt, 1 turn"
+  validation-code-review:
+    fixture: ../responses/validation/code_review_valid.json
+    note: "tests/golden/prompts/validation_code_review.txt; the file/line_range paragraph is the discriminator, 2 batches"
+  apply-code-fixes-batch:
+    fixture: ../responses/write_batches/apply_code_fixes.json
+    note: "utils/code_fix_batcher.format_fix_batch_prompt, 3 batches"
+  ask:
+    fixture: ../responses/ask/plan_question.md
+    note: "prompts/ask.txt, the standalone read-only turn after the chain"
+
+# Recorded on the wire, inside the image, from the real binaries. Not product
+# turns: these are the CLI's own bookkeeping calls, which still have to be
+# answered or every one of those rows fails under `on_unmatched: fail`.
+side_turns:
+  claude-code-session-title:
+    fixture: ../responses/session_title/plain_title.txt
+    note: "\"Generate a concise, sentence-case title (3-7 words)\"; the instruction is in `system`, so the extracted prompt STARTS with ours"
+  opencode-session-title:
+    fixture: ../responses/session_title/plain_title.txt
+    note: "\"You are a title generator. You output ONLY a thread title.\""
+  kilocode-session-title:
+    fixture: ../responses/session_title/plain_title.txt
+    note: "byte-identical to opencode's - kilocode is an opencode fork"
+  goose-session-title:
+    fixture: ../responses/session_title/plain_title.txt
+    note: "\"Generate a short title (four words or less)\", quoting our prompt IN FULL between ---BEGIN/END USER MESSAGES---"
+  grok-session-title:
+    fixture: ../responses/session_title/plain_title.txt
+    note: "\"You are tasked with generating the session title.\" - and it CARRIES TOOLS, so has_tools does not separate it; the fifth title-firing CLI, one more than redirect.yaml's note records"
+  muse-reminder-observer:
+    fixture: ../responses/muse_reminder/no_reminder.md
+    note: "background skill-reminder task, fired in parallel with the real turn"
+  muse-reminder-observer-2:
+    fixture: ../responses/muse_reminder/no_reminder.md
+    note: "the second, shorter reminder observer of the same exec"

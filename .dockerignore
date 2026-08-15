@@ -1,0 +1,103 @@
+# Build-context allowlist for the containerized E2E harness
+# (plans/containerized-harness-e2e.md, C6b rule 1 — a local-only working note,
+# gitignored and absent from a fresh clone).
+#
+# `docker build` reads .dockerignore from the CONTEXT directory, never from
+# beside the `-f` Dockerfile. The harness build is
+#
+#     docker build -f skills/multi-llm/tests/container/Dockerfile <repo-root>
+#
+# so the context is the repo root, this file has to live here, and every path
+# below is repo-root-relative. A copy dropped under tests/container/ next to the
+# Dockerfile is silently inert: the build would then upload the whole repo
+# unfiltered while wearing a green build as a disguise.
+#
+# The file is allow-nothing-by-default. `*` puts everything out, and every
+# runtime source the image needs is then negated back in by name -- which makes
+# the allowlist a runtime manifest, because allow-nothing means the product
+# under test is out too. It mirrors
+# skills/multi-llm/tests/container/context_manifest.txt, and
+# skills/multi-llm/tests/test_build_context.py builds the context from a clean
+# `git worktree` checkout and asserts the two agree in both directions.
+#
+# Three semantics this file depends on, all measured rather than reasoned about:
+#
+#   1. COMMENTS MUST BE ON THEIR OWN LINE. Docker skips a line that *starts*
+#      with `#`, but it does not strip a trailing comment: the plan's draft form
+#      `!skills/multi-llm/*.py    # every orchestrator` is read as one pattern
+#      containing spaces and a `#`, matches nothing, and silently drops every
+#      .py from the context. Measured on this tree: that single line costs 17
+#      files and the export still looks green.
+#   2. A DIRECTORY PATH MATCHES THE DIRECTORY ENTRY, NOT ITS CONTENTS. The
+#      tempting `!path/to/dir/` form copies an empty directory and nothing else,
+#      so every directory allowlist below is written `/**`.
+#   3. NO BARE PARENT NEGATION (`!skills`, `!skills/multi-llm`). The matcher
+#      seeds each child's decision with its parent's, so one un-excluded parent
+#      re-includes its entire subtree and silently converts this allowlist back
+#      into a denylist.
+#
+# Rule 3 left open the question of whether a builder will descend into a
+# directory that `*` excludes. FORM SHIPPED: no ancestor negations were needed.
+# Verified by tests/test_build_context.py against BuildKit v0.24.0 / v0.31.1
+# (Docker Engine 28.4.0, buildx 0.28.0) -- `skills/` is excluded by `*` and the
+# skill still exports in full, because the builder descends whenever a negation
+# pattern is prefixed by an excluded directory. The plan's bounded remedy
+# (`!skills/` + `!skills/multi-llm/` + `!skills/multi-llm/tests/`, each
+# immediately followed by a `skills/multi-llm/*` style re-exclusion placed above
+# the leaf negations) is therefore NOT applied here. If a future builder does
+# decline to descend, apply that remedy in full -- never a bare parent negation.
+
+# Everything is out ...
+*
+
+# ... except the product under test.
+# multi_llm.py, modes.py and every orchestrator:
+!skills/multi-llm/*.py
+!skills/multi-llm/providers.yaml
+!skills/multi-llm/pyproject.toml
+!skills/multi-llm/uv.lock
+!skills/multi-llm/SKILL.md
+!skills/multi-llm/utils/**
+!skills/multi-llm/instructions/**
+# the instruction core cites these at runtime:
+!skills/multi-llm/references/**
+!skills/multi-llm/prompts/**
+!skills/multi-llm/schemas/**
+!skills/multi-llm/templates/**
+# inlined by the HTML report:
+!skills/multi-llm/assets/icons/**
+# capabilities.yaml + shim templates + snippets (host lane):
+!skills/multi-llm/hosts/**
+
+# ... and the rig that drives it.
+!skills/multi-llm/tests/__init__.py
+!skills/multi-llm/tests/conftest.py
+!skills/multi-llm/tests/scenario_matcher.py
+!skills/multi-llm/tests/harness/**
+!skills/multi-llm/tests/mocks/**
+!skills/multi-llm/tests/container/**
+!skills/multi-llm/tests/fixtures/**
+!skills/multi-llm/tests/golden/**
+!skills/multi-llm/tests/test_container_*.py
+
+# Re-excluded from inside the allowed trees. Last match wins, so these have to
+# stay BELOW the negations above.
+**/__pycache__/**
+# raw evidence bundles; the sibling records/ (C10 provenance) stays in:
+skills/multi-llm/tests/container/runs/**
+# Credential shapes that would otherwise ride in on an allowlisted tree. These
+# are the locations .gitignore anchors under C6b rule 3, restated here because
+# the build context does not consult .gitignore -- an untracked scratch
+# creds.json inside tests/container/ is exactly the leak this line stops.
+**/.env
+**/.env.*
+**/creds.json
+**/creds/**
+**/*.credentials.json
+**/.codex/auth.json
+**/.local/share/opencode/auth.json
+# ... but the committed value-free seed templates the image actually needs stay
+# in, for the same reason .gitignore negates them back: opencode's credential
+# file is literally named auth.json, so the rules above would otherwise shadow
+# the seed set. This must remain the LAST word on that tree.
+!skills/multi-llm/tests/container/home_seed/**

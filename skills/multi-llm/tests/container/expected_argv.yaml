@@ -1,0 +1,368 @@
+# Normalized argv table — command-construction regression (C8 part one).
+#
+# READ THIS AS COVERAGE OF OUR OWN build_command(), NOT AS DRIFT DETECTION.
+# Both sides of the comparison originate in this repository. If an upstream CLI
+# renames or removes a flag, the wrapper keeps logging the argv *we* generate,
+# byte-identical to this table, and the assertion stays green while the real
+# binary rejects the call. The upstream-facing half is cli-surface.yaml's help
+# probe. What this catches is a refactor on OUR side that drops --json, reorders a
+# positional, loses a separator token, or leaks a stray flag — at the argv,
+# instead of inside a decoded stream three layers down.
+#
+# WHAT IS COMPARED is the normalized flag view (tests/golden/normalize_argv.py),
+# never the raw argv: the prompt positional is tens of KB of plan text, and the
+# model ids, per-invocation config roots and absolute paths are volatile by
+# construction. Policy values stay VERBATIM because they are the assertion
+# (--sandbox workspace-write, --format json, --log-level ERROR, --with-builtin
+# developer, --max-turns 25); row-derived values become a TYPED placeholder, so a
+# refactor that passed a base URL to --model does not normalize identically.
+#
+# KEYED provider x profile x transport. build_command_for_transport(..., "stdin")
+# returns cmd[:-1] and hands the prompt to the child's stdin, so one adapter
+# legitimately emits two argvs. A record whose prompt is on argv must match an
+# `argv` row and one without must match a `stdin` row; a crossed match fails.
+# That is deliberate: cmd[:-1] truncating a FLAG because the prompt was no longer
+# last is precisely the silent bug a "the prompt is optional" rule would wave
+# through.
+#
+# Seeded 2026-08-14 from a real `review-plan --quick` run of all 11 rows, then
+# read by hand. The agent-write/stdin rows arrive with Phase 3's full chain,
+# which is what dispatches that transport.
+#
+# COMPARISON RUNS IN BOTH DIRECTIONS: every call-log record must match some entry,
+# and every entry must match at least min_records records. An entry matching
+# nothing is a stale row (a profile we stopped dispatching), which is as much a
+# finding as an unmatched record.
+
+version: 1
+
+entries:
+  - provider: aider
+    profile: generate
+    transport: argv
+    binary: aider
+    subcommands: []
+    options:
+      "--chat-history-file": "/dev/null"
+      "--input-history-file": "/dev/null"
+      "--message": "<prompt>"
+      "--model": "<model>"
+      "--no-analytics": null
+      "--no-auto-commits": null
+      "--no-check-update": null
+      "--no-detect-urls": null
+      "--no-fancy-input": null
+      "--no-gitignore": null
+      "--no-pretty": null
+      "--no-show-model-warnings": null
+      "--no-show-release-notes": null
+      "--no-stream": null
+      "--read": "<path>"
+      "--yes-always": null
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  - provider: aider
+    profile: generate
+    transport: argv
+    binary: aider
+    subcommands: []
+    options:
+      "--chat-history-file": "/dev/null"
+      "--input-history-file": "/dev/null"
+      "--message": "<prompt>"
+      "--model": "<model>"
+      "--no-analytics": null
+      "--no-auto-commits": null
+      "--no-check-update": null
+      "--no-detect-urls": null
+      "--no-fancy-input": null
+      "--no-gitignore": null
+      "--no-pretty": null
+      "--no-show-model-warnings": null
+      "--no-show-release-notes": null
+      "--no-stream": null
+      "--read": "<path>+"
+      "--yes-always": null
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  - provider: claude-code
+    profile: agent-readonly
+    transport: stdin
+    binary: claude
+    subcommands: []
+    options:
+      "--allowed-tools": "Read,Grep,Glob,TodoWrite"
+      "--disallowed-tools": "Edit,MultiEdit,Write,NotebookEdit,Bash,Task,WebFetch,WebSearch"
+      "--model": "<model>"
+      "--output-format": "json"
+      "-p": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: claude-code
+    profile: agent-write
+    transport: stdin
+    binary: claude
+    subcommands: []
+    options:
+      "--allowed-tools": "Read,Grep,Glob,Edit,MultiEdit,Write,NotebookEdit,Bash,TodoWrite,WebFetch,WebSearch"
+      "--disallowed-tools": "Task"
+      "--model": "<model>"
+      "--output-format": "json"
+      "--permission-mode": "acceptEdits"
+      "-p": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: claude-code
+    profile: generate
+    transport: argv
+    binary: claude
+    subcommands: []
+    options:
+      "--model": "<model>"
+      "--output-format": "json"
+      "-p": null
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: claude-code
+    profile: probe
+    transport: stdin
+    binary: claude
+    subcommands: []
+    options:
+      "--version": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: cline
+    profile: generate
+    transport: argv
+    binary: cline
+    subcommands: []
+    options:
+      "--json": null
+      "-P": "<provider>"
+      "-m": "<model>"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: codex
+    profile: agent-readonly
+    transport: stdin
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "read-only"
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: codex
+    profile: agent-write|generate
+    transport: argv
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "workspace-write"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: codex
+    profile: agent-write|generate
+    transport: stdin
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "workspace-write"
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: codex
+    profile: probe
+    transport: stdin
+    binary: codex
+    subcommands: []
+    options:
+      "--version": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: codex
+    profile: probe
+    transport: stdin
+    binary: codex
+    subcommands: ["login", "status"]
+    options: {}
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: gemini
+    profile: generate
+    transport: argv
+    binary: gemini
+    subcommands: []
+    options:
+      "--model": "<model>"
+      "--output-format": "json"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: goose
+    profile: generate
+    transport: argv
+    binary: goose
+    subcommands: ["run"]
+    options:
+      "--max-turns": "25"
+      "--model": "<model>"
+      "--no-profile": null
+      "--no-session": null
+      "--output-format": "json"
+      "--provider": "<provider>"
+      "--with-builtin": "developer"
+      "-q": null
+      "-t": "<prompt>"
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  - provider: grok
+    profile: generate
+    transport: argv
+    binary: grok
+    subcommands: []
+    options:
+      "--always-approve": null
+      "--no-auto-update": null
+      "--output-format": "json"
+      "-m": "<model>"
+      "-p": "<prompt>"
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  - provider: kilocode
+    profile: generate
+    transport: argv
+    binary: kilocode
+    subcommands: ["run"]
+    options:
+      "--auto": null
+      "-m": "<model>"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: muse
+    profile: generate
+    transport: argv
+    binary: muse
+    subcommands: ["exec"]
+    options:
+      "--base-url": "<base-url>"
+      "--disable-approval": null
+      "--json": null
+      "--model": "<model>"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: opencode
+    profile: agent-readonly
+    transport: stdin
+    binary: opencode
+    subcommands: ["run"]
+    options:
+      "--agent": "plan"
+      "--format": "json"
+      "--log-level": "ERROR"
+      "--model": "<model>"
+      "--print-logs": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: opencode
+    profile: agent-write
+    transport: stdin
+    binary: opencode
+    subcommands: ["run"]
+    options:
+      "--agent": "build"
+      "--format": "json"
+      "--log-level": "ERROR"
+      "--model": "<model>"
+      "--print-logs": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: opencode
+    profile: generate
+    transport: argv
+    binary: opencode
+    subcommands: ["run"]
+    options:
+      "--format": "json"
+      "--log-level": "ERROR"
+      "--model": "<model>"
+      "--print-logs": null
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: opencode
+    profile: probe
+    transport: stdin
+    binary: opencode
+    subcommands: []
+    options:
+      "--version": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: opencode
+    profile: probe
+    transport: stdin
+    binary: opencode
+    subcommands: ["auth", "list"]
+    options: {}
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: pi
+    profile: generate
+    transport: argv
+    binary: pi
+    subcommands: []
+    options:
+      "--model": "<model>"
+      "--no-session": null
+      "-p": null
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1

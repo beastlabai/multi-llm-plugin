@@ -1,0 +1,73 @@
+Fix the following 3 related issues in `src/security.py`:
+
+**Plan file**: /work/sample-project/plans/auth-feature.md
+**Primary file**: src/security.py
+**Batch type**: mixed
+**Fixes in this batch**: 3
+
+---
+### Fix 1: New module has no test coverage
+- **Type**: missing
+- **Lines**: unknown
+- **Importance**: LOW
+- **Anchor text**: ``
+
+**Description**:
+src/security.py ships with no tests, while tests/test_auth.py covers the helpers it sits beside. Add a test module for the rate limiter before the diff lands.
+
+---
+### Fix 2: Attempt store grows without bound
+- **Type**: improvement
+- **Lines**: 10-14
+- **Importance**: MEDIUM
+- **Anchor text**: `_attempts = {}`
+
+**Description**:
+record_attempt appends to a module level dict that is never pruned, so a process that has seen many addresses keeps every one of them for its whole lifetime. Evict entries outside WINDOW_SECONDS on write.
+
+---
+### Fix 3: Token comparison is not constant time
+- **Type**: bug
+- **Lines**: 16-18
+- **Importance**: MEDIUM
+- **Anchor text**: `return a == b`
+
+**Description**:
+compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+1. **Batch 1** (step_1): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+2. **Batch 2** (step_6): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+3. **Batch 3** (step_2): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+4. **Batch 4** (step_3): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+5. **Batch 5** (section:plan_coverage): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged., verified no file changes)
+6. **Batch 6** (section:t002): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged., verified no file changes)
+7. **Batch 7** (section:t003): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged., verified no file changes)
+8. **Batch 8** (T001): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed., verified no file changes)
+9. **Batch 9** (T002): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed., verified no file changes)
+10. **Batch 10** (T003): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed., verified no file changes)
+
+---
+
+## Instructions
+
+1. Use `git diff c42d568a4006b1c36e18bb33fa820a0aaf03a14c -- src/security.py` to see recent changes
+2. Read the file first to understand the current state
+3. Apply ALL fixes in this batch, processing them in line order (top to bottom)
+4. For each fix:
+   - Locate using line numbers or anchor text
+   - Make the necessary change
+   - Ensure it integrates smoothly with surrounding code
+5. Do NOT make any changes beyond these specific fixes
+6. Run typecheck if applicable to verify no regressions
+
+## Return Format
+
+Return a brief summary for EACH fix applied:
+```
+Fix 1: [What was changed]
+Fix 2: [What was changed]
+...
+```

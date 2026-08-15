@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "plan_preamble": "The sample project implements the first steps of the auth feature plan: a user/session model layer, password hashing helpers and an in-progress rate limiter. The committed tree already carries src/auth.py, src/models.py and src/sessions.py; the uncommitted working diff adds src/security.py and wires login() through it. These tasks harden the two weakest points of that diff and add the regression tests the plan asks for. Every path below is relative to the repository root.",
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "Make token comparison constant time",
+      "description": "Replace the plain equality in compare_tokens with hmac.compare_digest so refresh-token comparison does not leak timing information, and keep the existing signature.",
+      "depends_on": [],
+      "files_to_create": [],
+      "files_to_modify": ["src/security.py"],
+      "acceptance_criteria": [
+        "compare_tokens uses hmac.compare_digest",
+        "the function still returns a bool for equal and unequal token pairs"
+      ],
+      "estimated_complexity": "low",
+      "executor_role": "agent"
+    },
+    {
+      "id": "T002",
+      "title": "Bound the login attempt store",
+      "description": "The module level _attempts dict grows without bound. Evict entries older than WINDOW_SECONDS when recording an attempt so the store stays proportional to active users.",
+      "depends_on": [],
+      "files_to_create": [],
+      "files_to_modify": ["src/security.py"],
+      "acceptance_criteria": [
+        "record_attempt drops entries older than WINDOW_SECONDS",
+        "is_locked_out still reports a lockout after MAX_ATTEMPTS recent failures"
+      ],
+      "estimated_complexity": "medium",
+      "executor_role": "agent"
+    },
+    {
+      "id": "T003",
+      "title": "Add regression tests for lockout",
+      "description": "Add a test module covering the lockout threshold and the constant time comparison introduced by the earlier tasks.",
+      "depends_on": ["T001", "T002"],
+      "files_to_create": ["tests/test_security.py"],
+      "files_to_modify": [],
+      "acceptance_criteria": [
+        "a test asserts that MAX_ATTEMPTS recent failures lock an account out",
+        "a test asserts compare_tokens is true for equal tokens and false otherwise"
+      ],
+      "estimated_complexity": "low",
+      "executor_role": "agent"
+    }
+  ]
+}

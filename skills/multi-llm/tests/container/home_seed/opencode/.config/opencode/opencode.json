@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Stub",
+      "options": {
+        "baseURL": "{{base_url}}",
+        "apiKey": "{{stub_session_key}}"
+      },
+      "models": {
+        "stub-model": { "name": "Stub Model" }
+      }
+    }
+  }
+}

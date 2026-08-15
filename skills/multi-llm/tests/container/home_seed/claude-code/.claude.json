@@ -1,0 +1,9 @@
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/work/sample-project": {
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true
+    }
+  }
+}

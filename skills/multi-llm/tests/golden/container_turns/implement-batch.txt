@@ -1,0 +1,47 @@
+You are implementing a specific task from a larger plan.
+
+## Plan Context
+The sample project implements the first steps of the auth feature plan: a user/session model layer, password hashing helpers and an in-progress rate limiter. The committed tree already carries src/auth.py, src/models.py and src/sessions.py; the uncommitted working diff adds src/security.py and wires login() through it. These tasks harden the two weakest points of that diff and add the regression tests the plan asks for. Every path below is relative to the repository root.
+
+## Plan Reference
+Full plan: /work/sample-project/plans/auth-feature.md
+Consult only if the above context leaves something genuinely ambiguous.
+
+## Task
+Title: Add regression tests for lockout
+Description: **Executor**: agent
+
+Add a test module covering the lockout threshold and the constant time comparison introduced by the earlier tasks.
+
+---
+
+## Relevant Files to Review
+- Explore codebase as needed
+
+Read these files to understand existing patterns before implementing.
+
+## Output Files Expected
+- tests/test_security.py
+
+## Acceptance Criteria
+- [ ] a test asserts that MAX_ATTEMPTS recent failures lock an account out
+- [ ] a test asserts compare_tokens is true for equal tokens and false otherwise
+
+## Preceding Tasks (already completed)
+- **T001: Make token comparison constant time** - **Executor**: agent
+- **T002: Bound the login attempt store** - **Executor**: agent
+
+## Instructions
+1. Read the relevant files above to understand existing patterns
+2. Implement ONLY what is described in this task
+3. Do not implement features from other tasks
+
+## Constraints
+- Do NOT run git commit, git push, or any destructive git operations
+- Do NOT modify files outside the output_files list unless absolutely necessary
+- Do NOT create unnecessary abstractions or over-engineer the solution
+- Stay focused on the specific task at hand
+- Only run tests directly related to this task's changed files — do NOT run broad test suites or regression checks
+- If a test fails, be aware that other tasks may be running in parallel and modifying shared code — the failure may not be caused by your changes. Only fix failures clearly related to your own modifications.
+
+Proceed with the implementation.

@@ -1,0 +1,232 @@
+# Per-CLI surface contract — the ONE upstream-facing drift signal (C8 part two).
+#
+# WHY THE ARGV GOLDEN IS NOT THIS. Both sides of `expected_argv.yaml` originate in
+# this repository, so it cannot move when upstream does: if a CLI renames or drops
+# a flag, the wrapper keeps logging the argv *we* generate, byte-identical to the
+# expected table, and the assertion stays green while the real binary rejects the
+# call. Read that table as coverage of our own build_command(). THIS file is the
+# half that can see upstream.
+#
+# Captured 2026-08-14 against the pinned image, offline. `options` is derived from
+# each adapter's own build_command()/build_agent_command() across every profile it
+# declares — never hand-listed — so the contract cannot drift from what we
+# actually dispatch. The derivation runs against a prompt that NAMES AN EXISTING
+# ABSOLUTE PATH, not a bare word: aider's argv is prompt-conditional (`--read
+# <path>` per existing path it finds), so a bare prompt would derive a contract
+# thinner than every aider row really dispatches.
+#
+# `options` also carries, per row, the flags the RIG injects that no adapter ever
+# emits — redirect.yaml's `argv_inject`, which today is muse's `--base-url` alone.
+# Presence is the same question for those: muse has no env var and no config key
+# for the redirect, so if upstream drops the flag every muse container row breaks
+# exactly as if an adapter flag had gone. Each is called out in its row.
+#
+# TWO ASSERTIONS, DELIBERATELY OF DIFFERENT STRENGTHS:
+#   * presence is HARD — every option must still appear in that version's help.
+#     A missing one fails the row naming the CLI, the pinned and installed
+#     versions, and the option that disappeared: a pre-written bug report.
+#   * help_sha256 is SOFT — help text that changed while every option we need
+#     survived is REPORTED, not failed. That is the early warning a deprecation
+#     notice is. codex's `--full-auto` -> `--sandbox workspace-write` is exactly
+#     this class: the argv golden stays green straight through it, while the probe
+#     sees the note appear and then the removal.
+#
+# The invocation is per CLI and is NOT always `<cli> --help`: goose, codex, muse,
+# kilocode and opencode list only subcommands at the top level, so a contract
+# taken there would be made of the wrong text.
+
+version: 1
+captured_on: "2026-08-14"
+image: mllm-e2e:local
+
+clis:
+
+  - cli: aider
+    binary: aider
+    version: "aider 0.86.2"
+    probe: ok
+    help_invocation: "aider --help"
+    help_sha256: 78282bb738f1d378d138db8302310a2cdd3542f3cadff38b958bef9178883314
+    help_bytes: 29760
+    profiles: [generate]
+    options:
+      - "--chat-history-file"
+      - "--input-history-file"
+      - "--message"
+      - "--model"
+      - "--no-analytics"
+      - "--no-auto-commits"
+      - "--no-check-update"
+      - "--no-detect-urls"
+      - "--no-fancy-input"
+      - "--no-gitignore"
+      - "--no-pretty"
+      - "--no-show-model-warnings"
+      - "--no-show-release-notes"
+      - "--no-stream"
+      # Prompt-conditional: one pair per existing absolute path the prompt
+      # names, which is how the plan file reaches the model (aider's own
+      # mention auto-add never matches absolute paths). expected_argv.yaml
+      # asserts it on BOTH aider rows, so it is dispatched on every real run.
+      - "--read"
+      - "--yes-always"
+
+  - cli: claude-code
+    binary: claude
+    version: "2.1.232 (Claude Code)"
+    probe: ok
+    help_invocation: "claude --help"
+    help_sha256: 71ad650f59e08ae40ede14c534db4f49d8590ee5a4f92f6da2882d3a5560fea6
+    help_bytes: 16886
+    profiles: [generate, agent-readonly, agent-write]
+    options:
+      - "--allowed-tools"
+      - "--disallowed-tools"
+      - "--model"
+      - "--output-format"
+      - "--permission-mode"
+      - "-p"
+
+  - cli: cline
+    binary: cline
+    version: "3.0.55"
+    probe: ok
+    help_invocation: "cline --help"
+    help_sha256: 5eb3b0a80e8dd33501f32f4b4d8996390d21604e8719f39caee8e3ecb1c06242
+    help_bytes: 3768
+    profiles: [generate]
+    options:
+      - "--json"
+      - "-P"
+      - "-m"
+
+  - cli: codex
+    binary: codex
+    version: "codex-cli 0.146.0"
+    probe: ok
+    help_invocation: "codex exec --help"
+    help_sha256: 9f86f0115238ddde2514587e5f95b0ab0aa6b89495e5912878d49ad26038aa19
+    help_bytes: 3681
+    profiles: [generate, agent-readonly, agent-write]
+    subcommands: [exec]
+    options:
+      - "--json"
+      - "--model"
+      - "--sandbox"
+
+  - cli: gemini
+    binary: gemini
+    version: "0.25.2"
+    probe: ok
+    help_invocation: "gemini --help"
+    help_sha256: b9c445819e0e31abb68742003b46bcc636438b8ddd9c7a4dfa52b7723d413a10
+    help_bytes: 2648
+    profiles: [generate]
+    options:
+      - "--model"
+      - "--output-format"
+
+  - cli: goose
+    binary: goose
+    version: "1.41.0"
+    probe: ok
+    help_invocation: "goose run --help"
+    help_sha256: d40a8beaa569fdd633ff74662ee2597ff950e46da6d57cb6d9022362da584adc
+    help_bytes: 4056
+    profiles: [generate]
+    subcommands: [run]
+    options:
+      - "--max-turns"
+      - "--model"
+      - "--no-profile"
+      - "--no-session"
+      - "--output-format"
+      - "--provider"
+      - "--with-builtin"
+      - "-q"
+      - "-t"
+
+  - cli: grok
+    binary: grok
+    version: "grok 0.2.93 (f00f96316d)"
+    probe: ok
+    help_invocation: "grok --help"
+    help_sha256: 371d1463e8a58eb945faba09bd572d3ac35f0649cf805c5f90b34b65c997238b
+    help_bytes: 5587
+    profiles: [generate]
+    options:
+      - "--always-approve"
+      - "--output-format"
+      - "--reasoning-effort"
+      - "-m"
+      - "-p"
+    hidden_options:
+      # Accepted by the binary but ABSENT from its help. Asserted by
+      # acceptance rather than by presence: `grok --no-auto-update --help`
+      # exits 0 while a bogus flag exits 2, so the CLI does validate flags
+      # and acceptance is meaningful evidence. If upstream ever REMOVES it,
+      # the accept-probe flips to rejected and the row fails — which a
+      # presence-only contract could never catch, since it is already absent.
+      - "--no-auto-update"
+
+  - cli: kilocode
+    binary: kilocode
+    version: "7.4.19"
+    probe: ok
+    help_invocation: "kilocode run --help"
+    help_sha256: 597c9d88f9e64c63f17871b6fafe660d268f97e4d00fc92555529678b3ffdbce
+    help_bytes: 4747
+    profiles: [generate]
+    subcommands: [run]
+    options:
+      - "--auto"
+      - "-m"
+
+  - cli: muse
+    binary: muse
+    version: "Muse Code 0.1.0 (0.1.0-R708.1)"
+    probe: ok
+    help_invocation: "muse exec --help"
+    help_sha256: 0fdca4a01db7369a5a4ab7a1c2db8c2f2702318d8ca3534b01087da2734a4cc7
+    help_bytes: 3331
+    profiles: [generate]
+    subcommands: [exec]
+    options:
+      # RIG-INJECTED, not emitted by MuseProvider.build_command: this row's ONLY
+      # redirect mechanism is argv (six config keys across auth.json and
+      # settings.json were proved negative), so redirect.yaml's `argv_inject`
+      # adds it after `exec` and the wrapper is the one place it comes from.
+      # Unprobed, it would be the single unasserted link in every muse row.
+      - "--base-url"
+      - "--disable-approval"
+      - "--json"
+      - "--model"
+
+  - cli: opencode
+    binary: opencode
+    version: "1.18.18"
+    probe: ok
+    help_invocation: "opencode run --help"
+    help_sha256: d62299ebc267afdf5bab2c07fbfe1a6625cc8769cb7073b3bad975e9531c5732
+    help_bytes: 3053
+    profiles: [generate, agent-readonly, agent-write]
+    subcommands: [run]
+    options:
+      - "--agent"
+      - "--format"
+      - "--log-level"
+      - "--model"
+      - "--print-logs"
+
+  - cli: pi
+    binary: pi
+    version: "0.80.6"
+    probe: ok
+    help_invocation: "pi --help"
+    help_sha256: 9b90de6d92f969899927938c0be43d264f108e5fc8bf470404678f54df40a1a9
+    help_bytes: 9125
+    profiles: [generate]
+    options:
+      - "--model"
+      - "--no-session"
+      - "-p"

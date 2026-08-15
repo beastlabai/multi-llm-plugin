@@ -1,0 +1,125 @@
+# Container posture, declared once and inspected from both ends (C6).
+#
+# This lane runs frequently updated third-party binaries, on the host lane holding
+# a real key, with shell and edit access, on an open network — so confinement
+# cannot stop at which files are mounted. `harness.py` builds every `docker run`
+# from this file, and the posture test compares the effective settings against it
+# from INSIDE the container (uid/gid, capability bounding set, NoNewPrivs, Seccomp,
+# read-only root, tmpfs $HOME) and from the HOST (`docker inspect` HostConfig).
+#
+# Posture is a property of the run *command* — the kind of thing that erodes one
+# debugging session at a time. The realistic failure is `seccomp=unconfined` added
+# to unblock one CLI and never removed, which is why the default profile is
+# asserted rather than assumed.
+
+version: 1
+
+identity:
+  # A fixed numeric non-root identity, baked AND re-stated rather than inherited.
+  # These are three separate failures — an image whose final USER is root, a run
+  # that forgets --user, a tmpfs mounted for the wrong owner (which fails on the
+  # entrypoint's first write into its own home) — so each is asserted rather than
+  # assumed to follow from the others.
+  uid: 10001
+  gid: 10001
+  user: e2e
+  # Non-root here is not hygiene: several agent CLIs refuse to start or change
+  # sandbox behaviour under uid 0, and in the host lane a root process holds a
+  # live key on an open network. Guessing the invoking uid (`--user $(id -u)`) is
+  # rejected: it produces a process with no passwd entry and an unowned $HOME,
+  # which is precisely the shape those CLIs mishandle.
+  requires_passwd_entry: true
+  requires_owned_home: true
+
+security:
+  cap_drop: [ALL]
+  # Expected /proc/self/status values inside the container.
+  no_new_privs: 1        # --security-opt=no-new-privileges
+  seccomp: 2             # 2 = filtered; the default profile, never `unconfined`
+  security_opt:
+    - "no-new-privileges"
+  readonly_rootfs: true
+
+limits:
+  # A runaway CLI is a failed row, not a wedged workstation.
+  pids_limit: 512
+  memory: "4g"
+  cpus: "2.0"
+
+network:
+  # The provider lane blocks the go-live failure STRUCTURALLY: a mis-redirected
+  # CLI cannot reach a real endpoint because there is no route to one. The host
+  # lane's `--creds none` DISCOVERY tier is selected onto this same key: it carries
+  # no credential and calls no model, so it needs no route either
+  # (`harness.network_mode` is the one chooser; `entrypoint._assert_network` reads
+  # the same rule from inside).
+  provider_lane: "none"
+  # The CREDENTIALED host modes cannot have that — they must reach openrouter.ai —
+  # so their guarantee downgrades from impossibility to DETECTION (stub-log
+  # coverage, wrapper records, scrub receipts, per row).
+  host_lane: "bridge"
+  # `open` is the v1 default. `allowlist` (MLLM_EGRESS_ALLOWLIST=1) is the opt-in
+  # host-side DOCKER-USER rule permitting openrouter.ai:443 plus DNS. It stays
+  # opt-in because it is a moving part per backend (rootful vs rootless Docker vs
+  # Podman) and per host firewall, and a filter that silently fails open is worse
+  # than a documented open network. Whichever mode a row ran under is recorded in
+  # its run record, so the evidence states which guarantee it had.
+  egress: open
+
+mounts:
+  # The complete run-time list. The repo working tree is NEVER mounted: a bind of
+  # skills/multi-llm would carry .git, untracked scratch and a dogfooded
+  # .multi-llm/ straight past the .dockerignore allowlist, and would put C6a rule
+  # 4's deny-list (which names the repo's own .git) in contradiction with the run
+  # mechanism. The skill reaches the image by build-time COPY instead.
+  - target: /work/out
+    type: bind
+    mode: rw
+    source: "runs/<utc>/<row-id>/"
+    note: >-
+      the single writable bind: receipts, stub + call logs, and the phase dirs the
+      entrypoint exports in its `finally`. harness.py creates it mode 0777 before
+      the run, so the non-root container can write into a directory the developer
+      owns and the artifacts come back prunable.
+  - target: /work/sample-project
+    type: tmpfs
+    mode: "rw,mode=0755,uid=10001,gid=10001"
+    note: seeded fresh per row by seed_workspace.py (C7)
+  - target: /work/homes
+    type: tmpfs
+    mode: "rw,mode=0700,uid=10001,gid=10001"
+    note: >-
+      per-CLI homes: $HOME=/work/homes/<cli>, one per identity the row runs,
+      seeded from home_seed/<cli>/. One shared $HOME would put two CLIs in the
+      same config root, which a provider row hits every time — the row's own CLI
+      and the agent-write helper its executor needs are two different binaries.
+  - target: /home/e2e
+    type: tmpfs
+    mode: "rw,mode=0700,uid=10001,gid=10001"
+    note: >-
+      the HOST process's home on a host-lane row: synthesized configs and the
+      copied-in credential, all dying with the container (C6a rule 3)
+  - target: /tmp
+    type: tmpfs
+    mode: "rw,mode=1777"
+    note: uv cache (UV_CACHE_DIR), CLI scratch
+  - target: /run/creds
+    type: bind
+    mode: ro
+    optional: true
+    note: >-
+      fallback credential mode only, one file per creds.yaml allowlist entry;
+      absent entirely on the default OpenRouter path and on the provider lane
+
+uv:
+  # The read-only root has one consequence worth discovering early: the skill's uv
+  # environment must be materialized AT BUILD TIME, or the first `uv run --project`
+  # a host dispatches dies on a read-only filesystem — and, in the provider lane,
+  # on --network none before it ever gets that far. A `uv run` that decides it
+  # needs to sync does not get as far as complaining about the filesystem; it has
+  # no index to reach either, and the row dies in resolution with a stack that
+  # looks nothing like the bug it is.
+  project_environment: /opt/mllm/skill/.venv
+  cache_dir: /tmp/uv-cache
+  offline: true
+  extra_run_args: ["--frozen", "--no-sync"]

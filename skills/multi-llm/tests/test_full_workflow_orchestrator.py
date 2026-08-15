@@ -430,6 +430,25 @@ class TestConditionalApplyPhases:
         capsys.readouterr()
         assert "apply-code-fixes" in _modes_called(calls)
 
+    def test_the_workflow_never_opts_into_the_standalone_high_gate(
+        self, tmp_path, stub_phases, capsys
+    ):
+        """`full` must never ask `review-code` to fail on HIGH findings.
+
+        A completed review is exit 0 whatever it found; ``--fail-on-high`` is the
+        opt-in that turns HIGH findings into exit 3, and it exists for a
+        standalone CI caller. Handing it to the workflow would re-create the bug
+        it replaced: :meth:`_verify` stops the chain on any non-zero, so `full`
+        would abort **at** review-code — one phase before `apply-code-fixes`, the
+        phase whose entire job is to fix what the review just found.
+        """
+        calls = stub_phases()
+        plan = _plan(tmp_path)
+        _complete(plan, "generate-tasks")
+        assert multi_llm.main(["full", str(plan), "--yes"]) == 0
+        capsys.readouterr()
+        assert "--fail-on-high" not in dict(calls)["review-code"]
+
     def test_no_code_review_findings_records_the_skip(
         self, tmp_path, stub_phases, capsys
     ):

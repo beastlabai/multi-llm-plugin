@@ -1,0 +1,30 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "group_hash": "6779911c6f8b335b",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "139bdba80f54ba7d",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "ef911087fcf05304",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    }
+  ],
+  "metadata": {
+    "model": "container-stub",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "schema_version": "2.1"
+  }
+}

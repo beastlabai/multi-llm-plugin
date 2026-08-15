@@ -1,0 +1,91 @@
+# Credential mount policy for the containerized harness (C6a).
+#
+# This file contains PATHS ONLY — never a credential value. It is tracked, and the
+# committed-secret scanner (tests/test_no_committed_secrets.py) walks it on every PR.
+#
+# The DEFAULT host-lane path mounts nothing at all: the entire injection is one
+# `-e OPENROUTER_API_KEY` plus the per-host wiring the entrypoint writes into the
+# container's own tmpfs $HOME. Everything under `allowlist:` below applies only to
+# the documented *fallback* mode (subscription / vendor keys), for a developer with
+# no OpenRouter account or someone testing a host under its native auth.
+#
+# The provider lane mounts nothing and receives no credential variable, ever (C1).
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Rule 1: credentials are bind-mounted at run time, NEVER `COPY`ed into the image.
+# A COPY writes a layer that survives `docker push`, `docker save`, layer caching,
+# and deletion of the file in a later layer. The Dockerfile therefore contains no
+# credential path at all.
+#
+# Rule 2: mount individual FILES, never home directories, against this allowlist.
+# The entrypoint refuses to start if a mount exists that this list does not name.
+# ---------------------------------------------------------------------------
+allowlist:
+  claude-code:
+    - source: ~/.claude/.credentials.json
+      dest: /run/creds/claude/.credentials.json
+      mode: ro
+  codex:
+    - source: ~/.codex/auth.json
+      dest: /run/creds/codex/auth.json
+      mode: ro
+  opencode:
+    - source: ~/.local/share/opencode/auth.json
+      dest: /run/creds/opencode/auth.json
+      mode: ro
+
+# ---------------------------------------------------------------------------
+# Deliberately NOT mountable, and this is the most important entry in the file.
+#
+# ~/.claude.json is ~87 KB on a working machine and holds per-project history for
+# every repo the developer has opened, MCP server definitions (which routinely
+# embed third-party API keys), and assorted local state. Mounting it into a
+# container that runs third-party CLIs would expose far more than the credential
+# the run needs. `claude` reads it only to skip onboarding and trust prompts, so
+# the entrypoint synthesizes a minimal one instead.
+# ---------------------------------------------------------------------------
+synthesized:
+  - path: ~/.claude.json
+    reason: >-
+      per-project history + MCP server definitions that routinely embed
+      third-party API keys; the host only needs onboarding + trust
+    contents: hasCompletedOnboarding, plus a trust entry for /work/sample-project
+
+# ---------------------------------------------------------------------------
+# Rule 3: the allowlisted files are copied into a tmpfs $HOME at start and the run
+# proceeds from there. A CLI that refreshes an OAuth token needs to write; a :ro
+# mount would make it fail, and a :rw mount would let a container write back to
+# the developer's real credential file. Copy-on-start resolves both — every write
+# lives and dies in RAM with the container.
+# ---------------------------------------------------------------------------
+tmpfs_home:
+  path: /home/e2e
+  options: rw,mode=0700,uid=10001,gid=10001
+  copy_mode: "0600"
+
+# ---------------------------------------------------------------------------
+# Rule 4: things that must never be mounted, asserted at start (the entrypoint
+# stats each and aborts if present).
+#
+# The first three matter most: this repo's remote is public GitHub, and a container
+# holding a gh token plus a network route is one stray command away from pushing.
+# ---------------------------------------------------------------------------
+denylist:
+  - path: ~/.gitconfig
+    reason: git identity; seed_workspace.py pins author/committer per invocation instead
+  - path: ~/.git-credentials
+    reason: push credential for a public remote
+  - path: ~/.config/gh/hosts.yml
+    reason: gh token for a public remote
+  - path: ~/.ssh
+    reason: push credential, and far more
+  - path: ~/.netrc
+    reason: generic credential store several CLIs read implicitly
+  - path: ~/.aws
+    reason: cloud credentials no lane needs
+  - path: .git
+    reason: >-
+      the repo's own history and remote; the working tree is never mounted, so a
+      debugging session that binds it "just this once" fails loudly here
