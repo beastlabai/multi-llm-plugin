@@ -49,6 +49,61 @@
 #   * every row with a subagent batch (review-plan, and the three apply rows)
 #   * the negative auth rows
 #   * `applied` bytes through a real host (the claude-code native write row)
+#
+# ---------------------------------------------------------------------------
+# WHY FIVE ROWS STILL CARRY NO `args` — AND WHY ADDING ONE WOULD NOT HELP
+# (verified 2026-08-15)
+#
+# `codex-apply-executor`, `opencode-apply-executor`, `claude-code-apply-native`,
+# `codex-auth-negative` and `opencode-auth-negative` are authored down to their
+# `command:` and `expect:` blocks and carry no `args:`, so `render_prompt`
+# aborts each in ~1.5 s having made zero model calls. That is not a missing
+# prompt. **No prompt can make these five rows run**, and writing one would only
+# turn a fast, honest abort into a slow red row that spends money and proves
+# nothing. Three blockers, each verified rather than inferred:
+#
+# (1) ALL FIVE DISPATCH `apply-suggestions`, AND THAT MODE CANNOT RUN FIRST.
+#     The host lane seeds one fresh workspace per row (`seed_workspace.py`: the
+#     src tree, plans/auth-feature.md, one commit, a working diff,
+#     .multi-llm/providers.yaml) and launches exactly ONE host process against
+#     it — this lane has no pre-command leg. Run standalone against that
+#     workspace, `apply-suggestions plans/auth-feature.md --yes` exits **1** in
+#     `_setup` step 9 — "Output directory not found: …/plans/auth-feature" —
+#     before any batch, any runner and any auth gate; with the phase dir present
+#     but empty it is still exit 1, "Run --review-plan first to generate
+#     validation results". The provider lane says the same thing in a test name:
+#     "apply-suggestions has nothing to apply without review-plan", which is why
+#     its applied-bytes row runs `review-plan` and then `apply-suggestions` as
+#     two commands. The host lane has nowhere to put the first one.
+#
+# (2) `remove_seed` IS A DEAD CELL. Both negative rows name a credential file to
+#     delete and nothing anywhere deletes it — the key's only other readers are
+#     in `test_container_host_lane.py`, which uses its mere PRESENCE to classify
+#     a row as negative and never acts on its value. So even past (1), both rows
+#     would run with the seeded credential in place and could not be refused for
+#     the reason they declare.
+#
+# (3) `claude-code-apply-native`'s BYTE EXPECTATION CANNOT BE MET BY THE MODE IT
+#     NAMES. `apply-suggestions` declares exactly one file, the plan
+#     (write_phase_bridge.py: "The plan file is THE artifact"), and the grader's
+#     census delta drops everything under `plans/` as the workflow's own output.
+#     `bytes_must_change: true` with `paths: ["src/**"]` is therefore
+#     unsatisfiable for this mode however the row is prompted: src/** moves
+#     under `implement` / `apply-code-fixes`, not here.
+#
+# (1) and (2) are rig gaps and belong in the harness — a per-row pre-command leg
+# that can seed the prerequisite phase through the SAME host turn or ahead of
+# it, and an implementation of `remove_seed` in the home-seeding step. (3) is a
+# row-design question (which phase is supposed to supply this lane's only
+# applied bytes) and is left open rather than answered by widening a matcher.
+#
+# The `args:` strings are not the hard part and are fully determined once those
+# land: `args` is what the OPERATOR types, `command` is what the shim must build
+# from it, so `args` = the `--<mode>` flag form of `command`'s mode word, the
+# same quoted positionals, and only the flags the host does NOT bake — never
+# `--host`, never `--detach` (the shim adds it per its own step 5), never
+# `--yes`/`--exec-subagents` on codex or opencode, and `--yes` explicitly on
+# claude-code, whose shim bakes none of them (`must_type_explicitly` below).
 # ---------------------------------------------------------------------------
 
 version: 1
@@ -182,9 +237,35 @@ hosts:
     # one on the denied Skill call, the rest hunting for the file by hand — and
     # ended `is_error: true, stop_reason: tool_use`. A shim-following run is
     # ~8 tool turns (skill load, uv preflight, `util instructions`, the
-    # dispatcher, a read-back), so 25 leaves headroom for one retry without
+    # dispatcher, a read-back), so 25 left headroom for one retry without
     # turning the bound into a licence.
-    turn_bound: {kind: max-turns, value: 25}
+    #
+    # RAISED 25 -> 40 on 2026-08-15, and the reason is the DISTRIBUTION, not one
+    # bad row. `claude-code-ask` hit `error_max_turns` at num_turns 26 against
+    # --max-turns 25 while its dispatcher receipt still read `state: done,
+    # exit: 0` — the phase completed, three seconds before the cap.
+    # The turn count on this row has always been wide, and the recorded
+    # `measured: turns: 12` below is one sample out of five taken that day:
+    #
+    #   2026-08-14  9, 11, 12, 13(capped at the old 12), 21   ← argv byte-identical
+    #   2026-08-15  26                                        ← argv byte-identical
+    #
+    # 25 was set when the observed tail was 21, i.e. four turns of headroom, and
+    # 26 is one turn past it. Nothing the shim asks for grew: both runs produced
+    # the same two dispatcher receipts (`util instructions ask`, then `ask …`),
+    # both completed the phase, and `host-run.json`'s argv is byte-for-byte the
+    # same as the 2026-08-14 pass — SKILL.md last moved on 2026-08-08 (3a6d62c)
+    # and instructions/ask.md's last edit (e4e43a9, 11:39 UTC) predates that
+    # 19:01 UTC pass by seven hours, so both runs read identical bytes.
+    # What moved is the model behind the `~`-prefixed ALIAS this matrix
+    # already flags as a moving target, which improvised for ~22 turns between
+    # reading the instructions and dispatching (two of its Bash calls denied:
+    # `grep … | head` does not match `Bash(grep:*)`, and `python3 -c` is granted
+    # nowhere). The cheaper, faster, higher-turn shape says so too: 166 s and
+    # $0.0113 for 26 turns against 295 s and $0.0204 for 12.
+    # 40 clears the observed tail by half again rather than by one turn. The
+    # real ceiling on a runaway row is `wall_clock_s` below, not this.
+    turn_bound: {kind: max-turns, value: 40}
     parser: utils/providers/claude_code.py
     # WHERE THE INNER MULTI_LLM_RESULT LINE LANDS — and on this host it does NOT.
     result_line_in_stream:
@@ -367,6 +448,14 @@ hosts:
           host. Explicitly WITHOUT --exec-subagents: the shipped shim says "Never
           pass --exec-subagents on this host". An all-clean-failure result is
           reported as a FAILED row ("dispatched, nothing landed"), not a green one.
+          NO `args` YET, DELIBERATELY — see "WHY FIVE ROWS STILL CARRY NO `args`"
+          in the header. This row is blocked by all three findings there. The
+          third is its own: `paths: ["src/**"]` cannot be met by a mode whose
+          declared artifact is the plan file, and the grader drops everything
+          under `plans/` as a workflow output. The plan's wording is "the named
+          fixture file's SHA must differ", i.e. plans/auth-feature.md — so the
+          path set, the mode and the grader's filter are three different answers
+          to one question, and picking one is a row-design call, not a prompt.
 
   # ===========================================================================
   codex:
@@ -595,10 +684,23 @@ hosts:
           asserts that outcome instead of hoping for an applied one. An `applied`
           batch here fails just as loudly — bytes landing from a tool-call-free
           stub means the redirect leaked.
+          NO `args` YET, DELIBERATELY — blocked by header finding (1): this lane
+          launches one host process against a workspace with no review-plan
+          output, and `apply-suggestions` exits 1 before it reaches a batch.
       - id: codex-auth-negative
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
         remove_seed: ".codex/auth.json"
         expect: {exit: 3, reason: not_authenticated, stub_requests: 0, within_s: 30}
+        note: >
+          NO `args` YET, DELIBERATELY — blocked by header findings (1) and (2).
+          Note also that `command` omits --detach on purpose: the auth gate this
+          row trips is `write_batch_scheduler`'s per-dispatch `preflight_runner`,
+          which runs INSIDE the worker, so a detached invocation puts the exit-3
+          refusal on the worker's receipt while the launcher's reads exit 0 —
+          and the grader takes the last `apply-suggestions` receipt. The shim,
+          meanwhile, tells the agent to add --detach to a fan-out mode. Wiring
+          this row therefore also needs an answer to "who decides the foreground
+          form", which is not something an `args` string can settle.
 
   # ===========================================================================
   opencode:
@@ -805,6 +907,10 @@ hosts:
           phases: [apply-suggestions]
           write_outcome: clean-failure
           bytes_must_change: false
+        note: >
+          NO `args` YET, DELIBERATELY — blocked by header finding (1), exactly as
+          codex-apply-executor is: one host process, a workspace with no
+          review-plan output, and `apply-suggestions` exiting 1 before any batch.
       - id: opencode-auth-negative
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
         remove_seed: ".local/share/opencode/auth.json"
@@ -814,3 +920,10 @@ hosts:
           exit: unknown
           reason: "probe passes while logged out; failure surfaces at dispatch"
           provenance: unmeasured
+        note: >
+          NO `args` YET, DELIBERATELY — blocked by header findings (1) and (2).
+          This row's own assertion is the weakest of the five and it is the one
+          worth wiring FIRST once they land: `exit: unknown` means the grader
+          only files evidence, so the row cannot fail for the model's behaviour,
+          and what it records — that this gate OPENS where codex's closes — is a
+          product finding nobody has observed yet.
