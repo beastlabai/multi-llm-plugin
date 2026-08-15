@@ -1,0 +1,12 @@
+{
+  "providers": {
+    "stub": {
+      "baseUrl": "{{base_url}}",
+      "api": "openai-completions",
+      "apiKey": "{{stub_session_key}}",
+      "models": [
+        { "id": "stub-model", "name": "Stub Model" }
+      ]
+    }
+  }
+}

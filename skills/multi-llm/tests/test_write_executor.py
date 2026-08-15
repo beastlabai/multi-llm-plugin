@@ -58,6 +58,7 @@ from utils.write_batch_scheduler import (  # noqa: E402
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
+SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
 
 #: The three adapters that ship a real `agent-write` invocation. Parametrized over
 #: so a profile that silently stops being edit-capable fails here rather than on a
@@ -74,17 +75,25 @@ WRITE_RUNNERS = [
 # ---------------------------------------------------------------------------
 
 def _install_launcher(bin_dir: Path, name: str) -> Path:
+    """Put a mock provider CLI called ``name`` on a temp PATH.
+
+    A *copied* launcher cannot find ``tests/scenario_matcher.py`` through its own
+    ``__file__`` the way the real file and a symlink to it can, so the one
+    definition of what a scenario means is copied beside it.
+    """
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / name
     if os.name == "nt":  # pragma: no cover - POSIX CI
         target = bin_dir / f"{name}.py"
         shutil.copyfile(MOCK_LLM, target)
+        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
     else:
         try:
             target.symlink_to(MOCK_LLM)
         except (OSError, NotImplementedError):  # pragma: no cover
             shutil.copyfile(MOCK_LLM, target)
             target.chmod(target.stat().st_mode | stat.S_IXUSR)
+            shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
     return target
 
 

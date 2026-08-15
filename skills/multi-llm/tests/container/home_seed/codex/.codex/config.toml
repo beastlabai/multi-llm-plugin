@@ -1,0 +1,22 @@
+# Minimum synthesized codex config for a container row (Phase 1, measured).
+#
+# $CODEX_HOME must point at the directory holding this file AND that directory
+# must exist: codex exits 1 with "CODEX_HOME points to ... but that path does not
+# exist". A relative $HOME is worse than useless — codex resolves ~/.codex against
+# it, finds nothing, and goes straight to api.openai.com over a WebSocket
+# transport (wss://api.openai.com/v1/responses) before falling back to HTTPS.
+# A custom base_url avoids that transport entirely: the redirected run went
+# straight to http://127.0.0.1:<port>/v1/responses.
+#
+# {{base_url}} is substituted per exec by the PATH wrapper, so each invocation
+# carries its own session id in the path.
+
+model_provider = "stub"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.stub]
+name = "stub"
+base_url = "{{base_url}}"
+wire_api = "responses"
+env_key = "STUB_API_KEY"

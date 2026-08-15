@@ -1,0 +1,15 @@
+{
+  "name": "mllm-e2e-clis",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned coding-agent CLI set for the containerized E2E harness image.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.232",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@google/gemini-cli": "0.25.2",
+    "@kilocode/cli": "7.4.19",
+    "@openai/codex": "0.146.0",
+    "cline": "3.0.55",
+    "opencode-ai": "1.18.18"
+  }
+}

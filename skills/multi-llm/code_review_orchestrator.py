@@ -52,6 +52,8 @@ from utils import (
 )
 from utils.stream_bootstrap import bootstrap_streams
 from utils.cli_common import (
+    EXIT_NEEDS_HUMAN,
+    EXIT_OK,
     build_parent_parser,
     dispatcher_command,
     dispatcher_prefix,
@@ -255,6 +257,19 @@ Examples:
         choices=['pr', 'flat'],
         default='pr',
         help='HTML report template style: "pr" for PR-style contextual view, "flat" for classic card layout (default: pr)'
+    )
+
+    # Opt-in CI gate. A completed review is exit 0 whatever it found (see the
+    # summary block in main()); this is for a standalone caller who wants HIGH
+    # findings to stop a pipeline. Exit 3 — "needs a human" — never 1, because
+    # the review did not error. `full` never passes it: the phase whose whole job
+    # is to fix what the review found runs next.
+    parser.add_argument(
+        '--fail-on-high',
+        action='store_true',
+        help='Exit 3 ("needs a human") when the review finds HIGH-importance '
+             'issues, instead of the default 0. For standalone CI gating; the '
+             '[HIGH_PRIORITY_ISSUES] <n> marker is printed either way.'
     )
 
     return parser.parse_args(argv)
@@ -1846,6 +1861,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
     print("\n=== Review Summary ===")
     print(f"Total issues: {len(all_issues)}")
     print(f"High priority: {high_count}")
+    if high_count > 0:
+        # The finding, in the channel this skill already uses for every other
+        # "you must act on this" fact ([VALIDATION_PENDING], [PARTIAL_RESULTS: …],
+        # [REAGGREGATE_AFTER_SALVAGE], [CONSOLIDATION_RECOMMENDED]). It carries the
+        # count, which the exit code it replaces could not.
+        print(f"[HIGH_PRIORITY_ISSUES] {high_count}")
 
     # Report fix tasks if prepared
     if args.apply_fixes and fix_tasks_path:
@@ -1914,7 +1935,23 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("")
         print("Claude Code: After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
 
-    return 1 if high_count > 0 else 0
+    # A review that found HIGH-importance issues *worked*: the report is written
+    # and `code-review` is recorded completed in state.json. Under the uniform
+    # contract (0 done, 1 unexpected error, 2 nothing to do, 3 needs a human) that
+    # is exit 0, and the 1 this shipped with claimed an error that never happened.
+    # Two things read that claim. `full` routes every phase through
+    # `_verify(phase, code)`, which stops the chain on any non-zero — so the
+    # workflow aborted at review-code, one step before `apply-code-fixes`, the
+    # phase that exists to fix exactly what the review found. And
+    # `cli_common._STATE_BY_EXIT` maps 1 to "error", so the single
+    # MULTI_LLM_RESULT line every host reads reported `state: "error"` for a
+    # successful run. The finding itself is not lost: it is printed as
+    # [HIGH_PRIORITY_ISSUES] <n> above, and `--fail-on-high` restores a non-zero
+    # exit for a standalone CI gate. The sibling fan-outs (`review-plan`,
+    # `review-tasks`) already return 0 regardless of what they found.
+    if high_count > 0 and getattr(args, "fail_on_high", False):
+        return EXIT_NEEDS_HUMAN
+    return EXIT_OK
 
 
 if __name__ == "__main__":

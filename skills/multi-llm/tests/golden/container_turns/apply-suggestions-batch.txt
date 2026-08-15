@@ -1,0 +1,31 @@
+Apply the following suggestion to the plan file:
+
+**Plan file**: /work/sample-project/plans/auth-feature.md
+**Suggestion**: Specify JWT and refresh token expiration times
+**Type**: clarification
+**Section**: ### Step 3: Authentication Service
+**Importance**: MEDIUM
+
+**Details**:
+The plan doesn't specify token lifetimes. Recommend: access tokens expire in 15 minutes, refresh tokens in 7 days. Store these as configuration values, not hardcoded.
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+1. **Batch 1** (step_1): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+2. **Batch 2** (step_6): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+3. **Batch 3** (step_2): (batch failed — No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged., verified no file changes)
+
+Instructions:
+1. Read the current plan file
+2. Locate the section mentioned in the reference
+3. Apply the suggested change appropriately:
+   - For "addition": Add new content in the appropriate location
+   - For "modification": Update existing content as described
+   - For "deletion": Remove the specified content
+   - For "clarification": Rewrite for clarity while preserving meaning
+4. Ensure the change integrates smoothly with surrounding content
+5. Check if the plan already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating
+6. Do NOT make any other changes beyond this specific suggestion
+
+Return a brief summary of what was changed.

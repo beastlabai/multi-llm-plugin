@@ -1,0 +1,44 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "group_hash": "ed2a0235cc4d9050",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "d948c7a933b2e244",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "93c4a25d0e7f6cf6",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "cf093f90d561613c",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "5d4efdfb196e11f2",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    }
+  ],
+  "metadata": {
+    "model": "container-stub",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "schema_version": "2.1"
+  }
+}

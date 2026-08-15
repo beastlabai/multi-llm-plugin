@@ -615,7 +615,9 @@ class WriteBatchScheduler:
         limits: Dict[str, Optional[int]] = {}
         for spec in dict.fromkeys(specs):
             provider_name, _ = parse_model_spec(spec, anchor=self.anchor)
-            limits[provider_name] = get_provider_max_concurrent(provider_name)
+            limits[provider_name] = get_provider_max_concurrent(
+                provider_name, anchor=self.anchor
+            )
         return limits
 
     # -- ordering -------------------------------------------------------

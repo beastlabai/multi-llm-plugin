@@ -14,6 +14,37 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The committed-secret scanner walks `git ls-files`; a shallow checkout
+          # is fine for that, but the scanner also needs the repo's own
+          # .gitignore/.gitleaks.toml, which the default checkout provides.
+          fetch-depth: 1
       - uses: astral-sh/setup-uv@v5
+      # The committed-secret guard is the one that actually holds the line for a
+      # PUBLIC repo, so it has to run on a PR rather than only where a developer
+      # happens to have the binary. Linux only: the guard is OS-independent, and
+      # one runner catching a leak is enough — the module skips with a named
+      # reason on the other two rather than failing.
+      - name: Install gitleaks (leak guard)
+        if: runner.os == 'Linux'
+        env:
+          GITLEAKS_VERSION: 8.28.0
+          # From the release's own gitleaks_8.28.0_checksums.txt. Verified BEFORE
+          # extraction, like every other downloaded artifact in this repo: a
+          # version-pinned URL still trusts whatever the host serves today, and
+          # this is the step that guards a PUBLIC repo against committed secrets.
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum --check --strict -
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
       - name: Run tests
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live"
+        # `not container` is not redundant with pyproject's addopts: an explicit -m
+        # here REPLACES that default, so without it a container-marked file would be
+        # collected and run on every PR — on runners with no Docker daemon, and none
+        # at all on the macOS/Windows images.
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container"

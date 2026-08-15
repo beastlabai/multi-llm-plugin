@@ -78,22 +78,52 @@ def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def _porcelain_destination(path_field: str) -> str:
+    """Return the on-disk path of a ``git status --porcelain`` path field.
+
+    Rename and copy entries render as ``<old> -> <new>``; the path that exists
+    in the working tree is the destination, so the source half is dropped. Git
+    quotes either side when it contains a space, which is what makes the
+    separator unambiguous: an unquoted destination contains no space of its own,
+    and a quoted one is the trailing ``"..."``.
+    """
+    if path_field.endswith('"'):
+        index = path_field.rfind(' -> "')
+        if index != -1:
+            return path_field[index + len(" -> "):]
+        return path_field
+    index = path_field.rfind(" -> ")
+    if index != -1:
+        return path_field[index + len(" -> "):]
+    return path_field
+
+
 def get_modified_files() -> List[str]:
     """Get list of modified and untracked files."""
     stdout, _, _ = _run_git("status", "--porcelain")
     files = []
-    for line in stdout.strip().split("\n"):
-        if line:
-            status = line[:2]
-            filename = line[3:]
-            if status.strip():
-                files.append(filename)
+    # NEVER strip leading whitespace off this output: a worktree-only change is
+    # reported as `" M path"`, so `stdout.strip()` would eat the first line's
+    # status column and `line[3:]` would then cut a character off the filename.
+    # Only the trailing newline is dropped, by filtering short/blank lines.
+    for line in stdout.split("\n"):
+        # A real entry is `XY <path>`: two status columns, a space, a path.
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        if not status.strip():
+            continue
+        filename = _porcelain_destination(line[3:])
+        if filename:
+            files.append(filename)
     return files
 
 def get_staged_files() -> List[str]:
     """Get list of currently staged files."""
     stdout, _, _ = _run_git("diff", "--cached", "--name-only")
-    return [f for f in stdout.strip().split("\n") if f]
+    # `--name-only` emits one unquoted path per line, so leading/trailing spaces
+    # in a filename are meaningful; only the line separator may be dropped.
+    return [f for f in stdout.split("\n") if f]
 
 def stage_files(files: List[str]) -> None:
     """Stage specific files."""
@@ -213,7 +243,9 @@ def get_diff_since_ref(base_ref: str) -> str:
 def get_files_changed_since_ref(base_ref: str) -> List[str]:
     """Get list of files changed since a reference commit."""
     stdout, _, _ = _run_git("diff", "--name-only", base_ref)
-    return [f for f in stdout.strip().split("\n") if f]
+    # Same rule as get_staged_files: one unquoted path per line, so the only
+    # thing safe to drop is the line separator.
+    return [f for f in stdout.split("\n") if f]
 
 
 def validate_git_ref(ref: str) -> str:

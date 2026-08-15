@@ -1,0 +1,82 @@
+# Per-row COMPLETE selection override, rendered by seed_workspace.py into the
+# sample project's .multi-llm/providers.yaml (C7).
+#
+# WHY THIS IS COMPLETE RATHER THAN A ONE-LINE `providers:` BLOCK.
+# The project layer *deep-merges* onto the shipped base (provider_registry.
+# load_config -> _deep_merge: nested dicts recurse, lists and scalars replace,
+# None is skipped). It never replaces it. So every selection key a row leaves
+# unset keeps base's value — and base's values name eight other CLIs. Measured
+# against providers.yaml as shipped:
+#
+#   defaults.quick_models          -> cursor-agent x2 + claude-code   (EVERY --quick run)
+#   defaults.models                -> 12 specs across 5 providers     (any non-quick turn,
+#                                     plus every salvage task's model_hint)
+#   defaults.modes.<mode>.*        -> consulted BEFORE the global lists
+#   driver.subagent_runner         -> claude-code:sonnet              (every --exec-subagents dispatch)
+#   driver.subagent_runner_cheap   -> claude-code:haiku               (ditto)
+#
+# Naming the row's CLI under `providers:` is the weakest form of all: that block
+# is availability metadata, and the image installs every verified CLI, so nothing
+# is filtered out and the fan-out really does run all of them. Delivering the same
+# partial file through MULTI_LLM_PROVIDERS_CONFIG changes nothing either — the env
+# layer is the last layer, but it merges exactly like the project one.
+#
+# Placeholders, substituted per row by seed_workspace.py:
+#   {{spec}}            the row's single "provider:model" spec
+#   {{runner}}          the row's agent-write-capable executor runner spec
+#   {{runner_cheap}}    the cheap-tier runner; normally the same as {{runner}}
+#
+# NOTE on defaults.modes: base ships no `modes` key today, so these entries beat
+# nothing at present. They are written anyway because a mode entry wins outright
+# over the global lists, and `modes: {}` would deep-merge as a no-op rather than
+# clearing a base entry — the only way to beat one is to write a leaf list of our
+# own. A plain-CI test asserts base ships no defaults.modes key this template does
+# not override, so a base edit that adds one fails there rather than by quietly
+# fanning out mid-row.
+
+defaults:
+  models:
+    - "{{spec}}"
+  quick_models:
+    - "{{spec}}"
+  modes:
+    review-plan:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    apply-suggestions:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    generate-tasks:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    review-tasks:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    apply-task-suggestions:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    implement:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    review-code:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    apply-code-fixes:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    full:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+    ask:
+      models: ["{{spec}}"]
+      quick: ["{{spec}}"]
+
+driver:
+  # BOTH keys, not just the obvious one: an unset subagent_runner_cheap keeps
+  # base's claude-code:haiku and adds a second binary to every row.
+  subagent_runner: "{{runner}}"
+  subagent_runner_cheap: "{{runner_cheap}}"
+  # Write concurrency stays at base's 1: the batchers partition by artifact, and
+  # a row that fans two write subagents at one workspace would make the pre/post
+  # byte census ambiguous about which batch moved what.
+  max_concurrent_write_subagents: 1

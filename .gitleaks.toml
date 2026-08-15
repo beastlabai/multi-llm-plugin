@@ -1,0 +1,130 @@
+# Committed-secret scanner rules for beastlabai/multi-llm-plugin.
+#
+# This repository is public, so anything committed is published. `.gitignore`
+# keeps credentials out by *location* and prevents the accident; this config —
+# together with `skills/multi-llm/tests/test_no_committed_secrets.py`, which
+# walks `git ls-files` on every PR — catches the one that slips through. The two
+# files land together and are maintained together: a rule change that needs an
+# exception is not finished until the exception is written here.
+#
+# Two design rules decide whether this holds anything at all.
+#
+# 1. RULES MATCH VALUES, NOT PREFIXES AND NOT FIELD NAMES.
+#    A rule that fires on the literal `sk-`, `ghp_` or `xoxb-` is red on its
+#    first run against this tree, and a rule that fires on the *identifier*
+#    `api_key` / `refresh_token` is red on content we cannot delete and would not
+#    want to:
+#      * `skills/multi-llm/tests/fixtures/e2e/responses/code_review/
+#        mixed_importance.json` ships an `API_KEY = "sk-1234…"` assignment as the
+#        anchor text of a review finding — the fixture is *about* a hardcoded
+#        key (spelled elided here on purpose: the full 13-character literal
+#        clears `generic-api-key`'s entropy floor when it sits next to the
+#        identifier, so writing it out would make this very file a finding);
+#      * `skills/multi-llm/tests/fixtures/e2e/plans/auth-feature.md` specifies a
+#        `sessions` table with a `refresh_token VARCHAR(255)` column and a
+#        `refresh(refresh_token)` endpoint — schema and API field names with no
+#        value attached, i.e. exactly what a plan about session management says;
+#      * `skills/multi-llm/uv.lock` is hundreds of 64-char sha256 digests that a
+#        bare entropy floor would hit.
+#    A scanner that is red on day one gets silenced on day two, so none of those
+#    may match in the first place. That is what `useDefault` below buys: the
+#    stock pack qualifies every vendor prefix with length, charset and (where the
+#    vendor defines one) a checksum, and its `generic-api-key` shape needs an
+#    identifier *plus* an adjacent value clearing length, charset and entropy
+#    floors. Markdown stays in scope — a real key is pasted into a README far
+#    more often than into a fixture — but only under those value-qualified rules.
+#    We do not hand-roll regexes we would then own: vendor key formats are
+#    precisely the thing that changes without telling us. Anything added on top
+#    of the pack observes the same discipline.
+#
+# 2. EXCLUSIONS ARE MATCH-LEVEL, NEVER FILE-LEVEL.
+#    A `paths` glob over `tests/fixtures/**` or `uv.lock` hides a *future* real
+#    key pasted into those files, and fixture directories are exactly where a
+#    real capture gets dropped "just to reproduce something". So `paths` never
+#    appears without a `regexes` beside it: the pair means "this value in this
+#    file", while `paths` alone means "this file is a blind spot".
+#
+#    Which shape actually *implements* that pair is a measured fact, not an
+#    assumption — see "How gitleaks really evaluates an allowlist" below, because
+#    the obvious spelling of it is a silent no-op.
+
+title = "multi-llm-plugin committed-secret rules"
+
+[extend]
+# gitleaks' stock rule pack, whole and unmodified — see rule 1 above.
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Allowlist entries
+# ---------------------------------------------------------------------------
+#
+# There are none. Measured, not assumed: on 2026-08-14, gitleaks 8.28.0 with the
+# stock pack over `git ls-files` reported zero findings on the tracked tree. The
+# `uv.lock` digests the plan predicted would fire do not — the stock
+# `generic-api-key` rule wants an identifier next to the value, and a bare
+# `sha256:...` in a lockfile has none — and `mixed_importance.json`'s decoy is a
+# 13-character `sk-` string inside an escaped JSON literal, below every vendor
+# rule's length floor. An entry that suppresses nothing is decoration,
+# and decoration is how a `paths`-shaped exclusion sneaks back in later, so the
+# test asserts both directions: every entry present must be load-bearing
+# (deleting it turns the scanner red) and the set must be no larger than what
+# actually fires.
+#
+# ---------------------------------------------------------------------------
+# How gitleaks really evaluates an allowlist (measured, gitleaks 8.28.0)
+# ---------------------------------------------------------------------------
+#
+# The natural way to write "this value in this file" does not do that, so this
+# is written down rather than rediscovered. Each row below was run against a
+# scratch tree holding one real-shape `ghp_` token, and
+# `test_no_committed_secrets.py::TestGitleaksAllowlistSemantics` pins the two
+# that these rules depend on, so a version bump that changes them fails loudly
+# instead of quietly widening an exception:
+#
+#   [[allowlists]] + paths           -> the whole FILE is skipped before any rule
+#                                       runs ("skipping file: global allowlist").
+#                                       A `regexes` beside it is inert, and so is
+#                                       `condition = "AND"`. This is the blind
+#                                       spot rule 2 forbids, and it is forbidden
+#                                       here however it is dressed up.
+#   [[allowlists]] + regexes         -> works: that exact value is excused
+#                                       everywhere. No blind spot — a different
+#                                       value in the same file is still caught.
+#   [[allowlists]] + targetRules     -> a SILENT NO-OP. It suppresses nothing,
+#                                       for stock and locally-defined rules
+#                                       alike, and an unknown rule id raises no
+#                                       error. Forbidden: an exception that
+#                                       looks scoped and does nothing is worse
+#                                       than none, because the reviewer stops
+#                                       looking.
+#   [[rules.allowlists]] + paths     -> that rule is skipped in that file. Still
+#                                       a blind spot, just a per-rule one.
+#   [[rules.allowlists]] + paths
+#     + regexes + condition = "AND"  -> the real thing: the value is excused only
+#                                       in that file, and the same value
+#                                       elsewhere — or a different value there —
+#                                       is still a finding.
+#
+# A rule-level allowlist needs a `[[rules]]` block to hang on, and a bare `id`
+# with no `regex` attaches to the stock rule of that id without restating its
+# pattern, which is what keeps rule 1's "never hand-roll" intact.
+#
+# So the required shape for any entry added later — rule ID, match regex, path,
+# fingerprints, rationale and the date it was added, every one of which the test
+# enforces — is:
+#
+#   [[rules]]
+#   id = "generic-api-key"   # the stock rule; its regex is deliberately not restated
+#
+#   [[rules.allowlists]]
+#   description = "uv.lock: pypi artifact digests, not credentials — scoped to the digest capture; added 2026-08-14"
+#   condition   = "AND"      # value AND path; either alone is a blind spot
+#   regexes     = ['''sha(?:256|512):[a-f0-9]{64,128}''']
+#   paths       = ['''skills/multi-llm/uv\.lock''']
+#   # fingerprints: skills/multi-llm/uv.lock:generic-api-key:12,19,26
+#
+# Note there is no `.gitleaksignore` in this repository and there must not be
+# one: fingerprint suppression outside this file is an exception nobody reviews.
+# For the same reason the scanner runs with `--ignore-gitleaks-allow`, so an
+# inline `gitleaks:allow` comment cannot silence a finding either. This file is
+# the single exception channel.

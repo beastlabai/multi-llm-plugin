@@ -16,6 +16,7 @@ Usage:
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ import pytest
 
 # Add tests directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from harness import (
     SkillRunner,
@@ -30,6 +32,12 @@ from harness import (
     MockProvider,
     AssertionHelpers,
     PERF_SCALE,
+)
+from utils.cli_common import (  # noqa: E402
+    EXIT_NEEDS_HUMAN,
+    EXIT_NOTHING_TO_DO,
+    EXIT_OK,
+    parse_result_line,
 )
 
 
@@ -598,10 +606,27 @@ class TestCodeReviewHeadBeforeImplement:
         )
 
         assert result.success, f"code_review failed: {result.stderr}"
-        # The orchestrator prints "Git base reference: <ref>" — verify it used the newer one
-        # Note: validate_git_ref may fall back if the ref is not a real commit,
-        # but it should NOT contain the old head_at_start value
-        assert "old_sha_from_plan_review" not in result.stdout
+
+        # Bind the preference *positively*. Both shas are fake, so `validate_git_ref`
+        # falls back to HEAD~1 and neither value reaches the "Git base reference:"
+        # line — an absence-only assertion would therefore pass just as happily if
+        # the preference were reversed. The ref the orchestrator actually picked is
+        # named either on that line (when it validates) or in the fallback warning
+        # it triggers ("git ref '<ref>' is invalid"), so require the newer value in
+        # one of those and the older value in neither.
+        chose_newer = (
+            "Git base reference: newer_sha_from_impl_start" in result.stdout
+            or "newer_sha_from_impl_start" in result.stderr
+        )
+        assert chose_newer, (
+            "code review did not resolve head_before_implement as the base ref\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert "old_sha_from_plan_review" not in (result.stdout + result.stderr), (
+            "code review fell back to head_at_start even though "
+            f"head_before_implement is present\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
 
 
 class TestCodeReviewMockSafety:
@@ -651,3 +676,222 @@ class TestCodeReviewMockSafety:
         assert len(calls) >= 1, "Expected at least 1 mock call"
         providers = {c.provider for c in calls}
         assert "cursor-agent" in providers, "cursor-agent should be in called providers"
+
+
+# ---------------------------------------------------------------------------
+# A review that *found* something is not a review that failed
+# ---------------------------------------------------------------------------
+
+#: Issues the code-review schema accepts, with a known HIGH count. Built here
+#: rather than read from ``responses/code_review/issues.json`` so the assertions
+#: below name a count this test owns, and so no other lane's fixture can move it.
+def _issues(high: int, low: int = 1):
+    issues = [
+        {
+            "title": f"SQL injection in user lookup {i}",
+            "desc": "The query is built with string formatting instead of a "
+                    "parameterized statement.",
+            "importance": "high",
+            "file": "src/services/auth_service.py",
+            "line_range": [40 + i, 42 + i],
+            "type": "bug",
+            "anchor_text": f"cursor.execute(lookup_query_{i})",
+        }
+        for i in range(high)
+    ]
+    issues += [
+        {
+            "title": f"Undocumented helper {i}",
+            "desc": "The public helper has no docstring.",
+            "importance": "low",
+            "file": "src/api/auth_routes.py",
+            "line_range": [80 + i, 81 + i],
+            "type": "style",
+            "anchor_text": f"def _helper_{i}():",
+        }
+        for i in range(low)
+    ]
+    return issues
+
+
+def _plan_with_issues(
+    skill_runner: SkillRunner,
+    fixture_manager: FixtureManager,
+    mock_provider: MockProvider,
+    name: str,
+    issues,
+):
+    """A code-review-ready plan whose single model returns exactly *issues*.
+
+    ``set_fixture_path`` rather than a scenario: the shipped scenarios route the
+    code-review prompt by regex, and "You are reviewing code changes that
+    implement a feature plan" also matches the *plan* review pattern — which is
+    why the importance mix a code-review test thinks it pinned is not always the
+    one the model returns. Handing the mock one fixture removes that variable.
+    """
+    mock_provider.set_fixture_path(
+        mock_provider.create_response_fixture(issues, name=f"{name}_issues")
+    )
+    skill_runner.extra_env.update(mock_provider.get_env())
+
+    plan = fixture_manager.create_plan(
+        name, "# Auth Plan\n\n## Overview\nAdd login.\n\n## Tasks\n- Auth service\n"
+    )
+    _create_implement_phase(fixture_manager, plan)
+    fixture_manager.create_state_file(
+        plan,
+        phases_completed=["review-plan", "implement"],
+        extra_state={
+            "head_at_start": "abc123def",
+            "tracked_files": [
+                {"path": "src/services/auth_service.py", "task_id": "T001"},
+            ],
+        },
+    )
+    return plan
+
+
+class TestHighFindingsAreNotAFailedPhase:
+    """`review-code` must not report "I found something serious" as an error.
+
+    ``main()`` used to end with ``return 1 if high_count > 0 else 0``. Under the
+    uniform exit-code contract (AGENTS.md: ``0`` done, ``1`` unexpected error,
+    ``2`` nothing to do, ``3`` needs a human) that claimed an error that never
+    happened — the report was written and ``code-review`` was recorded completed —
+    and two readers believed it:
+
+    * ``full`` routes every phase through ``_verify(phase, code)``, which treats
+      any non-zero as a failed phase and stops the chain. A chain whose review
+      found HIGH issues therefore aborted **at** ``review-code``, one phase before
+      ``apply-code-fixes`` — the phase whose entire job is to fix what the review
+      just found.
+    * ``cli_common._STATE_BY_EXIT`` maps ``1`` to ``"error"``, so the one
+      machine-readable line every host reads reported ``state: "error"`` for a
+      successful run.
+
+    The finding is not lost. It is announced as ``[HIGH_PRIORITY_ISSUES] <n>`` —
+    the bracketed-marker channel this skill already uses for every other
+    "you must act on this" fact — and ``--fail-on-high`` restores a non-zero exit
+    for a standalone CI gate.
+    """
+
+    def test_high_findings_exit_zero_and_announce_themselves(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "high-findings", _issues(high=3),
+        )
+
+        result = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", timeout=45,
+        )
+
+        assert "High priority: 3" in result.stdout, (
+            "the fixture must actually produce HIGH findings, or this test proves "
+            f"nothing. stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        # The bug, and the whole point: `full`'s `_verify` treats anything outside
+        # {EXIT_OK, EXIT_NOTHING_TO_DO} as a failed phase and stops the chain.
+        assert result.exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO), (
+            f"a completed review is not a failed phase, but it exited "
+            f"{result.exit_code}; `full` would stop here and never reach "
+            f"apply-code-fixes"
+        )
+        # The signal a standalone caller keeps, richer than the exit code it
+        # replaces: it carries the count.
+        assert "[HIGH_PRIORITY_ISSUES] 3" in result.stdout
+
+        # And the phase really did finish, so there is something to fix next.
+        assert (plan.output_dir / "code-review" / "report.md").exists()
+        state = result.get_state() or {}
+        assert "code-review" in (state.get("phases_completed") or {})
+
+    def test_the_result_line_of_a_high_finding_review_says_done(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """Through the dispatcher, because that is where the result line is emitted."""
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "high-findings-result", _issues(high=2),
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable, str(skill_runner.skill_dir / "multi_llm.py"),
+                "review-code", str(plan.plan_path),
+                "--models", "cursor-agent", "--skip-validation",
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60 * PERF_SCALE, env=skill_runner._build_env(),
+            cwd=str(skill_runner.skill_dir),
+        )
+
+        assert "[HIGH_PRIORITY_ISSUES] 2" in proc.stdout, proc.stdout
+        result = parse_result_line(proc.stdout)
+        assert result is not None, proc.stdout
+        assert result["exit"] == EXIT_OK
+        assert result["state"] == "done", (
+            "a review that completed and wrote its report is `done`, never `error`"
+        )
+
+    def test_fail_on_high_restores_the_standalone_gate(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """The opt-in a CI job that gated on `$?` migrates to.
+
+        Exit 3 ("needs a human"), never 1: the caller asked to be stopped, and
+        nothing errored. `full` never passes this flag.
+        """
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "fail-on-high", _issues(high=2),
+        )
+
+        result = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", "--fail-on-high",
+            timeout=45,
+        )
+
+        assert result.exit_code == EXIT_NEEDS_HUMAN
+        assert "[HIGH_PRIORITY_ISSUES] 2" in result.stdout
+        # Gating is not aborting: the review still produced everything it would
+        # have produced without the flag.
+        assert (plan.output_dir / "code-review" / "report.md").exists()
+        assert (plan.output_dir / "code-review" / "grouped.json").exists()
+        state = result.get_state() or {}
+        assert "code-review" in (state.get("phases_completed") or {})
+
+    def test_fail_on_high_is_quiet_when_nothing_is_high(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "no-high-findings", _issues(high=0, low=2),
+        )
+
+        result = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", "--fail-on-high",
+            timeout=45,
+        )
+
+        assert result.exit_code == EXIT_OK
+        assert "High priority: 0" in result.stdout
+        assert "[HIGH_PRIORITY_ISSUES]" not in result.stdout, (
+            "the marker is the finding, so it is printed only when there is one"
+        )

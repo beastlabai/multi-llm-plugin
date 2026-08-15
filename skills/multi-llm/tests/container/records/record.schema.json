@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-llm.invalid/schemas/container_run_record.schema.json",
+  "title": "Container harness run record (C10)",
+  "description": "The sanitized, TRACKED summary the host-side driver derives from a run's ephemeral runs/<utc>/<row-id>/ bundle. A green host-lane row is the only evidence that promotes a hosts/capabilities.yaml field from `documented` to `verified`, and evidence a reviewer cannot open at the promotion commit — or that `make e2e-clean` erases — cannot back a claim that ships to users. So this file is committed alongside the promotion while the raw bundle stays gitignored and prunable. The writer refuses any key outside this schema, so 'the driver learned to log one more field' cannot quietly turn a record into a transcript.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "started_at", "lane", "image", "rows", "outcome"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "started_at": {
+      "type": "string",
+      "description": "UTC ISO-8601; matches the <utc> segment of the bundle directory."
+    },
+    "ended_at": {"type": "string"},
+    "lane": {"enum": ["provider", "host"]},
+    "creds_mode": {
+      "enum": ["openrouter", "fallback", "none"],
+      "description": "The operator's choice for the whole invocation. NOT the same thing as a host's recorded credential_mode, which is Phase 1's measurement that no working credential path was found for that host."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "digest", "platform"],
+      "properties": {
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "platform": {"type": "string"},
+        "pin_mode": {"enum": ["pinned", "latest"]}
+      }
+    },
+    "egress": {
+      "enum": ["none", "open", "allowlist"],
+      "description": "Recorded so a row's evidence states which guarantee it had: `none` is structural (a mis-redirected CLI cannot reach a real endpoint), `open` is detection-only, `allowlist` converts detection back into a structural guarantee."
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["row_id", "outcome"],
+        "properties": {
+          "row_id": {"type": "string"},
+          "cli": {"type": "string"},
+          "host": {"type": "string"},
+          "mode": {"type": "string"},
+          "cli_version": {"type": "string"},
+          "model": {"type": "string", "description": "The PINNED slug from host_matrix.yaml, never a run-time 'cheapest' lookup."},
+          "credential_mode": {"enum": ["openrouter", "fallback", "none", "discovery-only"]},
+          "outcome": {"enum": ["pass", "fail", "skip", "not-run", "cap-hit"]},
+          "reason": {
+            "type": "string",
+            "description": "Named reason on a skip/fail/cap-hit — e.g. `cap-hit: tool-loop`, `cap-hit: no-first-call`, `cap-hit: stalled-after-<turn>`, `not_authenticated`, `permission`."
+          },
+          "wall_clock_s": {"type": "number"},
+          "turns": {"type": "integer"},
+          "stub_requests": {"type": "integer"},
+          "unhandled_routes": {"type": "integer"},
+          "unmatched_prompts": {"type": "integer"},
+          "write_outcome": {"enum": ["applied", "clean-failure", "partial", "schema-rejected"]},
+          "cost": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "estimate_usd": {"type": "number"},
+              "estimate_source": {"enum": ["seeded", "measured"]},
+              "actual_usd": {
+                "type": ["number", "null"],
+                "description": "null means the readback surfaces did not answer; the running total is then relabelled `estimate` rather than `spend` and the record says actual: unavailable. A number is never recorded that was not measured."
+              },
+              "actual_source": {"enum": ["generation-stats", "key-usage-delta", "unavailable"]},
+              "input_tokens": {"type": "integer"},
+              "output_tokens": {"type": "integer"}
+            }
+          }
+        }
+      }
+    },
+    "census": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How many hosts ran in each mode, each named with its reason. `3/0/0/0` and `0/0/3/0` are both possible outcomes of the same command, and a summary that cannot tell them apart is exactly how zero host coverage passes for a green matrix.",
+      "properties": {
+        "openrouter": {"type": "integer"},
+        "fallback": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "discovery_only": {"type": "integer"},
+        "detail": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "actual"],
+            "properties": {
+              "host": {"type": "string"},
+              "expected": {"enum": ["openrouter", "fallback", "none"]},
+              "actual": {"enum": ["openrouter", "fallback", "skipped", "discovery-only"]},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "outcome": {"enum": ["pass", "fail", "not-run"]},
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Digests of the ephemeral half, so the deletable bundle stays checkable without being durable. If the operator still has it, `make e2e-verify-record` re-hashes and says whether it is the one the promotion cited; if it is gone, the record still stands on its own and the reviewer knows precisely what is no longer inspectable.",
+      "required": ["files", "aggregate"],
+      "properties": {
+        "root": {"type": "string"},
+        "files": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        },
+        "aggregate": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "archive_url": {
+          "type": "string",
+          "description": "Optional. The digest is what is trusted; the URL is only how you fetch the bytes."
+        }
+      }
+    },
+    "promotions": {
+      "type": "array",
+      "description": "The hosts/capabilities.yaml edits this run justifies. PRINTED, never applied: promoting a capability changes which code path ships to users, so it stays a human commit carrying the record file and the capabilities edit in the same diff.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "field", "from", "to"],
+        "properties": {
+          "host": {"type": "string"},
+          "field": {"type": "string"},
+          "from": {"enum": ["unknown", "documented", "verified"]},
+          "to": {"enum": ["documented", "verified"]},
+          "evidence": {"type": "string", "description": "Row id within this record."}
+        }
+      }
+    }
+  }
+}

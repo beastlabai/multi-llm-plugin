@@ -54,8 +54,17 @@ from instruction_refactor_bundle import (  # noqa: E402
     GUARD_PLAN,
     GUARD_SCENARIO,
     capture,
+)
+
+# The normalize/diff/allowlist machinery is shared with the container lane (C8):
+# two guards comparing normalized run bundles must not grow two subtly different
+# sets of rules for what "the same run" means.
+from bundle_compare import (  # noqa: E402
+    AllowlistError,
     diff_bundles,
+    load_allowlist,
     normalize_run,
+    partition,
 )
 
 BASELINE = (
@@ -71,36 +80,24 @@ BASELINE_COMMIT = "272f9469252842e0fff0e5238203f431e8bfc016"
 
 
 def _load_allowlist():
-    document = yaml.safe_load(ALLOWLIST.read_text(encoding="utf-8")) or {}
-    entries = document.get("changes") or []
-    for entry in entries:
-        assert isinstance(entry, dict), entry
-        pointer = entry.get("pointer")
-        assert pointer and pointer != "/", (
-            "an expected_changes.yaml entry needs a JSON-pointer path, and `/` "
-            "(a blanket ignore) is not one"
-        )
-        assert entry.get("rationale"), (
-            f"expected_changes.yaml entry {pointer} carries no rationale; an "
-            "undocumented allowed diff is indistinguishable from an unnoticed one"
-        )
-    return entries
+    """The shared loader (C8), with this guard's own allowlist path.
+
+    The *code* is shared with the container lane because two guards must not grow
+    two subtly different notions of what "the same run" means. The *baseline and
+    the allowlist* are deliberately not: this file's entries describe one specific
+    refactor against one pinned tag, so pointing the container lane at them would
+    silently excuse a container regression that happened to land under one — and
+    fail container runs on entries whose diff exists only relative to that tag.
+    """
+    try:
+        return load_allowlist(ALLOWLIST)
+    except AllowlistError as exc:  # keep this guard's failures assertion-shaped
+        raise AssertionError(str(exc)) from exc
 
 
 def _partition(diffs, entries):
     """Split reported diffs into (allowed, unexplained) and count entry matches."""
-    matched = {entry["pointer"]: 0 for entry in entries}
-    allowed, unexplained = [], []
-    for pointer, before, after in diffs:
-        hit = next(
-            (e["pointer"] for e in entries if pointer.startswith(e["pointer"])), None
-        )
-        if hit is None:
-            unexplained.append((pointer, before, after))
-        else:
-            matched[hit] += 1
-            allowed.append((pointer, before, after))
-    return allowed, unexplained, matched
+    return partition(diffs, entries)
 
 
 class TestBaselineIntegrity:

@@ -1,0 +1,64 @@
+# Runtime manifest for the containerized E2E build context
+# (plans/containerized-harness-e2e.md, C6b rule 1 — a local-only working note,
+# gitignored and absent from a fresh clone).
+#
+# The explicit list of runtime sources the image needs: the product under test
+# plus the rig that drives it. It is the twin of the repo-root .dockerignore,
+# whose negations these patterns mirror one for one, and it exists so the
+# allowlist cannot quietly become narrower than the product it is meant to ship.
+#
+# skills/multi-llm/tests/test_build_context.py exports the build context from a
+# clean checkout and asserts against this file in all three directions:
+#
+#   1. every pattern here matches at least one exported path -- a widened `*`, a
+#      missing `/**` or a new runtime directory nobody added fails here rather
+#      than as an ImportError three phases later;
+#   2. the planted secrets are absent;
+#   3. every exported path matches at least one pattern here -- the direction
+#      that stops the allowlist drifting back into a denylist as these trees
+#      grow.
+#
+# FORMAT. One glob pattern per line, repo-root-relative, matched against files
+# only. `*` and `?` stop at a `/`; `**` spans separators (`a/**` is everything
+# under `a/`, `**/x` is `x` at any depth). Blank lines are ignored, and -- unlike
+# .dockerignore, where a trailing comment silently corrupts the pattern -- `#`
+# comments are stripped here, inline ones included, because this file is parsed
+# by the test and never by Docker. A pattern whose target does not exist yet is
+# marked `# optional`, which exempts it from direction 1 only; it still counts
+# for direction 3.
+
+# --- the product under test -------------------------------------------------
+
+# multi_llm.py, modes.py and every orchestrator
+skills/multi-llm/*.py
+skills/multi-llm/providers.yaml
+skills/multi-llm/pyproject.toml
+skills/multi-llm/uv.lock
+skills/multi-llm/SKILL.md
+skills/multi-llm/utils/**
+skills/multi-llm/instructions/**
+# the instruction core cites these at runtime
+skills/multi-llm/references/**
+skills/multi-llm/prompts/**
+skills/multi-llm/schemas/**
+skills/multi-llm/templates/**
+# inlined by the HTML report
+skills/multi-llm/assets/icons/**
+# capabilities.yaml + shim templates + snippets (host lane)
+skills/multi-llm/hosts/**
+
+# --- the rig that drives it -------------------------------------------------
+
+skills/multi-llm/tests/__init__.py
+skills/multi-llm/tests/conftest.py
+skills/multi-llm/tests/scenario_matcher.py  # optional
+skills/multi-llm/tests/harness/**
+skills/multi-llm/tests/mocks/**
+skills/multi-llm/tests/container/**
+# the value-free credential seed set, kept in by the last negation in
+# .dockerignore even though the credential re-exclusions above it name the same
+# filenames; listed separately so a seed that stops shipping is visible here
+skills/multi-llm/tests/container/home_seed/**  # optional
+skills/multi-llm/tests/fixtures/**
+skills/multi-llm/tests/golden/**
+skills/multi-llm/tests/test_container_*.py  # optional

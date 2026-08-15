@@ -1,0 +1,37 @@
+{
+  "groups": [
+    {
+      "group_index": 0,
+      "group_hash": "c948ad24b1b8e432",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "1558bbe6cea433cf",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "a4ba681281e554b8",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "64ba7f164d362232",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    }
+  ],
+  "metadata": {
+    "model": "container-stub",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "schema_version": "2.1"
+  }
+}

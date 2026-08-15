@@ -1,0 +1,23 @@
+[
+  {
+    "title": "No task covers session revocation",
+    "desc": "The plan requires refresh tokens to be revocable, and SessionStore.revoke already exists, but no generated task exercises or wires it. Add a task that revokes the stored session on logout and asserts the token can no longer be redeemed.",
+    "importance": "high",
+    "reference": "Plan Coverage",
+    "type": "addition"
+  },
+  {
+    "title": "T002 acceptance criteria omit the eviction bound",
+    "desc": "T002 says entries older than WINDOW_SECONDS are dropped but never states the resulting bound on the store, so the criterion is not verifiable. State the post-condition explicitly: after eviction the store holds only entries inside the window.",
+    "importance": "medium",
+    "reference": "T002",
+    "type": "clarification"
+  },
+  {
+    "title": "T003 does not name the lockout threshold under test",
+    "desc": "T003 asks for regression tests but does not say which MAX_ATTEMPTS boundary the test pins, so two implementers would write different tests. Name the boundary in the description.",
+    "importance": "low",
+    "reference": "T003",
+    "type": "modification"
+  }
+]
