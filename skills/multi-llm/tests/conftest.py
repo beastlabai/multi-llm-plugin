@@ -66,6 +66,85 @@ def pytest_collection_modifyitems(items):
     items[:] = [item for item in items if id(item) not in postponed] + deferred
 
 
+# --------------------------------------------------------------------------- #
+# The container host lane's SECOND verdict (C10b).
+#
+# A `hosts/capabilities.yaml` promotion is a claim that a capability was
+# demonstrated, and the harness may only propose one for a row that passed twice:
+# the container exited 0 **and** the assertions over the evidence that run left
+# behind also passed. The driver knows the first when `run_row` returns; only
+# pytest knows the second, and only after the record has already been written. So
+# the driver writes the record provisionally (no promotions, by construction) and
+# these two hooks carry the grader's verdict back to it.
+#
+# Both are no-ops for every non-container session: the ledger is empty unless a
+# host row really ran, and the import is guarded so a checkout without the
+# container package still collects.
+# --------------------------------------------------------------------------- #
+
+#: `None` until first asked; `False` when the container package is unavailable,
+#: which is a legitimate state (the harness is optional) rather than an error.
+_GRADE_LEDGER = None
+
+
+def _grade_ledger():
+    global _GRADE_LEDGER
+    if _GRADE_LEDGER is None:
+        try:
+            from .container.harness import GRADES
+        except Exception:                       # noqa: BLE001 — optional package
+            _GRADE_LEDGER = False
+        else:
+            _GRADE_LEDGER = GRADES
+    return _GRADE_LEDGER or None
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """File each test's verdict against every container row the test read.
+
+    Deliberately swallowing: this runs for every phase of every test in the suite,
+    and a bookkeeping error here must never be what turns a green test red. A row
+    that collects no verdict promotes nothing, so the failure mode of a silent
+    miss is a withheld promotion — the safe direction.
+    """
+    outcome = yield
+    ledger = _grade_ledger()
+    if ledger is None or not ledger.rows:
+        return
+    try:
+        ledger.note_report(item, outcome.get_result())
+    except Exception:                           # noqa: BLE001 — see docstring
+        pass
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Re-emit every host row's record with both verdicts, then print promotions.
+
+    Session end rather than fixture teardown, because it is the one point every
+    row has been graded by everything that was ever going to grade it — including
+    the modules pytest reordered — and it still runs after `pytest.exit`, which is
+    how the host lane reports an empty lane and a blown budget.
+    """
+    ledger = _grade_ledger()
+    if ledger is None or not ledger.rows:
+        return
+    try:
+        ledger.resolve_all()
+        for line in ledger.summary():
+            print(line)
+    except Exception as exc:                    # noqa: BLE001 — reported, not hidden
+        print(f"container harness: the run records could not be resolved: "
+              f"{type(exc).__name__}: {exc}")
+        session.exitstatus = session.exitstatus or 1
+        return
+    if ledger.errors:
+        # A record that cannot be written is a driver bug, and C10's whole point
+        # is that the tracked record is the evidence. Reported as a failed
+        # invocation rather than as a green run with a missing file.
+        session.exitstatus = session.exitstatus or 1
+
+
 @pytest.fixture(autouse=True)
 def _isolate_provider_config(request, monkeypatch):
     """Neutralize per-project config discovery for the default test suite.

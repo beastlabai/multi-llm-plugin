@@ -50,7 +50,7 @@
           "outcome": {"enum": ["pass", "fail", "skip", "not-run", "cap-hit"]},
           "reason": {
             "type": "string",
-            "description": "Named reason on a skip/fail/cap-hit — e.g. `cap-hit: tool-loop`, `cap-hit: no-first-call`, `cap-hit: stalled-after-<turn>`, `not_authenticated`, `permission`."
+            "description": "Named reason on a skip/fail/cap-hit — e.g. `cap-hit: tool-loop`, `cap-hit: no-first-call`, `cap-hit: stalled-after-<turn>`, `not_authenticated`, `permission`. Also carries the GRADER's side of the verdict on an otherwise green row: `provisional` (the record was written when the row exited, before pytest graded it — such a record proposes no promotion), `ungraded` (no test ever asserted on this row), or the assertion that failed it. A row whose container exited 0 but whose assertions failed is recorded `fail` and names them here."
           },
           "wall_clock_s": {"type": "number"},
           "turns": {"type": "integer"},
@@ -122,7 +122,7 @@
     },
     "promotions": {
       "type": "array",
-      "description": "The hosts/capabilities.yaml edits this run justifies. PRINTED, never applied: promoting a capability changes which code path ships to users, so it stays a human commit carrying the record file and the capabilities edit in the same diff.",
+      "description": "The hosts/capabilities.yaml edits this run justifies. PRINTED, never applied: promoting a capability changes which code path ships to users, so it stays a human commit carrying the record file and the capabilities edit in the same diff. An entry here means the row passed TWICE — its container exited 0 and the assertions over its bundle passed. A record written before the grader ran, or for a row the grader failed or never looked at, carries an empty array and says which in `rows[].reason`.",
       "items": {
         "type": "object",
         "additionalProperties": false,
