@@ -391,6 +391,30 @@ The harness **prints** the `capabilities.yaml` promotions a run justifies; it ne
 applies them. Promoting a capability changes which code path ships to users, so it
 stays a human commit carrying the record and the edit in the same diff.
 
+### "Green" is two verdicts, and a promotion needs both
+
+The **container** exiting 0 and the **grader** (pytest, asserting over the bundle
+that run left behind) passing are different facts, and rows really do produce one
+without the other: a `codex-review-plan` row exited 0 having never detached its
+worker — no `orchestrator-run.log`, no `.lock`, every run state `None` — and a
+`claude-code-ask` row exited 0 with its host at `error_max_turns`. Both would once
+have proposed capability edits, because the record was written the moment the row
+finished, before any assertion had read it.
+
+So each host row's record is written **twice**. `run_row` writes it as soon as the
+row exits, carrying the container's verdict, no promotions at all, and a `reason`
+saying the grader has not spoken yet — evidence survives an interrupted session,
+but a provisional record can never propose an edit. `GradeLedger` then re-emits it
+at session end with both verdicts, which is the only point a promotion can appear.
+`promotions()` defaults its grader argument to `ungraded`, so "promote by
+omission" is not a code path any caller can reach.
+
+Two consequences worth knowing: a row nothing asserted about is `ungraded`, which
+promotes nothing and says so (it is not a pass); and because the re-emission
+re-digests the bundle, a grading test that writes into the bundle it grades —
+`negative-auth-observed.json` — no longer turns `make e2e-verify-record` into a
+false MISMATCH.
+
 ---
 
 ## Two operational rules, on you rather than on the code

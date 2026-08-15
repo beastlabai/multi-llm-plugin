@@ -136,7 +136,9 @@ class RowResult:
     stderr: str = ""
     #: Where C10's tracked record for this row landed, or ``None`` when the driver
     #: could not derive one (it says why in ``record-skipped.txt`` beside the
-    #: bundle). A grader re-emits through :func:`emit_record` with its own verdict.
+    #: bundle). What lands here first is the PROVISIONAL record — the container's
+    #: verdict, no promotions; :class:`GradeLedger` rewrites the same path with the
+    #: grader's verdict once pytest has finished asserting over this bundle.
     record_path: Path | None = None
 
     # -- the evidence, read back after the container is gone ---------------- #
@@ -1143,6 +1145,31 @@ def census_block(row: Row, result: RowResult, outcome: str) -> dict:
     return counts
 
 
+#: The GRADER's three states, kept apart from the container's `row_outcome`
+#: vocabulary on purpose — they answer different questions and a row has one of
+#: each. `ungraded` is not a synonym for `fail`: "pytest asserted nothing about
+#: this row" and "pytest failed this row" are different facts, and only the second
+#: one is a finding. Both withhold promotions.
+GRADED_PASS = "pass"
+GRADED_FAIL = "fail"
+UNGRADED = "ungraded"
+
+#: What a record says while it is still waiting for its grader. Written into the
+#: row's `reason` rather than left implicit: a record left behind by an
+#: interrupted session must state that its verdict is the container's alone,
+#: because otherwise it reads exactly like a graded pass.
+PROVISIONAL_REASON = (
+    "provisional: this is the container's verdict alone — pytest had not finished "
+    "grading the row when the record was written, so no promotion is emitted from it"
+)
+
+#: The other half of the same honesty: a row that ran and that no assertion ever
+#: looked at is not evidence for anything, however cleanly its container exited.
+UNGRADED_REASON = (
+    "ungraded: no test reported a verdict on this row, so it promotes nothing"
+)
+
+
 def promotable_fields(row: Row, result: RowResult) -> set[str]:
     """Which `capabilities.yaml` fields THIS row's artifacts are evidence for.
 
@@ -1175,14 +1202,20 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
     return fields
 
 
-def promotions(row: Row, result: RowResult, outcome: str) -> list[dict]:
-    """The `capabilities.yaml` edits this row justifies — printed, never applied.
+def candidate_promotions(row: Row, result: RowResult) -> list[dict]:
+    """The edits this row's ARTIFACTS could justify, before any verdict is applied.
 
-    Only a green row promotes anything (that file's own rule), and only a field
-    whose provenance is currently below `verified`: re-promoting a verified cell
-    would be noise in the diff a reviewer has to read beside the evidence.
+    Split out from :func:`promotions` so the two questions stay separable: *what
+    would this bundle support* is a property of the files on disk, and *may it be
+    promoted* is a property of the two verdicts. The summary needs the first to
+    say what a failing row withheld; only the second may ever reach a reviewer as
+    a proposed edit.
+
+    Only a field whose provenance is currently below `verified` appears:
+    re-promoting a verified cell would be noise in the diff a reviewer has to read
+    beside the evidence.
     """
-    if outcome != "pass" or not row.host:
+    if not row.host:
         return []
     provenance = (load_capabilities().get(row.host) or {}).get("provenance") or {}
     edits = []
@@ -1192,6 +1225,32 @@ def promotions(row: Row, result: RowResult, outcome: str) -> list[dict]:
             edits.append({"host": row.host, "field": field_name, "from": was,
                           "to": "verified", "evidence": row.row_id})
     return edits
+
+
+def promotions(row: Row, result: RowResult, outcome: str,
+               graded: str = UNGRADED) -> list[dict]:
+    """The `capabilities.yaml` edits this row justifies — printed, never applied.
+
+    **Two verdicts, and a promotion needs both.** `outcome` is the container's:
+    the run exited 0. `graded` is pytest's: the assertions over the evidence that
+    run left behind also passed. They are genuinely different facts — a row can
+    exit 0 having produced output that then fails its own assertions, which is
+    exactly how `codex-review-plan` printed five promotions on a run where the
+    worker was never detached (`expect.run: done`, observed all-`None`), and how
+    `claude-code-ask` printed three on a run whose host exited 1 with
+    `error_max_turns`.
+
+    `graded` therefore defaults to :data:`UNGRADED`, which promotes **nothing**.
+    That default is the fix rather than a formality: the only way to emit a
+    promotion is for a caller to state, in as many words, that a grader looked at
+    this row and passed it. A caller that has no grader verdict to offer — the
+    driver at `run_row` time, where pytest has not begun asserting yet — cannot
+    accidentally promote by omission, because there is no longer a code path from
+    "the container exited 0" to a proposed capability edit.
+    """
+    if outcome != "pass" or graded != GRADED_PASS:
+        return []
+    return candidate_promotions(row, result)
 
 
 def _schema_errors(node, schema, path: str = "<root>") -> list[str]:
@@ -1246,8 +1305,14 @@ def validate_record(record: dict) -> list[str]:
 def build_record(row: Row, result: RowResult, posture: dict | None = None,
                  image: str = DEFAULT_IMAGE, outcome: str | None = None,
                  reason: str | None = None,
-                 archive_url: str | None = None) -> dict:
-    """Assemble one row's record. Raises nothing; validation is the writer's job."""
+                 archive_url: str | None = None,
+                 graded: str = UNGRADED) -> dict:
+    """Assemble one row's record. Raises nothing; validation is the writer's job.
+
+    `graded` is the grader's verdict and defaults to :data:`UNGRADED`, so a caller
+    that has not been told a row passed its assertions writes a record with an
+    empty `promotions` array.
+    """
     posture = posture or load_posture()
     if outcome is None:
         outcome, default_reason = row_outcome(result)
@@ -1269,7 +1334,7 @@ def build_record(row: Row, result: RowResult, posture: dict | None = None,
         # cap-hit and skip are row verdicts; a run is pass, fail or not-run.
         "outcome": ("pass" if outcome == "pass"
                     else "not-run" if outcome == "not-run" else "fail"),
-        "promotions": promotions(row, result, outcome),
+        "promotions": promotions(row, result, outcome, graded),
     }
     bundle = bundle_block(result.out_dir, archive_url)
     if bundle:
@@ -1284,13 +1349,22 @@ def build_record(row: Row, result: RowResult, posture: dict | None = None,
 def emit_record(row: Row, result: RowResult, posture: dict | None = None,
                 image: str = DEFAULT_IMAGE, outcome: str | None = None,
                 reason: str | None = None, records_dir: Path | None = None,
-                archive_url: str | None = None) -> Path | None:
+                archive_url: str | None = None,
+                graded: str = UNGRADED) -> Path | None:
     """Derive, validate and write this row's tracked record. Idempotent per row.
 
     Re-emitting with a graded `outcome` rewrites the same path, so the record a
     reviewer reads carries the *grader's* verdict rather than the container's exit
     code — a row whose container exited 0 can still fail an assertion over its
-    evidence, and only the assertion knows that.
+    evidence, and only the assertion knows that. :class:`GradeLedger` is what does
+    the re-emitting; nothing else should call this with a `graded` argument,
+    because the ledger is the only thing that has heard from pytest.
+
+    The re-emission also re-digests the bundle, which matters beyond the verdict:
+    a grading test may write into the bundle it is grading (the negative-auth rows
+    file `negative-auth-observed.json` there), and a digest taken before the
+    grader ran would then report MISMATCH — the verdict this rig reserves for
+    "something rewrote the evidence" — against a bundle nobody tampered with.
 
     Failures are kept apart on purpose. A record that does not validate is a
     **driver bug** and raises: writing an unsanitized record is the one outcome
@@ -1300,7 +1374,7 @@ def emit_record(row: Row, result: RowResult, posture: dict | None = None,
     digest; both write their reason beside the bundle they are about.
     """
     record = build_record(row, result, posture, image, outcome, reason,
-                          archive_url)
+                          archive_url, graded)
     if not record["image"]:
         note = (f"no record written: `docker image inspect {image}` did not "
                 f"answer with a sha256 id, so the record's image column could "
@@ -1328,6 +1402,285 @@ def emit_record(row: Row, result: RowResult, posture: dict | None = None,
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
     return path
+
+
+# --------------------------------------------------------------------------- #
+# C10b — the grader's verdict, and the ordering problem it has to survive.
+#
+# A promotion is a claim that a capability was *demonstrated*, and demonstrating
+# it takes two things that happen at two different times:
+#
+# 1. the container runs and exits — the driver knows this the moment `run_row`
+#    returns, and it is the only verdict that existed here before;
+# 2. the assertions over the evidence that run left behind pass — pytest knows
+#    this later, one test at a time, after the record has already been written.
+#
+# The record cannot simply be written later instead: a row's bundle is the only
+# durable evidence a crashed or interrupted session leaves, and a driver that
+# wrote nothing until the grader finished would lose the record for exactly the
+# runs that most need one. So the record is written **twice**, and the ledger
+# below owns both writes:
+#
+# * `open()` writes it as soon as the row finishes, with the container's verdict
+#   and — by construction, since `promotions()` defaults to `UNGRADED` —
+#   **no promotions**, plus a `reason` that says so in as many words;
+# * `note_report()` collects each pytest report and attributes it to the rows the
+#   test actually read (via `item.funcargs`, so attribution is the fixture value
+#   the test was handed rather than a guess from its id or from run order);
+# * `resolve_all()` re-emits every row at session end with both verdicts, which is
+#   where a promotion can first appear at all.
+#
+# The alternative designs were rejected for concrete reasons rather than taste.
+# Keeping the write at row time and *applying* the grader's verdict to
+# `capabilities.yaml` afterwards would break C10's rule that the harness never
+# writes that file. Deriving the verdict from the record itself is circular. And
+# inferring "the row passed" from pytest's exit code cannot work on a matrix: one
+# red row would suppress every other row's promotions, and a lane whose failures
+# are all skips would suppress none.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class GradedRow:
+    """One row's two verdicts, plus the record they are written into."""
+
+    row: Row
+    result: RowResult
+    posture: dict | None = None
+    image: str = DEFAULT_IMAGE
+    records_dir: Path | None = None
+    #: `nodeid`s, so a withheld promotion names the assertion that withheld it.
+    passed: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    resolved: bool = False
+    record_path: Path | None = None
+    #: What was really written on the last emit — never what the artifacts could
+    #: have supported, which is `candidate_promotions`.
+    emitted: list[dict] = field(default_factory=list)
+
+    @property
+    def graded(self) -> str:
+        """`fail` beats `pass`; nothing at all is :data:`UNGRADED`, not a pass."""
+        if self.failed:
+            return GRADED_FAIL
+        if self.passed:
+            return GRADED_PASS
+        return UNGRADED
+
+    def verdict(self) -> tuple[str, str | None]:
+        """The row's outcome and reason with BOTH verdicts folded in.
+
+        A grader failure over a container that exited 0 is recorded as `fail` —
+        the row did not pass, and the record is the tracked artifact a reviewer
+        reads instead of the pytest scrollback that scrolled away.
+        """
+        outcome, reason = row_outcome(self.result)
+        if self.failed:
+            named = ", ".join(_test_name(nodeid) for nodeid in self.failed[:3])
+            if len(self.failed) > 3:
+                named += f" (+{len(self.failed) - 3} more)"
+            reason = "; ".join(part for part in (
+                reason, f"the grader failed this row: {named}") if part)
+            if outcome == "pass":
+                outcome = "fail"
+        elif not self.passed:
+            reason = "; ".join(part for part in (reason, UNGRADED_REASON) if part)
+        return outcome, reason
+
+
+def _test_name(nodeid: str) -> str:
+    """The readable tail of a nodeid — the part a failure message is about."""
+    return nodeid.rsplit("::", 1)[-1] or nodeid
+
+
+def _row_results(value) -> list[RowResult]:
+    """Every `RowResult` a fixture value carries, one container level deep.
+
+    The host-lane fixtures hand a test `(result, census, entry)`; the chain
+    fixtures hand it a bare `RowResult`. Both shapes are read here rather than
+    each module teaching the ledger about its own tuple.
+    """
+    candidates = [value]
+    if isinstance(value, (tuple, list)):
+        candidates += list(value)
+    return [candidate for candidate in candidates
+            if isinstance(candidate, RowResult)]
+
+
+class GradeLedger:
+    """Every host row of one invocation, and the two verdicts each one carries."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, GradedRow] = {}
+        #: Insertion order, so the summary reads in the order the rows ran.
+        self.order: list[str] = []
+        #: Rows whose final record could not be written. A driver bug, reported
+        #: rather than swallowed — see `resolve_all`.
+        self.errors: list[tuple[str, str]] = []
+
+    def reset(self) -> None:
+        """Forget the invocation. For a test that drives this ledger deliberately."""
+        self.__init__()
+
+    # -- the two verdicts ---------------------------------------------------- #
+    def open(self, row: Row, result: RowResult, posture: dict | None = None,
+             image: str = DEFAULT_IMAGE,
+             records_dir: Path | None = None) -> Path | None:
+        """Register a finished row and write its PROVISIONAL record.
+
+        Re-opening the same row id **resolves the previous entry first, then
+        replaces it**: a re-run of a row is a new row result, and grading it
+        against the earlier run's reports would be the same class of error this
+        whole block exists to remove — while silently dropping the earlier entry
+        would leave its record provisional for ever.
+        """
+        if row.row_id in self.rows:
+            self.resolve(row.row_id)
+        entry = GradedRow(row=row, result=result, posture=posture, image=image,
+                          records_dir=records_dir)
+        self.rows[row.row_id] = entry
+        if row.row_id not in self.order:
+            self.order.append(row.row_id)
+        return self._emit(entry, provisional=True)
+
+    def note(self, row_id: str, nodeid: str, passed: bool) -> None:
+        entry = self.rows.get(row_id)
+        if entry is None:
+            return
+        bucket = entry.passed if passed else entry.failed
+        if nodeid not in bucket:
+            bucket.append(nodeid)
+
+    def note_report(self, item, report) -> None:
+        """Attribute one pytest report to every row the test actually read.
+
+        Attribution is by fixture VALUE (`item.funcargs`), not by the test's id or
+        by whichever row ran most recently: module-scoped parametrized fixtures
+        outlive their own tests — the last `discovery` instance is still alive
+        while the credentialed rows run — so "the row that is currently open" would
+        quietly charge one row's failures to another.
+
+        Only a `call`-phase pass counts as a pass, because a skipped test still
+        reports its setup as passed and a row every test skipped has been graded by
+        nothing. A failure counts from any phase: a teardown error is a real one.
+        """
+        if not self.rows:
+            return
+        failed = bool(getattr(report, "failed", False))
+        passed = bool(getattr(report, "passed", False)) and report.when == "call"
+        if not failed and not passed:
+            return                      # skips, and the setup/teardown passes
+        seen: set[str] = set()
+        for value in (getattr(item, "funcargs", None) or {}).values():
+            for result in _row_results(value):
+                row_id = result.row.row_id
+                if row_id in seen or row_id not in self.rows:
+                    continue
+                seen.add(row_id)
+                # The ledger keys on the row id, so a stale entry from an earlier
+                # invocation of the same row must not collect this report.
+                if self.rows[row_id].result is result:
+                    self.note(row_id, report.nodeid, passed)
+
+    # -- resolution ----------------------------------------------------------- #
+    def resolve(self, row_id: str) -> Path | None:
+        entry = self.rows.get(row_id)
+        if entry is None or entry.resolved:
+            return entry.record_path if entry else None
+        entry.resolved = True
+        return self._emit(entry, provisional=False)
+
+    def resolve_all(self) -> list[Path]:
+        """Re-emit every unresolved row with both verdicts. Never raises.
+
+        A record that does not validate is a driver bug and `emit_record` raises
+        on it — but raising from here would abandon every row after it, so the
+        failure is collected, reported by `summary()` and turned into a non-zero
+        exit by the caller. One unwritable record must not cost the others theirs.
+        """
+        written: list[Path] = []
+        for row_id in list(self.order):
+            entry = self.rows.get(row_id)
+            if entry is None or entry.resolved:
+                continue
+            entry.resolved = True
+            try:
+                path = self._emit(entry, provisional=False)
+            except Exception as exc:                     # noqa: BLE001 — reported
+                self.errors.append((row_id, f"{type(exc).__name__}: {exc}"))
+                continue
+            if path:
+                written.append(path)
+        return written
+
+    def _emit(self, entry: GradedRow, provisional: bool) -> Path | None:
+        if provisional:
+            outcome, reason = row_outcome(entry.result)
+            reason = "; ".join(part for part in (reason, PROVISIONAL_REASON) if part)
+            graded = UNGRADED
+        else:
+            outcome, reason = entry.verdict()
+            graded = entry.graded
+        entry.record_path = emit_record(
+            entry.row, entry.result, entry.posture, entry.image,
+            outcome=outcome, reason=reason, records_dir=entry.records_dir,
+            graded=graded)
+        entry.emitted = (promotions(entry.row, entry.result, outcome, graded)
+                         if entry.record_path else [])
+        return entry.record_path
+
+    # -- the printed surface -------------------------------------------------- #
+    def summary(self) -> list[str]:
+        """What this invocation promotes, what it withheld, and why.
+
+        PRINTED, never applied — promoting a capability changes which code path
+        ships to users, so the edit stays a human commit carrying the record and
+        the `capabilities.yaml` change in one diff.
+        """
+        if not self.rows:
+            return []
+        lines = ["capability promotions (printed, NEVER applied — commit the edit "
+                 "beside the record it cites):"]
+        promoted = [(entry, edit) for row_id in self.order
+                    for entry in [self.rows[row_id]] for edit in entry.emitted]
+        for entry, edit in promoted:
+            lines.append(f"  {edit['host']:<12} {edit['field']:<16} "
+                         f"{edit['from']} → {edit['to']}   "
+                         f"evidence: {edit['evidence']}")
+        if not promoted:
+            lines.append("  none — no row both exited 0 and passed its grader")
+        withheld = []
+        for row_id in self.order:
+            entry = self.rows[row_id]
+            if entry.emitted:
+                continue
+            candidates = candidate_promotions(entry.row, entry.result)
+            if not candidates:
+                continue
+            # The CONTAINER's own verdict, not the combined one `verdict()`
+            # returns: the whole point of the line is that the two can differ, and
+            # printing the combined verdict under the label "container" would hide
+            # exactly the case this block exists to report.
+            container, _reason = row_outcome(entry.result)
+            _outcome, reason = entry.verdict()
+            withheld.append((row_id, candidates, container, entry.graded, reason))
+        if withheld:
+            lines.append("promotions WITHHELD — these rows produced the artifacts "
+                         "but did not pass, so they promote nothing:")
+            for row_id, candidates, container, graded, reason in withheld:
+                fields = ", ".join(edit["field"] for edit in candidates)
+                lines.append(f"  {row_id}: {fields}")
+                lines.append(f"    container {container}, grader {graded} — "
+                             f"{reason}")
+        for row_id, error in self.errors:
+            lines.append(f"  RECORD NOT WRITTEN for {row_id}: {error}")
+        return lines
+
+
+#: The invocation's one ledger. Module state for the same reason `MATRIX` is: a
+#: single pytest invocation collects several row-producing modules, and the
+#: grader's reports arrive through a hook that has no other way to reach them.
+GRADES = GradeLedger()
 
 
 def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
@@ -1433,10 +1786,16 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
     # provenance has to outlive the gitignored bundle it was derived from. The
     # provider lane deliberately writes none — its evidence is a golden diff in
     # the same commit, and a tracked file per CLI per run would be noise around
-    # the records that back a claim. A grader re-emits this with its own verdict
-    # once it has read the evidence.
+    # the records that back a claim.
+    #
+    # This registers the row and writes its record PROVISIONALLY: the container's
+    # verdict is in, the grader's is not, and a promotion needs both (C10b). The
+    # ledger re-emits it with both once pytest has finished asserting over this
+    # bundle. Emitting the final record straight from here is precisely the bug —
+    # a container that exits 0 having produced output that then fails its own
+    # assertions would propose capability edits nothing ever demonstrated.
     if row.lane == "host":
-        result.record_path = emit_record(row, result, posture, image)
+        result.record_path = GRADES.open(row, result, posture, image)
 
     return result
 
