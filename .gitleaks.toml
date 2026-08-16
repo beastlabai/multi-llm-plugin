@@ -58,17 +58,39 @@ useDefault = true
 # Allowlist entries
 # ---------------------------------------------------------------------------
 #
-# There are none. Measured, not assumed: on 2026-08-14, gitleaks 8.28.0 with the
-# stock pack over `git ls-files` reported zero findings on the tracked tree. The
-# `uv.lock` digests the plan predicted would fire do not — the stock
-# `generic-api-key` rule wants an identifier next to the value, and a bare
-# `sha256:...` in a lockfile has none — and `mixed_importance.json`'s decoy is a
-# 13-character `sk-` string inside an escaped JSON literal, below every vendor
-# rule's length floor. An entry that suppresses nothing is decoration,
-# and decoration is how a `paths`-shaped exclusion sneaks back in later, so the
-# test asserts both directions: every entry present must be load-bearing
-# (deleting it turns the scanner red) and the set must be no larger than what
-# actually fires.
+# There is exactly one, and it is at the bottom of this file. Measured, not
+# assumed: on 2026-08-14, gitleaks 8.28.0 with the stock pack over
+# `git ls-files` reported zero findings on the tracked tree. The `uv.lock`
+# digests the plan predicted would fire do not — the stock `generic-api-key`
+# rule wants an identifier next to the value, and a bare `sha256:...` in a
+# lockfile has none — and `mixed_importance.json`'s decoy is a 13-character
+# `sk-` string inside an escaped JSON literal, below every vendor rule's length
+# floor. An entry that suppresses nothing is decoration, and decoration is how a
+# `paths`-shaped exclusion sneaks back in later, so the test asserts both
+# directions: every entry present must be load-bearing (deleting it turns the
+# scanner red) and the set must be no larger than what actually fires.
+#
+# The one entry arrived with the first *committed* container run record
+# (2026-08-15). `tests/container/records/*.json` was always designed to be
+# tracked provenance — `record.schema.json` has been tracked since C10 and the
+# harness README calls records "tracked, committed with the promotion" — but no
+# record had ever actually been committed, so this scanner had never seen one.
+# A record's `bundle.files` is a digest manifest: a JSON object mapping each
+# file in the ephemeral `runs/<utc>/<row-id>/` bundle to its SHA-256, which is
+# what lets `make e2e-verify-record` re-hash a bundle the promotion cited after
+# `make e2e-clean` has deleted it. One of those filenames is
+# `credential-census.json` — Phase 1's count of which hosts found a working
+# credential path, a file of integers — and the stock `generic-api-key` rule
+# reads `credential… : <64 hex>` as identifier-next-to-value. The digest is not
+# a credential; the *name of the file it digests* is what fires.
+#
+# So the exception is written to the manifest's **shape**, never to today's
+# digests: `"<filename>.<ext>": "<64 lowercase hex>"` alone on its line, inside
+# a record. A fingerprint list would pin 2026-08-15's twenty-two matches and go
+# stale on the next `make e2e` run; a bare `[a-f0-9]{64}` on the default regex
+# target would excuse *any* 64-hex value anywhere in a record, including one
+# sitting under `"OPENROUTER_API_KEY"` — measured, and the reason this is a
+# line-shaped regex rather than a value-shaped one.
 #
 # ---------------------------------------------------------------------------
 # How gitleaks really evaluates an allowlist (measured, gitleaks 8.28.0)
@@ -105,6 +127,31 @@ useDefault = true
 #                                       elsewhere — or a different value there —
 #                                       is still a finding.
 #
+# And one more silent no-op, found writing the entry below and pinned by the
+# same test class:
+#
+#   regexes, default regexTarget     -> the regex is matched against the SECRET
+#                                       (the rule's capture group) alone, not the
+#                                       line. So a regex describing the context a
+#                                       benign value sits in — `"<key>": "<value>"`
+#                                       — never matches, and the entry suppresses
+#                                       nothing while looking precise. This is the
+#                                       third shape that fails quietly.
+#   regexes + regexTarget = "line"   -> matched against that one line, and only
+#                                       that line: a secret on the line above or
+#                                       below is still a finding. This is what
+#                                       makes "excuse the *shape* of a manifest
+#                                       row" expressible without excusing the
+#                                       values in it. `regexTarget = "match"` is
+#                                       the weaker cousin — the stock
+#                                       `generic-api-key` match starts *inside*
+#                                       the key (its regex opens with a lazy
+#                                       `[\w.-]{0,50}?`), so a "match"-anchored
+#                                       regex can pin neither the key's opening
+#                                       quote nor the end of the line, and a real
+#                                       key pasted after the benign value on the
+#                                       same line rides along excused. Measured.
+#
 # A rule-level allowlist needs a `[[rules]]` block to hang on, and a bare `id`
 # with no `regex` attaches to the stock rule of that id without restating its
 # pattern, which is what keeps rule 1's "never hand-roll" intact.
@@ -114,17 +161,69 @@ useDefault = true
 # enforces — is:
 #
 #   [[rules]]
-#   id = "generic-api-key"   # the stock rule; its regex is deliberately not restated
+#   id = "<stock-rule-id>"   # the stock rule; its regex is deliberately not restated
 #
 #   [[rules.allowlists]]
-#   description = "uv.lock: pypi artifact digests, not credentials — scoped to the digest capture; added 2026-08-14"
+#   description = "<what this value is, why it is not a credential; added YYYY-MM-DD>"
 #   condition   = "AND"      # value AND path; either alone is a blind spot
-#   regexes     = ['''sha(?:256|512):[a-f0-9]{64,128}''']
-#   paths       = ['''skills/multi-llm/uv\.lock''']
-#   # fingerprints: skills/multi-llm/uv.lock:generic-api-key:12,19,26
+#   regexTarget = "line"     # omit and the regex is tested against the secret alone
+#   regexes     = ['''<the benign value, in the context that makes it benign>''']
+#   paths       = ['''<the one file or directory it may appear in>''']
+#   # fingerprints: <what it suppressed the day it landed>
 #
 # Note there is no `.gitleaksignore` in this repository and there must not be
 # one: fingerprint suppression outside this file is an exception nobody reviews.
 # For the same reason the scanner runs with `--ignore-gitleaks-allow`, so an
 # inline `gitleaks:allow` comment cannot silence a finding either. This file is
 # the single exception channel.
+
+[[rules]]
+id = "generic-api-key"   # the stock rule; its regex is deliberately not restated
+
+[[rules.allowlists]]
+description = "container run records: SHA-256 rows of the bundle digest manifest, not credentials — `credential-census.json` is a filename being digested, not a key being assigned; added 2026-08-15"
+condition   = "AND"      # value AND path; either alone is a blind spot
+regexTarget = "line"     # default is the secret alone, against which this regex is inert
+regexes     = ['''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$''']
+paths       = ['''^skills/multi-llm/tests/container/records/[^/]+\.json$''']
+# Read the regex as the four things that must ALL hold before a line is excused,
+# each one measured against a probe tree that also held a real-shape key:
+#   1. the line is nothing but one JSON member — `[ \t]` never `\s` (which spans
+#      newlines in Go), and `\r?$` so a CRLF checkout behaves the same. A real key
+#      appended after the digest on the same line is still a finding.
+#   2. its key is filename-shaped: a relative path ending in a lowercase
+#      extension. `"OPENROUTER_API_KEY": "<64 hex>"` is not, and is still caught.
+#   3. its value is a *bare* 64-char lowercase hex string, quote to quote. The
+#      quotes are load-bearing: `"credential-census.json": "sk-or-v1-<64 hex>"`
+#      is still caught, because an OpenRouter key is a 64-hex body behind a
+#      prefix and the prefix does not fit between them.
+#   4. it is in a committed run record. Same line in any other tracked file —
+#      including the ignored `runs/` bundles were they ever staged — is a finding.
+# What this deliberately does NOT do is name `credential-census.json`. The rule
+# fires on that key only because it carries one of the stock pack's identifier
+# words; a later bundle file called `auth*`, `secrets*`, `token-*`, `access-*`,
+# `api-key-*`, `creds-*`, `key-*`, `passwd*` or `password-*` would fire exactly
+# the same way. Measured, not assumed: a probe manifest of 26 filenames produced
+# eleven findings — those nine shapes plus `credential-census.json` itself —
+# while `host-run.json`, `stub.jsonl`, `usage.json`, `row-result.json`,
+# `openrouter.json`, `bearer-check.json`, `discovery.json`, the `receipts/…`
+# paths and the rest stayed quiet (a `/` between the identifier word and the
+# key's closing quote takes the line out of the rule's reach, which is why
+# `artifacts/auth-feature/…/.status.lock` never fired either). Pinning the entry
+# to one filename would buy a second exception commit for each of them; pinning
+# it to the manifest's shape covers them without widening what a "credential" is
+# allowed to look like.
+# fingerprints: 22 the day it landed — one per record carrying a
+#   `credential-census.json` row, all `generic-api-key`, all under
+#   skills/multi-llm/tests/container/records/. Listed by record and line, from
+#   `20260815T172352Z-*`: claude-code-apply-native:8, claude-code-ask:14,
+#   claude-code-review-plan:24, codex-apply-executor:8, codex-ask:15,
+#   codex-auth-negative:8, codex-review-plan:24, opencode-apply-executor:8,
+#   opencode-ask:15, opencode-auth-negative:8, opencode-review-plan:26; and from
+#   `20260815T231349Z-*`: claude-code-apply-native:8, claude-code-ask:13,
+#   claude-code-review-plan:16, codex-apply-executor:8, codex-ask:15,
+#   codex-auth-negative:8, codex-review-plan:26, opencode-apply-executor:8,
+#   opencode-ask:15, opencode-auth-negative:8, opencode-review-plan:24.
+#   NOT exhaustive going forward, and that is the point: every future run commits
+#   more records with fresh digests, so this list is provenance for the day the
+#   exception was written, never the definition of what it covers.

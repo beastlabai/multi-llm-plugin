@@ -91,6 +91,7 @@ The gitleaks binary is deliberately **not vendored**; when it is absent the
 module skips with a reason that names the fix.
 """
 
+import hashlib
 import json
 import os
 import random
@@ -855,7 +856,7 @@ class TestPlantedCredentialsAreDetected:
 
 @requires_gitleaks
 class TestGitleaksAllowlistSemantics:
-    """Pin the two gitleaks behaviours the config's exclusion rules are built on.
+    """Pin the three gitleaks behaviours the config's exclusion rules are built on.
 
     ``.gitleaks.toml`` forbids a ``paths`` entry in a *global* allowlist and
     permits it only under a ``[[rules]]`` block alongside ``regexes`` and
@@ -864,6 +865,12 @@ class TestGitleaksAllowlistSemantics:
     is a whole-file blind spot. Measured here rather than assumed, so a gitleaks
     upgrade that changes either behaviour fails on this test instead of quietly
     widening every exception the config carries.
+
+    The third is ``regexTarget``, which the run-record entry depends on: an
+    allowlist regex is tested against the *secret* unless told otherwise, so a
+    regex describing the context that makes a value benign matches nothing and
+    the entry is a no-op — and ``"line"`` has to really mean one line, or an
+    exception written for a benign row would cover its neighbours too.
 
     The probe fixture is a lockfile-shaped file holding a benign digest *and* a
     real-shape token, plus a second file holding the same token: the pair is what
@@ -927,6 +934,118 @@ class TestGitleaksAllowlistSemantics:
         assert ("github-pat", "elsewhere.txt") in hits, (
             "a rule-level paths+regexes+AND entry leaked past its `paths` scope — the "
             "same value elsewhere must still be a finding, or the exception is global"
+        )
+
+    # The shape the committed run-record entry uses, restated here so this test
+    # measures the *mechanism* rather than importing the entry it protects: a
+    # config edit that widened the real regex would still have to pass this.
+    _MANIFEST_LINE = r'''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$'''
+    _RECORDS_PATH = r"""^skills/multi-llm/tests/container/records/[^/]+\.json$"""
+
+    @pytest.fixture
+    def manifest_probe(self, tmp_path):
+        """A record-shaped file: a benign digest row, then a real key on the next line.
+
+        The two lines are the whole point. A ``regexTarget`` that matched a
+        *region* rather than a line would excuse the key along with the row it
+        neighbours, and the exception would be the blind spot it was written to
+        avoid.
+        """
+        secret = _synthesize("anthropic-api-key", "regex-target")
+        digest = hashlib.sha256(b"multi-llm manifest probe").hexdigest()
+        rel = "skills/multi-llm/tests/container/records/probe.json"
+        tree = tmp_path / "tree"
+        (tree / rel).parent.mkdir(parents=True)
+        (tree / rel).write_text(
+            "{\n"
+            '  "bundle": {\n'
+            '    "files": {\n'
+            f'      "credential-census.json": "{digest}",\n'
+            f'      "token": "{secret}"\n'
+            "    }\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return tree, rel, digest, secret
+
+    def _manifest_scan(self, manifest_probe, tmp_path, name, entry_lines):
+        tree, _, _, _ = manifest_probe
+        config = tmp_path / f"{name}.toml"
+        config.write_text(
+            "[extend]\nuseDefault = true\n"
+            '\n[[rules]]\nid = "generic-api-key"\n\n[[rules.allowlists]]\n'
+            'description = "manifest digest rows, measured against a planted key"\n'
+            'condition   = "AND"\n' + entry_lines,
+            encoding="utf-8",
+        )
+        findings, _ = _run_gitleaks(tree, config, tmp_path / f"out-{name}")
+        return {f["Secret"] for f in findings}
+
+    def test_the_probe_fires_on_both_lines_unallowlisted(self, manifest_probe, tmp_path):
+        """Sanity: a probe whose digest is below the entropy floor proves nothing."""
+        _, _, digest, secret = manifest_probe
+        secrets = self._manifest_scan(
+            manifest_probe,
+            tmp_path,
+            "manifest-baseline",
+            f"regexes     = ['''{re.escape('no-such-value')}''']\n"
+            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+        )
+        assert digest in secrets, (
+            "the benign manifest digest does not fire unallowlisted, so nothing below "
+            "can show it being excused — the probe is broken, not the config"
+        )
+        assert secret in secrets, "the planted key does not fire; the probe is broken"
+
+    def test_a_regex_without_regex_target_is_tested_against_the_secret(
+        self, manifest_probe, tmp_path
+    ):
+        """Why the run-record entry carries ``regexTarget``: without it, it is a no-op.
+
+        This is the third silent-failure shape, alongside global ``paths`` and
+        ``targetRules``. A regex describing the *line* a benign value sits on is
+        never compared against that line by default — it is compared against the
+        capture group — so the entry looks precise, suppresses nothing, and the
+        author reaches for something broader when the scan stays red.
+        """
+        _, _, digest, _ = manifest_probe
+        secrets = self._manifest_scan(
+            manifest_probe,
+            tmp_path,
+            "manifest-no-target",
+            f"regexes     = ['''{self._MANIFEST_LINE}''']\n"
+            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+        )
+        assert digest in secrets, (
+            "gitleaks now applies an allowlist regex to the line by default. The "
+            "run-record entry's `regexTarget = \"line\"` was written because it did "
+            "not — re-read 'How gitleaks really evaluates an allowlist' before "
+            "trusting either spelling."
+        )
+
+    def test_regex_target_line_excuses_one_line_and_not_its_neighbour(
+        self, manifest_probe, tmp_path
+    ):
+        """The property the run-record entry rests on: ``line`` is one line."""
+        _, _, digest, secret = manifest_probe
+        secrets = self._manifest_scan(
+            manifest_probe,
+            tmp_path,
+            "manifest-line",
+            'regexTarget = "line"\n'
+            f"regexes     = ['''{self._MANIFEST_LINE}''']\n"
+            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+        )
+        assert digest not in secrets, (
+            "a rule-level paths+regexes+AND entry with `regexTarget = \"line\"` did not "
+            "excuse the manifest row it describes; the shape .gitleaks.toml's run-record "
+            "entry uses does not work on this gitleaks"
+        )
+        assert secret in secrets, (
+            "the manifest-row exception swallowed a real key on the *adjacent* line, so "
+            "`regexTarget = \"line\"` is matching a region rather than a line. That turns "
+            "the run-record entry into the blind spot it was written to avoid."
         )
 
 
