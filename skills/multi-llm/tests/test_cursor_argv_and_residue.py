@@ -107,11 +107,17 @@ def confirmed(monkeypatch):
     monkeypatch.setattr(cursor_agent_module, "_help_flag_tokens", lambda _b: CONFIRMED)
 
 
-def _write_help_binary(path: Path, help_text: str, *, exit_code: int = 0, counter: Path = None) -> Path:
+def _write_help_binary(
+    path: Path, help_text: str, *, exit_code: int = 0, counter: Path | None = None
+) -> Path:
     """A fake CLI that answers ``--help`` with ``help_text`` and nothing else."""
+    # Render the no-counter case as the empty string, not as ``str(None)``: the
+    # generated script guards on truthiness, and ``"None"`` is a perfectly
+    # truthy string, so the default used to tick a counter into a file literally
+    # named ``None`` in whatever the CWD happened to be.
     body = (
         "import sys, pathlib\n"
-        f"counter = {str(counter)!r}\n"
+        f"counter = {('' if counter is None else str(counter))!r}\n"
         "if counter:\n"
         "    p = pathlib.Path(counter)\n"
         "    p.write_text(str(int(p.read_text() or 0) + 1) if p.exists() else '1')\n"
