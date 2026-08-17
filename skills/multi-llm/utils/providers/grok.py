@@ -1,10 +1,10 @@
 """Grok Build CLI provider implementation."""
 import json
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Reasoning effort values accepted by `grok --reasoning-effort`
 # (verified live against grok 0.2.93).
@@ -26,6 +26,15 @@ class GrokProvider(LLMProvider):
     verbatim as the model name.
     """
 
+    #: §9.4: the prompt trails. It used to sit at index 4 — the one adapter that
+    #: rendered a flag *after* it — which made `cmd[:-1]` and
+    #: `build_agent_command_for_transport` silently wrong the moment grok gained
+    #: a stdin transport or an agent profile. It has neither today, so
+    #: normalizing the order changes no dispatched behaviour: `-p` takes exactly
+    #: one value and the flags are order-independent. Note the pair: a future
+    #: non-argv transport must drop `-p` **and** the prompt, not `cmd[:-1]`.
+    prompt_argv_index = -1
+
     @property
     def name(self) -> str:
         return "grok"
@@ -37,19 +46,27 @@ class GrokProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("grok") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
-        # grok --no-auto-update --always-approve -p <prompt> --output-format json
-        #   -m <model> [--reasoning-effort <effort>]
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
+        # grok --no-auto-update --always-approve --output-format json
+        #   -m <model> [--reasoning-effort <effort>] -p <prompt>
         # --no-auto-update skips background update checks in automated runs;
         # --always-approve auto-approves tool executions (headless runs would
         # otherwise stall waiting for interactive approval).
+        # The `-p <prompt>` pair trails so the prompt is argv[-1] (§9.4); see
+        # `prompt_argv_index` above for why the pair, not just the prompt, is
+        # what a non-argv transport would have to drop.
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         cmd = [
             "grok",
             "--no-auto-update",
             "--always-approve",
-            "-p",
-            prompt,
             "--output-format",
             "json",
             "-m",
@@ -57,6 +74,7 @@ class GrokProvider(LLMProvider):
         ]
         if effort is not None:
             cmd += ["--reasoning-effort", effort]
+        cmd += ["-p", prompt]
         return cmd
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:

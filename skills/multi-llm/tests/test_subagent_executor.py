@@ -652,18 +652,31 @@ class TestFailureLadder:
         does) leaves that child running against a task nobody is reading, and
         leaves the drain waiting on a writer that never goes away. The dispatch
         must land on rung 2 in bounded time *and* take the tree with it.
+
+        **The runner is opencode rather than codex, and the timeout is the
+        reason.** M9 turned on §7.5 rule 4: a slot whose remaining budget cannot
+        hold one worst-case attempt of the adapter's *declared* vendor envelope
+        is refused with nothing spawned. codex declares `max_wall_s: 25.0`, so a
+        `timeout=2` codex dispatch is now legitimately `budget_exhausted` and
+        never reaches a child — there would be no grandchild to survive anything.
+        Raising the timeout past 25 s would buy that back at the price of a 26 s
+        unit test; opencode declares **no** envelope (`internal_retries = None`,
+        rule 6(c)'s "assume one request"), so rule 4 performs no admission test
+        and the two-second timeout this regression needs is admitted unchanged.
+        What is under test — a timed-out dispatch may not leave a surviving
+        grandchild, and the drain may not hang on one — is untouched.
         """
         if os.name == "nt":  # pragma: no cover - POSIX process groups
             pytest.skip("process groups are POSIX; Windows tears down via the job")
-        runner_env.use("codex:gpt-5.5")
+        runner_env.use("opencode:opencode/big-pickle")
         marker = tmp_path / "grandchild.pid"
-        script = runner_env.bin_dir / "codex"
+        script = runner_env.bin_dir / "opencode"
         script.unlink()
         script.write_text(
             textwrap.dedent(
                 f"""\
                 #!/bin/sh
-                case "$1" in --version|-V) echo "codex 9.9.9"; exit 0;; esac
+                case "$1" in --version|-V) echo "opencode 9.9.9"; exit 0;; esac
                 # A tool child that inherits stdout and outlives its parent.
                 sh -c 'echo $$ > "{marker}"; sleep 30' &
                 sleep 30
@@ -680,7 +693,7 @@ class TestFailureLadder:
             try:
                 box["outcome"] = executor.dispatch_task(
                     _validation_batch(tmp_path), phase_dir=str(tmp_path),
-                    runner="codex:gpt-5.5", timeout=2, retries=0,
+                    runner="opencode:opencode/big-pickle", timeout=2, retries=0,
                     sleep=lambda _s: None,
                 )
             finally:
@@ -1670,8 +1683,48 @@ class TestUsageMetrics:
         )
         assert provider.parse_usage(stream, "")["input_tokens"] == 500
 
+    def test_cursor_agent_reads_the_result_envelope(self):
+        """The camelCase `usage` block a real cursor-agent envelope carries.
+
+        Captured from a real `cursor-agent --print --output-format json` run:
+        nine keys, `usage` holding exactly the four camelCase counters and **no**
+        cost field anywhere — which is why the adapter declares `partial`.
+        """
+        provider = registry.get_provider("cursor-agent")
+        stdout = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "duration_ms": 106583, "duration_api_ms": 106583,
+            "result": "[]",
+            "session_id": "2a865a87-7663-423a-8057-7390018cfd28",
+            "request_id": "b8e08da0-0f72-4336-ac73-639e52e4bbfa",
+            "usage": {"inputTokens": 45064, "outputTokens": 7780,
+                      "cacheReadTokens": 486304, "cacheWriteTokens": 128},
+        })
+        # Exact equality, so a cache *write* silently folded into any total
+        # fails here: the normalized shape has no slot for it, and only the
+        # read half is "cached input".
+        assert provider.parse_usage(stdout, "") == {
+            "input_tokens": 45064, "output_tokens": 7780,
+            "cached_input_tokens": 486304,
+            "total_tokens": 45064 + 7780,
+        }
+        assert provider.usage_support == "partial"
+
+    def test_cursor_agent_omits_fields_the_envelope_does_not_carry(self):
+        """Absent means "not reported", never 0 — and a bare envelope is None."""
+        provider = registry.get_provider("cursor-agent")
+        partial = provider.parse_usage(json.dumps({
+            "type": "result", "result": "[]",
+            "usage": {"outputTokens": 7780},
+        }), "")
+        assert partial == {"output_tokens": 7780}
+        assert provider.parse_usage(
+            json.dumps({"type": "result", "result": "[]"}), ""
+        ) is None
+        assert provider.parse_usage("not json at all", "") is None
+
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "cline", "cursor-agent", "gemini", "goose", "grok",
+        "agy", "aider", "cline", "gemini", "goose", "grok",
         "kilocode", "muse", "pi",
     ])
     def test_every_other_adapter_declares_usage_none(self, name):

@@ -50,6 +50,18 @@ Environment Variables (New - for scenario-based testing):
         in its base URL. Ignored by any scenario that declares no ``turns:``.
     MOCK_LLM_CONFIG: JSON string with dynamic configuration
     MOCK_LLM_CALL_LOG: Path to JSONL file for logging all invocations
+    MOCK_LLM_PLUGIN: Path to a **throwaway** one-off fake adapter (M22). See
+        ``load_mock_plugin``/``install_mock_plugin`` at the bottom of this file:
+        it is imported *after* every table here is built, honoured only under
+        MULTI_LLM_TEST_MODE=1, and may replace exactly the four seams named in
+        ``PLUGIN_SEAMS`` — anything else is a loud refusal, not a silent no-op.
+        A probe that needs one fake provider to behave unusually (a huge
+        payload, a malformed envelope, a version below a gate) writes a scratch
+        module OUTSIDE the tree and points this at it, instead of editing this
+        shared file in place — which is a real incident, not a hypothetical
+        (plans/harness-invocation-improvements.md §13.1: this file was
+        overwritten 1275 lines -> 40 and broke two suites by collection error).
+        ``SkillRunner(mock_plugin=...)`` is the harness-side way to set it.
     MOCK_LLM_VERSION: Version string `--version` prints (default: the per-provider
         release each shipped parser fixture was captured from). Drives the D3m
         minimum-version refusal path in tests.
@@ -60,6 +72,13 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
         read-only sentinel test can prove a runner that ignores its profile is
         detectable (a genuinely read-only runner never sets this).
+    MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR: "honour" or "ignore" — agy only. Selects
+        one of the two §9.6.e stubs behind `--print-timeout`: the child that
+        reaches its own derived cutoff and shuts down cleanly before the outer
+        deadline, or the one that ignores the flag and is orphaned by the
+        leader-only kill. See `run_print_timeout_stub`.
+    MOCK_LLM_PID_FILE: Path the print-timeout stubs write their descendant's pid
+        to, so a test can assert nothing outlived the run rather than infer it.
     MOCK_LLM_EDITS: JSON list of ``{path, mode: create|patch|delete, content}``
         applied **relative to the invocation cwd** before the mock prints its
         result. This is the write path (D3g): it is what makes the four outcomes
@@ -93,11 +112,13 @@ Precedence:
 
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import re
 import sys
 import time
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -678,9 +699,29 @@ def log_call(provider: str, args: List[str], prompt: str) -> None:
 def format_cursor_agent_output(content: str) -> str:
     """Format output for cursor-agent provider.
 
-    Format: {"type": "result", "result": "<content>"}
+    Format: {"type": "result", "result": "<content>"} plus the rest of the
+    nine-key envelope the real CLI emits. `parse_output` unwraps `result` and
+    discards everything else, but the `usage` block is what the D3j extractor
+    reads (camelCase here, unlike claude-code's snake_case one), so keeping the
+    envelope complete is what makes `usage_support = partial` testable. There is
+    deliberately no cost field: the real envelope carries none.
     """
-    return json.dumps({"type": "result", "result": content})
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 1234,
+        "duration_api_ms": 1234,
+        "result": content,
+        "session_id": "mock-session-12345",
+        "request_id": "mock-request-12345",
+        "usage": {
+            "inputTokens": 100,
+            "outputTokens": 50,
+            "cacheReadTokens": 20,
+            "cacheWriteTokens": 0,
+        },
+    })
 
 
 def format_gemini_output(content: str) -> str:
@@ -923,7 +964,29 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
     if provider == "cursor-agent":
         parser = argparse.ArgumentParser(description="Mock cursor-agent CLI")
         parser.add_argument("--print", dest="print_mode", action="store_true")
-        parser.add_argument("-f", "--force", action="store_true")
+        # `-f`/`--yolo` are still what the real CLI accepts, so the mock still
+        # accepts them — but the adapter no longer emits them (M1/§3.1).
+        parser.add_argument("-f", "--force", "--yolo", action="store_true")
+        # What `CursorAgentProvider.build_command` really emits now. Both are
+        # load-bearing twice over: an unrecognised flag is an argparse **exit 2
+        # that reads as a provider failure** (the same trap this file already
+        # records for opencode's `--agent`), and M1's §5.4.1 capability gate
+        # sniffs the *help text* of whichever binary the lane resolves — this
+        # one included — so a flag missing from `--help` is silently dropped and
+        # the fixtures then assert an argv the real CLI would never emit.
+        # argparse renders both into `--help` from these two lines; the help
+        # strings are there so a truncated rendering still shows the tokens.
+        parser.add_argument(
+            "--trust",
+            action="store_true",
+            help="Trust the current workspace without prompting",
+        )
+        parser.add_argument(
+            "--mode",
+            choices=["plan", "ask"],
+            default=None,
+            help="Start in the given execution mode (plan | ask)",
+        )
         parser.add_argument("--output-format", dest="output_format", default="json")
         parser.add_argument("--model", default="auto")
         parser.add_argument("prompt", nargs="?", default="")
@@ -979,6 +1042,29 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         # providers.yaml — so an argv the product really builds was an argparse
         # exit 2 here until this line existed.
         exec_parser.add_argument("-c", "--config", action="append", default=[])
+        # M2: both are emitted UNCONDITIONALLY by `CodexProvider.build_command`,
+        # on every profile and both transports, so every mock codex dispatch
+        # carries them. Missing here they are an argparse exit 2 —
+        # indistinguishable from a provider failure once it is behind a
+        # subprocess, which is the trap this file's comments record twice.
+        # `--ephemeral` suppresses the rollout file; `--skip-git-repo-check`
+        # opens codex's trust gate (real codex outside a git repo exits 1 with
+        # zero requests without it). Both are booleans and neither takes a value.
+        exec_parser.add_argument("--ephemeral", action="store_true")
+        exec_parser.add_argument("--skip-git-repo-check", dest="skip_git_repo_check",
+                                 action="store_true")
+        # §4.2's `--output-schema <FILE>`. codex's half of the contract asymmetry
+        # takes a PATH, not inline JSON. It carries no §5.4.1 gate (verified at
+        # the declared floor 0.144.0), so the help text is not load-bearing the
+        # way claude's is — but the parser entry is: without it the argv the
+        # product really builds is an argparse exit 2 that reads as a provider
+        # failure, which is the trap this file's comments record twice.
+        exec_parser.add_argument(
+            "--output-schema",
+            dest="output_schema",
+            default=None,
+            help="Path to a JSON Schema file constraining the final response",
+        )
         exec_parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         if args.command != "exec":
@@ -1004,6 +1090,40 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         # deliberately NOT accepted: no profile may emit it, so a regression that
         # introduces it fails loudly here.
         parser.add_argument("--permission-mode", dest="permission_mode", default=None)
+        # §3.6's `--fallback-model <m1,m2>`, emitted only from a configured
+        # `providers.claude-code.fallback_models` list. It has to be here TWICE
+        # over: as a parser entry, or the argv the product really builds is an
+        # argparse exit 2 that reads as a provider failure; and in the HELP TEXT,
+        # because the flag carries a §5.4.1 capability gate that sniffs this
+        # mock's own `--help` — a flag missing from the help is silently dropped
+        # one step earlier, and the fixture then asserts an argv the real CLI
+        # would never emit. argparse renders the `help=` below into `--help`, so
+        # the two cannot drift apart.
+        parser.add_argument(
+            "--fallback-model",
+            dest="fallback_model",
+            default=None,
+            help=(
+                "Enable automatic fallback to specified model(s) when the "
+                "default model is overloaded or not available. Accepts a "
+                "comma-separated list to try each in order. (only works with "
+                "--print)"
+            ),
+        )
+        # §4.2's `--json-schema <inline json>`, emitted only when a caller
+        # attaches a schema. Exactly the same two-places rule as
+        # `--fallback-model` above, for exactly the same two reasons: as a parser
+        # entry, or an argv the product really builds is an argparse exit 2 that
+        # reads as a provider failure; and in the HELP TEXT, because the flag
+        # carries a §5.4.1 capability gate that sniffs THIS mock's `--help` — a
+        # flag missing from the help is silently dropped one step earlier, and
+        # the fixture then asserts an argv the real CLI would never emit.
+        parser.add_argument(
+            "--json-schema",
+            dest="json_schema",
+            default=None,
+            help="JSON Schema for structured output (only works with --print)",
+        )
         parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
         return args, args.prompt
@@ -1036,7 +1156,7 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
     elif provider == "agy":
         # `AgyProvider.build_command` emits, in this order:
         #   agy --new-project --dangerously-skip-permissions
-        #       --output-format json --print-timeout 20m --model "<Display Name>"
+        #       --output-format json --print-timeout <duration> --model "<Display Name>"
         #       -p "<prompt>"
         # Every flag verified against `agy --help` (agy 1.1.13, offline), where
         # `-p` is the short alias of `--print`/`--prompt` and carries the prompt
@@ -1065,6 +1185,12 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
         parser.add_argument("--output-format", dest="output_format", default="json")
         parser.add_argument("--print-timeout", dest="print_timeout", default=None)
         parser.add_argument("--model", default=None)
+        # L11 #3: `agy --effort low|medium|high` is a real flag (`agy --help`,
+        # agy 1.1.13) that the adapter now emits for a `model:effort` spec. Note
+        # `allow_abbrev=False` above means this does NOT open the door to
+        # `--eff`; and it must stay distinct from `--model`, which is why the
+        # adapter passes the level on its own flag rather than in the name.
+        parser.add_argument("--effort", default=None)
         parser.add_argument("-p", "--print", "--prompt", dest="prompt", default="")
         args = parser.parse_args()
         return args, args.prompt
@@ -1167,6 +1293,283 @@ def read_stdin_prompt() -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# MOCK_LLM_PLUGIN: the supported injection point for a ONE-OFF fake adapter.
+#
+# A probe that needs a fake provider to behave unusually used to have exactly
+# one move available: edit this file. That is not a hypothetical — it happened
+# (plans/harness-invocation-improvements.md §13.1), it replaced 1275 lines with
+# 40, and it broke tests/test_fake_lane_roster.py and
+# tests/test_mock_adapter_roundtrip.py by collection error until `git checkout`
+# undid it. So the injection point is a **file outside the tree**, named by an
+# environment variable, and everything about it is deliberately narrow:
+#
+#   * it is honoured only under MULTI_LLM_TEST_MODE=1 — the same gate the binary
+#     itself refuses to run without, checked BEFORE the import, so a stray
+#     variable in a shell can never make a real invocation import a scratch
+#     module;
+#   * it is imported AFTER every table above is built, so an override replaces a
+#     value rather than being replaced by one;
+#   * it may replace exactly four seams and no others. A name it cannot honour
+#     is a loud refusal (exit 9, the code this mock already reserves for a rig
+#     mistake) rather than a silent no-op, because a probe that quietly did
+#     nothing is the same failure the incident was: an assertion about a mock
+#     talking to itself.
+#
+# What it is NOT: a way to add an identity. An identity is five parts (see this
+# module's docstring and tests/test_fake_lane_roster.py) and belongs here, in
+# the tree, asserted. A plugin is one throwaway probe's private business.
+# ---------------------------------------------------------------------------
+
+#: Exactly what a plugin may override. Each is looked up through module globals
+#: at call time, so replacing the binding is enough.
+PLUGIN_SEAMS = (
+    "parse_provider_args",
+    "format_output",
+    "get_response_content",
+    "VERSION_STRINGS",
+)
+
+#: The name the imported plugin module is given. Used to tell a function the
+#: plugin **defined** from one it merely imported (reusing a formatter from this
+#: file is legitimate; redefining one is a seam that does not exist).
+PLUGIN_MODULE_NAME = "mock_llm_plugin"
+
+
+class MockPluginError(Exception):
+    """MOCK_LLM_PLUGIN named something this hook cannot honour.
+
+    Always a test-authoring error (exit 9), never a simulated provider failure:
+    the probe asked for behaviour it will not get, and finding that out from a
+    wrong-looking assertion three files away is exactly what this hook exists to
+    prevent.
+    """
+
+
+def _mock_owned_names() -> set:
+    """Every non-seam name this module owns, for the collision check below."""
+    owned = set()
+    for name, value in vars(sys.modules[__name__]).items():
+        if name.startswith("_") or name in PLUGIN_SEAMS:
+            continue
+        if isinstance(value, types.ModuleType):
+            continue
+        if name.isupper() or getattr(value, "__module__", None) == __name__:
+            owned.add(name)
+    return owned
+
+
+def load_mock_plugin() -> Optional[types.ModuleType]:
+    """Import ``MOCK_LLM_PLUGIN``, or return None when there is nothing to load.
+
+    Returns None both when the variable is unset and when
+    ``MULTI_LLM_TEST_MODE`` is not ``"1"`` — the gate is checked *before* the
+    import, so a plugin's module body (arbitrary code) never runs outside test
+    mode.
+
+    Raises:
+        MockPluginError: the path does not exist, or the module raised while
+            importing. Both are the probe's own mistake and must be loud.
+    """
+    plugin_env = os.environ.get("MOCK_LLM_PLUGIN")
+    if not plugin_env:
+        return None
+    if os.environ.get("MULTI_LLM_TEST_MODE") != "1":
+        return None
+
+    plugin_path = Path(plugin_env)
+    if not plugin_path.is_file():
+        raise MockPluginError(
+            f"MOCK_LLM_PLUGIN={plugin_env} is not a file. A one-off fake adapter "
+            f"is a throwaway .py module (normally under a pytest tmp_path), "
+            f"never an edit to {Path(__file__).name}."
+        )
+
+    spec = importlib.util.spec_from_file_location(PLUGIN_MODULE_NAME, plugin_path)
+    if spec is None or spec.loader is None:
+        raise MockPluginError(
+            f"MOCK_LLM_PLUGIN={plugin_env} is not importable as a Python module."
+        )
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - the probe's own code, reported as-is
+        raise MockPluginError(
+            f"MOCK_LLM_PLUGIN={plugin_env} raised while importing: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    return module
+
+
+def _plugin_declared_names(plugin: types.ModuleType) -> set:
+    """The public names a plugin **defines**, minus the seams.
+
+    A callable imported from elsewhere is excluded, so a plugin may legitimately
+    reuse this module's own helpers (``from mock_llm import
+    format_codex_output``) while *redefining* one is caught.
+    """
+    declared = set()
+    for name, value in vars(plugin).items():
+        if name.startswith("_") or name in PLUGIN_SEAMS:
+            continue
+        if isinstance(value, types.ModuleType):
+            continue
+        if callable(value) and getattr(value, "__module__", None) != PLUGIN_MODULE_NAME:
+            continue
+        declared.add(name)
+    return declared
+
+
+def install_mock_plugin(
+    namespace: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Override the seams ``MOCK_LLM_PLUGIN`` declares; return their names.
+
+    Args:
+        namespace: The mapping to write the overrides into. Defaults to this
+            module's own globals (which is what ``main`` wants); tests pass a
+            copy so they can assert what moved without patching the module.
+
+    Returns:
+        The overridden seam names, in ``PLUGIN_SEAMS`` order. Empty when no
+        plugin is configured (or test mode is off).
+
+    Raises:
+        MockPluginError: the plugin declares no seam at all (a probe that
+            silently does nothing), or declares a name this hook cannot honour.
+    """
+    plugin = load_mock_plugin()
+    if plugin is None:
+        return []
+
+    declared = _plugin_declared_names(plugin)
+    unhonourable = sorted(declared & _mock_owned_names())
+    if unhonourable:
+        raise MockPluginError(
+            f"MOCK_LLM_PLUGIN defines {', '.join(unhonourable)}, which this hook "
+            f"does not override. A plugin may replace exactly: "
+            f"{', '.join(PLUGIN_SEAMS)}. Anything else has to be expressed "
+            f"through one of those four (or belong in {Path(__file__).name} as a "
+            f"real identity, with the five parts an identity needs)."
+        )
+
+    overridden = [name for name in PLUGIN_SEAMS if hasattr(plugin, name)]
+    if not overridden:
+        raise MockPluginError(
+            f"MOCK_LLM_PLUGIN overrides nothing: it defines none of "
+            f"{', '.join(PLUGIN_SEAMS)}, so the run would silently be the "
+            f"ordinary mock. Check the seam name for a typo."
+        )
+
+    target = globals() if namespace is None else namespace
+    for name in overridden:
+        target[name] = getattr(plugin, name)
+    return overridden
+
+
+#: Go duration spellings `AgyProvider.build_command` can emit: whole seconds
+#: (`1170s`, what §9.6.c renders) plus the `19m30s` fallback form the plan keeps
+#: in reserve if the real binary ever rejects bare seconds.
+_GO_DURATION_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def parse_go_duration(text: Optional[str]) -> Optional[int]:
+    """Seconds in a Go duration string, or ``None`` when it is not one."""
+    if not text:
+        return None
+    match = _GO_DURATION_RE.match(str(text))
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = (int(group or 0) for group in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def run_print_timeout_stub(provider: str, args: Any) -> Optional[int]:
+    """The two agy stubs behind ``--print-timeout`` (§9.6.e), or ``None``.
+
+    Selected with ``MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR``:
+
+    * ``honour`` — the child agy is supposed to be. It starts a descendant,
+      reaches its own ``--print-timeout`` cutoff, shuts that descendant down and
+      writes its ``status: ERROR`` envelope, all *before* the parent's
+      ``subprocess.run`` deadline. The harness then reports agy's own reason
+      instead of a bare TIMEOUT, and nothing is left running. This is the stub
+      L5 makes reachable: it only works because the derived inner cutoff is
+      strictly below the outer one.
+    * ``ignore`` — the disobedient twin. It starts the same descendant and then
+      sleeps past *any* outer deadline. ``subprocess.run``'s kill reaches the
+      leader only, so the descendant survives — the orphan owned by
+      ``plans/timeout-orphans-and-reaggregate-determinism.md``. L5 cannot fix
+      this one, which is why its test ships xfail.
+
+    ``MOCK_LLM_PID_FILE`` receives the descendant's pid, so a test can assert
+    liveness rather than infer it. Returns ``None`` when neither stub is
+    selected, so the normal answer path continues untouched.
+    """
+    import subprocess
+
+    behaviour = os.environ.get("MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR")
+    if not behaviour:
+        return None
+    if behaviour not in ("honour", "ignore"):
+        print(
+            f"MOCK STUB ERROR: MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR={behaviour!r} "
+            f"is not 'honour' or 'ignore'",
+            file=sys.stderr,
+        )
+        return EXIT_TEST_AUTHORING_ERROR
+    if provider != "agy":
+        # A silent no-op here would let a test believe it exercised the stub.
+        print(
+            f"MOCK STUB ERROR: MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR is agy-only "
+            f"(--print-timeout is agy's flag); got provider {provider!r}",
+            file=sys.stderr,
+        )
+        return EXIT_TEST_AUTHORING_ERROR
+
+    rendered = getattr(args, "print_timeout", None)
+    inner_s = parse_go_duration(rendered)
+    if behaviour == "honour" and inner_s is None:
+        print(
+            f"MOCK STUB ERROR: --print-timeout {rendered!r} is not a Go "
+            f"duration, so the honouring stub has no cutoff to honour",
+            file=sys.stderr,
+        )
+        return EXIT_TEST_AUTHORING_ERROR
+
+    # A real descendant, so "no child survives" is observed and not inferred.
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+    pid_file = os.environ.get("MOCK_LLM_PID_FILE")
+    if pid_file:
+        Path(pid_file).write_text(str(sleeper.pid), encoding="utf-8")
+
+    if behaviour == "ignore":
+        time.sleep(600)
+        return 0
+
+    time.sleep(inner_s)
+    sleeper.terminate()
+    try:
+        sleeper.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        sleeper.kill()
+        sleeper.wait()
+    # agy's own envelope, in agy's own shape: `AgyProvider.parse_output` reads
+    # `status` and reports `error` as the failure reason.
+    print(json.dumps({
+        "conversation_id": "conv-mock-agy",
+        "status": "ERROR",
+        "response": "",
+        "error": f"print-timeout of {rendered} reached",
+        "duration_seconds": float(inner_s),
+        "num_turns": 1,
+        "usage": {"input_tokens": 50, "output_tokens": 0},
+    }))
+    return 0
+
+
 def main() -> int:
     """Main entry point for the unified mock LLM binary.
 
@@ -1183,6 +1586,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    # A one-off fake adapter (M22), installed before ANY seam is consulted —
+    # `--version` reads VERSION_STRINGS below, so a later install would be a
+    # seam the plugin was promised and did not get.
+    try:
+        install_mock_plugin()
+    except MockPluginError as exc:
+        print(f"MOCK PLUGIN ERROR: {exc}", file=sys.stderr)
+        return EXIT_TEST_AUTHORING_ERROR
 
     # Detect provider from invocation name
     provider = get_provider_name()
@@ -1248,6 +1660,14 @@ def main() -> int:
         time.sleep(0.05)  # 50ms
         print("ERROR: Simulated timeout - operation timed out", file=sys.stderr)
         return 124  # Standard timeout exit code
+
+    # L5 (§9.6.e): the two agy stubs that decide whether a child outlives the
+    # outer deadline. Placed after the call log so the argv is recorded either
+    # way, and before any response formatting because neither stub answers the
+    # prompt — they exist to be *slow* in one of two specific ways.
+    stub_exit = run_print_timeout_stub(provider, args)
+    if stub_exit is not None:
+        return stub_exit
 
     # Get response content. A scenario that declared `on_unmatched: fail` and
     # found nothing to say is a **failed invocation**, not a generic answer:

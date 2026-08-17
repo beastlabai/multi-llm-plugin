@@ -266,6 +266,46 @@ hosts:
     # 40 clears the observed tail by half again rather than by one turn. The
     # real ceiling on a runaway row is `wall_clock_s` below, not this.
     turn_bound: {kind: max-turns, value: 40}
+    # ADAPTER CHANGES OF 2026-08-16 (§7.3/L6, §3.6/L7, §9.8/L8) — this cell is
+    # UNCHANGED, and that is a finding, not an omission. Provenance: derived,
+    # 2026-08-16, from the adapters' own builders read offline (no container run).
+    #
+    #   * `invoke_argv` above launches claude-code AS A HOST, i.e. the argv that
+    #     loads SKILL.md and runs the dispatcher. It is not
+    #     `ClaudeCodeProvider.build_command`, so a provider-side flag never
+    #     appears in it. Adding one here would make the host lane launch an argv
+    #     no code emits.
+    #   * §3.6's `--fallback-model` is emitted only from a configured
+    #     `providers.claude-code.fallback_models`, and the shipped value is an
+    #     EMPTY map — so on this lane the provider argv is byte-for-byte what it
+    #     has always been, and `expected_argv.yaml`'s three claude-code rows still
+    #     match (re-derived offline through `seed_expected_argv.adapter_shapes`).
+    #   * §9.8's `--` separator lands only on the ARGV transport of the two agent
+    #     profiles. Both container rows are `transport: stdin`, where the adapter
+    #     drops the separator along with the prompt it shields, so those rows are
+    #     byte-identical too.
+    #   * §7.3's `CLAUDE_CODE_MAX_RETRIES=3` / `API_TIMEOUT_MS` are child-process
+    #     ENV, not argv. They reach a provider child through `wrapper.py`'s
+    #     carry-over allowlist (widened for exactly these two names); the HOST
+    #     process launched by `invoke_argv` is unaffected, since `get_env()` is
+    #     applied per provider dispatch and never exported by the harness.
+    #   * §4.2/M7's `--json-schema` is emitted only when a CALLER attaches a
+    #     schema (`invoke_with_provider(schema_phase=…)`), and no lane in this
+    #     matrix does — `schema=None` renders argv byte-for-byte as before, which
+    #     `tests/test_structured_output.py` asserts against L5's frozen capture
+    #     over all thirteen adapters. Its pinned `MAX_STRUCTURED_OUTPUT_RETRIES=1`
+    #     is child ENV on the same terms as the two names above, and is carried
+    #     by the same `wrapper.py` allowlist.
+    #     T3 EVIDENCE, 2026-08-16, host lane, ZERO paid tokens: the adapter's own
+    #     rendered argv for `generate-tasks` — `claude -p --output-format json
+    #     --json-schema <generated_tasks.schema.json> --model <m> <prompt>` — was
+    #     run VERBATIM against a localhost Anthropic stub at claude 2.1.233. Exit
+    #     0 in ONE request, `structured_output` present, `parse_output` unchanged.
+    #     The same argv against a stub whose tool input omits
+    #     `estimated_complexity` exits 1 as `error_max_structured_output_retries`
+    #     after ONE request (the pin working), and a prose-only stub exits 0,
+    #     `subtype: success`, with NO `structured_output` key — §4.2.1's trap,
+    #     measured.
     parser: utils/providers/claude_code.py
     # WHERE THE INNER MULTI_LLM_RESULT LINE LANDS — and on this host it does NOT.
     result_line_in_stream:
@@ -506,6 +546,19 @@ hosts:
     # `agent-write` profile our own adapter builds (`--sandbox workspace-write`),
     # which the provider lane still asserts verbatim — and which never hit bwrap
     # there because a tool-call-free stub makes codex execute no commands at all.
+    #
+    # M2 (`--ephemeral` + `--skip-git-repo-check`, unconditional) does NOT reach
+    # this cell, and the omission is deliberate rather than an oversight. M2
+    # changes `utils/providers/codex.py` — the argv the dispatcher builds for a
+    # codex *provider* dispatch — while this line is how the rig launches codex
+    # as the *host agent*, hand-typed and re-verifiable only by running the host
+    # lane. Neither flag would change what this row measures: `seed_workspace.py`
+    # `git init`s /work/sample-project, so the trust gate
+    # `--skip-git-repo-check` opens is already open here, and this row's finding
+    # is about bwrap, not about rollout persistence. Adding two unmeasured
+    # tokens would downgrade `invoke_provenance: verified` to a guess in the one
+    # lane whose whole value is that its cells were observed. If the host lane
+    # is re-run for another reason, adding `--ephemeral` here is a free tidy-up.
     invoke_argv: ["codex", "exec", "--json", "--sandbox", "danger-full-access",
                   "--model", "<model>", "<prompt>"]
     invoke_provenance: verified

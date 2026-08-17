@@ -104,6 +104,28 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # The schema-carrying variant of the row above: build_command splices
+  # --json-schema right after --output-format json when the §5.4.1 --help gate
+  # passes (claude_code.py:550-556). The chain reaches it exactly once, for kind
+  # task_generation -> phase generate-tasks -> generated_tasks.schema.json. The
+  # collapsed digest is pinned deliberately: a schema swapped for another schema
+  # is the regression this row exists to catch.
+  - provider: claude-code
+    profile: agent-readonly
+    transport: stdin
+    binary: claude
+    subcommands: []
+    options:
+      "--allowed-tools": "Read,Grep,Glob,TodoWrite"
+      "--disallowed-tools": "Edit,MultiEdit,Write,NotebookEdit,Bash,Task,WebFetch,WebSearch"
+      "--json-schema": "<prompt:sha256:7c5e7d6c:len=2325>"
+      "--model": "<model>"
+      "--output-format": "json"
+      "-p": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   - provider: claude-code
     profile: agent-write
     transport: stdin
@@ -131,6 +153,20 @@ entries:
       "-p": null
     tail: ["<prompt>"]
     prompt: argv
+    min_records: 1
+
+  # The §5.4.1 per-flag capability gate: _read_help_tokens spawns `claude --help`
+  # once per process (claude_code.py:209), memoised on the resolved binary, and
+  # only when a schema is attached. No other adapter probes this way.
+  - provider: claude-code
+    profile: probe
+    transport: stdin
+    binary: claude
+    subcommands: []
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
     min_records: 1
 
   - provider: claude-code
@@ -163,9 +199,11 @@ entries:
     binary: codex
     subcommands: ["exec"]
     options:
+      "--ephemeral": null
       "--json": null
       "--model": "<model>"
       "--sandbox": "read-only"
+      "--skip-git-repo-check": null
     tail: []
     prompt: stdin
     min_records: 1
@@ -176,9 +214,11 @@ entries:
     binary: codex
     subcommands: ["exec"]
     options:
+      "--ephemeral": null
       "--json": null
       "--model": "<model>"
       "--sandbox": "workspace-write"
+      "--skip-git-repo-check": null
     tail: ["<prompt>"]
     prompt: argv
     min_records: 1
@@ -189,9 +229,11 @@ entries:
     binary: codex
     subcommands: ["exec"]
     options:
+      "--ephemeral": null
       "--json": null
       "--model": "<model>"
       "--sandbox": "workspace-write"
+      "--skip-git-repo-check": null
     tail: []
     prompt: stdin
     min_records: 1

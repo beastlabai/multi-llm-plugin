@@ -1,10 +1,10 @@
 """Pi coding agent CLI provider implementation."""
 import json
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Thinking levels accepted by `pi --thinking` (per pi.dev docs). pi also
 # parses the same levels as a native ":level" suffix on --model; the adapter
@@ -53,7 +53,14 @@ class PiProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("pi") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # pi --no-session -p [--thinking <effort>] --model <model> "<prompt>"
         # -p prints the final answer and exits; the prompt goes last as a
         # positional argument.

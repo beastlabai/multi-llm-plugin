@@ -22,7 +22,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import detach as _detach
 from . import status_file as _status_file
@@ -41,16 +41,39 @@ from .unattended import NeedsHuman
 from .provider_registry import (
     get_all_model_specs,
     parse_model_spec,
+    get_provider,
     get_provider_timeout,
     get_provider_max_concurrent,
+    get_subagent_retries,
     is_model_valid,
+    set_run_anchor,
 )
 from .json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
 from .llm_client import invoke_with_provider, invoke_with_file_output
+from .providers.base import (
+    CATEGORY_CONNECTION_ERROR,
+    CATEGORY_INVALID_MODEL,
+    CATEGORY_PERMISSION_DENIED,
+    CATEGORY_SERVER_ERROR,
+    classify_streams,
+    context_length_message,
+)
+from .retry_ladder import (
+    RetryLadder,
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+    budget_exhausted_reason,
+)
 from .git_utils import get_project_root
 from .html_report_generator import (
     generate_html_report,
     write_html_report,
+    served_model_label,
     sort_raw_groups_by_priority,
     compute_max_importance,
     IMPORTANCE_ORDER,
@@ -411,6 +434,60 @@ def extract_json_array(text: str) -> Optional[str]:
     return None
 
 
+#: The ``Reason:`` line, keyed by the shared classifier's category (§7.1.a).
+#:
+#: This replaces a seven-branch ``elif`` chain of raw substring tests that had
+#: drifted from every other classifier in the tree: its first branch called
+#: **every** provider's failure "cursor-agent command not found" (and swallowed
+#: "model not found" with a bare ``'not found' in stderr``), its rate-limit
+#: branch disagreed with the retry decision three hundred lines below it, and
+#: ``'insufficient'`` matched any prose containing the word.
+#:
+#: A lookup rather than a chain is the point: the sentence a user acts on and
+#: the retry decision now read the *same* verdict off the *same* streams, so
+#: they can no longer contradict each other.
+#:
+#: The old "Quota exceeded or insufficient credits" branch is deliberately gone.
+#: A quota notice is what the shared classifier calls ``rate_limited`` — that is
+#: the rung it is retried on — and a second name for it here is exactly the
+#: disagreement this table removes.
+_REASON_BY_CATEGORY = {
+    STATUS_SPAWN_FAILED:
+        "Reason: the runner CLI could not be started (is it installed and in PATH?)",
+    CATEGORY_PERMISSION_DENIED: "Reason: Permission denied",
+    STATUS_AUTH_FAILED: "Reason: Authentication error (check API key)",
+    CATEGORY_INVALID_MODEL: "Reason: Model not found or invalid",
+    STATUS_RATE_LIMITED: "Reason: Rate limited",
+    STATUS_TIMEOUT: "Reason: Timed out",
+    CATEGORY_CONNECTION_ERROR: "Reason: Connection/network error",
+    CATEGORY_SERVER_ERROR: "Reason: API/Server error",
+    STATUS_RUNNER_ERROR: "Reason: the runner reported a failure",
+}
+
+_REASON_UNKNOWN = "Reason: Unknown (see tail output below)"
+
+
+#: The one translation from §7.2's classifier vocabulary into the D3k ladder's
+#: (§7.1.b). ``classify_streams`` returns four ``CATEGORY_*`` names the ladder has
+#: no rung for; two of them are transport-shaped and therefore rung 4, which is
+#: what makes a connection error or a 5xx spend ``driver.subagent_retries``
+#: exactly once — the behaviour the deleted ``retry_count < 1`` recursion had.
+#:
+#: Everything **absent** from this table reaches :meth:`RetryLadder.record` under
+#: its own name, and that is deliberate rather than an oversight:
+#: ``rate_limited`` and ``timeout`` are already ladder statuses; ``auth_failed``
+#: and ``spawn_failed`` are rung 1; and ``invalid_model``,
+#: ``permission_denied``, ``context_length_exceeded`` and the unrecognized
+#: ``None`` all fall through ``record``'s last branch to "never retried", which
+#: is exactly what the deleted ``failure_category in
+#: RETRYABLE_FAILURE_CATEGORIES`` guard decided. One table, not two.
+#: ``tests/test_lane_a_ladder.py`` pins the two vocabularies in agreement.
+_LADDER_STATUS_BY_CATEGORY = {
+    CATEGORY_CONNECTION_ERROR: STATUS_RUNNER_ERROR,
+    CATEGORY_SERVER_ERROR: STATUS_RUNNER_ERROR,
+}
+
+
 def _get_tail_output(text: str, max_lines: int = 20) -> str:
     """Get the last N lines of text for error context."""
     if not text:
@@ -427,26 +504,22 @@ def _format_failure_details(
     stderr_text: str,
     max_tail_lines: int = 20
 ) -> str:
-    """Format failure details with clear reason and tail output."""
-    error_parts = [f"Exit code {returncode}"]
-    combined_output = f"{stderr_text}\n{stdout_text}".lower()
+    """Format failure details with clear reason and tail output.
 
-    if 'command not found' in combined_output or 'not found' in stderr_text.lower():
-        error_parts.append("Reason: cursor-agent command not found (is it installed and in PATH?)")
-    elif 'permission denied' in combined_output:
-        error_parts.append("Reason: Permission denied")
-    elif 'unauthorized' in combined_output or 'authentication' in combined_output or '401' in stderr_text:
-        error_parts.append("Reason: Authentication error (check API key)")
-    elif 'model not found' in combined_output or 'invalid model' in combined_output:
-        error_parts.append("Reason: Model not found or invalid")
-    elif '429' in stderr_text or 'rate limit' in combined_output:
-        error_parts.append("Reason: Rate limited")
-    elif 'quota' in combined_output or 'insufficient' in combined_output:
-        error_parts.append("Reason: Quota exceeded or insufficient credits")
-    elif 'api error' in combined_output or 'server error' in combined_output or '500' in stderr_text:
-        error_parts.append("Reason: API/Server error")
+    The reason is the shared classifier's verdict looked up in
+    :data:`_REASON_BY_CATEGORY` (§7.1.a) — there is no second rule here. The
+    classifier is called with :class:`~utils.providers.base.LLMProvider`'s own
+    declared pattern sets, because this helper is handed two streams and an exit
+    code and never an adapter; a per-adapter override therefore reaches the
+    executor's rung decision (which does have one) but not this cosmetic line.
+    """
+    error_parts = [f"Exit code {returncode}"]
+
+    category = classify_streams(stdout_text, stderr_text, returncode)
+    if category == STATUS_CONTEXT_LENGTH_EXCEEDED:
+        error_parts.append(f"Reason: {context_length_message('')}")
     else:
-        error_parts.append("Reason: Unknown (see tail output below)")
+        error_parts.append(_REASON_BY_CATEGORY.get(category, _REASON_UNKNOWN))
 
     tail_parts = []
     if stderr_text.strip():
@@ -492,6 +565,46 @@ def _try_pretty_print_json(text: str) -> str:
 # Model invocation
 # ---------------------------------------------------------------------------
 
+def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
+    """§3.6's attribution keys from an invocation's ``details``, or ``{}``.
+
+    Splatted into a per-model result record so the fan-out carries what the
+    adapter read. Absent means "nothing was claimed" — every adapter but
+    claude-code, and every claude-code run under the shipped empty
+    ``fallback_models`` — and the record then has exactly the keys it has
+    always had.
+    """
+    served = (details or {}).get("served_model")
+    if not served:
+        return {}
+    return {
+        "served_model": served,
+        "served_model_is_fallback": bool(details.get("served_model_is_fallback")),
+    }
+
+
+def collect_served_models(
+    results: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """``{model_spec: {"served_model", "fallback"}}`` for a fan-out's results.
+
+    The report-side shape of the same fact, built from the per-model records
+    :func:`run_single_model` returns. Empty for a default run, which is what
+    keeps every downstream artifact unchanged.
+    """
+    served: Dict[str, Dict[str, Any]] = {}
+    for model_spec, result in (results or {}).items():
+        if not isinstance(result, dict):
+            continue
+        name = result.get("served_model")
+        if name:
+            served[model_spec] = {
+                "served_model": name,
+                "fallback": bool(result.get("served_model_is_fallback")),
+            }
+    return served
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -506,6 +619,20 @@ async def run_single_model(
 ) -> Dict[str, Any]:
     """Run a single model review with file-based JSON output.
 
+    Retries are the shared :class:`~utils.retry_ladder.RetryLadder` (§7.1.b),
+    **not** the recursion this function used to be. Two self-calls — one for a
+    rate limit, one for a network error — each re-entered with the *same*
+    ``timeout`` argument, so a claude-code slot at ``default_timeout: 1800``
+    could run 4 × 1800 s + 35 s of backoff ≈ 2 h against a configured ceiling of
+    1800 s (§7.5's opening paragraph). Being a tail call inside an ``async def``
+    it also kept its retry state in a place no budget could see.
+
+    The loop below is the sketch in §7.1.b, and its only lane-specific lines are
+    the ``await``ed dispatch and the ``await asyncio.sleep``. It is deliberately
+    **not** Lane B's loop: this coroutine is awaited inside ``asyncio.gather``
+    under two semaphores, so a blocking retry loop here would serialize the whole
+    fan-out. What the two lanes share is the policy object.
+
     Args:
         model_spec: Model specification (e.g., 'cursor-agent:auto')
         plan_path: Absolute path to the plan file
@@ -513,8 +640,12 @@ async def run_single_model(
         prompt_context: Dict of variables to substitute in the prompt
         phase_name: Phase directory name (e.g., 'review-plan', 'review-tasks')
         invoke_phase: Phase name for invoke_with_file_output (e.g., 'plan_review', 'task_review')
-        timeout: Optional timeout override in seconds
-        retry_count: Current retry attempt (for exponential backoff)
+        timeout: Optional timeout override in seconds — the slot's **whole**
+            wall-clock budget, taken once as a deadline and never re-issued.
+        retry_count: Vestigial. Retry state lives in the ladder now, which is the
+            point of §7.5 rule 1; the parameter survives only because
+            ``review_plan_orchestrator``'s backward-compatible wrapper forwards
+            it. Passing a non-zero value has no effect.
         out_dir: Optional output directory for log files and JSON output
         prefix: Optional prefix for log file names
 
@@ -525,7 +656,9 @@ async def run_single_model(
     start_time = time.time()
 
     project_root = get_project_root(plan_path)
-    provider_name, model_name = parse_model_spec(model_spec)
+    # `plan_path` IS the discovery anchor (§9.3.a): no new value is computed
+    # here, the existing one simply stops being thrown away at the spawn.
+    provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
     display_name = f"{provider_name}:{model_name}"
 
     effective_prefix = prefix or sanitize_prefix(os.path.basename(plan_path))
@@ -533,7 +666,10 @@ async def run_single_model(
     if "prefix" not in full_prompt_context:
         full_prompt_context["prefix"] = effective_prefix
 
-    effective_timeout = timeout if timeout is not None else get_provider_timeout(provider_name)
+    effective_timeout = (
+        timeout if timeout is not None
+        else get_provider_timeout(provider_name, anchor=plan_path)
+    )
 
     log_file = None
     if out_dir and prefix:
@@ -553,7 +689,8 @@ async def run_single_model(
                 model_spec=model_spec,
                 timeout=int(effective_timeout),
                 log_file=log_file,
-                cwd=project_root
+                cwd=project_root,
+                anchor=plan_path,
             )
             duration = time.time() - start_time
             details = result.get("details", {})
@@ -574,7 +711,8 @@ async def run_single_model(
                     "stderr": stderr_text,
                     "duration_seconds": duration,
                     "model_spec": model_spec,
-                    "source": "stdout"
+                    "source": "stdout",
+                    **served_model_fields(details),
                 }
             else:
                 return {
@@ -602,74 +740,177 @@ async def run_single_model(
                 "source": "stdout"
             }
 
-    try:
-        print(f"[{display_name}] Starting review with file-based output (timeout: {effective_timeout}s)...")
+    result: Optional[Dict[str, Any]] = None
+    details: Dict[str, Any] = {}
+    stderr_text = ""
+    source = "unknown"
+    status: Optional[str] = None
+    action = None
 
-        result = await asyncio.to_thread(
-            invoke_with_file_output,
-            prompt_template=prompt_template,
-            model_spec=model_spec,
-            prompt_context=full_prompt_context,
-            output_dir=out_dir,
-            phase=invoke_phase,
-            timeout=int(effective_timeout),
-            log_file=log_file,
-            prefer_arrays=True,
-            cwd=project_root
+    try:
+        # §7.5 rule 1: ONE deadline for this slot, taken once, here. Every
+        # attempt below is spawned with what is LEFT of it — the whole of M9's
+        # budget half. The declared vendor envelope (§7.6(b)) turns on rule 4's
+        # pre-dispatch admission test and rule 6(b)'s refusal to re-issue a
+        # rate-limit dispatch a CLI already exhausted internally; `getattr`
+        # because the eleven unmeasured adapters declare `None`, which rule 6(c)
+        # reads as "assume one request", never "assume the worst".
+        provider = get_provider(provider_name)
+        ladder = RetryLadder(
+            timeout=effective_timeout,
+            retries=get_subagent_retries(anchor=plan_path),
+            envelope=getattr(provider, "internal_retries", None),
+            now=time.monotonic,
         )
+        # A placeholder only until the first attempt names its real output file:
+        # rule 4 can refuse this slot before any dispatch, and the result dict
+        # still owes its caller a `prompt`.
+        prompt = prompt_template.format(**full_prompt_context, output_json_path="")
+
+        while (slice_s := ladder.next_attempt()) is not None:
+            # Never a fresh copy of `effective_timeout`: `next_attempt()` returns
+            # what is left of the one deadline, and rule 3 guarantees it is at
+            # least MIN_ATTEMPT_BUDGET_S, so the floor below can never be 0.
+            # `round`, not `int`: `invoke_with_file_output` takes whole seconds,
+            # and truncating would silently spend up to a second of the slot's
+            # budget on every attempt — including the first, whose slice is
+            # `effective_timeout` minus the microseconds since the ladder was
+            # constructed. The ≤ 0.5 s of overshoot the other way is bounded and
+            # sits inside the fan-out's `base_timeout × 2` of slack.
+            attempt_timeout = max(1, int(round(slice_s)))
+            print(
+                f"[{display_name}] Starting review with file-based output "
+                f"(attempt {ladder.attempt_index}, timeout: {attempt_timeout}s "
+                f"of a {effective_timeout}s slot)..."
+            )
+
+            result = await asyncio.to_thread(
+                invoke_with_file_output,
+                prompt_template=prompt_template,
+                model_spec=model_spec,
+                prompt_context=full_prompt_context,
+                output_dir=out_dir,
+                phase=invoke_phase,
+                timeout=attempt_timeout,
+                log_file=log_file,
+                prefer_arrays=True,
+                cwd=project_root,
+                anchor=plan_path,
+            )
+
+            details = result.get("details", {})
+            stderr_text = details.get("stderr", "")
+            source = result.get("source", "unknown")
+            output_file = result.get("output_file", "")
+
+            prompt = prompt_template.format(
+                **full_prompt_context, output_json_path=output_file
+            )
+
+            if output_file:
+                print(f"[{display_name}] Output file: {output_file} (source: {source})")
+
+            # §7.1.a/§7.2: ONE classification per failed slot, read off the
+            # shared classifier, replacing the three raw-substring tests that
+            # used to live in this function and disagree with each other. The
+            # boundary- and context-awareness L2 introduced is preserved because
+            # it is the *same* implementation — a model that wrote "reviewed 429
+            # files" still costs one dispatch, not four full-timeout ones plus
+            # 35s of backoff.
+            # The haystack is the invocation's own ``error`` string and nothing
+            # else, exactly as L2 left it. That string is already what
+            # ``_format_failure_details`` built from *both* streams, so adding
+            # ``stderr_text`` beside it would not add information — it would
+            # duplicate the same prose and let the tail of one copy supply the
+            # error-context word for a bare token in the other, which is
+            # precisely the false positive ``matches_any``'s 48-character window
+            # exists to prevent.
+            failure_category = (
+                None if result.get("success")
+                else classify_streams(str(result.get("error", "")), "")
+            )
+            status = (
+                STATUS_OK if result.get("success")
+                else _LADDER_STATUS_BY_CATEGORY.get(failure_category, failure_category)
+            )
+
+            # One `record` call is the whole retry decision, identical to Lane
+            # B's: rung 1 is terminal, rung 3 backs off with jitter at most three
+            # times without consuming the transport budget, rungs 2/4/5 spend
+            # `driver.subagent_retries`, everything else is never retried — and
+            # every one of those decisions is taken against the same deadline the
+            # dispatches are charged to. `retry_count < 3` and `retry_count < 1`
+            # are gone; they were two counters neither of which saw a clock.
+            action = ladder.record(status)
+            if not action.retry:
+                break
+            if action.delay:
+                # The ladder is pure, so the test fast-backoff switch cannot live
+                # there. Applying it here, at the one place this lane really
+                # sleeps, keeps MULTI_LLM_TEST_FAST_BACKOFF=1 an exact 10 ms.
+                delay = get_backoff_delay(action.delay)
+                print(f"[{display_name}] {status}, retrying in {delay}s...")
+                await asyncio.sleep(delay)
 
         duration = time.time() - start_time
-        details = result.get("details", {})
-        stderr_text = details.get("stderr", "")
-        source = result.get("source", "unknown")
-        output_file = result.get("output_file", "")
 
-        prompt = prompt_template.format(**full_prompt_context, output_json_path=output_file)
-
-        if output_file:
-            print(f"[{display_name}] Output file: {output_file} (source: {source})")
-
-        # Check for rate limiting (429)
-        if not result.get("success") and '429' in str(result.get("error", "")):
-            if retry_count < 3:
-                base_backoff = [5, 10, 20][retry_count]
-                backoff = get_backoff_delay(base_backoff)
-                print(f"[{display_name}] Rate limited (429), retrying in {backoff}s...")
-                await asyncio.sleep(backoff)
-                return await run_single_model(
-                    model_spec, plan_path, prompt_template, prompt_context,
-                    phase_name, invoke_phase, timeout, retry_count + 1, out_dir, prefix
-                )
-            else:
-                return {
-                    "success": False, "output": None,
-                    "error": "Rate limited (429) - max retries exceeded",
-                    "prompt": prompt, "stdout": "", "stderr": stderr_text,
-                    "duration_seconds": duration, "model_spec": model_spec,
-                    "source": source
-                }
-
-        # Check for context exceeded
-        if not result.get("success") and 'context' in str(result.get("error", "")).lower():
+        if result is None:
+            # §7.5 rule 4: the slot was refused before anything was spawned. It
+            # is recorded as its own outcome rather than dispatched to be killed
+            # part-way through a retry chain the harness cannot see.
+            reason = budget_exhausted_reason(
+                ladder, target=display_name, timeout=effective_timeout
+            )
+            print(f"[{display_name}] {reason}")
             return {
                 "success": False, "output": None,
-                "error": "Context length exceeded - consider chunking the plan",
+                "error": reason,
+                "prompt": prompt, "stdout": "", "stderr": "",
+                "duration_seconds": duration, "model_spec": model_spec,
+                "source": "not-dispatched",
+            }
+
+        # The ladder granted a retry and `next_attempt()` then refused it: what
+        # ended this slot is the budget, not the last attempt's error. Lane B
+        # appends the same sentence (`subagent_executor.py`'s STOP_DEADLINE leg),
+        # because without it the recorded reason names a transport failure that
+        # the harness had, and did not spend, retries for.
+        budget_note = ""
+        if action is not None and action.retry:
+            budget_note = (
+                f" (no retry: the per-slot wall-clock budget of "
+                f"{effective_timeout}s is exhausted — {ladder.stop_reason})"
+            )
+
+        if status == STATUS_RATE_LIMITED:
+            # Either the ≤ 3 backoffs are spent, or §7.5 rule 6(b) refused an
+            # identical re-dispatch against an adapter whose CLI already ran its
+            # own 429 chain. `action.reason` names which, and — for 6(b) — the
+            # declared envelope that decided it.
+            return {
+                "success": False, "output": None,
+                "error": f"Rate limited (429) - {action.reason}{budget_note}",
                 "prompt": prompt, "stdout": "", "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source
             }
 
-        # Check for network/connection errors with retry
-        error_msg = str(result.get("error", "")).lower()
-        if not result.get("success") and ('connection' in error_msg or 'network' in error_msg):
-            if retry_count < 1:
-                backoff = get_backoff_delay(5)
-                print(f"[{display_name}] Network error, retrying in {backoff}s...")
-                await asyncio.sleep(backoff)
-                return await run_single_model(
-                    model_spec, plan_path, prompt_template, prompt_context,
-                    phase_name, invoke_phase, timeout, retry_count + 1, out_dir, prefix
-                )
+        # §7.6(a): a context overflow is TERMINAL. Splitting the prompt is open
+        # question 13 and nobody has designed it, so the shipping behaviour is to
+        # classify it, name it, and fail the slot with the two remedies a human
+        # can actually apply — never a re-dispatch, because re-sending an
+        # unchanged oversized prompt is the one retry guaranteed to fail
+        # identically. The old test here was `'context' in str(error)`, which
+        # also fired on `context_mode`, on "in this context", and on any prose
+        # quoting the plan's own Context section.
+        if status == STATUS_CONTEXT_LENGTH_EXCEEDED:
+            return {
+                "success": False, "output": None,
+                "error": context_length_message(model_spec),
+                "prompt": prompt, "stdout": "", "stderr": stderr_text,
+                "duration_seconds": duration, "model_spec": model_spec,
+                "source": source
+            }
 
         if result.get("success"):
             print(f"[{display_name}] Completed successfully in {duration:.1f}s (source: {source})")
@@ -684,10 +925,12 @@ async def run_single_model(
                 "error": None, "prompt": prompt,
                 "stdout": output_str, "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
-                "source": source
+                "source": source,
+                # §3.6: the served model rides out with the answer it produced.
+                **served_model_fields(details),
             }
         else:
-            error_details = result.get("error", "Unknown error")
+            error_details = f"{result.get('error', 'Unknown error')}{budget_note}"
             file_error = result.get("file_error", "")
             if file_error:
                 print(f"[{display_name}] File error: {file_error}")
@@ -723,6 +966,7 @@ async def run_models_concurrent(
     timeout: Optional[float],
     max_parallel: int,
     skip_predicate: Optional[Callable[[str, int], Optional[Any]]] = None,
+    anchor: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Run a per-model async callback across all models with shared concurrency control.
 
@@ -756,6 +1000,11 @@ async def run_models_concurrent(
             immediately (no stagger delay, no semaphore serialization). This
             keeps resume of already-completed models fast. Returning ``None``
             means "not skipped" and the model proceeds normally.
+        anchor: Optional discovery anchor (the run's plan-file path). This
+            function has no plan path of its own, so without it every per-provider
+            bound and every provider resolution below falls back to CWD (§9.3.c).
+            ``run_review_phase`` and ``ask_orchestrator`` both hold the plan path
+            and pass it.
 
     Returns:
         Dict mapping model spec to whatever the callback returned for it.
@@ -769,14 +1018,16 @@ async def run_models_concurrent(
     # Per-provider semaphores for concurrency limiting
     provider_semaphores: Dict[str, asyncio.Semaphore] = {}
     for spec in model_specs:
-        prov, _ = parse_model_spec(spec)
+        prov, _ = parse_model_spec(spec, anchor=anchor)
         if prov not in provider_semaphores:
-            limit = get_provider_max_concurrent(prov)
+            limit = get_provider_max_concurrent(prov, anchor=anchor)
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Any]:
-        provider_name, model_name = parse_model_spec(model_spec)
+        # Display-only, but still anchored: a bare spec must render the same
+        # provider the router chose, not a second, different guess (§9.3.c).
+        provider_name, model_name = parse_model_spec(model_spec, anchor=anchor)
         display_name = f"{provider_name}:{model_name}"
 
         # Cheap pre-stagger skip check: short-circuit already-completed models on
@@ -811,7 +1062,10 @@ async def run_models_concurrent(
     if timeout is not None:
         base_timeout = timeout
     else:
-        base_timeout = max(get_provider_timeout(parse_model_spec(spec)[0]) for spec in model_specs)
+        base_timeout = max(
+            get_provider_timeout(parse_model_spec(spec, anchor=anchor)[0], anchor=anchor)
+            for spec in model_specs
+        )
 
     stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
@@ -847,6 +1101,7 @@ async def run_tasks_concurrent(
     max_parallel: int = 4,
     skip_predicate: Optional[Callable[[Dict[str, Any], str, int], Optional[Any]]] = None,
     provider_limits: Optional[Dict[str, int]] = None,
+    anchor: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """:func:`run_models_concurrent`'s mechanics, keyed by ``task_id`` (D3).
 
@@ -881,6 +1136,9 @@ async def run_tasks_concurrent(
         provider_limits: Optional per-provider in-flight overrides (D3i
             backpressure narrows a throttled provider's slots for the rest of the
             batch); defaults to ``get_provider_max_concurrent``.
+        anchor: Optional discovery anchor (the run's plan-file path), the Lane B
+            twin of ``run_models_concurrent``'s (§9.3.c). ``subagent_executor``
+            already holds the phase's plan path and passes it.
 
     Returns:
         ``{task_id: whatever the callback returned}``.
@@ -898,17 +1156,21 @@ async def run_tasks_concurrent(
 
     provider_semaphores: Dict[str, asyncio.Semaphore] = {}
     for spec in set(runners.values()):
-        prov, _ = parse_model_spec(spec)
+        prov, _ = parse_model_spec(spec, anchor=anchor)
         if prov in provider_semaphores:
             continue
-        limit = (provider_limits or {}).get(prov, get_provider_max_concurrent(prov))
+        limit = (provider_limits or {}).get(
+            prov, get_provider_max_concurrent(prov, anchor=anchor)
+        )
         if limit is not None:
             provider_semaphores[prov] = asyncio.Semaphore(limit)
 
     async def run_with_semaphore(task: Dict[str, Any], index: int) -> Tuple[str, Any]:
         task_id = str(task.get("task_id", index))
         runner = runners[task_id]
-        provider_name, _ = parse_model_spec(runner)
+        # Anchored for the same reason the fan-out's display resolution is: the
+        # semaphore this picks must be the one the batch was sized for (§9.3.c).
+        provider_name, _ = parse_model_spec(runner, anchor=anchor)
 
         if skip_predicate is not None:
             skipped = skip_predicate(task, runner, index)
@@ -937,7 +1199,7 @@ async def run_tasks_concurrent(
         base_timeout = timeout
     else:
         base_timeout = max(
-            get_provider_timeout(parse_model_spec(spec)[0])
+            get_provider_timeout(parse_model_spec(spec, anchor=anchor)[0], anchor=anchor)
             for spec in runners.values()
         )
     total_timeout = base_timeout * 2 + len(tasks) * PROVIDER_STAGGER_DELAY
@@ -1005,7 +1267,7 @@ async def run_all_models(
         # failure). Returns None when the model must (re)run.
         if not (skip_existing and out_dir):
             return None
-        provider_name, model_name = parse_model_spec(model_spec)
+        provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
         display_name = f"{provider_name}:{model_name}"
         sanitized = sanitize_model_name(model_spec)
         existing_path = os.path.join(
@@ -1043,6 +1305,7 @@ async def run_all_models(
     return await run_models_concurrent(
         model_specs, per_model, timeout, max_parallel,
         skip_predicate=skip_existing_result,
+        anchor=plan_path,
     )
 
 
@@ -1240,6 +1503,7 @@ def aggregate_results(
     tasks_path: Optional[Path] = None,
     template_style: str = 'pr',
     diff_data: Optional[Dict] = None,
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """Aggregate all model results into a consolidated markdown report.
 
@@ -1260,6 +1524,12 @@ def aggregate_results(
             (forwarded to ``generate_html_report()``).  Defaults to ``'pr'``.
         diff_data: Optional pre-computed diff hunk data (forwarded to
             ``generate_html_report()``).
+        served_models: Optional §3.6 attribution
+            (``{model_spec: {"served_model", "fallback"}}``, from
+            :func:`collect_served_models`).  A model that was served by a
+            configured fallback is named as such on the ``**Models:**`` line and
+            in the HTML report; with nothing configured this is empty and the
+            report is byte-for-byte what it was.
 
     Returns:
         Path to the generated report
@@ -1305,7 +1575,7 @@ def aggregate_results(
         "",
         f"**Original plan:** {prefix}.md",
         f"**Generated:** {timestamp}",
-        f"**Models:** {', '.join(successful_models)}",
+        f"**Models:** {', '.join(served_model_label(m, served_models) for m in successful_models)}",
         f"**Groups:** {len(groups_to_display) if groups_to_display else 0}",
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
@@ -1361,6 +1631,7 @@ def aggregate_results(
             tasks_path=tasks_path,
             template_style=template_style,
             diff_data=diff_data,
+            served_models=served_models,
         )
         write_html_report(html_content, Path(phase_dir))
         print(f"HTML report written to: {os.path.join(phase_dir, 'report.html')}")
@@ -1920,6 +2191,11 @@ async def run_review_orchestration(
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
 
+    # §9.3.a/b: the anchor capture point. Absolute, taken before anything can
+    # chdir and before any provider read that decides routing, so a call site
+    # that forgets the keyword still falls back to THIS plan, not to CWD.
+    set_run_anchor(plan_path)
+
     prefix = derive_prefix(plan_path)
     out_dir_arg = getattr(args, 'out_dir', None)
     base_dir = out_dir_arg or os.path.dirname(plan_path) or "."
@@ -2032,7 +2308,7 @@ async def run_review_orchestration(
         sys.exit(_unattended.fail_closed(e.message, site_id=e.site))
     except RuntimeError as e:
         print(f"ERROR: {e}")
-        available = get_all_model_specs()
+        available = get_all_model_specs(anchor=plan_path)
         print(f"Use --models flag. Available: {', '.join(available[:5])}...")
         sys.exit(1)
 
@@ -2054,7 +2330,9 @@ async def run_review_orchestration(
     invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        available = get_all_model_specs()
+        # Anchored to match the rejection above: an anchored `is_model_valid`
+        # paired with a CWD-discovered suggestion list is its own bug (§9.3.c).
+        available = get_all_model_specs(anchor=plan_path)
         print(f"Available models: {', '.join(available[:10])}...")
 
     # Run pre-run hook (e.g., validate tasks file existence)
@@ -2151,6 +2429,12 @@ async def run_review_orchestration(
         if not save_model_result(prefix, model_spec, success, output, error, out_dir, phase_dir, salvage_phase_name):
             failed_models[model_spec] = error or "Unknown error"
 
+    # §3.6: which model actually served each slot. The per-model `{model}.json`
+    # is a bare suggestion list reaggregation re-reads, so the attribution is
+    # recorded once here and carried to the report rather than stamped into an
+    # artifact whose shape another phase depends on. Empty for a default run.
+    served_models = collect_served_models(results)
+
     # D3b: a salvage task exists for every model whose output would not parse.
     # With --exec-subagents this run repairs them itself; a model whose result
     # file now exists is no longer failed, so the partial-results accounting
@@ -2197,6 +2481,9 @@ async def run_review_orchestration(
         "state": "models_complete",
         "models_completed": completed_models,
         "models_failed": failed_models,
+        # Added only when something was attributed, so a default run's
+        # `.status.json` gains no key.
+        **({"models_served": served_models} if served_models else {}),
     })
     _detach.report_progress(
         phase_dir,
@@ -2352,6 +2639,7 @@ async def run_review_orchestration(
         tasks_path=tasks_path,
         template_style=template_style,
         diff_data=diff_data,
+        served_models=served_models or None,
     )
 
     # Handle consolidation recommendation (only for phases that support it)

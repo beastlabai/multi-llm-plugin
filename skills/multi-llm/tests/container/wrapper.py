@@ -109,9 +109,23 @@ ENV_CAPTURE_SUFFIX = ("_BASE_URL",)
 # from the rig's own value rather than inherited) — so an adapter that later
 # contributes something neither place accounts for fails a test rather than
 # being silently scrubbed away.
+#
+# The third group is claude-code's retry envelope (§7.3): `CLAUDE_CODE_MAX_RETRIES`
+# and `API_TIMEOUT_MS` are the CLI's own knobs, set by `ClaudeCodeProvider.get_env()`
+# because the shipped default of 10 retries burned a measured 182 s in one
+# rate-limited slot. Scrubbed, a container row runs on that 10-retry default —
+# the same class of "testing a configuration the product never ships" as the
+# aider case above, and the one that decides whether `--fallback-model`'s
+# overload path exists at all. Both are integers; neither can hold a credential.
 ENV_CARRY_EXACT = (
     "PATH", "TERM", "LANG", "LC_ALL", "TZ",
     "COLUMNS", "LINES", "BROWSER", "NO_COLOR", "FORCE_COLOR",
+    "CLAUDE_CODE_MAX_RETRIES", "API_TIMEOUT_MS",
+    # §4.2.1's pinned structured-output budget. An integer, never a credential,
+    # and load-bearing on cost: without it the container row would run at the
+    # CLI's default of five model calls per invocation while the product ships
+    # one.
+    "MAX_STRUCTURED_OUTPUT_RETRIES",
 )
 ENV_CARRY_PREFIX = ("MLLM_",)
 

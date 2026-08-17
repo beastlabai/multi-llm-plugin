@@ -1,10 +1,11 @@
 """Block goose CLI provider implementation with JSON envelope parsing."""
 import json
+import re
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Thinking effort values accepted by goose's ThinkingEffort parser, aliases
 # included (verified on goose 1.41.0). goose has no CLI flag for this — the
@@ -44,6 +45,14 @@ class GooseProvider(LLMProvider):
     explicit failure result.
     """
 
+    #: §7.2 — the exit-0 sniff, folded out of ``parse_output`` and into the
+    #: classifier so the D3k ladder sees it too. goose exits **0** on a provider
+    #: error (measured again on 1.41.0, 2026-08-16, with an invalid
+    #: OPENROUTER_API_KEY), and the only signal is this phrase in the final
+    #: assistant text. ``parse_output`` still returns an explicit failure — the
+    #: two readings are the same marker, not two rules.
+    exit_zero_failure_markers = (re.compile(r"ran into this error:"),)
+
     @property
     def name(self) -> str:
         return "goose"
@@ -55,7 +64,14 @@ class GooseProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("goose") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # goose run --no-session -q --output-format json --no-profile
         #   --max-turns 25 --with-builtin developer
         #   --provider <goose-provider> --model <model-id> -t "<prompt>"

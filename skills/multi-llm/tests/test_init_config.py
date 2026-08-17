@@ -323,7 +323,11 @@ class TestEndToEndInit:
         # Detected providers' full blocks are present and live in the written file.
         assert "claude-code" in written["providers"]
         assert "cursor-agent" in written["providers"]
-        assert written["providers"]["claude-code"]["command"] == "claude"
+        # §9.2: `command`/`supports_json_output` are gone from base, so the
+        # rendered block carries neither. The live scalars still round-trip.
+        assert written["providers"]["claude-code"]["default_timeout"] == 1800
+        assert "command" not in written["providers"]["claude-code"]
+        assert "supports_json_output" not in written["providers"]["claude-code"]
         # Only detected providers' defaults specs are uncommented.
         assert written["defaults"]["models"] == [
             "cursor-agent:composer-2.5",
@@ -338,7 +342,7 @@ class TestEndToEndInit:
         _reset_cache()
         merged = registry.load_config(anchor=str(tmp_path))
         assert merged["defaults"]["models"] == written["defaults"]["models"]
-        assert merged["providers"]["claude-code"]["command"] == "claude"
+        assert merged["providers"]["claude-code"]["default_timeout"] == 1800
         # base providers the override omitted are still inherited.
         assert "gemini" in merged["providers"]
         _reset_cache()

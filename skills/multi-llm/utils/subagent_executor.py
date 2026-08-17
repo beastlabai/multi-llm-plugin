@@ -39,7 +39,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 import re
 import subprocess
 import sys
@@ -50,8 +49,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
+    from . import structured_output
     from .json_extractor import extract_json_from_text
-    from .llm_client import _CMD_UNSAFE_CHARS, _resolve_executable
+    from .llm_client import _CMD_UNSAFE_CHARS, _resolve_executable, expand_env_home
     from .provider_registry import (
         get_max_concurrent_subagents,
         get_provider,
@@ -66,7 +66,30 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
+        StructuredOutputUnavailable,
         matches_any,
+    )
+    from .retry_ladder import (  # noqa: F401 - re-exported, see below
+        BACKOFF_STATUSES,
+        FATAL_STATUSES,
+        MIN_ATTEMPT_BUDGET_S,
+        RETRYABLE_STATUSES,
+        RUNG_BY_STATUS,
+        STATUS_AUTH_FAILED,
+        STATUS_BUDGET_EXHAUSTED,
+        STATUS_INCOMPLETE,
+        STATUS_OK,
+        STATUS_RATE_LIMITED,
+        STATUS_REJECTED,
+        STATUS_RUNNER_ERROR,
+        STATUS_SCHEMA_INVALID,
+        STATUS_SPAWN_FAILED,
+        STATUS_TIMEOUT,
+        STATUS_UNPARSEABLE,
+        STOP_BUDGET,
+        STOP_DEADLINE,
+        RetryLadder,
+        budget_exhausted_reason,
     )
     from .schema_validator import (
         validate_human_decision_verdicts,
@@ -82,8 +105,13 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
+    from utils import structured_output
     from utils.json_extractor import extract_json_from_text
-    from utils.llm_client import _CMD_UNSAFE_CHARS, _resolve_executable
+    from utils.llm_client import (
+        _CMD_UNSAFE_CHARS,
+        _resolve_executable,
+        expand_env_home,
+    )
     from utils.provider_registry import (
         get_max_concurrent_subagents,
         get_provider,
@@ -98,7 +126,30 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
+        StructuredOutputUnavailable,
         matches_any,
+    )
+    from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
+        BACKOFF_STATUSES,
+        FATAL_STATUSES,
+        MIN_ATTEMPT_BUDGET_S,
+        RETRYABLE_STATUSES,
+        RUNG_BY_STATUS,
+        STATUS_AUTH_FAILED,
+        STATUS_BUDGET_EXHAUSTED,
+        STATUS_INCOMPLETE,
+        STATUS_OK,
+        STATUS_RATE_LIMITED,
+        STATUS_REJECTED,
+        STATUS_RUNNER_ERROR,
+        STATUS_SCHEMA_INVALID,
+        STATUS_SPAWN_FAILED,
+        STATUS_TIMEOUT,
+        STATUS_UNPARSEABLE,
+        STOP_BUDGET,
+        STOP_DEADLINE,
+        RetryLadder,
+        budget_exhausted_reason,
     )
     from utils.schema_validator import (
         validate_human_decision_verdicts,
@@ -128,6 +179,7 @@ __all__ = [
     "STATUS_REJECTED",
     "STATUS_SPAWN_FAILED",
     "STATUS_AUTH_FAILED",
+    "STATUS_BUDGET_EXHAUSTED",
     "STATUS_INCOMPLETE",
     "STATUS_PARTIAL",
     "STATUS_POLICY_VIOLATION",
@@ -148,6 +200,8 @@ __all__ = [
     "Attempt",
     "TaskOutcome",
     "BatchReport",
+    "SCHEMA_PHASE_BY_KIND",
+    "schema_phase_for_kind",
     "profile_for_kind",
     "resolve_task_runner",
     "resolve_output_target",
@@ -199,45 +253,14 @@ TIMEOUT_KILL_GRACE_S = 0.5
 #: one is the hang that turns a timed-out task into a wedged batch.
 TIMEOUT_DRAIN_S = 5.0
 
-#: The smallest slice of the per-task budget worth *starting* a retry with
-#: (D3i). ``subagent_timeout_s`` is the task's total wall-clock budget, so a
-#: retry gets what is left of it — and a runner handed under a second would
-#: spend it on process start-up and be killed for the same reason the previous
-#: attempt was, having only added a spawn and a kill to the batch.
-MIN_ATTEMPT_BUDGET_S = 1.0
-
-STATUS_OK = "ok"
-STATUS_TIMEOUT = "timeout"
-STATUS_RATE_LIMITED = "rate_limited"
-STATUS_RUNNER_ERROR = "runner_error"
-STATUS_UNPARSEABLE = "unparseable_result"
-STATUS_SCHEMA_INVALID = "schema_invalid"
-STATUS_REJECTED = "rejected"
-STATUS_SPAWN_FAILED = "spawn_failed"
-STATUS_AUTH_FAILED = "auth_failed"
-#: Not a dispatch outcome: a task with no result file at all (an orphan from a
-#: run killed mid-batch). Defined by artifacts, never by memory (D3i).
-STATUS_INCOMPLETE = "incomplete"
-
-#: The D3k ladder, first match wins. Every dispatch failure lands on exactly one
-#: rung, and the status is what ``subagent_batch_report.json`` records verbatim.
-RUNG_BY_STATUS = {
-    STATUS_SPAWN_FAILED: 1,
-    STATUS_AUTH_FAILED: 1,
-    STATUS_TIMEOUT: 2,
-    STATUS_RATE_LIMITED: 3,
-    STATUS_RUNNER_ERROR: 4,
-    STATUS_UNPARSEABLE: 5,
-    STATUS_SCHEMA_INVALID: 6,
-    STATUS_REJECTED: 7,
-}
-
-#: Statuses that consume ``driver.subagent_retries``.
-RETRYABLE_STATUSES = frozenset({STATUS_TIMEOUT, STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE})
-
-#: Rate limiting is retried with backoff+jitter and does **not** consume the
-#: retry budget (D3i) — it is not a transport failure.
-BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
+#: The status vocabulary, the D3k rung table, ``MIN_ATTEMPT_BUDGET_S`` and the
+#: two policy frozensets (``RETRYABLE_STATUSES``, ``BACKOFF_STATUSES``,
+#: ``FATAL_STATUSES``) are **defined in** :mod:`utils.retry_ladder` and imported
+#: above. The ladder is their only consumer now that ``dispatch_task``'s retry
+#: loop is one of its callers (§7.1.b), and a policy object that does not own its
+#: own vocabulary is not a policy object. They are re-exported from here
+#: unchanged, so every ``from utils.subagent_executor import STATUS_TIMEOUT``
+#: in the tree keeps working exactly as it did.
 
 #: The only statuses ``_classify_failed_run`` may reclassify (D3k). Rungs 4 and 5
 #: mean "the run produced nothing usable", which is exactly the condition under
@@ -250,10 +273,13 @@ BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
 #: or, worse, into a batch-failing ``auth_failed``.
 RECLASSIFIABLE_STATUSES = frozenset({STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE})
 
-#: Rungs that fail the whole batch immediately: every sibling would fail
-#: identically, so continuing would only burn the retry budget N times.
-FATAL_STATUSES = frozenset({STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED})
-
+#: ``STATUS_BUDGET_EXHAUSTED`` (§7.5 rule 4) is re-exported with them and is
+#: deliberately **absent from** ``RUNG_BY_STATUS``: no child was spawned, so
+#: there is no transport failure to put on a rung, and it is never retried (a
+#: second admission test against a shorter budget has the same answer) and never
+#: fatal to the batch (a sibling with a longer slot, or a runner with a smaller
+#: declared envelope, is unaffected).
+#:
 #: Not a dispatch outcome either: the two D3g **verification** failures. They have
 #: no D3k rung by design — the child ran, produced a schema-valid result and the
 #: transport worked; what failed is the executor's own byte comparison, so
@@ -270,6 +296,37 @@ PROFILE_BY_KIND = {
     **{kind: PROFILE_AGENT_READONLY for kind in READ_KINDS},
     **{kind: PROFILE_AGENT_WRITE for kind in WRITE_KINDS},
 }
+
+#: §4.2.2's phase → schema table is keyed by **phase**; a Lane B dispatch's
+#: document contract is its **kind**. The two are not interchangeable here: the
+#: ``code-review`` phase dispatches ``validation`` tasks whose result is a
+#: validation batch, not the phase's ``code_review_issues`` array, so handing a
+#: subagent the phase's schema would constrain it to a document it was never
+#: asked for — and then validate its answer against a second, different file.
+#:
+#: So the phase is derived from the kind, and the table is exactly the
+#: intersection where the kind's own result schema (``validate_result``) and
+#: ``structured_output.PHASE_SCHEMA_FILE`` resolve to the **same file**:
+#: ``task_generation`` → ``generated_tasks.schema.json`` and ``consolidation``
+#: → ``consolidation_batch.schema.json``. That identity is what lets §4.2.1's
+#: recovery branch stay this lane's own (see :func:`_parse_with_schema_policy`)
+#: instead of validating the same document twice against two files, and it is
+#: asserted functionally in ``tests/test_lane_b_structured_output.py`` rather
+#: than trusted.
+#:
+#: Every other kind maps to nothing, which is the off switch: no phase, no
+#: schema resolve, no flag, and an argv byte-identical to the pre-M7 lane. The
+#: write kinds are absent for §4.2.1's own reason — their product is a file
+#: diff, and ``PHASE_SCHEMA_FILE`` puts every apply/implement phase at ``None``.
+SCHEMA_PHASE_BY_KIND = {
+    "task_generation": "generate-tasks",
+    "consolidation": "consolidation",
+}
+
+
+def schema_phase_for_kind(kind: str) -> Optional[str]:
+    """The §4.2.2 phase whose schema governs ``kind``'s result, or ``None``."""
+    return SCHEMA_PHASE_BY_KIND.get(kind)
 
 #: The four D3g write outcomes, plus the D3l containment failure. Recorded on the
 #: outcome as its own axis rather than being folded into ``status``, because
@@ -480,6 +537,13 @@ class TaskOutcome:
     #: Where this task's pre-batch snapshot lives, so an exit-3 message can name
     #: the restore command instead of describing it.
     snapshot_dir: Optional[str] = None
+    #: §4.2.1's marker for a schema-carrying dispatch: ``native`` (the CLI's own
+    #: ``structured_output`` key, conformant), ``recovered`` (the document came
+    #: out of the prose answer and validated against the same schema file) or
+    #: ``unvalidated`` (no schema was in play). ``None`` — and therefore absent
+    #: from the report row — for every kind with no schema phase, which is what
+    #: keeps ``subagent_batch_report.json`` byte-identical off this path.
+    structured_output: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -516,6 +580,8 @@ class TaskOutcome:
             out["reason"] = self.reason
         if self.skipped:
             out["skipped"] = True
+        if self.structured_output:
+            out["structured_output"] = self.structured_output
         if self.write_outcome:
             out["write_outcome"] = self.write_outcome
             out["files_touched"] = list(self.files_touched)
@@ -595,23 +661,38 @@ class BatchReport:
         }
 
     def write(self, phase_dir: Optional[str] = None) -> str:
-        """Write ``subagent_batch_report.json`` atomically; return its path."""
+        """Write ``subagent_batch_report.json`` atomically; return its path.
+
+        The third of §4.5.3's four sinks — six planted shapes × fifteen rows,
+        carried in the ``reason`` and per-attempt ``error`` strings that quote a
+        provider's stream. Redaction sits on the write rather than on
+        :meth:`to_dict`, so it covers every field a failure record grows without
+        a per-field list to keep in step.
+        """
         target_dir = phase_dir or self.phase_dir
         path = os.path.join(target_dir, BATCH_REPORT_FILENAME)
-        _atomic_write_json(path, self.to_dict())
+        _atomic_write_json(path, _redact_json(self.to_dict()))
         return path
 
     def failure_summary(self) -> List[str]:
-        """One line per failure, for the phase's stdout summary (D3i)."""
+        """One line per failure, for the phase's stdout summary (D3i).
+
+        This is the *rendering* half of §4.5.3's fourth sink — the exit-3 block
+        prints these lines, and under ``--detach`` they are
+        ``orchestrator-run.log``. ``_classify_failed_run`` redacts the reason it
+        builds, but rungs 4–6 take theirs from an adapter's own error string,
+        which is provider output like any other; redacting here covers every rung
+        rather than the two that quote a stream by name.
+        """
         lines = []
         for outcome in self.failed:
             rung = outcome.rung
             rung_text = f"rung {rung}" if rung is not None else "no rung"
-            lines.append(
+            lines.append(_redact(
                 f"  - {outcome.task_id}: {outcome.status} ({rung_text}, "
                 f"{len(outcome.attempts)} attempt(s), runner {outcome.runner}) "
                 f"{outcome.reason or ''}".rstrip()
-            )
+            ))
         return lines
 
 
@@ -1748,6 +1829,40 @@ def _tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
     return encoded[-limit:].decode("utf-8", errors="replace")
 
 
+def _redact(text: str) -> str:
+    """§4.5's one redaction boundary, imported late.
+
+    ``write_safety`` is imported lazily everywhere in this module (it reaches
+    back here through ``subagent_tasks``), and this keeps that convention.
+
+    **Every caller runs this before ``_tail``, never after.** ``_tail`` keeps the
+    *last* bytes, so a cut landing inside ``aws_secret_access_key=`` leaves
+    ``_access_key=<value>`` — a shape ``SECRET_KEY`` does not match, so no later
+    pass could recover it. That ordering is why §4.4 and §4.5 land together.
+    """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .write_safety import redact_text
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import redact_text
+    return redact_text(text)
+
+
+def _redact_json(value: Any) -> Any:
+    """``value`` with every string in it redacted, structure preserved.
+
+    Used at the two JSON write boundaries. A per-field list would have to be
+    kept in step with every new diagnostic field a failure record grows; walking
+    the payload cannot fall behind one.
+    """
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {key: _redact_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_json(item) for item in value]
+    return value
+
+
 def _safe_task_filename(task_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "task") or "task"
 
@@ -1772,6 +1887,11 @@ def _write_failure_capture(
     through, so the diagnosis has to survive on disk. The rendered argv carries
     the prompt **elided to its sha256 and byte length** — never the prompt bytes,
     which embed the plan/diff under review.
+
+    Six of the nine planted secret shapes landed here, three times each: the
+    existing 64 KiB ``_tail`` preserved every one, which is why §4.4 does not
+    subsume §4.5. Redaction runs on the **full** stream before the tail is taken,
+    and the assembled payload is walked once more on the way out.
     """
     import hashlib
 
@@ -1785,7 +1905,7 @@ def _write_failure_capture(
             else arg
             for arg in argv
         ]
-        _atomic_write_json(str(capture_dir / name), {
+        _atomic_write_json(str(capture_dir / name), _redact_json({
             "task_id": task.get("task_id"),
             "kind": task.get("kind"),
             "attempt": attempt_index,
@@ -1797,9 +1917,11 @@ def _write_failure_capture(
             "argv": rendered,
             "prompt_sha256": digest,
             "prompt_bytes": len((prompt or "").encode("utf-8")),
-            "stdout_tail": _tail(stdout),
-            "stderr_tail": _tail(stderr),
-        })
+            # §4.5 before §4.4: redact the whole stream, then tail it. Tailing
+            # first would keep a value whose key name the cut had just removed.
+            "stdout_tail": _tail(_redact(stdout)),
+            "stderr_tail": _tail(_redact(stderr)),
+        }))
         return str(capture_dir / name)
     except OSError:  # pragma: no cover - diagnostics must never fail a run
         return None
@@ -1825,6 +1947,60 @@ def _spawn(
     transport: str,
     timeout: float,
     cwd: Optional[str],
+    schema: Optional[Any] = None,
+) -> _Capture:
+    """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
+
+    §4.2.1 puts codex's sidecar in the **caller** — adapters are module-level
+    singletons in ``_PROVIDERS`` shared across a concurrent fan-out and cannot
+    hold per-run state — and requires the directory to be removed in a
+    ``finally`` covering timeout, kill-path teardown and exception alike. That is
+    precisely this scope: the ``with`` below opens *before* :func:`_spawn_child`
+    renders any argv (codex refuses a schema whose file is unreadable before
+    returning argv at all, so nothing partial can reach the CLI) and closes only
+    after the child has been spawned, communicated with, and — on a timeout —
+    killed with its process group and drained.
+
+    **One sidecar per attempt, not per dispatch.** This lane's retry loop lives
+    inside :func:`dispatch_task`, which returns from four points and breaks from
+    three more; a dispatch-scoped directory would have to be unwound by
+    re-indenting that whole region into a ``try/finally``. Per attempt gets the
+    same guarantee from one ``with`` in the one function that spawns, it matches
+    Lane A's *observable* lifetime (its ladder re-enters
+    ``invoke_with_provider``, which opens and closes a sidecar per call), and it
+    re-materializes a file that vanished between two attempts instead of failing
+    the retry on it. The cost is one ``mkdtemp`` plus one small write per
+    attempt, and only on the adapter whose transport is a file (codex);
+    claude's schema is inline and never touches the disk at all.
+
+    ``schema=None`` — every kind with no schema phase, and every adapter that
+    declined the flag — skips all of it and renders the argv it always did.
+    """
+    if schema is not None and getattr(
+        provider, "structured_output_transport", "inline"
+    ) == "file":
+        with structured_output.schema_sidecar(schema) as materialized:
+            return _spawn_child(
+                provider=provider, model=model, prompt=prompt, profile=profile,
+                transport=transport, timeout=timeout, cwd=cwd,
+                schema=materialized,
+            )
+    return _spawn_child(
+        provider=provider, model=model, prompt=prompt, profile=profile,
+        transport=transport, timeout=timeout, cwd=cwd, schema=schema,
+    )
+
+
+def _spawn_child(
+    *,
+    provider: Any,
+    model: str,
+    prompt: str,
+    profile: str,
+    transport: str,
+    timeout: float,
+    cwd: Optional[str],
+    schema: Optional[Any] = None,
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -1833,10 +2009,15 @@ def _spawn(
     sibling checkout (D3e). Env composition is the adapter's
     ``get_env``/``get_remove_env`` pair — the same single site the fan-out path and
     the detached child use, so there is never a second hand-rolled env filter.
+
+    ``schema`` is §4.2.2's optional keyword, already materialized by
+    :func:`_spawn` when this adapter's transport is a file. An adapter that
+    declares no ``structured_output_support`` ignores it and renders the same
+    argv either way; one that cannot carry it raises before any argv exists.
     """
     capture = _Capture()
     argv, stdin_text = provider.build_agent_command_for_transport(
-        prompt, model, profile, transport
+        prompt, model, profile, transport, schema=schema
     )
     # The batch-shim flag is consumed pre-dispatch by `_prompt_over_budget`, which
     # resolves argv[0] the same way: it applies cmd.exe's 8,191-unit cap and
@@ -1846,7 +2027,14 @@ def _spawn(
     argv = [*launcher, *argv[1:]]
     capture.argv = list(argv)
 
-    provider_env = provider.get_env(model)
+    # `resolve_env`, not `get_env`: the dispatch's own profile is what scopes the
+    # §2.2 git block. `agent-readonly` gets the global non-interactive keys AND
+    # `credential.helper=""` (a hanging helper fails in ~0.27 s instead of burning
+    # the slot and orphaning a child); `agent-write` gets the global keys ONLY and
+    # keeps whatever helper the user configured, because it is the profile that
+    # legitimately reaches private remotes. Passing a constant here would erase
+    # that distinction.
+    provider_env = expand_env_home(provider.resolve_env(model, profile))
     host_guards, passthrough = _host_env_guards()
     # The union, not the adapter's list alone (D3c): the adapter guards against
     # its own nesting marker, the host entry declares what *this* host injects
@@ -2015,6 +2203,16 @@ def dispatch_task(
     spent from it, and a retry is refused once no usable slice remains. So a
     dispatch is bounded by the configured ceiling however many times it retries.
 
+    §4.2.2's structured-output leg is read **here, before dispatch**, and it is
+    the second of M7's two phase callers (``llm_client.invoke_with_provider`` is
+    the first). The phase comes from the task's *kind*
+    (:data:`SCHEMA_PHASE_BY_KIND`), the schema file is loaded once per dispatch,
+    codex's sidecar is written per attempt inside :func:`_spawn`'s ``finally``,
+    and §4.2.1's verdict lands on this lane's own rungs (see
+    :func:`_parse_with_schema_policy`) plus ``TaskOutcome.structured_output``. A
+    kind with no schema phase — every kind but ``task_generation`` and
+    ``consolidation`` — takes none of it and renders the argv it always did.
+
     Args:
         prompt: The prompt to dispatch, overriding ``task["prompt"]``. This is the
             D3n seam: an apply prompt is complete except for
@@ -2103,33 +2301,92 @@ def dispatch_task(
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
     napper = sleep or time.sleep
 
-    attempt_index = 0
-    transport_retries_left = budget
-    rate_limit_attempts = 0
-    # D3j: the recorded duration is wall-clock across *every* attempt, including
-    # the backoff sleeps between them — not the sum of the children's own
-    # runtimes. The sum is also what made D3i's "bounded by a total per-task
-    # wall-clock budget" below bound nothing: a task that slept through four
-    # exponential backoffs would report only the seconds its children ran and
-    # never reach `effective_timeout`. Monotonic, so a clock step cannot rewind
-    # the budget mid-task.
-    started_at = time.monotonic()
-    # D3i: `effective_timeout` is the *task's* wall-clock budget, not one budget
-    # per attempt. Every spawn below is given what is LEFT of this deadline and
-    # every retry decision is taken against it, so a task with N retries can
-    # never run for (N+1) × the configured ceiling plus its backoff sleeps —
-    # which is what would push a dispatch past the host's own ceiling and delay
-    # a detached run's failure detection by the same multiple.
-    deadline = started_at + effective_timeout
+    # §4.2.2's "the caller reads the flag before dispatch", on this lane and once
+    # per dispatch — the schema file is read here, not per attempt, and the
+    # per-(provider, phase) WARN is emitted once per process by
+    # `schema_for_dispatch`. The phase comes from the KIND (see
+    # `SCHEMA_PHASE_BY_KIND`): `None` means no schema, no flag and an argv
+    # byte-identical to the pre-M7 lane. A `None` schema with a phase means the
+    # adapter declined — no `structured_output_support`, or a schema this CLI
+    # provably cannot carry — which resolves exactly like a failed §5.4.1 gate:
+    # prompt-level JSON, marked `recovered`/`unvalidated`, never `native`.
+    schema_phase = schema_phase_for_kind(kind)
+    schema = None
+    declined_marker = None
+    if schema_phase:
+        try:
+            schema, resolved_marker = structured_output.schema_for_dispatch(
+                provider, schema_phase
+            )
+        except structured_output.SchemaConfigError as exc:
+            # Rung 7, not a rung 4/5 transport failure: no dispatch can produce a
+            # schema file that is not there, so it is never retried and nothing
+            # was spawned.
+            outcome.status = STATUS_REJECTED
+            outcome.reason = f"structured output: {exc}"
+            return outcome
+        if schema is None:
+            # The adapter declined, so the marker is already decided and only the
+            # result is still open; when a schema IS dispatched the post-run
+            # verdict decides between `native` and `recovered` instead.
+            declined_marker = resolved_marker
+
+    # §7.1.b: what the two invocation lanes share is the *policy*, not the loop.
+    # `RetryLadder` owns D3i's single monotonic deadline — taken once, every
+    # attempt spawned with what is LEFT of it, every backoff sleep charged to the
+    # same deadline, so a task with N retries can never run for (N+1) × the
+    # configured ceiling — plus D3k's two separate counters and §7.5's admission
+    # tests. The only lane-specific lines below are the blocking `_spawn` and the
+    # `napper` call.
+    #
+    # The adapter's DECLARED vendor envelope (§7.6(b)) switches on §7.5's two
+    # composition rules: rule 4's pre-dispatch admission test ("would one
+    # worst-case attempt fit in what is left?", recorded `budget_exhausted` with
+    # nothing spawned) and rule 6(b)'s refusal to re-issue an identical
+    # rate-limit dispatch against a CLI that already exhausted its own 429 chain.
+    # `getattr` rather than an attribute read: the eleven unmeasured adapters
+    # declare `None`, which rule 6(c) reads as "assume one request" — never
+    # "assume the worst".
+    ladder = RetryLadder(
+        timeout=effective_timeout,
+        retries=budget,
+        envelope=getattr(provider, "internal_retries", None),
+        now=time.monotonic,
+    )
 
     def elapsed() -> float:
-        return time.monotonic() - started_at
+        # D3j: wall-clock across *every* attempt, including the backoff sleeps
+        # between them — not the sum of the children's own runtimes. That sum is
+        # what made "bounded by a total per-task wall-clock budget" bound
+        # nothing: a task that slept through four exponential backoffs would
+        # report only the seconds its children ran and never reach
+        # `effective_timeout`. Monotonic, so a clock step cannot rewind it.
+        return ladder.elapsed()
 
-    def remaining() -> float:
-        return deadline - time.monotonic()
+    def never_started(attempts_done: int) -> str:
+        return (
+            f"the per-task wall-clock budget of {effective_timeout}s was "
+            f"exhausted after {attempts_done} attempt(s); attempt "
+            f"{attempts_done + 1} was never started"
+        )
 
     while True:
-        attempt_index += 1
+        if ladder.next_attempt() is None:
+            # §7.5 rules 3 and 4: no attempt starts with less than
+            # MIN_ATTEMPT_BUDGET_S of the deadline left, and none starts at all
+            # when what is left cannot hold one worst-case attempt of this
+            # adapter's *declared* vendor envelope — better a slot that spawned
+            # nothing than a child killed part-way through a retry chain the
+            # harness cannot see.
+            if ladder.stop_reason == STOP_BUDGET:
+                status = STATUS_BUDGET_EXHAUSTED
+                error = budget_exhausted_reason(
+                    ladder, target=runner, timeout=effective_timeout
+                )
+            else:
+                status, error = STATUS_TIMEOUT, never_started(ladder.attempt_index)
+            break
+        attempt_index = ladder.attempt_index
         if before_attempt is not None:
             # The write path's snapshot / policy / audit leg. A refusal here means
             # nothing is spawned for this attempt — the whole point of enforcing
@@ -2154,35 +2411,49 @@ def dispatch_task(
                 outcome.reason = exc.message
                 outcome.duration_seconds = elapsed()
                 return outcome
-        attempt_budget = remaining()
+        attempt_budget = ladder.remaining()
         if attempt_budget <= 0:
-            # The first attempt always has the whole budget, so this is the
-            # `before_attempt` leg (a large pre-batch snapshot) having consumed
-            # what a retry was admitted with. Spawning here would hand a runner
-            # a budget it cannot use and record the kill as its own timeout;
-            # the budget is the task's, so its exhaustion is the task's outcome.
-            status, error = STATUS_TIMEOUT, (
-                f"the per-task wall-clock budget of {effective_timeout}s was "
-                f"exhausted after {attempt_index - 1} attempt(s); attempt "
-                f"{attempt_index} was never started"
-            )
+            # The ladder already admitted this attempt, so what drained the
+            # budget is the `before_attempt` leg (a large pre-batch snapshot)
+            # spending what the attempt was admitted with. Spawning here would
+            # hand a runner a budget it cannot use and record the kill as its
+            # own timeout; the budget is the task's, so its exhaustion is the
+            # task's outcome.
+            status, error = STATUS_TIMEOUT, never_started(attempt_index - 1)
             break
-        capture = _spawn(
-            provider=provider,
-            model=model,
-            prompt=prompt,
-            profile=profile,
-            transport=transport,
-            timeout=attempt_budget,
-            cwd=cwd,
-        )
+        try:
+            capture = _spawn(
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                profile=profile,
+                transport=transport,
+                timeout=attempt_budget,
+                cwd=cwd,
+                schema=schema,
+            )
+        except (
+            StructuredOutputUnavailable, structured_output.SchemaConfigError
+        ) as exc:
+            # §4.2.1's sixth acceptance case: raised while the sidecar was being
+            # written or while the argv was being rendered, so **nothing was
+            # spawned and no partial argv reached the CLI**. Rung 7 — a
+            # configuration error, never retried, because re-running produces the
+            # same missing file.
+            status, error = STATUS_REJECTED, f"structured output: {exc}"
+            break
         usage = _safe_parse_usage(provider, capture)
         status, error = _classify_pre_parse(capture)
 
         if status == STATUS_OK:
-            status, error, data = _parse_and_validate(
-                provider, capture, kind=kind, prefer_arrays=prefer_arrays
+            status, error, data, marker = _parse_with_schema_policy(
+                provider, capture, kind=kind, prefer_arrays=prefer_arrays,
+                schema=schema, schema_phase=schema_phase or "",
+                model=f"{provider_name}:{model}",
+                declined_marker=declined_marker,
             )
+            if marker is not None:
+                outcome.structured_output = marker
             if status == STATUS_OK:
                 try:
                     written = persist_result(task, phase_dir, data)
@@ -2243,7 +2514,7 @@ def dispatch_task(
                 # those patterns. Rung 6 therefore never reaches this branch —
                 # it is never retried (D3k), so laundering it into rung 3's
                 # backoff or rung 1's batch-wide auth failure would be pure loss.
-                reclassified = _classify_failed_run(provider, capture)
+                reclassified = _classify_failed_run(provider, capture, model)
                 if reclassified is not None:
                     status, error = reclassified
 
@@ -2271,37 +2542,33 @@ def dispatch_task(
         ))
         _accumulate_usage(outcome, usage)
 
-        if status in FATAL_STATUSES:
-            break
-        if status in BACKOFF_STATUSES:
-            # Backoff + jitter, bounded by the same per-task wall-clock budget;
-            # does NOT consume the transport retry budget (D3i).
-            rate_limit_attempts += 1
-            delay = _backoff_delay(rate_limit_attempts)
-            if (
-                rate_limit_attempts > 3
-                or remaining() - delay < MIN_ATTEMPT_BUDGET_S
-            ):
-                # The sleep itself is inside the budget: waiting past the ceiling
-                # only to dispatch one more attempt is spending the budget twice.
-                # And a slice the next attempt could not use is not worth waiting
-                # for either — the sleep would only delay the same outcome.
-                break
-            napper(delay)
+        # One `record` call is the whole decision (D3k, §7.5 rules 2/3/6): rung 1
+        # is fatal to the batch; rung 3 backs off with jitter, at most three
+        # times, without consuming the transport budget; rungs 2/4/5 spend
+        # `driver.subagent_retries`; rungs 6/7 are never retried. Every one of
+        # those decisions is taken against the same deadline the spawns are
+        # charged to, which is what keeps the counters a ceiling the wall clock
+        # usually reaches first.
+        action = ladder.record(status)
+        if action.retry:
+            if action.delay:
+                # The ladder computes the delay — it is pure, so the test switch
+                # cannot live there. Applying the hook *here*, at the one place
+                # this lane really sleeps, keeps MULTI_LLM_TEST_FAST_BACKOFF=1 an
+                # exact 10 ms without putting an env read in the policy object.
+                napper(_apply_backoff_hook(action.delay))
             continue
-        if status in RETRYABLE_STATUSES and transport_retries_left > 0:
-            if remaining() < MIN_ATTEMPT_BUDGET_S:
-                # The retry budget is not the only budget: a retry runs inside
-                # the task's remaining wall clock, never on a fresh copy of it.
-                error = (
-                    f"{error} (no retry: the per-task wall-clock budget of "
-                    f"{effective_timeout}s is exhausted, "
-                    f"{transport_retries_left} retr"
-                    f"{'y' if transport_retries_left == 1 else 'ies'} unused)"
-                )
-                break
-            transport_retries_left -= 1
-            continue
+        if status in RETRYABLE_STATUSES and ladder.stop_reason == STOP_DEADLINE:
+            # The retry budget is not the only budget: a retry runs inside the
+            # task's remaining wall clock, never on a fresh copy of it. The
+            # unused count is the ladder's, still undecremented.
+            unused = ladder.transport_retries_left
+            error = (
+                f"{error} (no retry: the per-task wall-clock budget of "
+                f"{effective_timeout}s is exhausted, "
+                f"{unused} retr"
+                f"{'y' if unused == 1 else 'ies'} unused)"
+            )
         break
 
     outcome.status = status
@@ -2384,28 +2651,27 @@ def _prompt_over_budget(
     )
 
 
-def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff **plus jitter**, honoring the test fast-backoff switch.
+def _apply_backoff_hook(delay: float) -> float:
+    """Apply the ``MULTI_LLM_TEST_FAST_BACKOFF`` switch to a computed delay.
 
-    ``get_backoff_delay`` is only the test hook — it returns its argument
-    unchanged outside ``MULTI_LLM_TEST_FAST_BACKOFF`` — so the jitter D3i
-    specifies has to be added here. Without it the N sibling tasks a shared
-    provider throttled at the same moment re-attempt in lockstep and re-trip the
-    same limit together, which is the failure the backoff exists to avoid.
+    The rung-3 arithmetic and its jitter belong to
+    :func:`utils.retry_ladder.backoff_delay` — "equal jitter", half the
+    exponential step deterministic and half random, so the N sibling tasks a
+    shared provider throttled at the same moment never re-attempt in lockstep
+    and re-trip the same limit together. That function is **pure**, which is the
+    point: it reads no environment and keeps no import of this package, so the
+    test switch cannot live inside it.
 
-    "Equal jitter": half the exponential step is deterministic and half is
-    random, so a retry is never immediate and never longer than the step itself.
-    The jitter is applied to the *base* and the test hook is the outer call, which
-    keeps ``MULTI_LLM_TEST_FAST_BACKOFF=1`` an exact 10 ms — a jittered test suite
-    would be both slower and nondeterministic.
+    It lives here instead, wrapping the delay at the one place this lane really
+    sleeps. ``get_backoff_delay`` returns its argument unchanged outside
+    ``MULTI_LLM_TEST_FAST_BACKOFF`` and an exact 10 ms under it — a jittered test
+    suite would be both slower and nondeterministic.
     """
     try:
         from .review_orchestrator_base import get_backoff_delay
     except ImportError:  # pragma: no cover
         from utils.review_orchestrator_base import get_backoff_delay
-    step = min(2.0 ** attempt, 30.0)
-    half = step / 2.0
-    return get_backoff_delay(half + random.random() * half)
+    return get_backoff_delay(delay)
 
 
 def _safe_parse_usage(provider: Any, capture: _Capture) -> Optional[Dict[str, Any]]:
@@ -2476,8 +2742,127 @@ def _parse_and_validate(
     return STATUS_OK, "", data
 
 
+def _parse_with_schema_policy(
+    provider: Any,
+    capture: _Capture,
+    *,
+    kind: str,
+    prefer_arrays: bool,
+    schema: Optional[Any] = None,
+    schema_phase: str = "",
+    model: str = "",
+    declined_marker: Optional[str] = None,
+) -> Tuple[str, str, Any, Optional[str]]:
+    """:func:`_parse_and_validate` plus §4.2.1, when a schema was really carried.
+
+    Returns ``(status, error, data, marker)``. ``marker`` is set **only** when a
+    document was produced, so a report row never claims a path for a dispatch
+    that produced nothing.
+
+    ``schema=None`` — every kind with no schema phase, and every adapter that
+    declined the flag — returns exactly what :func:`_parse_and_validate` returns,
+    so this lane is byte-identical to its pre-M7 self and nothing new can fail a
+    dispatch. ``declined_marker`` is what ``schema_for_dispatch`` already decided
+    for the declining half of that case (``recovered``/``unvalidated``, never
+    ``native``) and is ``None`` for a kind that resolved no phase at all — which
+    is why such a kind's report row grows no key.
+
+    With a schema, ``structured_output.classify_attempt`` (the one policy object
+    both lanes share) reads the captured streams and its verdict is translated
+    into D3k rungs:
+
+    * a **configuration error** — the CLI refused the schema *before making any
+      request* — is rung 7 (``rejected``): never retried, nothing billed. It
+      must not be allowed to land on rungs 4/5, which **are** retried: re-running
+      a refusal that made zero requests spends the transport budget on an
+      identical failure and reports it as if it were transient.
+    * the CLI's **own exhausted structured-output budget**
+      (``error_max_structured_output_retries``) is rung 6 (``schema_invalid``):
+      never retried here, because the CLI already spent the budget §4.2.1
+      pinned, and rung 6 is this lane's existing "deterministic disagreement"
+      rung.
+    * ``structured_output`` **present and conformant** is the answer. It is taken
+      as the result rather than re-derived from prose, and still passes through
+      the kind's own :func:`validate_result` — the CLI validates client-side, so
+      a disagreement here should be unreachable and is treated as case 2's
+      failure rather than trusted.
+    * anything else falls through to **this lane's own** extraction, which *is*
+      §4.2.1 case 2 performed against the same schema file:
+      :func:`validate_result` resolves to the file ``PHASE_SCHEMA_FILE`` names
+      for exactly the kinds :data:`SCHEMA_PHASE_BY_KIND` lists. It is preferred
+      over ``classify_attempt``'s own recovery because it runs the mandatory
+      ``parse_output``-before-extraction ordering (D3) and the kind's own
+      ``prefer_arrays``, neither of which a lane-agnostic policy function can
+      know — and because failing a document *this* extractor would have accepted
+      would be a regression dressed as a policy. Fail-closed is preserved
+      either way: a document that does not validate is rung 5/6 exactly as
+      before, so exit 0 is never on its own a success for a schema-carrying
+      dispatch.
+    """
+    if schema is None:
+        status, error, data = _parse_and_validate(
+            provider, capture, kind=kind, prefer_arrays=prefer_arrays
+        )
+        return (
+            status, error, data,
+            declined_marker if status == STATUS_OK else None,
+        )
+
+    verdict = structured_output.classify_attempt(
+        schema,
+        stdout=capture.stdout,
+        stderr=capture.stderr,
+        exit_code=capture.exit_code,
+        phase=schema_phase,
+        model=model,
+    )
+    if verdict.warning:
+        print(f"[WARN] {verdict.warning}", file=sys.stderr)
+    if verdict.failure_reason == structured_output.FAILURE_CONFIG_ERROR:
+        return STATUS_REJECTED, verdict.warning or (
+            f"structured output: the CLI refused {schema.name}"
+        ), None, None
+    if (
+        verdict.failure_reason == structured_output.FAILURE_SCHEMA_VIOLATION
+        and not verdict.retryable
+    ):
+        return STATUS_SCHEMA_INVALID, verdict.warning or (
+            f"structured output: no document conforming to {schema.name}"
+        ), None, None
+    if verdict.marker == structured_output.MARKER_NATIVE and verdict.data is not None:
+        errors = validate_result(kind, verdict.data)
+        if errors:
+            return (
+                STATUS_SCHEMA_INVALID,
+                f"the CLI's own structured_output does not match the {kind} "
+                f"result shape: " + "; ".join(errors[:5]),
+                verdict.data,
+                None,
+            )
+        return STATUS_OK, "", verdict.data, structured_output.MARKER_NATIVE
+
+    status, error, data = _parse_and_validate(
+        provider, capture, kind=kind, prefer_arrays=prefer_arrays
+    )
+    if status == STATUS_OK:
+        if not verdict.warning:
+            # §4.2.1 wants one WARN whenever a document was recovered rather than
+            # handed over natively. `classify_attempt` prints its own when *its*
+            # recovery succeeded; this covers the case where only this lane's
+            # extractor got there, so a recovered result always says so.
+            print(
+                f"[WARN] structured output: no `structured_output` key "
+                f"({schema_phase} {model}); the document was recovered from the "
+                f"reply and validated against {schema.name}. Marked "
+                f"'{structured_output.MARKER_RECOVERED}'.",
+                file=sys.stderr,
+            )
+        return status, error, data, structured_output.MARKER_RECOVERED
+    return status, error, data, None
+
+
 def _classify_failed_run(
-    provider: Any, capture: _Capture
+    provider: Any, capture: _Capture, model: str = ""
 ) -> Optional[Tuple[str, str]]:
     """Ladder rung 3 (plus rung-1 auth), consulted only for a run with no result.
 
@@ -2487,23 +2872,53 @@ def _classify_failed_run(
     successful answer routinely quotes plan text containing "rate limit" or
     "unauthorized".
     """
+    # §7.6(a)'s terminal status is the ladder's, imported here rather than
+    # redeclared: `retry_ladder` owns the status vocabulary and this module
+    # re-exports it. Function-local because the constants block above is being
+    # converted to re-exports in the same window.
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .retry_ladder import STATUS_CONTEXT_LENGTH_EXCEEDED
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.retry_ladder import STATUS_CONTEXT_LENGTH_EXCEEDED
+
     try:
         classified = provider.classify_failure(
             capture.stdout, capture.stderr, capture.exit_code or 0
         )
     except Exception:  # noqa: BLE001 - classification must not raise
         return None
+    # §4.5.3's fourth sink: this reason is printed by the exit-3 block, which is
+    # `orchestrator-run.log` under `--detach`, and is also stored in
+    # `subagent_batch_report.json`. Redaction runs on the full stream **before**
+    # the 2 KB tail — an auth failure is precisely the run whose stream quotes a
+    # credential back, and tailing first would keep the value and drop the key
+    # name that makes it matchable.
+    if classified == STATUS_CONTEXT_LENGTH_EXCEEDED:
+        # Terminal, and NOT a rung: it is in none of RETRYABLE/BACKOFF/FATAL, so
+        # the dispatch loop below falls through to its final `break` and the slot
+        # ends after exactly one attempt. §7.6(a) is explicit that this is the
+        # shipping behaviour until open question 13 designs a prompt splitter —
+        # re-sending an unchanged oversized prompt is the one retry guaranteed to
+        # fail identically, and a rung-down would only spend the budget doing it.
+        try:  # pragma: no cover - import shim mirrors the rest of utils/
+            from .providers.base import context_length_message
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.providers.base import context_length_message
+        return STATUS_CONTEXT_LENGTH_EXCEEDED, context_length_message(model)
+    if classified not in (STATUS_AUTH_FAILED, STATUS_RATE_LIMITED):
+        return None
+    tail = _tail(_redact(capture.stderr or capture.stdout), 2000)
     if classified == STATUS_AUTH_FAILED:
         return STATUS_AUTH_FAILED, (
             f"the runner is installed but not authenticated (it printed a "
             f"login/credential notice). No retry can fix this and every sibling "
             f"task would fail identically, so the whole batch fails. Stream tail: "
-            f"{_tail(capture.stderr or capture.stdout, 2000)!r}"
+            f"{tail!r}"
         )
     if classified == STATUS_RATE_LIMITED:
         return STATUS_RATE_LIMITED, (
             f"the provider reported a rate limit / quota / overloaded condition. "
-            f"Stream tail: {_tail(capture.stderr or capture.stdout, 2000)!r}"
+            f"Stream tail: {tail!r}"
         )
     return None
 
@@ -2816,6 +3231,9 @@ async def _gather(
         max_parallel=max_parallel,
         skip_predicate=skip_done,
         provider_limits=provider_limits,
+        # §9.3.c: the helper has no plan path of its own; this batch's is the
+        # anchor its per-provider bounds and timeouts must resolve against.
+        anchor=anchor,
     )
 
 

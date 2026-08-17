@@ -20,6 +20,7 @@ from utils.providers.base import LLMProvider, split_reasoning_effort
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
+from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
 from utils.providers.goose import GooseProvider
@@ -210,6 +211,45 @@ This concludes the review."""
             "Review this code",
         ]
 
+    def test_claude_code_build_command_with_a_schema_exact(self, provider):
+        """§4.2/§4.2.2's exact argv — the `==` row §14.1 requires for this flag.
+
+        The schema pair lands at the fixed index right after
+        `--output-format json`, ahead of `--model`, so the prompt is still
+        `cmd[-1]` and the flag is never adjacent to it.
+        """
+        from unittest.mock import patch
+
+        from utils.providers.base import StructuredSchema
+        from utils.providers.claude_code import reset_flag_gate_cache
+
+        reset_flag_gate_cache()
+        schema = StructuredSchema(
+            document={"type": "object", "properties": {"a": {"type": "string"}}},
+            name="probe.schema.json",
+        )
+        try:
+            with patch("shutil.which", return_value="/usr/bin/claude"), patch(
+                "utils.providers.claude_code._read_help_tokens",
+                lambda binary, remove_env=(): frozenset({"--json-schema"}),
+            ):
+                cmd = provider.build_command("Review this code", "sonnet",
+                                             schema=schema)
+        finally:
+            reset_flag_gate_cache()
+
+        assert cmd == [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            '{"properties":{"a":{"type":"string"}},"type":"object"}',
+            "--model",
+            "sonnet",
+            "Review this code",
+        ]
+
     def test_claude_code_reasoning_efforts_constant(self):
         """Module-level REASONING_EFFORTS holds exactly the five valid efforts."""
         from utils.providers.claude_code import REASONING_EFFORTS
@@ -289,10 +329,1011 @@ This concludes the review."""
 
     @patch.dict(os.environ, {"CLAUDECODE": "1", "HOME": "/home/test"})
     def test_get_env_does_not_include_claudecode(self, provider):
-        """Test that get_env returns empty dict (env stripping is via get_remove_env)."""
+        """get_env never re-adds CLAUDECODE (stripping is via get_remove_env).
+
+        It is no longer empty: §7.3/L6 makes it carry the CLI's own retry budget.
+        The contents are asserted by ``TestClaudeCodeRetryEnvelope`` below; what
+        this one still pins is that the nested-session marker is not among them.
+        """
         env = provider.get_env("opus")
 
-        assert env == {}
+        assert "CLAUDECODE" not in env
+
+
+class TestClaudeCodeRetryEnvelope:
+    """§7.3 (task L6) — the retry budget is delegated to the vendor CLI.
+
+    The CLI's own default is **10 retries**, measured at 182 s of wall clock in a
+    single rate-limited slot before the harness saw anything at all. So `get_env`
+    pins it to §3.6's floor of 3 and sizes the CLI's own per-request timeout to
+    sit *under* the outer per-provider slot timeout, in milliseconds.
+    """
+
+    @pytest.fixture
+    def provider(self):
+        return ClaudeCodeProvider()
+
+    def _with_timeout(self, monkeypatch, seconds):
+        """Pin the resolved per-provider slot timeout `get_env` derives from."""
+        import utils.provider_registry as registry
+
+        monkeypatch.setattr(
+            registry,
+            "get_provider_timeout",
+            lambda name, anchor=None, **kw: seconds,
+        )
+
+    def test_max_retries_is_the_floor_exactly(self, provider):
+        """3 is §3.6's floor — below it `--fallback-model`'s overload path dies."""
+        from utils.providers.claude_code import CLAUDE_CODE_MAX_RETRIES
+
+        assert CLAUDE_CODE_MAX_RETRIES == 3
+        assert provider.get_env("sonnet")["CLAUDE_CODE_MAX_RETRIES"] == "3"
+
+    def test_api_timeout_is_milliseconds_at_the_1800s_slot(self, provider, monkeypatch):
+        """providers.yaml ships `default_timeout: 1800` → the 300 000 ms ceiling."""
+        self._with_timeout(monkeypatch, 1800)
+
+        env = provider.get_env("sonnet")
+
+        # min(300_000, 1_800_000 // 4 - 30_000) = min(300_000, 420_000)
+        assert env["API_TIMEOUT_MS"] == "300000"
+
+    def test_api_timeout_is_milliseconds_at_the_600s_slot(self, provider, monkeypatch):
+        """The adapter's own `default_timeout` end: the derivation, not the ceiling."""
+        self._with_timeout(monkeypatch, 600)
+
+        env = provider.get_env("sonnet")
+
+        # min(300_000, 600_000 // 4 - 30_000) = min(300_000, 120_000)
+        assert env["API_TIMEOUT_MS"] == "120000"
+
+    def test_the_value_is_milliseconds_not_seconds(self, provider, monkeypatch):
+        """The s→ms conversion is the whole point: the donor plan had it wrong."""
+        self._with_timeout(monkeypatch, 600)
+
+        value = int(provider.get_env("sonnet")["API_TIMEOUT_MS"])
+
+        assert value == 120_000
+        assert value != 120, "seconds, not milliseconds — this is the §7.3 defect"
+
+    @pytest.mark.parametrize("seconds", [300, 600, 900, 1200, 1800, 3600, 4242])
+    def test_the_whole_retry_budget_fits_inside_the_slot(
+        self, provider, monkeypatch, seconds
+    ):
+        """(MAX_RETRIES + 1) × API_TIMEOUT_MS must stay under the outer deadline.
+
+        §9.6.c's margin rule applied one level in: the CLI has to reach its own
+        cutoff and exit before the harness kills it, or a live child is killed and
+        the run reports a bare timeout instead of the CLI's own reason.
+        """
+        from utils.providers.claude_code import CLAUDE_CODE_MAX_RETRIES
+
+        self._with_timeout(monkeypatch, seconds)
+        env = provider.get_env("sonnet")
+
+        worst_case_ms = (CLAUDE_CODE_MAX_RETRIES + 1) * int(env["API_TIMEOUT_MS"])
+        assert worst_case_ms < seconds * 1000, (
+            f"a {seconds}s slot would be exceeded by the CLI's own retry budget "
+            f"({worst_case_ms} ms)"
+        )
+
+    def test_a_slot_too_short_to_carry_a_budget_omits_the_timeout(
+        self, provider, monkeypatch
+    ):
+        """Below ~120 s the derivation goes non-positive; emit nothing, not junk.
+
+        A zero or negative `API_TIMEOUT_MS` would abort every request instantly.
+        The retry cap still ships — it is the half that is a bug fix on its own.
+        """
+        self._with_timeout(monkeypatch, 60)
+
+        env = provider.get_env("sonnet")
+
+        assert env["CLAUDE_CODE_MAX_RETRIES"] == "3"
+        assert "API_TIMEOUT_MS" not in env
+
+    def test_the_configured_claude_code_timeout_is_honoured(self, provider):
+        """No monkeypatch: the real `providers.yaml` value flows through."""
+        from utils.provider_registry import get_provider_timeout
+        from utils.providers.claude_code import derive_api_timeout_ms
+
+        resolved = get_provider_timeout("claude-code")
+        env = provider.get_env("sonnet")
+
+        assert env["API_TIMEOUT_MS"] == str(derive_api_timeout_ms(resolved))
+
+    def test_the_fictional_anthropic_names_are_never_emitted(self, provider):
+        """Measured 2026-08-16: zero occurrences in the binary, provably inert.
+
+        Emitting them would look like a retry policy and be one only on paper.
+        """
+        env = provider.get_env("sonnet")
+
+        assert "ANTHROPIC_MAX_RETRIES" not in env
+        assert "ANTHROPIC_REQUEST_TIMEOUT_SECONDS" not in env
+
+    def test_the_fictional_names_are_absent_from_the_adapter_source(self):
+        """Not just from one call — from the module, so nobody re-adds them."""
+        import inspect
+
+        import utils.providers.claude_code as adapter
+
+        source = inspect.getsource(adapter)
+        for name in ("ANTHROPIC_MAX_RETRIES", "ANTHROPIC_REQUEST_TIMEOUT_SECONDS"):
+            # The module names them once each, in the comment that records the
+            # measurement; what must never appear is an assignment.
+            assert f'"{name}"' not in source, (
+                f"{name} is measurably inert — it must not be a key in get_env()"
+            )
+
+    def test_only_claude_code_declares_a_retry_shaped_variable(self):
+        """§7.6(b)'s converse: no other adapter may set one without an envelope."""
+        from utils.provider_registry import _PROVIDERS
+
+        for name, provider in sorted(_PROVIDERS.items()):
+            if name == "claude-code":
+                continue
+            try:
+                env = provider.get_env("m")
+            except TypeError:
+                env = provider.get_env()
+            retryish = [
+                key for key in (env or {})
+                if "MAX_RETRIES" in key.upper() or "API_TIMEOUT" in key.upper()
+            ]
+            assert not retryish, f"{name} sets {retryish} with no declared envelope"
+
+
+#: §7.6(b)'s guard shape. Two families, both of which move the number §7.5 rule 4
+#: subtracts: a *count* of vendor-internal requests (`…MAX_RETRIES`, a backoff or
+#: attempt cap) and the *per-request* cutoff those requests are multiplied by
+#: (`API_TIMEOUT_MS` — claude-code's `max_wall_s` is literally 4 × this). Both are
+#: matched, because either one set without a declared envelope leaves the ladder
+#: budgeting for one request against a subprocess that will make several.
+#: Deliberately narrow: a generic `*_TIMEOUT` would catch env shaping that says
+#: nothing about retries and force a fabricated declaration.
+RETRY_SHAPED_ENV_KEY = r"RETRY|RETRIES|BACKOFF|ATTEMPTS?|API_TIMEOUT|REQUEST_TIMEOUT"
+
+
+def _retry_shaped_env_keys(provider):
+    """The retry-shaped variables this adapter's ``get_env`` really sets."""
+    import re
+
+    try:
+        env = provider.get_env("m")
+    except TypeError:  # pragma: no cover - defensive, no adapter needs it today
+        env = provider.get_env()
+    return sorted(
+        key for key in (env or {})
+        if re.search(RETRY_SHAPED_ENV_KEY, key.upper())
+    )
+
+
+def _envelope_sweep_names():
+    """Every provider id in the registry, resolved at class-definition time.
+
+    A local twin of `_registered_provider_names()` — which is defined further
+    down this module, after this class — because `@pytest.mark.parametrize`
+    evaluates its argument while the class body runs.
+    """
+    from utils.provider_registry import _PROVIDERS
+
+    return sorted(_PROVIDERS)
+
+
+class TestInternalRetryEnvelopeDeclarations:
+    """§7.6(b) — every adapter declares its CLI's internal retry envelope.
+
+    §7.5's arithmetic needs one number per adapter and today that number exists
+    only in the plan's measurements. The declaration is the input rule 4
+    subtracts: a slot whose remaining budget cannot hold one worst-case attempt
+    of the adapter's own vendor envelope is `budget_exhausted` *before* a child
+    is spawned, and rule 6(b) refuses an identical rate-limit re-dispatch to an
+    adapter that already retried 429s internally.
+
+    Nothing reads it yet — M9's ladder is written and pure, and consumes it
+    structurally (`retry_ladder.InternalRetryEnvelopeLike`), which is why these
+    tests assert the three attribute *names* rather than an isinstance.
+    """
+
+    MEASURED = ("claude-code", "codex")
+
+    @pytest.fixture
+    def registry(self):
+        from utils.provider_registry import _PROVIDERS
+
+        return _PROVIDERS
+
+    def test_the_sweep_really_covers_thirteen_adapters(self, registry):
+        """The done-when is 'all 13' — a shrinking sweep must fail, not pass."""
+        assert len(registry) == 13, sorted(registry)
+
+    def test_the_base_default_is_none(self):
+        """An adapter that measured nothing declares nothing, by inheriting."""
+        assert LLMProvider.internal_retries is None
+
+    @pytest.mark.parametrize("name", _envelope_sweep_names())
+    def test_every_adapter_declares_the_attribute(self, registry, name):
+        provider = registry[name]
+
+        assert hasattr(provider, "internal_retries")
+
+    @pytest.mark.parametrize("name", _envelope_sweep_names())
+    def test_a_declared_envelope_satisfies_the_ladders_protocol(self, registry, name):
+        """The seam is structural: three attributes, read off whatever is there."""
+        envelope = registry[name].internal_retries
+        if envelope is None:
+            return
+
+        assert isinstance(envelope.max_requests, int) and envelope.max_requests >= 1
+        assert envelope.max_wall_s is None or envelope.max_wall_s > 0
+        assert isinstance(envelope.retries_rate_limit, bool)
+        assert isinstance(envelope.configurable_by, tuple)
+
+    @pytest.mark.parametrize(
+        "name",
+        [n for n in _envelope_sweep_names() if n not in ("claude-code", "codex")],
+    )
+    def test_the_other_eleven_are_unmeasured(self, registry, name):
+        """§7.5 rule 6(c): `None` is 'assume one request', never 'assume the worst'."""
+        assert registry[name].internal_retries is None
+
+    # -- the measured rows ------------------------------------------------
+
+    def _with_timeout(self, monkeypatch, seconds):
+        """Pin the resolved per-provider slot timeout the envelope derives from."""
+        import utils.provider_registry as registry_module
+
+        monkeypatch.setattr(
+            registry_module,
+            "get_provider_timeout",
+            lambda name, anchor=None, **kw: seconds,
+        )
+
+    def test_claude_code_declares_the_post_l6_request_count(self, registry):
+        """11 at the CLI default → 4 once L6 sets `CLAUDE_CODE_MAX_RETRIES=3`.
+
+        The shipped number is the post-L6 one because L6 has landed and every
+        dispatch carries its env; declaring 11 would budget for a configuration
+        this harness never runs.
+        """
+        from utils.providers.claude_code import CLAUDE_CODE_MAX_RETRIES
+
+        envelope = registry["claude-code"].internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == 4
+        assert envelope.max_requests == CLAUDE_CODE_MAX_RETRIES + 1
+
+    def test_claude_code_retries_rate_limits_internally(self, registry):
+        """Which is what makes §7.5 rule 6(b) forbid an identical re-dispatch."""
+        assert registry["claude-code"].internal_retries.retries_rate_limit is True
+
+    def test_claude_code_names_both_knobs_l6_sets(self, registry):
+        envelope = registry["claude-code"].internal_retries
+
+        assert envelope.configurable_by == ("CLAUDE_CODE_MAX_RETRIES", "API_TIMEOUT_MS")
+
+    @pytest.mark.parametrize("slot_s,expected", [(1800, 1200.0), (600, 480.0)])
+    def test_claude_code_max_wall_tracks_the_resolved_timeout(
+        self, registry, monkeypatch, slot_s, expected
+    ):
+        """4 × `API_TIMEOUT_MS`, and `API_TIMEOUT_MS` is itself derived (§7.3).
+
+        The plan's two measured points: **1200 s** at a 1800 s slot and 480 s at
+        a 600 s one. A constant here would be wrong at one of them.
+        """
+        self._with_timeout(monkeypatch, slot_s)
+
+        assert registry["claude-code"].internal_retries.max_wall_s == expected
+
+    def test_claude_code_max_wall_is_four_times_the_emitted_env(
+        self, registry, monkeypatch
+    ):
+        """The declaration and the env are one derivation, not two copies of it."""
+        self._with_timeout(monkeypatch, 1800)
+        provider = registry["claude-code"]
+
+        env = provider.get_env("sonnet")
+
+        assert provider.internal_retries.max_wall_s == (
+            4 * int(env["API_TIMEOUT_MS"]) / 1000.0
+        )
+
+    def test_claude_code_declares_no_bound_when_the_slot_omits_the_timeout(
+        self, registry, monkeypatch
+    ):
+        """Below ~120 s `get_env` emits no `API_TIMEOUT_MS`, so the wall is unknown.
+
+        `None` is the honest answer and the one rule 4 handles (no admission
+        test); inventing a bound would fail slots that would have succeeded.
+        """
+        self._with_timeout(monkeypatch, 60)
+        provider = registry["claude-code"]
+
+        assert "API_TIMEOUT_MS" not in provider.get_env("sonnet")
+        assert provider.internal_retries.max_wall_s is None
+        assert provider.internal_retries.max_requests == 4
+
+    def test_codex_declares_thirty_requests(self, registry):
+        """(stream+1) × (request+1), defaults 4 and 5 — measured, not inferred."""
+        envelope = registry["codex"].internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == 30
+
+    def test_codex_does_not_retry_a_rate_limit(self, registry):
+        """One request, then `exceeded retry limit, last status: 429`.
+
+        So the harness-side backoff is the only one a 429 gets, and rule 6(b)
+        must NOT suppress it for this adapter.
+        """
+        assert registry["codex"].internal_retries.retries_rate_limit is False
+
+    def test_codex_declares_its_measured_wall(self, registry):
+        """~25 s on 5xx/stream failures inside the one awaited subprocess."""
+        assert registry["codex"].internal_retries.max_wall_s == 25.0
+
+    # -- the guard --------------------------------------------------------
+
+    @pytest.mark.parametrize("name", _envelope_sweep_names())
+    def test_a_retry_shaped_env_var_requires_a_declared_envelope(self, registry, name):
+        """§7.6(b)'s converse, and the reason the declaration ships with a test.
+
+        An adapter that grows a retry env without updating its envelope is a
+        budget bug: §7.5 rule 4 would subtract one request's worth of wall clock
+        from the deadline while the child quietly makes several. Red for
+        claude-code from the moment L6's `CLAUDE_CODE_MAX_RETRIES` landed.
+        """
+        provider = registry[name]
+        shaped = _retry_shaped_env_keys(provider)
+        if not shaped:
+            return
+
+        assert provider.internal_retries is not None, (
+            f"{name}: get_env sets {shaped} but declares no internal_retries "
+            f"envelope — §7.5's budget math would assume one request"
+        )
+
+    def test_the_ladder_stays_free_of_provider_imports(self):
+        """The structural read IS the seam (§7.6(b), `retry_ladder`'s docstring).
+
+        The ladder is pure by construction; an import of `utils.providers` would
+        make the policy object depend on the adapter registry it is meant to be
+        handed a value from.
+        """
+        import ast
+        import inspect
+
+        import utils.retry_ladder as ladder
+
+        tree = ast.parse(inspect.getsource(ladder))
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported += [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported.append(node.module or "")
+
+        assert not [name for name in imported if "provider" in name], (
+            f"retry_ladder must read the envelope structurally, never import it "
+            f"(found {imported})"
+        )
+
+
+def _write_fake_claude(tmp_path, *, help_text, body="", name="claude"):
+    """Put an executable fake `claude` on a fresh PATH directory.
+
+    The §5.4.1 gate sniffs the CLI's *own* help, so the fake has to answer
+    `--help` for real — which is exactly the trap `tests/mocks/mock_llm.py`
+    records: a flag missing from the help text is silently dropped one step
+    before argparse would have exited 2 over it.
+    """
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / name
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"HELP = {help_text!r}\n"
+        "argv = sys.argv[1:]\n"
+        "if '--help' in argv or '-h' in argv:\n"
+        "    sys.stdout.write(HELP)\n"
+        "    sys.exit(0)\n"
+        f"{body or 'sys.exit(0)'}\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
+    return bin_dir
+
+
+#: The real `claude --help` line, verbatim from 2.1.233.
+HELP_WITH_FALLBACK = (
+    "Usage: claude [options] [command] [prompt]\n"
+    "Options:\n"
+    "  -p, --print                           Print response and exit\n"
+    "  --model <model>                       Model for the session\n"
+    "  --fallback-model <model>              Enable automatic fallback to "
+    "specified model(s) when the default model is overloaded or not available "
+    "(only works with --print)\n"
+    "  --allowedTools, --allowed-tools <tools...>\n"
+    "  --disallowedTools, --disallowed-tools <tools...>\n"
+)
+HELP_WITHOUT_FALLBACK = (
+    "Usage: claude [options] [command] [prompt]\n"
+    "Options:\n"
+    "  -p, --print                           Print response and exit\n"
+    "  --model <model>                       Model for the session\n"
+    "  --allowedTools, --allowed-tools <tools...>\n"
+    "  --disallowedTools, --disallowed-tools <tools...>\n"
+)
+
+
+class TestClaudeCodeFallbackModel:
+    """§3.6 (task L7) — `--fallback-model`, default off, behind a per-flag gate."""
+
+    PROMPT = "Review this code"
+
+    @pytest.fixture
+    def provider(self):
+        return ClaudeCodeProvider()
+
+    @pytest.fixture(autouse=True)
+    def _clear_gate_cache(self):
+        import utils.providers.claude_code as adapter
+
+        adapter.reset_flag_gate_cache()
+        yield
+        adapter.reset_flag_gate_cache()
+
+    def _configure(self, monkeypatch, provider, mapping, default=None, models=None):
+        block = {
+            "models": models if models is not None
+            else ["sonnet", "opus", "fable", "haiku"],
+            "fallback_models": mapping,
+        }
+        if default is not None:
+            block["fallback_models_default"] = default
+        monkeypatch.setattr(
+            type(provider), "_provider_config", lambda self: block
+        )
+
+    def _gate_open(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(
+            "PATH",
+            str(_write_fake_claude(tmp_path, help_text=HELP_WITH_FALLBACK))
+            + os.pathsep
+            + os.environ["PATH"],
+        )
+
+    # ── the off switch ────────────────────────────────────────────────────
+    def test_the_shipped_config_emits_no_flag_at_all(self, provider):
+        """Nothing configured ⇒ today's argv, byte-for-byte."""
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert cmd == [
+            "claude", "-p", "--output-format", "json", "--model", "sonnet",
+            self.PROMPT,
+        ]
+
+    def test_the_base_config_ships_an_empty_fallback_map(self):
+        """`providers.yaml` declares the key so it is discoverable, and empty."""
+        from utils.provider_registry import load_base_config
+
+        block = load_base_config()["providers"]["claude-code"]
+
+        assert "fallback_models" in block, (
+            "the key must exist in base so a user can find it without reading code"
+        )
+        assert not block["fallback_models"], "the shipped value is EMPTY"
+
+    def test_an_unconfigured_primary_emits_nothing(self, monkeypatch, provider, tmp_path):
+        """Order and arity are the user's; nothing is invented per model."""
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {"opus": ["haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert "--fallback-model" not in cmd
+
+    # ── the flag itself ───────────────────────────────────────────────────
+    def test_a_configured_primary_emits_the_comma_joined_list(
+        self, monkeypatch, provider, tmp_path
+    ):
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {"sonnet": ["opus", "haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert cmd == [
+            "claude", "-p", "--output-format", "json", "--model", "sonnet",
+            "--fallback-model", "opus,haiku",
+            self.PROMPT,
+        ]
+
+    def test_the_effort_suffix_and_the_fallback_coexist(
+        self, monkeypatch, provider, tmp_path
+    ):
+        """The lookup key is the base model, not `model:effort`."""
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {"fable": ["haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "fable:max")
+
+        assert cmd == [
+            "claude", "-p", "--output-format", "json", "--model", "fable",
+            "--effort", "max", "--fallback-model", "haiku",
+            self.PROMPT,
+        ]
+
+    def test_the_default_list_covers_primaries_with_no_entry(
+        self, monkeypatch, provider, tmp_path
+    ):
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {}, default=["haiku"])
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert cmd[-3:] == ["--fallback-model", "haiku", self.PROMPT]
+
+    # ── the splice position (§3.6, §4.2.2, §9.8) ──────────────────────────
+    @pytest.mark.parametrize(
+        "profile", ["generate", "agent-readonly", "agent-write"]
+    )
+    @pytest.mark.parametrize("transport", ["argv", "stdin"])
+    def test_the_flag_precedes_the_first_variadic_tool_flag(
+        self, monkeypatch, provider, tmp_path, profile, transport
+    ):
+        """All four rows at once — this is the one edit that makes them right.
+
+        `--allowed-tools`/`--disallowed-tools` take `<tools...>`. Anything spliced
+        after them is swallowed, and `build_command_for_transport`'s stdin branch
+        returns `cmd[:-1]`, so a flag appended after the prompt would ship
+        valueless. Hence: inside `build_command`, ahead of the prompt append.
+        """
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
+
+        if profile == "generate":
+            argv, stdin_text = provider.build_command_for_transport(
+                self.PROMPT, "sonnet", transport
+            )
+        else:
+            argv, stdin_text = provider.build_agent_command_for_transport(
+                self.PROMPT, "sonnet", profile, transport
+            )
+
+        assert "--fallback-model" in argv
+        flag_at = argv.index("--fallback-model")
+        assert argv[flag_at + 1] == "haiku"
+        for variadic in ("--allowed-tools", "--disallowed-tools"):
+            if variadic in argv:
+                assert flag_at < argv.index(variadic), (
+                    f"{variadic} is variadic — it would swallow the fallback list"
+                )
+        if transport == "argv":
+            assert argv[-1] == self.PROMPT, "the prompt must still be cmd[-1]"
+            assert stdin_text is None
+        else:
+            assert stdin_text == self.PROMPT
+            assert self.PROMPT not in argv
+            assert argv[-1] != "--fallback-model", "a valueless flag shipped"
+
+    # ── the §5.4.1 per-flag gate, shipped inside this task ────────────────
+    def test_help_without_the_flag_drops_it_and_warns(
+        self, monkeypatch, provider, tmp_path, capsys
+    ):
+        """Unsupported ⇒ omit the flag, one WARN, the run proceeds as today.
+
+        Never `unknown option` and a dead slot: emitting a flag the binary may
+        reject is the one outcome the gate may not produce.
+        """
+        monkeypatch.setenv(
+            "PATH",
+            str(_write_fake_claude(tmp_path, help_text=HELP_WITHOUT_FALLBACK))
+            + os.pathsep + os.environ["PATH"],
+        )
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert "--fallback-model" not in cmd
+        assert cmd[-1] == self.PROMPT
+        warning = capsys.readouterr().err
+        assert "--fallback-model" in warning
+        assert "WARN" in warning.upper()
+
+    def test_an_absent_binary_is_undecidable_and_declines_the_flag(
+        self, monkeypatch, provider, tmp_path, capsys
+    ):
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert "--fallback-model" not in cmd
+        assert "--fallback-model" in capsys.readouterr().err
+
+    def test_a_failing_help_probe_declines_the_flag(
+        self, monkeypatch, provider, tmp_path
+    ):
+        """Non-zero exit / empty help resolve to unsupported, never to a crash."""
+        bin_dir = _write_fake_claude(tmp_path, help_text="")
+        (bin_dir / "claude").write_text(
+            "#!/usr/bin/env python3\nimport sys\nsys.exit(2)\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
+
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert "--fallback-model" not in cmd
+
+    def test_the_help_is_read_once_per_process(
+        self, monkeypatch, provider, tmp_path
+    ):
+        """One help spawn per CLI per process, memoised on the resolved path."""
+        counter = tmp_path / "help-calls"
+        bin_dir = _write_fake_claude(
+            tmp_path,
+            help_text=HELP_WITH_FALLBACK,
+            body=(
+                "open(os.environ['MLLM_HELP_COUNTER'], 'a').write('x')\n"
+                "sys.exit(0)"
+            ),
+        )
+        # Count the help path too, by counting every invocation of the fake.
+        (bin_dir / "claude").write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            f"HELP = {HELP_WITH_FALLBACK!r}\n"
+            "open(os.environ['MLLM_HELP_COUNTER'], 'a').write('x')\n"
+            "sys.stdout.write(HELP)\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MLLM_HELP_COUNTER", str(counter))
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"], "opus": ["haiku"]})
+
+        for _ in range(5):
+            provider.build_command(self.PROMPT, "sonnet")
+            provider.build_command(self.PROMPT, "opus")
+
+        assert counter.read_text(encoding="utf-8") == "x", (
+            "the help sniff must be memoised for the process, not re-spawned "
+            "per flag question — a 4-model x 10-phase run would spawn 40 of them"
+        )
+
+    def test_the_gate_reads_the_flag_as_a_whole_word(
+        self, monkeypatch, provider, tmp_path
+    ):
+        """A help mentioning `--fallback-models-list` is not this flag."""
+        monkeypatch.setenv(
+            "PATH",
+            str(_write_fake_claude(
+                tmp_path,
+                help_text="Options:\n  --fallback-model-chain <list>  no\n",
+            )) + os.pathsep + os.environ["PATH"],
+        )
+        self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
+
+        assert "--fallback-model" not in provider.build_command(self.PROMPT, "sonnet")
+
+    # ── load-time config validation ───────────────────────────────────────
+    def test_a_primary_in_its_own_fallback_list_is_refused(self, provider):
+        """The CLI accepts it silently (measured), so the validation is ours."""
+        from utils.provider_registry import ConfigError
+        from utils.providers.claude_code import validate_fallback_models
+
+        with pytest.raises(ConfigError) as excinfo:
+            validate_fallback_models({
+                "models": ["sonnet", "haiku"],
+                "fallback_models": {"sonnet": ["haiku", "sonnet"]},
+            })
+
+        assert "sonnet" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "mapping,needle",
+        [
+            ({"sonnet": ["haiku", "haiku"]}, "haiku"),      # repeated entry
+            ({"sonnet": [""]}, "sonnet"),                   # empty string
+            ({"sonnet": ["gpt-4"]}, "gpt-4"),               # undeclared model
+            ({"sonnet": "haiku"}, "sonnet"),                # not a list
+            ({"sonnet": []}, "sonnet"),                     # empty list
+        ],
+    )
+    def test_every_malformed_list_is_refused_naming_the_key(self, mapping, needle):
+        from utils.provider_registry import ConfigError
+        from utils.providers.claude_code import validate_fallback_models
+
+        with pytest.raises(ConfigError) as excinfo:
+            validate_fallback_models(
+                {"models": ["sonnet", "opus", "haiku"], "fallback_models": mapping}
+            )
+
+        assert needle in str(excinfo.value)
+
+    def test_a_valid_configuration_passes(self):
+        from utils.providers.claude_code import validate_fallback_models
+
+        validate_fallback_models({
+            "models": ["sonnet", "opus", "haiku"],
+            "fallback_models": {"sonnet": ["opus", "haiku"]},
+            "fallback_models_default": ["haiku"],
+        })
+
+    def test_validation_runs_on_the_whole_block_not_just_the_dispatched_key(
+        self, monkeypatch, provider, tmp_path
+    ):
+        """`at load, not at dispatch`: a bad entry for B fails a run of A."""
+        from utils.provider_registry import ConfigError
+
+        self._gate_open(monkeypatch, tmp_path)
+        self._configure(monkeypatch, provider, {"opus": ["opus"]})
+
+        with pytest.raises(ConfigError):
+            provider.build_command(self.PROMPT, "sonnet")
+
+
+class TestClaudeCodeServedModel:
+    """§3.6 — attribution is mandatory whenever a fallback is configured."""
+
+    @pytest.fixture
+    def provider(self):
+        return ClaudeCodeProvider()
+
+    def _envelope(self, model_usage, result="[]"):
+        return json.dumps({
+            "type": "result",
+            "result": result,
+            "modelUsage": model_usage,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "total_cost_usd": 0.01,
+        })
+
+    def test_served_model_is_read_from_model_usage(self, provider):
+        stdout = self._envelope({"claude-haiku-4-5-20251001": {"outputTokens": 5}})
+
+        assert provider.parse_served_model(stdout, "") == "claude-haiku-4-5-20251001"
+
+    def test_served_model_rides_the_usage_channel(self, provider):
+        stdout = self._envelope({"claude-haiku-4-5-20251001": {"outputTokens": 5}})
+
+        usage = provider.parse_usage(stdout, "")
+
+        assert usage["served_model"] == "claude-haiku-4-5-20251001"
+        # The numeric contract is unchanged: absent means "not reported".
+        assert usage["input_tokens"] == 10 and usage["total_tokens"] == 15
+
+    def test_a_fallback_that_fired_is_labelled_and_warned(self, provider):
+        stdout = self._envelope({"claude-haiku-4-5-20251001": {"outputTokens": 5}})
+
+        served, is_fallback, warning = provider.resolve_served_model(
+            stdout, "sonnet", ["haiku"]
+        )
+
+        assert served == "claude-haiku-4-5-20251001"
+        assert is_fallback is True
+        assert warning and "sonnet" in warning and "haiku" in warning
+
+    def test_the_primary_serving_its_own_turn_is_not_a_fallback(self, provider):
+        stdout = self._envelope({"claude-sonnet-4-5-20250929": {"outputTokens": 5}})
+
+        served, is_fallback, warning = provider.resolve_served_model(
+            stdout, "sonnet", ["haiku"]
+        )
+
+        assert served == "claude-sonnet-4-5-20250929"
+        assert is_fallback is False
+        assert warning is None
+
+    def test_absent_model_usage_records_the_requested_model_and_warns(self, provider):
+        """Read, never depended on: attribution never fails a good attempt."""
+        stdout = json.dumps({"type": "result", "result": "[]"})
+
+        served, is_fallback, warning = provider.resolve_served_model(
+            stdout, "sonnet", ["haiku"]
+        )
+
+        assert served == "sonnet"
+        assert is_fallback is False
+        assert warning is not None
+
+    def test_a_model_outside_the_configured_set_records_the_request(self, provider):
+        stdout = self._envelope({"some-other-model": {"outputTokens": 5}})
+
+        served, is_fallback, warning = provider.resolve_served_model(
+            stdout, "sonnet", ["haiku"]
+        )
+
+        assert served == "sonnet"
+        assert is_fallback is False
+        assert warning and "some-other-model" in warning
+
+    def test_unparseable_output_never_raises(self, provider):
+        assert provider.parse_served_model("not json at all", "") is None
+        assert provider.resolve_served_model("", "sonnet", [])[0] == "sonnet"
+
+
+class TestClaudeCodeAgentPromptPosition:
+    """§9.8 (task L8) — the prompt may not sit after a variadic tool flag.
+
+    `--allowed-tools` / `--disallowed-tools` take `<tools...>`. The adapter used
+    to emit the prompt immediately after `--disallowed-tools`, so the variadic
+    swallowed it: the adapter's own rendered argv, run verbatim at 2.1.233, exits
+    1 with `Error: Input must be provided either through stdin or as a prompt
+    argument when using --print` — zero requests.
+    """
+
+    PROMPT = "Review this code"
+
+    @pytest.fixture
+    def provider(self):
+        return ClaudeCodeProvider()
+
+    @pytest.mark.parametrize("profile", ["agent-readonly", "agent-write"])
+    def test_the_prompt_is_not_adjacent_to_the_variadic_flag(self, provider, profile):
+        argv = provider.build_agent_command(self.PROMPT, "sonnet", profile)
+
+        prompt_at = argv.index(self.PROMPT)
+        last_variadic = max(
+            argv.index(flag)
+            for flag in ("--allowed-tools", "--disallowed-tools")
+            if flag in argv
+        )
+        between = argv[last_variadic + 1:prompt_at]
+        assert "--" in between, (
+            "`--disallowed-tools` takes <tools...>, so every token after it up to "
+            "a separator is part of its VALUE and the prompt is swallowed — this "
+            "is the §9.8 defect (exit 1, zero requests, at 2.1.233)"
+        )
+
+    @pytest.mark.parametrize("profile", ["agent-readonly", "agent-write"])
+    def test_a_separator_shields_the_prompt_and_it_stays_last(self, provider, profile):
+        """`--` before the prompt: verified working at 2.1.233 (1 request, exit 0).
+
+        The prompt stays `argv[-1]`, which is what every `cmd[:-1]` override and
+        the cross-adapter `agent-write` invariant in this file rely on.
+        """
+        argv = provider.build_agent_command(self.PROMPT, "sonnet", profile)
+
+        assert argv[-1] == self.PROMPT
+        assert argv[-2] == "--"
+        assert argv.count("--") == 1
+
+    @pytest.mark.parametrize("profile", ["agent-readonly", "agent-write"])
+    def test_the_stdin_argv_drops_the_separator_with_the_prompt(
+        self, provider, profile
+    ):
+        """No positional left ⇒ nothing for the separator to shield.
+
+        This is what keeps `tests/container/expected_argv.yaml`'s two claude-code
+        agent rows (both `transport: stdin`) byte-identical to what they already
+        assert — the separator exists only on the argv transport.
+        """
+        from utils.providers.claude_code import (
+            READONLY_DENIED_TOOLS,
+            WRITE_DENIED_TOOLS,
+        )
+
+        argv, stdin_text = provider.build_agent_command_for_transport(
+            self.PROMPT, "sonnet", profile, "stdin"
+        )
+
+        assert stdin_text == self.PROMPT
+        assert self.PROMPT not in argv
+        assert "--" not in argv
+        assert argv[-1] in (
+            ",".join(READONLY_DENIED_TOOLS),
+            ",".join(WRITE_DENIED_TOOLS),
+        )
+
+    def test_the_generate_profile_is_unaffected(self, provider):
+        """`build_command` never had the defect — `--model` is not variadic."""
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+
+        assert "--" not in cmd
+        assert cmd[-1] == self.PROMPT
+
+
+class TestClaudeCodeGroupA3:
+    """§14.4 group gate A3 — L6 and L7 proved together in one run.
+
+    Either half alone is the inert state the group exists to prevent: a fallback
+    flag under fewer than three retries never reaches its overload path, and a
+    retry budget with no fallback list buys nothing on a retired model alias.
+    """
+
+    PROMPT = "Review this code"
+
+    @pytest.fixture(autouse=True)
+    def _clear_gate_cache(self):
+        import utils.providers.claude_code as adapter
+
+        adapter.reset_flag_gate_cache()
+        yield
+        adapter.reset_flag_gate_cache()
+
+    def test_the_fallback_fires_on_a_404_with_the_retry_budget_in_the_child_env(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """One run, both halves.
+
+        The fake `claude` behaves the way the measured 2.1.233 does on the
+        immediate-trigger case: a 404 on the primary falls back on the *first*
+        error, and the envelope's `modelUsage` names the model that really served
+        the turn. It records the env it was launched with, which is where the L6
+        half is observed.
+        """
+        from utils.llm_client import invoke_with_provider
+        from utils.provider_registry import get_provider
+
+        record = tmp_path / "child.json"
+        body = (
+            "argv = sys.argv[1:]\n"
+            "fallbacks = ''\n"
+            "if '--fallback-model' in argv:\n"
+            "    fallbacks = argv[argv.index('--fallback-model') + 1]\n"
+            "json.dump({'argv': argv, 'env': dict(os.environ)},\n"
+            "          open(os.environ['MLLM_CHILD_RECORD'], 'w'))\n"
+            "if not fallbacks:\n"
+            "    sys.stderr.write('API Error: 404 model not found\\n')\n"
+            "    sys.exit(1)\n"
+            "served = 'claude-' + fallbacks.split(',')[0] + '-4-5-20251001'\n"
+            "sys.stdout.write(json.dumps({\n"
+            "    'type': 'result', 'result': '[]',\n"
+            "    'modelUsage': {served: {'outputTokens': 7}},\n"
+            "    'usage': {'input_tokens': 3, 'output_tokens': 7},\n"
+            "}))\n"
+            "sys.exit(0)\n"
+        )
+        bin_dir = _write_fake_claude(
+            tmp_path, help_text=HELP_WITH_FALLBACK, body=body
+        )
+        monkeypatch.setenv("MLLM_CHILD_RECORD", str(record))
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+        provider = get_provider("claude-code")
+        monkeypatch.setattr(
+            type(provider),
+            "_provider_config",
+            lambda self: {
+                "models": ["sonnet", "haiku"],
+                "fallback_models": {"sonnet": ["haiku"]},
+            },
+        )
+
+        result = invoke_with_provider(self.PROMPT, model_spec="claude-code:sonnet")
+
+        assert result["success"] is True, result
+        child = json.loads(record.read_text(encoding="utf-8"))
+
+        # L7: the fallback was offered, and it is what answered.
+        assert "--fallback-model" in child["argv"]
+        assert child["argv"][child["argv"].index("--fallback-model") + 1] == "haiku"
+
+        # L6: the retry budget was in the child's environment, at or above the
+        # floor of 3 — below it the overload path above is silently dead.
+        assert int(child["env"]["CLAUDE_CODE_MAX_RETRIES"]) >= 3
+        assert int(child["env"]["API_TIMEOUT_MS"]) > 0
+        assert "ANTHROPIC_MAX_RETRIES" not in child["env"]
+        assert "ANTHROPIC_REQUEST_TIMEOUT_SECONDS" not in child["env"]
+
+        # The attribution the report has to carry.
+        stdout_envelope = json.dumps({
+            "type": "result", "result": "[]",
+            "modelUsage": {"claude-haiku-4-5-20251001": {"outputTokens": 7}},
+        })
+        served, is_fallback, warning = provider.resolve_served_model(
+            stdout_envelope, "sonnet", ["haiku"]
+        )
+        assert is_fallback and served == "claude-haiku-4-5-20251001"
+        assert warning and "sonnet" in warning
 
 
 class TestCursorAgentProvider:
@@ -417,16 +1458,30 @@ This concludes the review."""
         assert "raw" in result
 
     def test_cursor_agent_build_command(self, provider):
-        """Test command building for cursor-agent CLI."""
+        """The one shipping argv (M1/§3.1): ``-f`` out, ``--trust --mode ask`` in.
+
+        The two replacement flags are inseparable (atomic group **A5**): without
+        ``--trust`` the launch dies on cursor's workspace-trust gate in 0.43 s,
+        and ``--trust`` alone still writes files. They are emitted behind
+        §5.4.1's per-flag gate, stubbed here so the assertion is about the argv
+        rather than about the developer's installed cursor build. The gate's own
+        behaviour — including its refusal — is
+        ``tests/test_cursor_argv_and_residue.py``.
+        """
         prompt = "Review this code"
         model = "gpt-4"
 
-        cmd = provider.build_command(prompt, model)
+        with patch.object(
+            cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset({"--trust", "--mode"})
+        ), patch.object(cursor_agent_module.shutil, "which", lambda _n: "/usr/bin/cursor-agent"):
+            cmd = provider.build_command(prompt, model)
 
         assert cmd == [
             "cursor-agent",
             "--print",
-            "-f",
+            "--trust",
+            "--mode",
+            "ask",
             "--output-format",
             "json",
             "--model",
@@ -712,7 +1767,13 @@ class TestGrokProvider:
         assert result["data"] == [1, 2, 3]
 
     def test_grok_build_command(self, provider):
-        """Test command building for Grok Build CLI."""
+        """Test command building for Grok Build CLI.
+
+        The `-p <prompt>` pair TRAILS (§9.4): grok used to render the prompt at
+        index 4, the one adapter that put a flag after it, which silently broke
+        the `argv[-1] is the prompt` rule `cmd[:-1]` and
+        `build_agent_command_for_transport` rely on.
+        """
         prompt = "Analyze this"
         model = "grok-4.5"
 
@@ -722,12 +1783,12 @@ class TestGrokProvider:
             "grok",
             "--no-auto-update",
             "--always-approve",
-            "-p",
-            "Analyze this",
             "--output-format",
             "json",
             "-m",
             "grok-4.5",
+            "-p",
+            "Analyze this",
         ]
 
     def test_grok_reasoning_efforts_constant(self):
@@ -738,21 +1799,25 @@ class TestGrokProvider:
         assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
     def test_grok_build_command_effort_suffix_exact(self, provider):
-        """Exact argv for an :effort suffix: --reasoning-effort pair after -m <base>."""
+        """Exact argv for an :effort suffix: --reasoning-effort pair after -m <base>.
+
+        The effort pair goes BEFORE the trailing `-p <prompt>`, so the prompt is
+        still argv[-1] (§9.4).
+        """
         cmd = provider.build_command("Analyze this", "grok-4.5:low")
 
         assert cmd == [
             "grok",
             "--no-auto-update",
             "--always-approve",
-            "-p",
-            "Analyze this",
             "--output-format",
             "json",
             "-m",
             "grok-4.5",
             "--reasoning-effort",
             "low",
+            "-p",
+            "Analyze this",
         ]
 
     def test_grok_build_command_all_reasoning_efforts(self, provider):
@@ -764,14 +1829,14 @@ class TestGrokProvider:
                 "grok",
                 "--no-auto-update",
                 "--always-approve",
-                "-p",
-                "Analyze this",
                 "--output-format",
                 "json",
                 "-m",
                 "grok-4.5",
                 "--reasoning-effort",
                 effort,
+                "-p",
+                "Analyze this",
             ], f"effort {effort!r} did not build the expected command"
 
     def test_grok_build_command_effort_passthrough(self, provider):
@@ -783,12 +1848,12 @@ class TestGrokProvider:
                 "grok",
                 "--no-auto-update",
                 "--always-approve",
-                "-p",
-                "Analyze this",
                 "--output-format",
                 "json",
                 "-m",
                 model,
+                "-p",
+                "Analyze this",
             ], f"model {model!r} was not passed through verbatim"
 
     @patch("shutil.which")
@@ -1440,6 +2505,146 @@ This concludes the review."""
 
         assert result["success"] is True
         assert result["data"] == data
+
+
+class TestKiloCodeDefaultModelSpecs:
+    """Every kilocode `:variant` in `defaults.models` must be one the model publishes.
+
+    **This is the only place the mistake can be caught.** `kilocode run
+    --variant <name>` SILENTLY IGNORES an unsupported name — no warning, no
+    non-zero exit, no marker in the stream — so a fan-out row asking for a
+    variant the model does not have runs at the model's default reasoning level
+    and reports success. Nothing at run time distinguishes it from a row that
+    got what it asked for.
+
+    Four of the six kilocode rows of `defaults.models` were in exactly that
+    state (§13.4 #2): `kimi-k3:thinking`, `nemotron-3-ultra-550b-a55b:xhigh`,
+    `minimax-m3:xhigh`, `mimo-v2.5-pro:xhigh`.
+
+    The published set is a **captured** fixture, not a live probe: `kilocode
+    models <backend> --verbose` is credential-free but it is still a network
+    call, and a test that reaches the internet is a test that fails for reasons
+    that are not about this repository. `tests/fixtures/kilocode/
+    model_variants.json` carries the capture plus its own provenance, and this
+    test refuses to pass over a model the capture does not cover — a stale
+    fixture must be a failure, not a silent skip, or the guard evaporates the
+    first time somebody adds a row.
+    """
+
+    VARIANTS_FIXTURE = (Path(__file__).parent / "fixtures" / "kilocode"
+                        / "model_variants.json")
+
+    @staticmethod
+    def _kilocode_specs():
+        """The `kilocode:<model>` rows of the BASE `defaults.models`.
+
+        `load_base_config` and not `load_config`: a developer's own
+        `<git-root>/.multi-llm/providers.yaml` deep-merges over base and would
+        otherwise decide whether this test passes.
+        """
+        from utils.provider_registry import load_base_config
+
+        models = (load_base_config().get("defaults") or {}).get("models") or []
+        return [spec[len("kilocode:"):] for spec in models
+                if isinstance(spec, str) and spec.startswith("kilocode:")]
+
+    def _published(self):
+        return json.loads(
+            self.VARIANTS_FIXTURE.read_text(encoding="utf-8"))["variants"]
+
+    def test_fixture_covers_every_kilocode_default(self):
+        """A spec the capture does not know about fails loudly, naming the refresh."""
+        published = self._published()
+        specs = self._kilocode_specs()
+
+        assert specs, "defaults.models lists no kilocode rows — did the key move?"
+        for spec in specs:
+            from utils.providers.kilocode import REASONING_EFFORTS
+
+            base_model, _variant = split_reasoning_effort(spec, REASONING_EFFORTS)
+            assert base_model in published, (
+                f"no captured `variants` for kilocode model {base_model!r}. "
+                f"Refresh {self.VARIANTS_FIXTURE.name} with the commands in its "
+                "`_provenance` block (`kilocode models <backend> --verbose`, "
+                "credential-free) — an uncovered model is an unchecked variant, "
+                "which the CLI would ignore in silence."
+            )
+
+    def test_every_default_variant_is_published_by_its_model(self):
+        """The L11 #2 assertion: red on four of six before the catalog was corrected."""
+        published = self._published()
+        from utils.providers.kilocode import REASONING_EFFORTS
+
+        offenders = []
+        for spec in self._kilocode_specs():
+            base_model, variant = split_reasoning_effort(spec, REASONING_EFFORTS)
+            if variant is None:
+                continue
+            allowed = published.get(base_model)
+            if allowed is not None and variant not in allowed:
+                offenders.append(
+                    f"  kilocode:{spec} — {base_model} publishes {sorted(allowed)}")
+
+        assert not offenders, (
+            "defaults.models asks kilocode for a variant the model does not "
+            "publish. `kilocode run --variant` ignores an unsupported name "
+            "SILENTLY, so these rows run at the model's default effort and "
+            "still report success:\n" + "\n".join(offenders)
+        )
+
+    @staticmethod
+    def _catalog_specs():
+        """The `providers.kilocode.models` rows — the *selectable* catalog.
+
+        Separate from `defaults.models` because they fail differently, not
+        because the rule differs: a defaults row is silently mis-run on every
+        fan-out, while a catalog row is silently mis-run only once a user or
+        `--models` picks it. Same silent-ignore mechanism, same guard.
+        """
+        from utils.provider_registry import load_base_config
+
+        providers = load_base_config().get("providers") or {}
+        return list((providers.get("kilocode") or {}).get("models") or [])
+
+    def test_every_catalog_variant_is_published_by_its_model(self):
+        """Five catalog rows carried the same defect the defaults did.
+
+        Found while L11 was correcting `defaults.models` and fixed with the
+        same rule (the top variant the model actually publishes, preserving the
+        row's maximum-reasoning intent): `kimi-k3:thinking` → `:max`,
+        `minimax-m3:xhigh` → `:thinking`, `qwen3.7-max:xhigh` → `:max`,
+        `hy3:xhigh` → `:high`, `step-3.7-flash:xhigh` → `:high`.
+        """
+        published = self._published()
+        from utils.providers.kilocode import REASONING_EFFORTS
+
+        offenders = []
+        uncovered = []
+        for spec in self._catalog_specs():
+            if not isinstance(spec, str):
+                continue
+            base_model, variant = split_reasoning_effort(spec, REASONING_EFFORTS)
+            if variant is None:
+                continue
+            allowed = published.get(base_model)
+            if allowed is None:
+                uncovered.append(f"  {base_model}")
+                continue
+            if variant not in allowed:
+                offenders.append(
+                    f"  kilocode:{spec} — {base_model} publishes {sorted(allowed)}")
+
+        assert not uncovered, (
+            "providers.kilocode.models carries a `:variant` on a model the "
+            f"capture does not cover. Refresh {self.VARIANTS_FIXTURE.name} "
+            "with the commands in its `_provenance` block:\n"
+            + "\n".join(uncovered)
+        )
+        assert not offenders, (
+            "providers.kilocode.models asks for a variant the model does not "
+            "publish; `kilocode run --variant` ignores it SILENTLY:\n"
+            + "\n".join(offenders)
+        )
 
 
 class TestClineProvider:
@@ -2766,8 +3971,15 @@ class TestAgyProvider:
         assert provider.name == "agy"
 
     def test_default_timeout(self, provider):
-        """Test that default_timeout is set correctly."""
-        assert provider.default_timeout == 600
+        """The fallback twin of `providers.yaml`'s 1200 (§9.6.d).
+
+        It read 600 while the yaml read 1200 and the argv read `20m`: three
+        numbers for one fact. Raising it is a no-op on every real path — agy
+        ships in base config, so `get_provider_timeout` returns the yaml value
+        and never reaches the adapter default — which is what made it safe to
+        reconcile here rather than schedule separately.
+        """
+        assert provider.default_timeout == 1200
 
     def test_agy_parse_success_array(self, provider):
         """Extract a JSON array from the response field."""
@@ -2896,6 +4108,66 @@ class TestAgyProvider:
             "-p",
             "Analyze this",
         ]
+
+    # --- L11 #3: agy has a real --effort flag (§13.4 #3) --------------------
+    #
+    # `agy --help` (agy 1.1.13, offline, no auth):
+    #   --effort   Reasoning effort for the current CLI session (low|medium|high)
+    # The adapter and providers.yaml both used to state that agy has no
+    # `:effort` suffix support, so every effort a user configured was refused by
+    # *our* whitelist for a flag agy really has.
+
+    def test_agy_reasoning_efforts_constant(self):
+        """REASONING_EFFORTS is exactly what `agy --help` lists."""
+        from utils.providers.agy import REASONING_EFFORTS
+
+        assert set(REASONING_EFFORTS) == {"low", "medium", "high"}
+
+    def test_agy_build_command_effort_suffix_exact(self, provider):
+        """A `:effort` suffix becomes `--effort <level>`, model name intact.
+
+        agy display names carry no colon of their own, so the last-colon split
+        cannot damage one — `"Gemini 3.1 Pro (High)"` survives verbatim as a
+        single argv element while `high` moves onto the flag.
+        """
+        cmd = provider.build_command("Analyze this", "Gemini 3.1 Pro (High):high")
+
+        assert cmd == [
+            "agy",
+            "--new-project",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            "20m",
+            "--model",
+            "Gemini 3.1 Pro (High)",
+            "--effort",
+            "high",
+            "-p",
+            "Analyze this",
+        ]
+
+    def test_agy_build_command_all_reasoning_efforts(self, provider):
+        """Each accepted level renders the flag; none of them touches the model."""
+        for effort in ("low", "medium", "high"):
+            cmd = provider.build_command("p", f"Gemini 3.1 Pro (High):{effort}")
+
+            assert cmd[-4:] == ["--effort", effort, "-p", "p"], (
+                f"effort {effort!r} did not build the expected command: {cmd}")
+            assert "Gemini 3.1 Pro (High)" in cmd
+
+    def test_agy_build_command_effort_passthrough(self, provider):
+        """An unknown suffix is not an effort: it stays part of the model name.
+
+        agy rejects an unknown model outright with an ERROR envelope, so
+        passing it through is the loud failure — inventing an `--effort xhigh`
+        agy does not accept would be the quiet one.
+        """
+        cmd = provider.build_command("p", "Gemini 3.1 Pro (High):xhigh")
+
+        assert "--effort" not in cmd
+        assert cmd[cmd.index("--model") + 1] == "Gemini 3.1 Pro (High):xhigh"
 
     @patch("shutil.which")
     def test_agy_is_available_true(self, mock_which, provider):
@@ -3414,10 +4686,19 @@ class TestCodexProvider:
         assert provider.default_timeout == 600
 
     def test_codex_reasoning_efforts_constant(self):
-        """Module-level REASONING_EFFORTS holds exactly the six valid efforts."""
-        from utils.providers.codex import REASONING_EFFORTS
+        """REASONING_EFFORTS is the seven values codex EMITS (L11 #1, §6.1).
 
-        assert REASONING_EFFORTS == {"none", "minimal", "low", "medium", "high", "xhigh"}
+        `max` was missing, so `gpt-5.6-sol:max` — a combination the codex
+        catalog advertises — had its suffix glued onto the model name. `ultra`
+        is deliberately NOT here: it is an inbound alias the harness rewrites,
+        never a value this adapter puts on argv.
+        """
+        from utils.providers.codex import EFFORT_ALIASES, REASONING_EFFORTS
+
+        assert REASONING_EFFORTS == {
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        }
+        assert EFFORT_ALIASES == {"ultra": "max"}
 
     def test_codex_build_command_effort_suffix_exact(self, provider):
         """Exact argv for an :effort suffix: -c pair after --model <base>, prompt last."""
@@ -3429,6 +4710,37 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--model",
+            "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=high",
+            "p",
+        ]
+
+    def test_codex_build_command_with_a_schema_exact(self, provider, tmp_path):
+        """§4.2/§4.2.2's exact argv — codex's half is a FILE, not inline JSON."""
+        from utils.providers.base import StructuredSchema
+
+        path = tmp_path / "probe.schema.json"
+        path.write_text('{"type": "object"}')
+        schema = StructuredSchema(
+            document={"type": "object"}, path=str(path), name="probe.schema.json"
+        )
+
+        cmd = provider.build_command("p", "gpt-5.5:high", schema=schema)
+
+        assert cmd == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--output-schema",
+            str(path),
             "--model",
             "gpt-5.5",
             "-c",
@@ -3438,7 +4750,7 @@ class TestCodexProvider:
 
     def test_codex_build_command_all_reasoning_efforts(self, provider):
         """Every valid effort suffix produces the -c model_reasoning_effort form."""
-        for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
             cmd = provider.build_command("Review this code", f"gpt-5.5:{effort}")
 
             assert cmd == [
@@ -3447,12 +4759,64 @@ class TestCodexProvider:
                 "--sandbox",
                 "workspace-write",
                 "--json",
+                "--ephemeral",
+                "--skip-git-repo-check",
                 "--model",
                 "gpt-5.5",
                 "-c",
                 f"model_reasoning_effort={effort}",
                 "Review this code",
             ], f"effort {effort!r} did not build the expected command"
+
+    def test_codex_build_command_max_effort_reaches_the_flag(self, provider):
+        """L11 #1's live defect, stated as the argv it broke.
+
+        The codex catalog advertises `max` for `gpt-5.6-sol/-terra/-luna`
+        (`codex debug models` → `supported_reasoning_levels`). Before L11 the
+        adapter's whitelist stopped at `xhigh`, so `split_reasoning_effort`
+        found no known suffix and emitted `--model gpt-5.6-sol:max` — a model id
+        that does not exist — with no `-c` at all.
+        """
+        cmd = provider.build_command("p", "gpt-5.6-sol:max")
+
+        assert cmd == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--model",
+            "gpt-5.6-sol",
+            "-c",
+            "model_reasoning_effort=max",
+            "p",
+        ]
+
+    def test_codex_build_command_ultra_is_normalized_to_max(self, provider):
+        """`ultra` is accepted at the harness boundary and EMITTED as `max` (§6.1).
+
+        codex normalizes `ultra` down to `max` client-side, but that backstop is
+        deliberately not relied on: `ultra` is not a canonical rung, so the
+        rewrite happens here and argv carries `max`.
+        """
+        cmd = provider.build_command("p", "gpt-5.6-sol:ultra")
+
+        assert cmd == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--model",
+            "gpt-5.6-sol",
+            "-c",
+            "model_reasoning_effort=max",
+            "p",
+        ]
 
     def test_codex_build_command_multi_colon_splits_on_last(self, provider):
         """Multi-colon model rsplits on the LAST colon: base foo:bar, effort high."""
@@ -3464,6 +4828,8 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
             "--model",
             "foo:bar",
             "-c",
@@ -3475,37 +4841,107 @@ class TestCodexProvider:
         """A model without a colon is passed verbatim with no -c argument."""
         cmd = provider.build_command("p", "gpt-5.5")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "gpt-5.5", "p"]
 
     def test_codex_build_command_passthrough_unknown_suffix(self, provider):
         """An unknown suffix is not an effort: model passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:turbo")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:turbo", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "gpt-5.5:turbo", "p"]
 
     def test_codex_build_command_passthrough_wrong_case_suffix(self, provider):
         """Effort matching is case-sensitive: :HIGH is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:HIGH")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:HIGH", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "gpt-5.5:HIGH", "p"]
 
     def test_codex_build_command_passthrough_empty_suffix(self, provider):
         """A trailing colon with no effort is passed verbatim, no -c."""
         cmd = provider.build_command("p", "gpt-5.5:")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "gpt-5.5:", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "gpt-5.5:", "p"]
 
     def test_codex_build_command_passthrough_bare_effort_word(self, provider):
         """A bare effort word as the full model name (no colon) is passed verbatim."""
         cmd = provider.build_command("p", "high")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", "high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "high", "p"]
 
     def test_codex_build_command_passthrough_empty_base(self, provider):
         """An empty base before the colon (:high) is passed verbatim, no -c."""
         cmd = provider.build_command("p", ":high")
 
-        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json", "--model", ":high", "p"]
+        assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", ":high", "p"]
+
+    # --- M2: --ephemeral + --skip-git-repo-check, unconditional (§3.2) -------
+    #
+    # Both were re-verified FUNCTIONALLY at the declared floor (`min_version`
+    # 0.144.0) as well as at 0.146.0, which is why there is no version gate to
+    # test: every codex dispatch carries them, on every profile and every
+    # transport. `--ephemeral` stops each fan-out call writing a rollout file
+    # into `$CODEX_HOME/sessions` that multi-llm never resumes (a four-model,
+    # ten-phase run left 40 dead sessions); `--skip-git-repo-check` opens the
+    # trust gate that otherwise makes codex exit 1 with ZERO requests outside a
+    # git repo — the measured discriminator.
+
+    M2_FLAGS = ("--ephemeral", "--skip-git-repo-check")
+
+    def test_codex_m2_flags_on_every_profile_and_transport(self, provider):
+        """No profile and no transport may drop either flag."""
+        from utils.providers.base import PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE
+
+        for transport in ("argv", "stdin"):
+            argv, _stdin = provider.build_command_for_transport(
+                "p", "gpt-5.5", transport)
+            for flag in self.M2_FLAGS:
+                assert flag in argv, (
+                    f"generate/{transport} lost {flag}: {argv}")
+            for profile in (PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE):
+                argv, _stdin = provider.build_agent_command_for_transport(
+                    "p", "gpt-5.5", profile, transport)
+                for flag in self.M2_FLAGS:
+                    assert flag in argv, (
+                        f"{profile}/{transport} lost {flag}: {argv}")
+
+    def test_codex_m2_flags_are_valueless_and_precede_the_prompt(self, provider):
+        """Both are boolean flags, and neither may sit where it swallows argv[-1].
+
+        A boolean flag placed last would take the prompt as its value on the
+        real CLI, and `build_command_for_transport`'s stdin leg — which drops
+        `cmd[-1]` — would then drop the wrong element.
+        """
+        cmd = provider.build_command("the prompt", "gpt-5.5:high")
+
+        assert cmd[-1] == "the prompt"
+        for flag in self.M2_FLAGS:
+            index = cmd.index(flag)
+            assert cmd[index + 1].startswith("-"), (
+                f"{flag} is followed by {cmd[index + 1]!r}, which a boolean flag "
+                "would swallow as its value")
+        assert cmd.count("--ephemeral") == 1
+        assert cmd.count("--skip-git-repo-check") == 1
+
+    def test_codex_agent_readonly_keeps_m2_flags_and_rewrites_sandbox(self, provider):
+        """The read-only rewrite is positional; M2's flags must survive it intact."""
+        from utils.providers.base import PROFILE_AGENT_READONLY
+
+        cmd = provider.build_agent_command("p", "gpt-5.5", PROFILE_AGENT_READONLY)
+
+        assert cmd == ["codex", "exec", "--sandbox", "read-only", "--json",
+                       "--ephemeral", "--skip-git-repo-check",
+                       "--model", "gpt-5.5", "p"]
 
     @patch("shutil.which")
     def test_codex_is_available_true(self, mock_which, provider):
@@ -4418,3 +5854,482 @@ Done."""
         mock_subprocess.assert_called_once()
         call_kwargs = mock_subprocess.call_args
         assert call_kwargs.kwargs["timeout"] == 1800
+
+
+# ===========================================================================
+# L5 (§9.6): agy's `--print-timeout` is derived, not hardcoded
+# ===========================================================================
+#
+# Today the flag is the literal `20m`, which is three numbers pretending to be
+# one: `agy.py`'s `20m`, `providers.yaml`'s `default_timeout: 1200` and the
+# adapter's own `default_timeout`. The live symptom is two-sided. Configured
+# ABOVE 20 minutes the flag is a silent no-op — agy self-terminates at 1200 s
+# and returns its own `status: ERROR`, so the user diagnoses agy rather than
+# their configuration. Configured BELOW it, the parent's `subprocess.run`
+# deadline fires while agy is still alive, and the leader-only kill leaves a
+# descendant behind.
+#
+# The fix is one keyword-only `timeout_s=` on the four command builders,
+# threaded from the `effective_timeout` `invoke_with_provider` already
+# computes, rendered as whole seconds minus a deliberate shutdown margin.
+
+
+def parse_go_duration(text):
+    """Seconds in a Go duration string, or ``None`` when it is not one.
+
+    Deliberately narrow: only the spellings this adapter may emit
+    (``1170s``, ``19m30s``, ``1h0m0s``). `time.ParseDuration` accepts the
+    bare-seconds form, which is why §9.6.c renders whole seconds and removes
+    the minute-rounding rule instead of specifying one — rounding to minutes
+    is exactly what let 1200 s and `20m` become an exact tie.
+    """
+    import re
+
+    match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", str(text))
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = (int(g or 0) for g in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+class TestParseGoDurationHelper:
+    """The ladder invariant is only as good as the parser it reads with."""
+
+    def test_bare_seconds(self):
+        assert parse_go_duration("1170s") == 1170
+
+    def test_minutes_and_seconds(self):
+        assert parse_go_duration("19m30s") == 1170
+
+    def test_minutes_only(self):
+        assert parse_go_duration("20m") == 1200
+
+    def test_non_duration_is_none(self):
+        assert parse_go_duration("soon") is None
+        assert parse_go_duration("") is None
+
+
+class TestAgyPrintTimeoutDerivation:
+    """§9.6.e's acceptance table, above and below 20 minutes."""
+
+    PROMPT = "Analyze this"
+    MODEL = "Gemini 3.1 Pro (High)"
+
+    @pytest.fixture
+    def provider(self):
+        return AgyProvider()
+
+    @staticmethod
+    def _print_timeout(cmd):
+        assert "--print-timeout" in cmd, f"no --print-timeout in {cmd}"
+        return cmd[cmd.index("--print-timeout") + 1]
+
+    def test_the_constants_are_named_not_literals(self):
+        """§9.6.c: the margin is a named constant, never a literal in the builder."""
+        from utils.providers.agy import INNER_SHUTDOWN_MARGIN_S, MIN_INNER_TIMEOUT_S
+
+        assert INNER_SHUTDOWN_MARGIN_S == 30
+        assert MIN_INNER_TIMEOUT_S == 60
+
+    @pytest.mark.parametrize("configured,expected", [
+        (600, "570s"),
+        (1200, "1170s"),
+        # ABOVE 20 minutes — the silent no-op. Today this renders `20m`, agy
+        # self-terminates at 1200 s and blames itself.
+        (2400, "2370s"),
+    ])
+    def test_derived_from_the_resolved_timeout(self, provider, configured, expected):
+        cmd = provider.build_command(self.PROMPT, self.MODEL, timeout_s=configured)
+
+        assert self._print_timeout(cmd) == expected
+
+    def test_below_the_margin_clamps_to_the_floor_and_warns_once(self, provider, capsys):
+        """§9.6.c's misconfiguration guard: one WARN naming both numbers."""
+        cmd = provider.build_command(self.PROMPT, self.MODEL, timeout_s=45)
+
+        assert self._print_timeout(cmd) == "60s"
+        captured = capsys.readouterr()
+        assert captured.err.count("WARN") == 1, (
+            f"expected exactly one WARN, got: {captured.err!r}")
+        assert "45" in captured.err and "60" in captured.err
+
+    # Every rung is at or above MIN_INNER_TIMEOUT_S + INNER_SHUTDOWN_MARGIN_S,
+    # so none of them is clamped and the strict invariant must hold on all of
+    # them. 90 is the exact boundary; 1200 is the value that ties today.
+    LADDER = [90, 91, 120, 300, 600, 900, 1200, 1800, 2400, 3600, 7200]
+
+    def test_the_margin_invariant_holds_over_the_whole_ladder(self, provider):
+        from utils.providers.agy import INNER_SHUTDOWN_MARGIN_S
+
+        for configured in self.LADDER:
+            rendered = self._print_timeout(
+                provider.build_command(self.PROMPT, self.MODEL, timeout_s=configured)
+            )
+            inner = parse_go_duration(rendered)
+            assert inner is not None, (
+                f"{rendered!r} is not a Go duration (configured={configured})")
+            assert inner > 0, f"non-positive inner timeout for {configured}"
+            assert inner + INNER_SHUTDOWN_MARGIN_S <= configured, (
+                f"configured={configured} rendered {rendered!r}: agy would reach "
+                f"its own cutoff at or after the parent's deadline, which is the "
+                f"tie the margin exists to break")
+
+    def test_no_configured_value_still_renders_the_old_literal(self, provider):
+        """The hardcoded `20m` no longer decides a live invocation."""
+        for configured in (600, 1200, 2400):
+            rendered = self._print_timeout(
+                provider.build_command(self.PROMPT, self.MODEL, timeout_s=configured)
+            )
+            assert rendered != "20m", (
+                f"configured={configured} still renders the hardcoded literal")
+
+    def test_the_three_numbers_reconcile_to_one(self, provider):
+        """§9.6.d: `providers.yaml` and the adapter default agree at 1200."""
+        import yaml
+
+        base = Path(__file__).parent.parent / "providers.yaml"
+        config = yaml.safe_load(base.read_text(encoding="utf-8"))
+
+        assert config["providers"]["agy"]["default_timeout"] == 1200
+        assert provider.default_timeout == 1200
+        # And the derived flag is that same single number, minus the margin.
+        rendered = self._print_timeout(
+            provider.build_command(self.PROMPT, self.MODEL, timeout_s=provider.default_timeout)
+        )
+        assert rendered == "1170s"
+
+    def test_the_keyword_survives_the_effort_suffix(self, provider):
+        """L11 #3's `--effort` and L5's derived timeout are independent."""
+        cmd = provider.build_command(
+            self.PROMPT, "Gemini 3.1 Pro (High):high", timeout_s=2400
+        )
+
+        assert self._print_timeout(cmd) == "2370s"
+        assert cmd[cmd.index("--effort") + 1] == "high"
+        assert cmd[cmd.index("--model") + 1] == "Gemini 3.1 Pro (High)"
+
+    def test_the_keyword_is_keyword_only(self, provider):
+        """§9.6.a: positional passing must not be possible (M7 orders after L5)."""
+        with pytest.raises(TypeError):
+            provider.build_command(self.PROMPT, self.MODEL, 1200)
+
+    def test_the_transport_builder_threads_it(self, provider):
+        """§9.6.b's Lane A leg: `build_command_for_transport` forwards the value."""
+        argv, stdin_text = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "argv", timeout_s=2400
+        )
+
+        assert stdin_text is None
+        assert self._print_timeout(argv) == "2370s"
+
+
+class TestInvokeWithProviderThreadsTheResolvedTimeout:
+    """§9.6.b: the value comes from `invoke_with_provider`'s own computation."""
+
+    @pytest.mark.parametrize("configured,expected", [
+        (600, "570s"),
+        (1200, "1170s"),
+        (2400, "2370s"),
+    ])
+    def test_the_spawned_argv_carries_the_derived_flag(self, configured, expected):
+        from unittest.mock import MagicMock
+        from utils.llm_client import invoke_with_provider
+
+        completed = MagicMock()
+        completed.returncode = 0
+        completed.stdout = json.dumps({"status": "SUCCESS", "response": "[]"})
+        completed.stderr = ""
+
+        with patch("shutil.which", return_value="/usr/bin/agy"), \
+                patch("subprocess.run", return_value=completed) as run:
+            invoke_with_provider(
+                prompt="Test prompt",
+                model_spec="agy:Gemini 3.1 Pro (High)",
+                timeout=configured,
+            )
+
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--print-timeout") + 1] == expected
+        # The two deadlines are the same number, one margin apart — never a tie.
+        assert run.call_args.kwargs["timeout"] == configured
+
+
+# --- The off switch: `timeout_s=None` renders today's argv byte-for-byte ----
+#
+# Captured from the pre-L5 tree, before the keyword existed. This is the whole
+# rollback story (§14.4): drop the one call site in `llm_client.py` and every
+# adapter is back to exactly these bytes, agy included.
+PRE_L5_ARGV_PROMPT = "Analyze this plan carefully"
+
+PRE_L5_ARGV_MODELS = {
+    "agy": "Gemini 3.1 Pro (High)",
+    "aider": "openrouter/z-ai/glm-5.2",
+    "claude-code": "sonnet",
+    "cline": "openrouter/z-ai/glm-5.2",
+    "codex": "gpt-5.5",
+    "cursor-agent": "auto",
+    "gemini": "gemini-2.5-pro",
+    "goose": "openrouter/z-ai/glm-5.2",
+    "grok": "grok-4",
+    "kilocode": "openai-native/gpt-5.5",
+    "muse": "muse-spark-1.2",
+    "opencode": "openai/gpt-5.5",
+    "pi": "anthropic/claude-opus-4-8",
+}
+
+PRE_L5_ARGV = {
+    "agy": [
+        "agy", "--new-project", "--dangerously-skip-permissions",
+        "--output-format", "json", "--print-timeout", "20m",
+        "--model", "Gemini 3.1 Pro (High)", "-p", PRE_L5_ARGV_PROMPT,
+    ],
+    "aider": [
+        "aider", "--model", "openrouter/z-ai/glm-5.2",
+        "--message", f"/ask {PRE_L5_ARGV_PROMPT}",
+        "--yes-always", "--no-auto-commits", "--no-pretty", "--no-stream",
+        "--no-check-update", "--no-show-model-warnings", "--no-analytics",
+        "--no-gitignore", "--no-show-release-notes", "--no-detect-urls",
+        "--no-fancy-input",
+        "--chat-history-file", os.devnull,
+        "--input-history-file", os.devnull,
+    ],
+    "claude-code": [
+        "claude", "-p", "--output-format", "json", "--model", "sonnet",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "cline": [
+        "cline", "--json", "-P", "openrouter", "-m", "z-ai/glm-5.2",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "codex": [
+        "codex", "exec", "--sandbox", "workspace-write", "--json",
+        "--ephemeral", "--skip-git-repo-check", "--model", "gpt-5.5",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "cursor-agent": [
+        "cursor-agent", "--print", "--trust", "--mode", "ask",
+        "--output-format", "json", "--model", "auto", PRE_L5_ARGV_PROMPT,
+    ],
+    "gemini": [
+        "gemini", "--output-format", "json", "--model", "gemini-2.5-pro",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "goose": [
+        "goose", "run", "--no-session", "-q", "--output-format", "json",
+        "--no-profile", "--max-turns", "25", "--with-builtin", "developer",
+        "--provider", "openrouter", "--model", "z-ai/glm-5.2",
+        "-t", PRE_L5_ARGV_PROMPT,
+    ],
+    # §9.4 moved grok's `-p <prompt>` pair to the END (it was at index 4). That
+    # is an independent normalization, NOT the timeout keyword: `timeout_s` is
+    # still inert here, and the rollback story below is unaffected — dropping the
+    # keyword's call site returns grok to exactly this argv.
+    "grok": [
+        "grok", "--no-auto-update", "--always-approve",
+        "--output-format", "json", "-m", "grok-4", "-p", PRE_L5_ARGV_PROMPT,
+    ],
+    "kilocode": [
+        "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "muse": [
+        "muse", "exec", "--json", "--disable-approval", "--model",
+        "muse-spark-1.2", PRE_L5_ARGV_PROMPT,
+    ],
+    "opencode": [
+        "opencode", "run", "--format", "json", "--print-logs",
+        "--log-level", "ERROR", "--model", "openai/gpt-5.5",
+        PRE_L5_ARGV_PROMPT,
+    ],
+    "pi": [
+        "pi", "--no-session", "-p", "--model", "anthropic/claude-opus-4-8",
+        PRE_L5_ARGV_PROMPT,
+    ],
+}
+
+
+class TestTimeoutKeywordIsInertWhenUnset:
+    """`timeout_s=None` is the seam; assert it rather than assume it."""
+
+    def test_the_table_covers_every_registered_adapter(self):
+        assert set(PRE_L5_ARGV) == set(_registered_provider_names())
+        assert len(PRE_L5_ARGV) == 13
+
+    @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
+    def test_explicit_none_renders_the_pre_l5_argv(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+        argv = provider.build_command(
+            PRE_L5_ARGV_PROMPT, PRE_L5_ARGV_MODELS[name], timeout_s=None
+        )
+
+        assert argv == PRE_L5_ARGV[name]
+
+    @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
+    def test_omitting_the_keyword_is_the_same_as_passing_none(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+        model = PRE_L5_ARGV_MODELS[name]
+
+        assert provider.build_command(PRE_L5_ARGV_PROMPT, model) == provider.build_command(
+            PRE_L5_ARGV_PROMPT, model, timeout_s=None
+        )
+
+    @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
+    def test_the_other_three_builders_are_inert_too(self, name):
+        """The keyword lands on all four builders and changes none of them."""
+        from utils.provider_registry import _PROVIDERS
+        from utils.providers.base import PROFILE_GENERATE
+
+        provider = _PROVIDERS[name]
+        model = PRE_L5_ARGV_MODELS[name]
+
+        for transport in ("argv", "stdin"):
+            if transport != "argv" and not provider.supports_prompt_transport(transport):
+                continue
+            assert provider.build_command_for_transport(
+                PRE_L5_ARGV_PROMPT, model, transport, timeout_s=None
+            ) == provider.build_command_for_transport(
+                PRE_L5_ARGV_PROMPT, model, transport
+            )
+
+        for profile in provider.agent_profiles:
+            if profile == PROFILE_GENERATE:
+                continue
+            assert provider.build_agent_command(
+                PRE_L5_ARGV_PROMPT, model, profile, timeout_s=None
+            ) == provider.build_agent_command(PRE_L5_ARGV_PROMPT, model, profile)
+            for transport in ("argv", "stdin"):
+                if transport != "argv" and not provider.supports_prompt_transport(transport):
+                    continue
+                assert provider.build_agent_command_for_transport(
+                    PRE_L5_ARGV_PROMPT, model, profile, transport, timeout_s=None
+                ) == provider.build_agent_command_for_transport(
+                    PRE_L5_ARGV_PROMPT, model, profile, transport
+                )
+
+
+# --- No child survives the outer timeout — two tests, honestly split -------
+
+MOCK_LLM_PATH = Path(__file__).parent / "mocks" / "mock_llm.py"
+
+
+def _pid_is_alive(pid):
+    """Whether ``pid`` still names a live process (POSIX)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.fixture
+def agy_stub(tmp_path, monkeypatch):
+    """A real `agy` on PATH, backed by ``mock_llm.py``'s print-timeout stubs."""
+    import stat
+
+    launcher = tmp_path / "agy"
+    launcher.symlink_to(MOCK_LLM_PATH)
+    MOCK_LLM_PATH.chmod(MOCK_LLM_PATH.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
+    monkeypatch.setenv("MOCK_LLM_PID_FILE", str(tmp_path / "sleeper.pid"))
+    return launcher
+
+
+def _await_pid_file(path, deadline_s=10.0):
+    import time as _time
+
+    end = _time.time() + deadline_s
+    while _time.time() < end:
+        try:
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            text = ""
+        if text:
+            return int(text)
+        _time.sleep(0.05)
+    raise AssertionError(f"the stub never recorded a pid at {path}")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pid liveness + symlink")
+class TestNoChildOutlivesTheOuterDeadline:
+    """§9.6.e's survivor check.
+
+    Both stubs run against real processes with the margin scaled down, because
+    a test cannot sleep for 20 minutes: the *mechanism* is what is under test,
+    and `INNER_SHUTDOWN_MARGIN_S` / `MIN_INNER_TIMEOUT_S` are its parameters.
+    """
+
+    MODEL = "Gemini 3.1 Pro (High)"
+
+    @pytest.fixture
+    def scaled_margin(self, monkeypatch):
+        from utils.providers import agy as agy_module
+
+        monkeypatch.setattr(agy_module, "INNER_SHUTDOWN_MARGIN_S", 1)
+        monkeypatch.setattr(agy_module, "MIN_INNER_TIMEOUT_S", 1)
+
+    def test_a_stub_that_honours_the_flag_shuts_itself_down(
+        self, agy_stub, scaled_margin, monkeypatch, tmp_path
+    ):
+        """The child exits on its own and the harness reads agy's own reason."""
+        from utils.llm_client import ERROR_TIMEOUT, invoke_with_provider
+
+        monkeypatch.setenv("MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR", "honour")
+
+        with patch("shutil.which", return_value=str(agy_stub)):
+            result = invoke_with_provider(
+                prompt="Analyze this",
+                model_spec=f"agy:{self.MODEL}",
+                timeout=4,
+            )
+
+        assert result["success"] is False
+        # agy's OWN failure reason, not a bare TIMEOUT the parent invented.
+        assert result.get("error_code") != ERROR_TIMEOUT
+        assert "print-timeout" in result["error"]
+        # And nothing it started is still running.
+        sleeper = _await_pid_file(tmp_path / "sleeper.pid")
+        assert not _pid_is_alive(sleeper), (
+            f"pid {sleeper} outlived the run despite the stub honouring its "
+            f"own cutoff")
+
+    @pytest.mark.xfail(
+        reason=(
+            "the leader-only kill is the orphan bug itself, owned by "
+            "plans/timeout-orphans-and-reaggregate-determinism.md. L5 cannot "
+            "make a disobedient child reapable, and a silently-passing version "
+            "of this test would claim it did."
+        ),
+        strict=False,
+    )
+    def test_a_stub_that_ignores_the_flag_leaves_no_descendant(
+        self, agy_stub, scaled_margin, monkeypatch, tmp_path
+    ):
+        from utils.llm_client import ERROR_TIMEOUT, invoke_with_provider
+
+        monkeypatch.setenv("MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR", "ignore")
+        sleeper = None
+        try:
+            with patch("shutil.which", return_value=str(agy_stub)):
+                result = invoke_with_provider(
+                    prompt="Analyze this",
+                    model_spec=f"agy:{self.MODEL}",
+                    timeout=3,
+                )
+
+            assert result.get("error_code") == ERROR_TIMEOUT
+            sleeper = _await_pid_file(tmp_path / "sleeper.pid")
+            assert not _pid_is_alive(sleeper), (
+                f"pid {sleeper} outlived the outer deadline — the leader-only "
+                f"kill orphaned it")
+        finally:
+            if sleeper and _pid_is_alive(sleeper):
+                try:
+                    os.kill(sleeper, 9)
+                except OSError:
+                    pass

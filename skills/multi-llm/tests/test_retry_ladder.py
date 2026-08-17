@@ -1,0 +1,298 @@
+"""M9 (§7.1.b, §7.5) — the one retry policy both lanes obey.
+
+The ladder is pure, so every rule is testable against an injected clock with no
+subprocess, no sleeping and no event loop. §14.2's M9 row names four checks and
+they are the four classes below:
+
+* the budget is **monotonic** — no fresh full timeout per retry (today's Lane A
+  recursion resets it);
+* a slot whose declared vendor envelope exceeds the remaining budget is
+  ``budget_exhausted`` with **no** spawn;
+* rule 6(b) — a ``retries_rate_limit: true`` adapter returning ``rate_limited``
+  yields **no** identical re-dispatch;
+* a forever-429 provider finishes inside ``resolved_timeout``.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils.retry_ladder import (  # noqa: E402
+    MAX_RATE_LIMIT_BACKOFFS,
+    MIN_ATTEMPT_BUDGET_S,
+    RetryLadder,
+    STATUS_AUTH_FAILED,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_REJECTED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SCHEMA_INVALID,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+    STATUS_UNPARSEABLE,
+    STOP_BUDGET,
+    STOP_DEADLINE,
+    STOP_EXHAUSTED_ATTEMPTS,
+    STOP_FATAL,
+    STOP_TERMINAL,
+    STOP_VENDOR_ALREADY_RETRIED,
+    backoff_delay,
+)
+
+
+class Clock:
+    """An injected monotonic clock the test advances by hand."""
+
+    def __init__(self, t=0.0):
+        self.t = float(t)
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def _envelope(max_requests=1, max_wall_s=None, retries_rate_limit=False):
+    """A stand-in for an adapter's ``internal_retries`` (§7.6(b)).
+
+    Structural on purpose — the ladder must stay free of provider imports, and
+    a test that constructed the real dataclass would hide a coupling the design
+    deliberately does not have.
+    """
+    return type(
+        "Envelope",
+        (),
+        {
+            "max_requests": max_requests,
+            "max_wall_s": max_wall_s,
+            "retries_rate_limit": retries_rate_limit,
+        },
+    )()
+
+
+def _ladder(clock, timeout=1200.0, retries=1, envelope=None):
+    return RetryLadder(
+        timeout=timeout,
+        retries=retries,
+        envelope=envelope,
+        now=clock,
+        jitter=lambda: 0.0,  # deterministic: equal-jitter's random half is 0
+    )
+
+
+class TestTheBudgetIsMonotonic:
+    """§7.5 rule 1 — one deadline per slot, taken once.
+
+    This is the defect Lane A's recursion has today: ``run_single_model``
+    re-enters itself with the *same* ``timeout`` argument, so a claude-code slot
+    at ``default_timeout: 1800`` could run 4 × 1800 s + 35 s of backoff ≈ 2 h
+    against a configured ceiling of 1800 s.
+    """
+
+    def test_each_attempt_is_spawned_with_what_is_left(self):
+        clock = Clock()
+        ladder = _ladder(clock, timeout=100.0, retries=2)
+
+        slices = []
+        while (slice_s := ladder.next_attempt()) is not None:
+            slices.append(round(slice_s, 3))
+            clock.advance(30.0)  # the attempt really burned 30 s
+            action = ladder.record(STATUS_TIMEOUT)
+            clock.advance(action.delay)
+
+        # Not [100, 100, 100] — which is exactly what the recursion produces.
+        assert slices == [100.0, 70.0, 40.0]
+
+    def test_the_slot_never_outlives_its_timeout(self):
+        clock = Clock()
+        ladder = _ladder(clock, timeout=60.0, retries=5)
+        while (slice_s := ladder.next_attempt()) is not None:
+            clock.advance(slice_s)  # every attempt runs to its full slice
+            action = ladder.record(STATUS_TIMEOUT)
+            clock.advance(action.delay)
+        assert ladder.elapsed() <= 60.0
+        assert ladder.stop_reason == STOP_DEADLINE
+
+    def test_backoff_sleeps_are_charged_to_the_same_deadline(self):
+        """§7.5 rule 3 — the sleeps are inside the budget, not beside it."""
+        clock = Clock()
+        ladder = _ladder(clock, timeout=10.0, retries=0)
+        total_slept = 0.0
+        while ladder.next_attempt() is not None:
+            clock.advance(0.1)
+            action = ladder.record(STATUS_RATE_LIMITED)
+            total_slept += action.delay
+            clock.advance(action.delay)
+        assert ladder.elapsed() <= 10.0
+        assert total_slept > 0.0
+
+
+class TestBudgetExhaustedRefusesToSpawn:
+    """§7.5 rule 4 — vendor-internal retries are declared, not discovered."""
+
+    def test_a_declared_envelope_larger_than_the_budget_yields_no_spawn(self):
+        clock = Clock()
+        # claude-code at a 600 s slot: 4 × API_TIMEOUT_MS = 480 s… but give it a
+        # 1200 s envelope against a 600 s slot, which cannot fit even once.
+        ladder = _ladder(
+            clock, timeout=600.0, retries=1, envelope=_envelope(max_wall_s=1200.0)
+        )
+        assert ladder.next_attempt() is None
+        assert ladder.stop_reason == STOP_BUDGET
+        assert ladder.spawns == 0, "rule 4 is a pre-dispatch admission test"
+
+    def test_it_stops_before_a_LATER_attempt_that_would_not_fit(self):
+        clock = Clock()
+        ladder = _ladder(
+            clock, timeout=1000.0, retries=3, envelope=_envelope(max_wall_s=400.0)
+        )
+        spawns = 0
+        while ladder.next_attempt() is not None:
+            spawns += 1
+            clock.advance(350.0)
+            ladder.record(STATUS_TIMEOUT)
+        # 1000 → 650 → 300: the third attempt cannot hold a 400 s worst case.
+        assert spawns == 2
+        assert ladder.stop_reason == STOP_BUDGET
+
+    def test_an_undeclared_envelope_does_not_restrict_anything(self):
+        """Rule 6(c) — ``None`` means "assume one request", never "assume the worst"."""
+        clock = Clock()
+        ladder = _ladder(clock, timeout=10.0, retries=1, envelope=None)
+        assert ladder.next_attempt() == pytest.approx(10.0)
+
+    def test_rule_4_is_an_admission_test_not_a_second_debit(self):
+        """Rule 6(a) — the inner wall is already counted; do not count it twice."""
+        clock = Clock()
+        ladder = _ladder(
+            clock, timeout=100.0, retries=1, envelope=_envelope(max_wall_s=10.0)
+        )
+        assert ladder.next_attempt() == pytest.approx(100.0)
+        clock.advance(30.0)  # the attempt spent 30 s, vendor retries included
+        ladder.record(STATUS_TIMEOUT)
+        # 70 left, not 70 − 10: the envelope is never subtracted from the clock.
+        assert ladder.next_attempt() == pytest.approx(70.0)
+
+
+class TestRule6bNoIdenticalRateLimitRedispatch:
+    """§7.5 rule 6(b) — the two mechanisms compose; they must not multiply."""
+
+    def test_an_adapter_that_retries_429s_internally_is_not_re_dispatched(self):
+        clock = Clock()
+        ladder = _ladder(
+            clock,
+            timeout=1800.0,
+            retries=1,
+            envelope=_envelope(max_requests=4, retries_rate_limit=True),
+        )
+        assert ladder.next_attempt() is not None
+        action = ladder.record(STATUS_RATE_LIMITED)
+
+        assert action.retry is False
+        assert action.delay == 0.0
+        assert ladder.stop_reason == STOP_VENDOR_ALREADY_RETRIED
+        # The reason names the declared envelope, per §7.5 rule 6(b).
+        assert "4" in action.reason
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1, "≤ 3 backoffs would have made this 4 requests → 20"
+
+    def test_an_adapter_that_does_NOT_retry_429s_keeps_the_harness_backoff(self):
+        """codex: one request, then ``exceeded retry limit`` — so ≤ 3 applies."""
+        clock = Clock()
+        ladder = _ladder(
+            clock,
+            timeout=1800.0,
+            retries=1,
+            envelope=_envelope(max_requests=30, retries_rate_limit=False),
+        )
+        spawns = 0
+        while ladder.next_attempt() is not None:
+            spawns += 1
+            clock.advance(1.0)
+            action = ladder.record(STATUS_RATE_LIMITED)
+            clock.advance(action.delay)
+        assert spawns == MAX_RATE_LIMIT_BACKOFFS + 1
+        assert ladder.stop_reason == STOP_EXHAUSTED_ATTEMPTS
+
+    def test_rate_limiting_does_not_consume_the_transport_budget(self):
+        clock = Clock()
+        ladder = _ladder(clock, timeout=1800.0, retries=1)
+        ladder.next_attempt()
+        ladder.record(STATUS_RATE_LIMITED)
+        assert ladder.transport_retries_left == 1, "rung 3 is not a transport failure"
+
+
+class TestForever429FinishesInsideTheTimeout:
+    """§14.2's M9 row: the fake provider that 429s forever."""
+
+    def test_it_terminates_inside_resolved_timeout(self):
+        clock = Clock()
+        resolved_timeout = 1200.0
+        ladder = _ladder(clock, timeout=resolved_timeout, retries=1)
+
+        spawns = 0
+        while (slice_s := ladder.next_attempt()) is not None:
+            spawns += 1
+            assert slice_s <= resolved_timeout
+            clock.advance(1.0)
+            action = ladder.record(STATUS_RATE_LIMITED)
+            clock.advance(action.delay)
+
+        assert spawns <= 5, "§7.5 rule 2's ceiling across both counters"
+        assert ladder.elapsed() <= resolved_timeout + MIN_ATTEMPT_BUDGET_S
+
+
+class TestTerminalAndFatalStatuses:
+    """The rungs that are never retried, and the two that fail the batch."""
+
+    @pytest.mark.parametrize("status", [STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED])
+    def test_rung_1_is_fatal(self, status):
+        ladder = _ladder(Clock())
+        ladder.next_attempt()
+        action = ladder.record(status)
+        assert action.retry is False
+        assert ladder.stop_reason == STOP_FATAL
+
+    @pytest.mark.parametrize("status", [STATUS_SCHEMA_INVALID, STATUS_REJECTED])
+    def test_rungs_6_and_7_are_never_retried(self, status):
+        ladder = _ladder(Clock(), retries=5)
+        ladder.next_attempt()
+        action = ladder.record(status)
+        assert action.retry is False
+        assert ladder.stop_reason == STOP_TERMINAL
+
+    def test_ok_stops_the_ladder(self):
+        ladder = _ladder(Clock(), retries=5)
+        ladder.next_attempt()
+        assert ladder.record(STATUS_OK).retry is False
+        assert ladder.next_attempt() is None
+
+    @pytest.mark.parametrize(
+        "status", [STATUS_TIMEOUT, STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE]
+    )
+    def test_transport_statuses_consume_the_retry_budget(self, status):
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        assert ladder.record(status).retry is True
+        assert ladder.transport_retries_left == 0
+        ladder.next_attempt()
+        assert ladder.record(status).retry is False
+        assert ladder.stop_reason == STOP_EXHAUSTED_ATTEMPTS
+
+
+class TestBackoffDelay:
+    """Equal jitter: never immediate, never longer than the step."""
+
+    def test_it_is_bounded_by_the_step(self):
+        for attempt in range(1, 8):
+            step = min(2.0 ** attempt, 30.0)
+            assert backoff_delay(attempt, jitter=lambda: 0.0) == step / 2.0
+            assert backoff_delay(attempt, jitter=lambda: 1.0) == step
+            assert 0 < backoff_delay(attempt) <= step
+
+    def test_it_is_capped(self):
+        assert backoff_delay(50, jitter=lambda: 1.0) == 30.0

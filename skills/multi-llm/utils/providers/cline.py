@@ -1,10 +1,11 @@
 """Cline CLI provider implementation with JSONL event stream parsing."""
 import json
+import re
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Thinking levels accepted by `cline --thinking` (verified on cline 3.0.39).
 # Hard-validated by the CLI — invalid values exit 1. Unlike -m, --thinking
@@ -35,6 +36,29 @@ class ClineProvider(LLMProvider):
     through verbatim as the model name (keeping ``:free``-style ids intact).
     """
 
+    # §7.2 — per-adapter pattern overrides, EXTENDING the base sets.
+    #
+    # Measured on cline 3.0.39, 2026-08-16, with an invalid OPENROUTER_API_KEY:
+    # cline **exits 0** and the whole verdict is structured —
+    #   {"type":"run_result","finishReason":"error",…,"text":"User not found."}
+    #   {"type":"error","message":"User not found."}
+    # The message is the upstream provider's rejection and carries no auth word
+    # at all, so without this entry a logged-out cline classified as *nothing*
+    # and burned the transport retry budget on a condition no retry can fix.
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "user not found",
+    )
+    # No rate-limit override: cline's 429 text is the upstream provider's,
+    # already covered by the base set, and nothing cline-specific was measured.
+    rate_limit_patterns = LLMProvider.rate_limit_patterns
+
+    #: The exit code carries no verdict (above): ``finishReason`` does. Matched
+    #: JSON-key-first so a model quoting the phrase in prose cannot trip it.
+    exit_zero_failure_markers = (
+        re.compile(r'"finishreason"\s*:\s*"error"'),
+        re.compile(r'"errorclass"\s*:'),
+    )
+
     @property
     def name(self) -> str:
         return "cline"
@@ -46,7 +70,14 @@ class ClineProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("cline") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # cline --json [--thinking <effort>] -P <cline-provider> -m <model-id> "<prompt>"
         # --json auto-activates headless mode; auto-approve defaults to on,
         # so file-read tools work unattended. The prompt goes last as a

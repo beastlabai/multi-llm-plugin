@@ -356,7 +356,23 @@ def resolve_models(
         unattended: Whether --yes / --non-interactive was passed.
 
     Returns:
-        List of model specs in provider:model format
+        List of model specs in **canonical** ``provider:model`` format (§9.3.d).
+        ``--models`` and ``defaults.models`` both legally carry bare,
+        prefix-less entries, which every downstream consumer would otherwise
+        re-resolve through its *own* ``parse_model_spec`` — only some of them
+        anchored. That is the mechanism behind the measured wrong-provider
+        spawn: one ``sonnet`` became the project's ``gemini:sonnet`` in
+        validation and ``cursor-agent:sonnet`` at the spawn, in one run.
+        Resolving once here, against the anchor this function already accepts,
+        closes the spec set under ``parse_model_spec`` (idempotent on a
+        prefixed spec — it never reads config), so a site the sweep missed can
+        still get a *timeout* wrong but can no longer change the **provider**.
+
+        Two consequences, by design: canonical specs feed ``sanitize_model_name``
+        (so a run started before this change and resumed after it re-runs its
+        bare-spec models once, the resume predicate looking for the old file
+        name), and the "available models" / "invalid model" messages now echo
+        the resolved form.
 
     Raises:
         NeedsHuman: When nothing resolves and no human may be asked (exit 3).
@@ -371,6 +387,14 @@ def resolve_models(
         parse_model_spec,
     )
 
+    def _canonical(specs: List[str]) -> List[str]:
+        """Resolve every entry once, against this call's anchor (§9.3.d)."""
+        resolved = []
+        for spec in specs:
+            provider_name, model_name = parse_model_spec(spec, anchor=anchor)
+            resolved.append(f"{provider_name}:{model_name}")
+        return resolved
+
     # 0. Row 15, second layer: `--models ""` is never "use the defaults".
     if cli_models is not None:
         for spec in cli_models:
@@ -384,7 +408,7 @@ def resolve_models(
 
     # 1. CLI --models flag takes highest priority
     if cli_models and len(cli_models) > 0:
-        return cli_models
+        return _canonical(cli_models)
 
     # 2. --interactive flag forces interactive selection
     if interactive:
@@ -395,7 +419,10 @@ def resolve_models(
                 "forbids prompting. Pass exactly one.",
                 site=row(2).site_id,
             )
-        return select_models_two_step(anchor=anchor)
+        # Already canonical by construction (the picker prefixes each choice),
+        # but routed through the same leg so there is one definition of the
+        # shape resolve_models returns.
+        return _canonical(select_models_two_step(anchor=anchor))
 
     # 3. --quick flag uses quick_models from YAML
     if quick:
@@ -428,7 +455,7 @@ def resolve_models(
             )
 
         if available_models:
-            return available_models
+            return _canonical(available_models)
         elif quick_models:
             message = (
                 f"All quick_models providers are unavailable: {list(unavailable_providers)}. "
@@ -463,7 +490,7 @@ def resolve_models(
 
         # Only fail if ALL default providers are unavailable
         if available_models:
-            return available_models
+            return _canonical(available_models)
         elif default_models:
             # All default providers are unavailable
             if unattended:

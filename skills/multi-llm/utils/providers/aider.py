@@ -4,10 +4,10 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Reasoning effort values passed to aider's --reasoning-effort, which is an
 # unvalidated pass-through (verified on aider 0.86.2): for openrouter/ models
@@ -94,6 +94,39 @@ class AiderProvider(LLMProvider):
     parse_output unwraps that envelope and returns the parsed content.
     """
 
+    #: §9.4: aider has **no standalone prompt element**. The prompt ships inside
+    #: `"/ask " + prompt` after `--message` (the prefix is what keeps aider in
+    #: read-only chat mode — see the class docstring), so `argv[-1] == prompt`
+    #: is false and `cmd[:-1]` would truncate an unrelated flag. Declaring
+    #: `None` is why §9.4 could not be an assertion: aider is the counterexample.
+    #: An adapter declaring `None` must stay argv-only with no agent profile —
+    #: both of those paths drop `argv[-1]` — which aider is and does.
+    prompt_argv_index = None
+
+    # §7.2 — the auth override plus the exit-0 sniff, folded out of the class
+    # docstring's "Gotcha" and into the classifier so the D3k ladder sees them.
+    #
+    # Measured on aider 0.86.2, 2026-08-16, `--api-key openrouter=sk-invalid`,
+    # exit **0**:
+    #   litellm.AuthenticationError: AuthenticationError: OpenrouterException -
+    #   {"error":{"message":"Missing Authentication header","code":401}}
+    #   The API provider is not able to authenticate you. Check your API key.
+    # Not one word of that matches the base auth set — "Check your API key" is
+    # not "invalid api key", and `401` is only a context word — so a logged-out
+    # aider classified as *nothing* and spent the transport retry budget on it.
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "not able to authenticate",
+        "missing authentication header",
+    )
+
+    #: The residual marker: any other litellm exception aider prints while still
+    #: exiting 0. It says "this run failed" and nothing more, which is exactly
+    #: why :func:`classify_streams` consults it last.
+    exit_zero_failure_markers = (
+        re.compile(r"\blitellm\.\w*error\b"),
+        re.compile(r"\blitellm\.exceptions\b"),
+    )
+
     @property
     def name(self) -> str:
         return "aider"
@@ -128,7 +161,14 @@ class AiderProvider(LLMProvider):
                 break
         return found
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # aider --model <litellm-model-id> --message "/ask <prompt>" + flags.
         # Every flag is load-bearing: --yes-always (no interactive prompts),
         # --no-auto-commits (no commits in the target repo), --no-pretty /

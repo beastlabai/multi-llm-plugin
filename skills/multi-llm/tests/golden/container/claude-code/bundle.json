@@ -41,11 +41,11 @@
   },
   "manifest": {
     "bundle_version": 1,
-    "captured_at": "2026-08-15T12:19:20Z",
+    "captured_at": "2026-08-17T09:12:11Z",
     "cli": "claude-code",
     "image": "mllm-e2e:local",
     "row_id": "chain-claude-code",
-    "run_bundle": "20260815T105125Z"
+    "run_bundle": "20260817T084716Z"
   },
   "markers": [
     "[VALIDATION_BATCHES_PENDING]",
@@ -55,6 +55,7 @@
     "[VALIDATION_BATCHES_PENDING]",
     "[VALIDATION_BATCHES_PENDING]",
     "[OUTPUT_FILE]",
+    "[WARN]",
     "[OUTPUT_FILE]",
     "[OUTPUT_FILE]"
   ],
@@ -626,6 +627,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -663,6 +665,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -700,6 +703,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -766,6 +770,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -803,6 +808,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -840,6 +846,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1252,6 +1259,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1289,6 +1297,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1326,6 +1335,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1363,6 +1373,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1430,6 +1441,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1467,6 +1479,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1504,6 +1517,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1541,6 +1555,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1943,6 +1958,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1980,6 +1996,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2017,6 +2034,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2083,6 +2101,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2120,6 +2139,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2157,6 +2177,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2554,6 +2575,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2586,6 +2608,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2807,6 +2830,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2817,6 +2841,7 @@
               "profile": "agent-readonly",
               "runner": "claude-code:haiku",
               "status": "ok",
+              "structured_output": "recovered",
               "task_id": "task_generation",
               "usage": {
                 "cached_input_tokens": 0,
@@ -2960,6 +2985,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2997,6 +3023,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3034,6 +3061,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3100,6 +3128,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3137,6 +3166,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3174,6 +3204,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3447,6 +3478,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3479,6 +3511,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3511,6 +3544,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3828,6 +3862,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3860,6 +3895,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
+                    "served_model": "claude-haiku-4-5-20251001",
                     "total_tokens": "<int>"
                   }
                 }

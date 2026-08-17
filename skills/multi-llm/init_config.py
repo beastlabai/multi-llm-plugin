@@ -7,7 +7,7 @@ runtime uses), copies an **inert template** ``providers.yaml`` to
 ``<git-root>/.multi-llm/providers.yaml``, and **uncomments** exactly the lines
 that belong to the **detected** providers:
 
-  * each detected provider's full ``providers:`` sub-block (command, timeouts,
+  * each detected provider's full ``providers:`` sub-block (timeouts,
     concurrency, ``models:``) — undetected providers stay commented;
   * the ``defaults.models`` / ``defaults.quick_models`` candidate entries whose
     provider is detected;
@@ -232,16 +232,19 @@ _HEADER = """\
 # (only overwrite its list, e.g. `<mode>: []`) — see the modes note below.
 #
 # ----------------------------------------------------------------------------
-# TRUST MODEL — provider definitions DO merge from this file (command stays inert)
+# TRUST MODEL — provider definitions DO merge, but no layer picks the binary
 # ----------------------------------------------------------------------------
 # An UNCOMMENTED `providers:` block here deep-merges OVER the base, exactly like
-# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`,
-# `supports_json_output`, and each `models:` list all take effect (lists replace).
+# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`
+# and each `models:` list all take effect (lists replace). Those are the only
+# provider keys that DO anything — a key the base does not declare merges and is
+# then ignored, so writing one is a no-op, not a setting.
 # `--init` writes a full block for each detected provider so the file is a
 # complete, self-describing snapshot.
-#  * `command:` is DOCUMENTATION-ONLY and is NEVER executed — provider binaries
-#    are hardcoded in the plugin (utils/providers/). A `command:` value in ANY
-#    layer can never make the tool run a different program.
+#  * NO layer can choose the BINARY. Provider binaries are hardcoded in the
+#    plugin (utils/providers/); a `command:` value in ANY layer merges as inert
+#    metadata and can never make the tool run a different program. (The base
+#    config no longer declares one — it had zero readers.)
 #  * A provider name with no hardcoded adapter (e.g. one a newer plugin removed
 #    or renamed) still merges but is IGNORED at runtime — it lists no models and
 #    can never be selected.
@@ -283,7 +286,7 @@ _PROVIDERS_COMMENTS = [
     "## --- providers --------------------------------------------------------------",
     "## Full provider definitions. `--init` uncomments the block for each DETECTED",
     "## CLI; an uncommented block deep-merges OVER the base (lists replace).",
-    "## `command:` is documentation-only and is NEVER executed.",
+    "## No key here picks a binary — provider binaries are hardcoded in the plugin.",
 ]
 
 _DEFAULT_PROVIDER_COMMENTS = [

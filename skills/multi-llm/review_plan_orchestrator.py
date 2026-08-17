@@ -178,15 +178,15 @@ async def run_all_models(
     # Per-provider semaphores for concurrency limiting
     provider_semaphores = {}
     for spec in model_specs:
-        prov, _ = parse_model_spec(spec)
+        prov, _ = parse_model_spec(spec, anchor=plan_path)
         if prov not in provider_semaphores:
-            limit = get_provider_max_concurrent(prov)
+            limit = get_provider_max_concurrent(prov, anchor=plan_path)
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
     results = {}
 
     async def _run_with_semaphore(model_spec, index):
-        provider_name, model_name = parse_model_spec(model_spec)
+        provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
         display_name = f"{provider_name}:{model_name}"
 
         # Skip models that already have results
@@ -240,7 +240,12 @@ async def run_all_models(
     if timeout is not None:
         base_timeout = timeout
     else:
-        base_timeout = max(get_provider_timeout(parse_model_spec(spec)[0]) for spec in model_specs)
+        base_timeout = max(
+            get_provider_timeout(
+                parse_model_spec(spec, anchor=plan_path)[0], anchor=plan_path
+            )
+            for spec in model_specs
+        )
 
     stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead

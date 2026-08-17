@@ -62,6 +62,7 @@ from utils.provider_registry import (
     get_provider_timeout,
     is_model_valid,
     parse_model_spec,
+    set_run_anchor,
 )
 from utils.json_extractor import sanitize_model_name
 from utils.llm_client import invoke_with_provider
@@ -669,6 +670,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print(f"       Resolved path: {plan_path}")
         return 1
 
+    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # and before any provider read that decides routing.
+    set_run_anchor(plan_path)
+
     plan_content = read_plan(plan_path)
     plan_hash = compute_plan_hash(plan_content)
 
@@ -693,7 +698,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         return unattended_mod.fail_closed(e.message, site_id=e.site)
     except RuntimeError as e:
         print(f"ERROR: {e}")
-        available = get_all_model_specs()
+        available = get_all_model_specs(anchor=plan_path)
         print(f"Use --models flag. Available: {', '.join(available[:5])}...")
         return 1
 
@@ -705,7 +710,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
     invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        available = get_all_model_specs()
+        # Anchored to match the rejection above (§9.3.c).
+        available = get_all_model_specs(anchor=plan_path)
         print(f"Available models: {', '.join(available[:10])}...")
 
     # Compute slug + resolve the per-question directory (collision/resume guard).
@@ -798,7 +804,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         return None
 
     async def ask_one(model_spec: str, index: int) -> Dict[str, Any]:
-        provider_name, _ = parse_model_spec(model_spec)
+        provider_name, _ = parse_model_spec(model_spec, anchor=plan_path)
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
         # cwd=project_root, so a relative path could escape the question dir.
@@ -828,7 +834,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print(f"WARNING: rendered prompt for {model_spec} exceeded "
                   f"{MAX_PROMPT_BYTES // 1024} KB; question truncated to fit the argv "
                   f"size limit (plan path preserved so the model can read the full plan).")
-        per_model_timeout = int(args.timeout) if args.timeout is not None else get_provider_timeout(provider_name)
+        per_model_timeout = (
+            int(args.timeout) if args.timeout is not None
+            else get_provider_timeout(provider_name, anchor=plan_path)
+        )
 
         result = await asyncio.to_thread(
             invoke_with_provider,
@@ -837,6 +846,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             timeout=per_model_timeout,
             log_file=log_file,
             cwd=project_root,
+            anchor=plan_path,
         )
 
         # 1. Primary + hard-failure-with-file policy: a non-empty answer file is
@@ -870,6 +880,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
     results = await run_models_concurrent(
         model_specs, ask_one, args.timeout, args.max_parallel,
         skip_predicate=skip_existing_answer,
+        anchor=plan_path,
     )
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

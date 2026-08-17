@@ -92,6 +92,7 @@ class SkillRunner:
     - PATH prepended to use mock binaries
     - MULTI_LLM_TEST_MODE=1 to enable test mode
     - MOCK_LLM_CALL_LOG set to a unique file for call logging
+    - MOCK_LLM_PLUGIN, when ``mock_plugin=`` names a throwaway one-off adapter
     - MULTI_LLM_PROVIDERS_CONFIG pinned to the skill's base providers.yaml so a
       host repo's .multi-llm/providers.yaml cannot reroute mock model specs
 
@@ -135,6 +136,7 @@ class SkillRunner:
         skill_dir: Optional[Path] = None,
         scenario_path: Optional[Path] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        mock_plugin: Optional[Path] = None,
     ):
         """Initialize SkillRunner.
 
@@ -146,6 +148,15 @@ class SkillRunner:
                 If None, auto-detected relative to this file.
             scenario_path: Optional path to a scenario YAML file for response matching.
             extra_env: Optional additional environment variables to set.
+            mock_plugin: Optional path to a **throwaway** one-off fake adapter,
+                exported as ``MOCK_LLM_PLUGIN``. It overrides up to four seams
+                in ``tests/mocks/mock_llm.py`` (``parse_provider_args``,
+                ``format_output``, ``get_response_content``, ``VERSION_STRINGS``)
+                for this run only. Use it whenever a probe needs one fake
+                provider to behave unusually — a huge payload, a malformed
+                envelope, a version below a gate — so the probe stays a scratch
+                file outside the tree instead of a diff against the shared mock.
+                See ``tests/test_mock_plugin_hook.py``.
         """
         self.tmp_path = Path(tmp_path)
         self.bin_dir = self.tmp_path / "bin"
@@ -167,6 +178,7 @@ class SkillRunner:
 
         self.scenario_path = scenario_path
         self.extra_env = extra_env or {}
+        self.mock_plugin = Path(mock_plugin) if mock_plugin else None
 
         # Create the bin directory and provider launchers
         self._setup_mock_binaries()
@@ -356,6 +368,14 @@ class SkillRunner:
         # Set scenario path if provided
         if self.scenario_path:
             env["MOCK_LLM_SCENARIO"] = str(self.scenario_path)
+
+        # A one-off fake adapter for this run only (M22). The mock imports it
+        # after its own tables are built and lets it replace four seams; it is
+        # honoured only because MULTI_LLM_TEST_MODE=1 is set above. The variable
+        # is absent unless a test asked for it, so every existing run is
+        # byte-for-byte what it was.
+        if self.mock_plugin:
+            env["MOCK_LLM_PLUGIN"] = str(self.mock_plugin)
 
         # Isolate config discovery from the host machine. Orchestrators run with
         # cwd=skill_dir, so when the skill lives inside a repo with a

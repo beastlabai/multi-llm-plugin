@@ -175,6 +175,11 @@ def _isolate_provider_config(request, monkeypatch):
         registry._config = None
         if hasattr(registry, "_config_key"):
             registry._config_key = None
+        # §9.3.b: the process-wide run anchor is set-once and immutable within a
+        # process. A test that drives an orchestrator pre-flight pins one; the
+        # next test's plan is a different path, which would (correctly) raise.
+        if hasattr(registry, "_RUN_ANCHOR"):
+            registry._RUN_ANCHOR = None
 
     _reset_cache()
     monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)

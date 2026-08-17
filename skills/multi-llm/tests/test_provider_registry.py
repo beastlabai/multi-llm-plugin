@@ -8,12 +8,15 @@ This module tests the provider registry functionality including:
 - Model validation
 """
 
+import ast
+import asyncio
 import copy
 import os
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import sys
 
 import pytest
@@ -87,9 +90,13 @@ class TestLoadConfig:
         assert "gemini" in providers
         assert "opencode" in providers
 
-        # Verify each provider has required fields
+        # Verify each provider has required fields. `command` is NOT one of them
+        # any more (§9.2): it had zero readers — every `is_available()` is a
+        # hardcoded `shutil.which` — so the base no longer declares it.
         for provider_name, provider_config in providers.items():
-            assert "command" in provider_config, f"{provider_name} missing 'command'"
+            assert "command" not in provider_config, (
+                f"{provider_name} re-declares the dead 'command' field"
+            )
             assert "models" in provider_config, f"{provider_name} missing 'models'"
             assert isinstance(provider_config["models"], list), (
                 f"{provider_name} 'models' should be a list"
@@ -729,6 +736,10 @@ FIXED_BASE = {
 def _reset_cache():
     registry._config = None
     registry._config_key = None
+    # §9.3.b: the process-wide run anchor is set-once and immutable *within* a
+    # process, so a test that sets one must not leak it into the next.
+    if hasattr(registry, "_RUN_ANCHOR"):
+        registry._RUN_ANCHOR = None
 
 
 @pytest.fixture
@@ -1701,3 +1712,359 @@ class TestIsModelValidOptionB:
         monkeypatch.chdir(tmp_path)
         _reset_cache()
         assert is_model_valid("cursr-agent:foo", anchor=str(tmp_path)) is False
+
+
+# =============================================================================
+# §9.3 — Config anchoring (task L1, group A1)
+#
+# The measured failure this section exists for is *routing*, not timeouts: run
+# from a foreign CWD, a plan whose project config configures `gemini` spawned
+# `cursor-agent` instead, on the base timeout, with the base concurrency gates.
+# The three tests below are §9.3.f's acceptance row (all six observations in ONE
+# run), its no-project-config negative control, and §9.3.e's AST guard against an
+# eleventh unanchored accessor.
+# =============================================================================
+
+#: §9.3.f's fixture config. `subagent_timeout_s: null` is base's shipped value,
+#: restated so the Lane B leak (`get_subagent_timeout` dropping the anchor when
+#: the driver key is null) is exercised in its DEFAULT state, and
+#: `defaults.models` is bare on purpose so 9.3.d's canonicalisation is exercised.
+FOREIGN_CWD_PROJECT_CONFIG = """\
+default_provider: gemini
+providers:
+  gemini:
+    default_timeout: 4242
+    max_concurrent: 7
+driver:
+  max_concurrent_subagents: 9
+  subagent_timeout_s: null
+defaults:
+  models:
+    - sonnet
+"""
+
+
+def _foreign_cwd_project(tmp_path, monkeypatch, *, with_override: bool) -> Path:
+    """A git repo holding the plan, and a CWD *outside* it with no config at all.
+
+    Returns the plan file path (the anchor every accessor is supposed to follow).
+    """
+    proj = tmp_path / "proj"
+    (proj / "plans").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    if with_override:
+        _write_yaml(proj / ".multi-llm" / "providers.yaml", FOREIGN_CWD_PROJECT_CONFIG)
+    plan_file = proj / "plans" / "feature.md"
+    plan_file.write_text("# plan\n", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _reset_cache()
+    # Sanity: the foreign CWD must resolve to NO project config, or the test
+    # would be comparing two overrides instead of anchor-vs-CWD.
+    assert registry._find_project_config() is None
+    _reset_cache()
+    return plan_file
+
+
+def _completed(stdout: str = "[]"):
+    """A stand-in for the provider subprocess that never runs."""
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = stdout
+    result.stderr = ""
+    return result
+
+
+@pytest.mark.config_override
+class TestForeignCwdAnchoring:
+    """§9.3.f — routing, timeout and concurrency, asserted together (gate A1)."""
+
+    def test_routing_timeout_and_concurrency_all_follow_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        """All six observations, in ONE run.
+
+        A1's whole point is that a partially anchored run is worse than a
+        consistently wrong one, so these are deliberately not six tests that
+        could each pass alone.
+
+            spawned argv[0]                     cursor-agent -> gemini
+            its timeout= kwarg                  1200         -> 4242
+            per-provider semaphore bound        None         -> 7
+            global fan-out gate                 4            -> 9
+            get_subagent_timeout (Lane B twin)  1200         -> 4242
+            resolve_models' spec list           ["sonnet"]   -> ["gemini:sonnet"]
+        """
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+        import utils.review_orchestrator_base as rob
+        from utils.interactive import resolve_models
+        from utils.llm_client import invoke_with_provider
+
+        # The pre-flight capture point (§9.3.a): one absolute plan path, set once.
+        registry.set_run_anchor(str(plan_file))
+
+        # -- row 6: resolve_models returns CANONICAL specs (§9.3.d) ------------
+        specs = resolve_models(mode=None, anchor=str(plan_file))
+
+        # -- row 4: the global gate, read with NO keyword ----------------------
+        # The run anchor is the fallback (§9.3.b), so even a call site the sweep
+        # missed lands on the run's plan rather than on CWD.
+        gate = registry.get_max_concurrent_subagents()
+
+        # -- row 3: the bound the fan-out really sized its semaphore with ------
+        real_bound = registry.get_provider_max_concurrent
+        observed_bounds = []
+
+        def _record_bound(provider_name, anchor=None):
+            value = real_bound(provider_name, anchor=anchor)
+            observed_bounds.append((provider_name, value))
+            return value
+
+        monkeypatch.setattr(rob, "get_provider_max_concurrent", _record_bound)
+
+        # -- rows 1 + 2: the real Lane A fan-out, down to the spawn ------------
+        async def per_model(model_spec, index):
+            return await asyncio.to_thread(
+                invoke_with_provider,
+                prompt="q",
+                model_spec=model_spec,
+                anchor=str(plan_file),
+            )
+
+        with patch("utils.llm_client.subprocess.run") as spawn:
+            spawn.return_value = _completed()
+            asyncio.run(
+                rob.run_models_concurrent(
+                    specs, per_model, None, gate, anchor=str(plan_file)
+                )
+            )
+
+        assert spawn.call_count == 1
+        argv = list(spawn.call_args[0][0])
+        spawn_timeout = spawn.call_args[1]["timeout"]
+
+        assert specs == ["gemini:sonnet"], "row 6: resolve_models must canonicalise"
+        assert os.path.basename(argv[0]) == "gemini", (
+            f"row 1: the configured provider must be the one spawned; got {argv[0]!r}"
+        )
+        assert spawn_timeout == 4242, "row 2: the project's provider timeout"
+        assert ("gemini", 7) in observed_bounds, (
+            f"row 3: per-provider bound; observed {observed_bounds!r}"
+        )
+        assert gate == 9, "row 4: driver.max_concurrent_subagents"
+        assert registry.get_subagent_timeout("gemini", anchor=str(plan_file)) == 4242, (
+            "row 5: Lane B keeps the anchor when driver.subagent_timeout_s is null"
+        )
+
+    def test_negative_control_no_project_config(self, tmp_path, monkeypatch):
+        """§9.3.f's control: with no project config, anchored == unanchored.
+
+        Without this the acceptance test could go green by anchoring everything
+        at CWD (or at the git root of whatever happened to be around).
+        """
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        from utils.interactive import resolve_models
+
+        base = registry.load_base_config()
+        base_timeout = base["providers"]["gemini"]["default_timeout"]
+        base_gate = base["driver"]["max_concurrent_subagents"]
+
+        registry.set_run_anchor(str(plan_file))
+        anchor = str(plan_file)
+
+        assert registry.get_provider_timeout("gemini") == base_timeout
+        assert registry.get_provider_timeout("gemini", anchor=anchor) == base_timeout
+        assert registry.get_max_concurrent_subagents() == base_gate
+        assert registry.get_max_concurrent_subagents(anchor=anchor) == base_gate
+        assert (registry.get_provider_max_concurrent("gemini")
+                == registry.get_provider_max_concurrent("gemini", anchor=anchor))
+        assert registry.get_subagent_timeout("gemini", anchor=anchor) == base_timeout
+        assert (sorted(registry.get_all_model_specs())
+                == sorted(registry.get_all_model_specs(anchor=anchor)))
+        # Bare base defaults still come back canonical — the shape does not
+        # depend on an override being present.
+        specs = resolve_models(mode=None, anchor=anchor)
+        assert specs and all(":" in spec for spec in specs)
+
+
+@pytest.mark.config_override
+class TestRunAnchor:
+    """§9.3.b — the process-wide fallback and its two invariants."""
+
+    def test_fallback_answers_an_unanchored_read(self, tmp_path, monkeypatch):
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        registry.set_run_anchor(str(plan_file))
+        # No keyword anywhere: the run anchor, not CWD, decides.
+        assert registry.get_provider_timeout("gemini") == 4242
+        assert registry.load_config()["default_provider"] == "gemini"
+
+    def test_an_explicit_anchor_still_wins_over_the_fallback(self, tmp_path, monkeypatch):
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        registry.set_run_anchor(str(plan_file))
+        elsewhere = str(Path.cwd())
+        assert registry.get_provider_timeout("gemini", anchor=elsewhere) == 1200
+
+    def test_re_setting_the_same_path_is_a_no_op(self, tmp_path, monkeypatch):
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        registry.set_run_anchor(str(plan_file))
+        registry.set_run_anchor(str(plan_file))          # `full`'s per-phase pre-flight
+        assert registry.get_run_anchor() == os.path.abspath(str(plan_file))
+
+    def test_re_setting_a_different_path_raises(self, tmp_path, monkeypatch):
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        registry.set_run_anchor(str(plan_file))
+        other = plan_file.parent / "other.md"
+        other.write_text("# other\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="run anchor"):
+            registry.set_run_anchor(str(other))
+
+    def test_a_value_read_before_the_anchor_is_not_served_after_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Invariant 1, observable form.
+
+        `parse_args` renders `--help`'s model list before `main` has a plan path,
+        so "no load_config before set_run_anchor" cannot be asserted literally.
+        What must hold is the property it protects: nothing read on the CWD key
+        survives into the anchored half of the run.
+        """
+        plan_file = _foreign_cwd_project(tmp_path, monkeypatch, with_override=True)
+        assert registry.get_provider_timeout("gemini") == 1200      # CWD-anchored
+        registry.set_run_anchor(str(plan_file))
+        assert registry.get_provider_timeout("gemini") == 4242
+
+
+# ---------------------------------------------------------------------------
+# §9.3.e — the guard test, so there is never an eleventh site
+# ---------------------------------------------------------------------------
+
+#: Every provider_registry accessor that takes a discovery ``anchor`` — the 16
+#: that already followed the convention, plus the two L1 gave one to, plus
+#: ``resolve_models`` (which threads the same value into all of them).
+ANCHORED_ACCESSORS = frozenset({
+    "load_config",
+    "parse_model_spec",
+    "get_available_models",
+    "is_model_valid",
+    "_collect_configured_specs",
+    "get_default_models",
+    "get_quick_models",
+    "get_driver_config",
+    "get_driver_provenance",
+    "get_subagent_runner",
+    "get_subagent_timeout",
+    "get_provider_max_concurrent",
+    "get_max_concurrent_subagents",
+    "get_max_concurrent_write_subagents",
+    "get_write_paths",
+    "get_subagent_retries",
+    # ...and the ones §9.3.c gave an anchor to.
+    "get_provider_timeout",
+    "get_all_model_specs",
+    "resolve_models",
+})
+
+#: Directories that are not this skill's runtime source.
+_NOT_RUNTIME_DIRS = {"tests", "__pycache__", ".venv", "plans", "assets", "templates"}
+
+#: Per-call-site allowlist, keyed ``<module>::<enclosing function>::<callee>`` and
+#: valued ``(count, reason)``. Compared for EXACT equality against what the walk
+#: finds, so a new unanchored call — even a second one inside an already-listed
+#: function — is red, and a stale entry is red too.
+UNANCHORED_ALLOWLIST = {
+    "ask_orchestrator.py::parse_args::get_all_model_specs": (
+        1,
+        "argparse epilog: the available-model list is rendered while building the "
+        "parser, before --plan-file has been parsed, so no anchor exists yet.",
+    ),
+    "code_review_orchestrator.py::parse_args::get_all_model_specs": (1, "as above"),
+    "review_plan_orchestrator.py::parse_args::get_all_model_specs": (1, "as above"),
+    "review_tasks_orchestrator.py::parse_args::get_all_model_specs": (1, "as above"),
+}
+
+
+def _runtime_python_files():
+    root = Path(__file__).parent.parent
+    for path in sorted(root.rglob("*.py")):
+        if _NOT_RUNTIME_DIRS & set(path.relative_to(root).parts):
+            continue
+        yield root, path
+
+
+def _call_is_anchored(node: ast.Call) -> bool:
+    """True when the call hands an anchor on, by keyword or by forwarding."""
+    for keyword in node.keywords:
+        if keyword.arg == "anchor":
+            return True
+        if keyword.arg is None:          # **kwargs forwarding
+            return True
+    for arg in node.args:
+        # A positionally-forwarded `anchor` / `self.anchor` counts too.
+        if isinstance(arg, ast.Name) and arg.id == "anchor":
+            return True
+        if isinstance(arg, ast.Attribute) and arg.attr == "anchor":
+            return True
+    return False
+
+
+def _unanchored_accessor_calls(path: Path):
+    """``<enclosing function>::<callee>`` for every unanchored accessor call."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    stack, found = [], []
+
+    def visit(node):
+        pushed = False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stack.append(node.name)
+            pushed = True
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (func.id if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute) else None)
+            if name in ANCHORED_ACCESSORS and not _call_is_anchored(node):
+                found.append(f"{'.'.join(stack) or '<module>'}::{name}")
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(tree)
+    return found
+
+
+class TestNoUnanchoredAccessorCall:
+    """§9.3.e — 'add an accessor, forget the anchor' is red in CI."""
+
+    def test_every_unanchored_accessor_call_is_allowlisted(self):
+        offenders = Counter()
+        for root, path in _runtime_python_files():
+            relative = path.relative_to(root).as_posix()
+            for site in _unanchored_accessor_calls(path):
+                offenders[f"{relative}::{site}"] += 1
+
+        expected = {key: count for key, (count, _) in UNANCHORED_ALLOWLIST.items()}
+        assert dict(offenders) == expected, (
+            "§9.3.e: an anchored accessor was called without an anchor. Thread the "
+            "run's plan path through, or add the site to UNANCHORED_ALLOWLIST with "
+            "a reason.\n"
+            f"  unexpected: {sorted(set(offenders) - set(expected))}\n"
+            f"  stale allowlist entries: {sorted(set(expected) - set(offenders))}"
+        )
+
+    def test_the_definitions_really_take_an_anchor(self):
+        """The set the guard polices is the set that actually has the keyword."""
+        import inspect
+
+        from utils.interactive import resolve_models as _resolve_models
+
+        missing = []
+        for name in sorted(ANCHORED_ACCESSORS):
+            func = getattr(registry, name, None) or _resolve_models
+            if "anchor" not in inspect.signature(func).parameters:
+                missing.append(name)
+        assert not missing, f"declared anchored but takes no anchor=: {missing}"

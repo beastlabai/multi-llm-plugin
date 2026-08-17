@@ -110,9 +110,11 @@ clis:
     profiles: [generate, agent-readonly, agent-write]
     subcommands: [exec]
     options:
+      - "--ephemeral"
       - "--json"
       - "--model"
       - "--sandbox"
+      - "--skip-git-repo-check"
 
   - cli: gemini
     binary: gemini
