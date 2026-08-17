@@ -7,28 +7,34 @@
 #      block — over base, identical to the env layer below)
 #   3. MULTI_LLM_PROVIDERS_CONFIG=/path.yaml   (optional env escape hatch)
 # Each layer is deep-merged over the one below; LIST values replace wholesale.
-# (`command:` is documentation-only and is NEVER executed in any layer.)
 # Scaffold a per-project override with `--init`. See the README
 # "Per-project configuration" section for the full semantics.
 #
-# Note: Command construction (flags, arguments, subcommands) is handled by
-# provider classes in utils/providers/. This config only contains:
-# - command: CLI binary name (used for availability check via `which`)
+# Note: Command construction (flags, arguments, subcommands) — and the binary
+# name itself — is handled by provider classes in utils/providers/. This config
+# only contains:
 # - default_timeout: Provider-specific timeout in seconds
-# - supports_json_output: Whether provider supports JSON output natively
+# - max_concurrent: Provider-specific concurrency ceiling
 # - models: List of supported model names for this provider
+#
+# `command:` and `supports_json_output:` used to be declared here too. Both had
+# ZERO readers (§9.2): every `is_available()` is a hardcoded `shutil.which` on a
+# literal binary name, and nothing ever consulted the JSON flag. They are gone
+# rather than left as config a user could reasonably expect to take effect. A
+# `command:` in ANY layer still merges and is still inert — it can never make
+# the tool run a different program (see TestCommandNeverLaunchesBinary).
 #
 # Effort convention: most providers accept an optional ":effort" suffix on
 # model entries, parsed on the LAST colon against a per-provider whitelist
 # (see each provider's comment; unknown suffixes pass through as part of the
-# model name). Exceptions: cursor-agent and agy encode effort in the model
-# name itself; gemini is config-file-only.
+# model name). Exceptions: cursor-agent encodes effort in the model name itself;
+# gemini is config-file-only. agy is BOTH — its display names carry a tier and
+# it also has a real `--effort low|medium|high` flag, so a ":effort" suffix works
+# there too.
 
 providers:
   claude-code:
-    command: claude
     default_timeout: 1800
-    supports_json_output: true
     max_concurrent: 2
     # Model entries may carry an optional ":effort" suffix (e.g. fable:max),
     # translated to "--effort <level>". Valid: low, medium, high, xhigh, max;
@@ -39,12 +45,62 @@ providers:
       - opus
       - fable
       - haiku
+    # `--fallback-model <m1,m2>`: automatic fallback when the primary is
+    # overloaded (three consecutive 529s) or unavailable (a 404 falls back on
+    # the FIRST error — free insurance against a retired model alias above).
+    # Only works under `--print`, which is the mode this adapter already uses.
+    #
+    # DEFAULT OFF, and deliberately so: the flag is proven, but nothing here
+    # knows which model should stand in for which, and an implicit list would
+    # have multi-llm quietly answering with a model nobody configured. With this
+    # map empty the adapter emits no `--fallback-model` at all and the argv is
+    # byte-for-byte what it has always been. There is no built-in stand-in and no
+    # degrade ladder — the configured list IS the whole source, joined verbatim
+    # in your order. A fired fallback is attributed: the result records the
+    # `served_model` read from the envelope's `modelUsage`, not the requested one.
+    #
+    # Validated at load, because the CLI accepts a bad list silently: an entry
+    # that repeats, is empty, names a model not listed above, or is its own
+    # primary fails the run naming the key.
+    #
+    #   fallback_models:
+    #     sonnet: [haiku]
+    #   fallback_models_default: [haiku]   # primaries with no entry above
+    fallback_models: {}
 
   cursor-agent:
-    command: cursor-agent
     default_timeout: 1200
     max_concurrent: 2
-    supports_json_output: true
+    # Give each run its own cursor profile — CURSOR_CONFIG_DIR + CURSOR_DATA_DIR
+    # pointed at a process-scoped 0700 temp dir, removed at exit.
+    #
+    #   auto (default) redirect only where cursor's auth rule is VERIFIED not to
+    #        follow those two variables. That is Linux today, and it was
+    #        measured, not read off the bundle: auth.json is
+    #        $XDG_CONFIG_HOME/cursor/auth.json, which neither variable moves, and
+    #        a real run against an EMPTY redirected dir exited 0, authenticated
+    #        and printed nothing on stderr. Everywhere else `auto` declines and
+    #        the snapshot/restore guard below takes over.
+    #   on   always redirect, including on a platform nobody has measured. If
+    #        cursor resolves auth differently there, `on` presents every cursor
+    #        slot as logged out — a disabled provider — whereas `auto` falls back
+    #        to exactly the behaviour that shipped before the redirect existed.
+    #        That asymmetry is why the default is `auto`: use `on` to opt a
+    #        non-Linux host in once YOU have checked it.
+    #   off  today's behaviour — cursor writes to YOUR profile
+    #
+    # The trade-off: `--model` rewrites your global default model in
+    # cli-config.json and `--trust` writes a durable .workspace-trusted marker.
+    # With the redirect on, neither ever reaches your profile. With it off, a
+    # snapshot/restore guard puts them back — but that guard lives in ONE
+    # process, so two overlapping multi-llm runs still corrupt your default
+    # model permanently (the second run snapshots the first run's value as if it
+    # were yours). Turn it off only if you need cursor to see your own profile —
+    # a project-scoped rule set, an MCP config — and accept that. Setting
+    # CURSOR_CONFIG_DIR or CURSOR_DATA_DIR yourself also suppresses the
+    # redirect: a pinned profile is your decision, and it is never written or
+    # deleted.
+    isolate_profile: "auto"
     # Effort is encoded directly in cursor-agent's own model names (e.g. the
     # -xhigh variants); no ":effort" suffix support needed or implemented.
     models:
@@ -70,9 +126,7 @@ providers:
       - composer-2.5
 
   gemini:
-    command: gemini
     default_timeout: 1200  # Gemini can be slower
-    supports_json_output: true
     # No per-run effort control in gemini-cli (no flag, no env var). To control
     # thinking, define a custom alias with a thinkingConfig under
     # modelConfigs.customAliases in ~/.gemini/settings.json (or the project's
@@ -86,9 +140,7 @@ providers:
       - gemini-2.5-pro
 
   grok:
-    command: grok
     default_timeout: 1200
-    supports_json_output: true  # Single JSON object with "text" field
     # Run "grok models" to see the full list of available models
     # ":effort" suffix (e.g. grok-4.5:low) -> "--reasoning-effort <level>".
     # Valid: none, minimal, low, medium, high, xhigh, max. Per-model support
@@ -98,9 +150,7 @@ providers:
       - grok-composer-2.5-fast
 
   opencode:
-    command: opencode
     default_timeout: 1200
-    supports_json_output: true  # Uses --format json (NDJSON event stream)
     # Run "opencode models" to see the full list of available models
     # ":effort" suffix (e.g. openai/gpt-5.5:high) -> "run --variant <name>".
     # Variant names are provider-specific (OpenAI: none/minimal/low/medium/high/xhigh;
@@ -123,12 +173,14 @@ providers:
       - openrouter/deepseek/deepseek-v4-flash-0731
 
   codex:
-    command: codex
     default_timeout: 1800
-    supports_json_output: true  # Uses --json (NDJSON event stream)
     # Model entries may carry an optional ":effort" suffix (e.g. gpt-5.5:high),
     # translated by the codex adapter to "-c model_reasoning_effort=<effort>".
-    # Valid efforts: none, minimal, low, medium, high, xhigh.
+    # Valid efforts: none, minimal, low, medium, high, xhigh, max — plus "ultra",
+    # which is accepted and rewritten to "max" before argv is built. `max` is
+    # advertised per model by `codex debug models` (supported_reasoning_levels)
+    # for gpt-5.6-sol/-terra/-luna; none/minimal are taken on the wire but
+    # advertised by no catalog entry, so pass one only when you mean it.
     # Without a suffix, codex uses the default from the user's ~/.codex/config.toml
     models:
       - gpt-5.5
@@ -138,33 +190,37 @@ providers:
       - gpt-5.6-sol:xhigh
 
   kilocode:
-    command: kilocode
     default_timeout: 1200
-    supports_json_output: false  # Plain text output; --json streams too much data
     # Run "kilocode models" to see the full list of available models
     # Model names use 3-part format: backend/provider/model
     # ":variant" suffix -> "run --variant <name>". Variant names are MODEL-specific
-    # (glm-5.2: high/xhigh; kimi/minimax: thinking/instant; qwen, nemotron, mimo
-    # have none) — discover via "kilocode models <backend> --verbose".
+    # and drift, so there is no per-family rule to memorise — 201 of 351 openrouter
+    # models publish a `variants` list and each one is its own. Measured 2026-08-16
+    # on kilocode 7.4.19: glm-5.2 high/xhigh; minimax-m3 and kimi-k2.7-code
+    # instant/thinking; kimi-k3 low/high/max; nemotron-3-ultra medium/high;
+    # mimo-v2.5-pro low/medium/high; qwen3.8-max minimal/low/medium/high/xhigh;
+    # qwen3.7-max high/max; hy3 none/low/high; step-3.7-flash low/medium/high.
+    # Discover with "kilocode models <backend> --verbose" (credential-free); the
+    # capture backing these rows is tests/fixtures/kilocode/model_variants.json.
     # GOTCHA: an invalid/unsupported variant is SILENTLY ignored. Whitelisted
     # suffixes: none, minimal, low, medium, high, xhigh, max, thinking, instant;
     # anything else (e.g. ":free" model ids) passes through as part of the model name.
     max_concurrent: 2
     models:
       - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/moonshotai/kimi-k3:thinking
+      - openrouter/moonshotai/kimi-k3:max          # was :thinking (publishes low, high, max)
       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
       - openrouter/z-ai/glm-5.2:xhigh
       - kilo/z-ai/glm-5.2
       - openrouter/minimax/minimax-m2.7
-      - openrouter/minimax/minimax-m3:xhigh
+      - openrouter/minimax/minimax-m3:thinking     # was :xhigh (publishes instant, thinking)
       - openrouter/x-ai/grok-4.20-multi-agent
       - openrouter/arcee-ai/trinity-large-thinking
       - openrouter/xiaomi/mimo-v2.5-pro
-      - openrouter/qwen/qwen3.7-max:xhigh
+      - openrouter/qwen/qwen3.7-max:max            # was :xhigh (publishes high, max)
       - openrouter/qwen/qwen3.8-max:xhigh
-      - openrouter/tencent/hy3:xhigh
-      - openrouter/stepfun/step-3.7-flash:xhigh
+      - openrouter/tencent/hy3:high                # was :xhigh (publishes low, high, none)
+      - openrouter/stepfun/step-3.7-flash:high     # was :xhigh (publishes low, medium, high)
       - openrouter/openai/gpt-5.5-pro
       - openai/gpt-5.5-pro
       - openrouter/nex-agi/nex-n2-pro
@@ -176,9 +232,7 @@ providers:
       - openrouter/anthropic/claude-fable-5
 
   cline:
-    command: cline
     default_timeout: 1200
-    supports_json_output: true  # JSONL event stream; final run_result line holds the answer
     # Model names use the format <cline-provider>/<model-id>, e.g.
     # openrouter/z-ai/glm-5.2 — the segment before the first "/" is the cline
     # backend provider (-P), the rest is the model id (-m).
@@ -194,9 +248,7 @@ providers:
       - openrouter/openai/gpt-5.5
 
   goose:
-    command: goose
     default_timeout: 1200
-    supports_json_output: true  # Single JSON envelope with messages transcript
     # Model names use the format <goose-provider>/<model-id>, e.g.
     # openrouter/z-ai/glm-5.2 — the segment before the first "/" is the goose
     # backend provider (--provider), the rest is the model id (--model).
@@ -212,9 +264,7 @@ providers:
       - openrouter/openai/gpt-5.5
 
   aider:
-    command: aider
     default_timeout: 1200
-    supports_json_output: false  # Plain text output after a "► **ANSWER**" marker
     # Model names are litellm model specs passed VERBATIM to --model, e.g.
     # openrouter/z-ai/glm-5.2 (no provider/model splitting).
     # Auth is env-only: openrouter/ models need OPENROUTER_API_KEY in the
@@ -229,9 +279,13 @@ providers:
       - openrouter/openai/gpt-5.5
 
   agy:
-    command: agy
+    # This is now the ONLY number. agy's `--print-timeout` (its internal
+    # print-mode cutoff) is derived from whatever timeout resolves for a run —
+    # this value, unless overridden — minus a 30s shutdown margin, so agy
+    # reaches its own cutoff and writes its ERROR envelope before the harness's
+    # deadline fires. It used to be a hardcoded `20m` in the adapter, which made
+    # raising this key above 1200 a silent no-op and lowering it a race.
     default_timeout: 1200
-    supports_json_output: true  # Single JSON envelope with "response" field
     # Model names are the exact DISPLAY NAMES from `agy models` (spaces and
     # parentheses included), so keep these matching `agy models` exactly.
     # An unknown name is rejected outright: agy returns an ERROR envelope
@@ -239,8 +293,13 @@ providers:
     # 2026-07-29; older builds silently fell back to the default model).
     # Auth is Google OAuth only: requires a one-time `agy` sign-in
     # (persisted in ~/.gemini/antigravity-cli/); no API keys involved.
-    # Effort is already encoded in the display-name model strings ("(High)",
-    # "(Low)" etc.); no ":effort" suffix support.
+    # Effort appears twice, on two different axes. The display name carries the
+    # model's own tier ("(High)", "(Low)"), and `agy --effort low|medium|high`
+    # is a REAL flag on top of it (read from `agy --help`, agy 1.1.13) — this
+    # file used to deny that flag existed, so a configured effort was refused by
+    # our own whitelist. Entries may therefore carry a ":effort" suffix, e.g.
+    # "Gemini 3.1 Pro (High):high"; valid levels are low, medium, high ONLY, and
+    # anything else stays part of the model name (agy then rejects it out loud).
     models:
       - "Gemini 3.6 Flash (High)"
       - "Gemini 3.6 Flash (Medium)"
@@ -255,9 +314,7 @@ providers:
       - "GPT-OSS 120B (Medium)"
 
   muse:
-    command: muse
     default_timeout: 1800
-    supports_json_output: true  # Uses --json (JSONL event stream)
     # Meta's Muse Code harness. Auth is a stored provider credential
     # (`muse login` / `muse auth set`), not an env var.
     # ":effort" suffix (e.g. muse-spark-1.2:xhigh) -> "--reasoning-effort <level>".
@@ -274,9 +331,7 @@ providers:
       - muse-spark-1.2:xhigh
 
   pi:
-    command: pi
     default_timeout: 1200
-    supports_json_output: false  # -p print mode emits the final answer as plain text
     # Model names are pi model patterns passed VERBATIM to --model; pi resolves
     # "provider/id" forms itself (e.g. openrouter/z-ai/glm-5.2). Run
     # "pi --list-models" to see the full list.
@@ -355,6 +410,49 @@ driver:
       - '**/.npmrc'
       - '**/node_modules/**'
 
+# ---------------------------------------------------------------------------
+# git_env: the non-interactive git environment every spawned CLI inherits
+# ---------------------------------------------------------------------------
+# Every provider CLI shells out to git under an agent profile, and a credential
+# prompt behind captured pipes blocks forever. Measured against a private https
+# remote under a scratch HOME: a tty prompt burns 75.1 s with two empty streams,
+# and a GUI-style credential helper burns 90.1 s AND survives the parent's kill
+# as an orphan.
+#
+# Two layers, and only the second is configurable:
+#   * ALWAYS, every provider and both lanes — GIT_TERMINAL_PROMPT=0 and
+#     GIT_ASKPASS="" (plus the inert-on-Linux SSH_ASKPASS / SSH_ASKPASS_REQUIRE /
+#     GCM_INTERACTIVE hedges). Neither suppresses a helper that ANSWERS, so
+#     authentication that works today keeps working. Not a knob.
+#   * SCOPED — GIT_CONFIG_COUNT + `credential.helper=""`, applied only to the
+#     read-only lanes: the `generate` profile (which is the model fan-out) and
+#     `agent-readonly`. NEVER to `agent-write`, which is the profile that
+#     legitimately runs git clone/fetch/commit against the user's own remotes.
+#
+# credential_helper: auto | wipe | keep
+#   auto (default) — the scoping above.
+#   keep           — never wipe. Restores today's behaviour for the read-only
+#                    lanes: a private-HTTPS clone/fetch that a helper can answer
+#                    keeps working, and a helper that HANGS is bounded only by
+#                    the slot timeout. Set this if a read-only lane legitimately
+#                    needs a private remote (a private plan repo, a submodule
+#                    fetch during review).
+#   wipe           — wipe everywhere, agent-write included. Deterministic, at the
+#                    cost of agent-write no longer reaching private HTTPS remotes.
+#
+# Settable here (global) and per provider under `providers.<name>.git_env`;
+# MULTI_LLM_GIT_CREDENTIAL_HELPER=<value> overrides both for one run. An unknown
+# value in EITHER config layer is rejected at load time (a typo that silently
+# meant `auto` would restore the hang this key exists to switch off).
+#
+# The accepted cost of `auto`, stated so nobody has to guess it from a stack
+# trace: in the scoped lanes a private-HTTPS clone/fetch fails in ~0.27 s with
+# `fatal: could not read Username for '<url>': terminal prompts disabled`. The
+# helper is never invoked and leaves no orphan; the CLI reports its own tool
+# error and the model continues the turn. Fast and legible, never a hang.
+git_env:
+  credential_helper: auto
+
 # Default models to use when no models are specified on CLI
 # If set, skips interactive selection and uses these models automatically
 # Use --interactive flag to override and force interactive selection
@@ -367,11 +465,19 @@ defaults:
     #- cursor-agent:kimi-k3-high
     #- opencode:opencode/big-pickle
     - opencode:openrouter/deepseek/deepseek-v4-flash-0731
-    - kilocode:openrouter/moonshotai/kimi-k3:thinking
-    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
+    # kilocode variants are MODEL-specific and an unsupported one is SILENTLY
+    # ignored, so four of these six rows used to run at their model's default
+    # effort while reporting success. Each now asks for the top variant the
+    # model actually publishes, per `kilocode models <backend> --verbose`
+    # (kilocode 7.4.19, captured 2026-08-16 into
+    # tests/fixtures/kilocode/model_variants.json, which is what
+    # tests/test_providers.py::TestKiloCodeDefaultModelSpecs checks these
+    # against). Do not edit a suffix here without checking that capture.
+    - kilocode:openrouter/moonshotai/kimi-k3:max          # was :thinking (publishes low, high, max)
+    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high   # was :xhigh (publishes medium, high)
     - kilocode:openrouter/z-ai/glm-5.2:xhigh
-    - kilocode:openrouter/minimax/minimax-m3:xhigh
-    - kilocode:openrouter/xiaomi/mimo-v2.5-pro:xhigh
+    - kilocode:openrouter/minimax/minimax-m3:thinking     # was :xhigh (publishes instant, thinking)
+    - kilocode:openrouter/xiaomi/mimo-v2.5-pro:high       # was :xhigh (publishes low, medium, high)
     - kilocode:openrouter/qwen/qwen3.8-max:xhigh
     - claude-code:fable:high
     - codex:gpt-5.6-sol:xhigh

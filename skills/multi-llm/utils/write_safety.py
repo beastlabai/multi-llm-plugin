@@ -86,6 +86,8 @@ __all__ = [
     "relative_to_root",
     "admit_disjoint_groups",
     "file_sha256",
+    "redact_argv",
+    "redact_text",
 ]
 
 
@@ -1090,11 +1092,197 @@ class AuditLog:
         )
 
 
+# ---------------------------------------------------------------------------
+# Redaction over rendered text (§4.5)
+# ---------------------------------------------------------------------------
+#
+# One boundary, four sinks: the success log (``llm_client._save_log``), the
+# per-attempt failure captures (``failed/*.attemptN.json``), the batch report
+# (``subagent_batch_report.json``) and the exit-3 stdout block that becomes
+# ``orchestrator-run.log`` under ``--detach``. Provider stdout/stderr reached all
+# four unfiltered; each growing its own filter is the shape this replaces.
+#
+# **This runs BEFORE any cap.** Both the 64 KiB/line rule and the last-20-lines
+# rule cut by construction, and a cut applied first slices a secret into a
+# remnant no pattern matches — a byte tail keeps a value whose key name is gone,
+# and a line tail keeps a PEM body whose ``-----BEGIN`` header is gone. Nothing
+# downstream can recover either.
+#
+# **Why not just reuse `.gitleaks.toml`.** gitleaks is a Go binary over a file
+# tree at commit time; this runs in-process on every rendered line of every
+# fan-out slot. The blast radii also run opposite ways — a commit-time false
+# positive is a red PR, a runtime false negative is a live credential in
+# ``log_*.txt`` — so this set is deliberately a strict *superset*, carrying PII
+# and low-entropy delimiter shapes gitleaks must never flag. The one-way drift
+# gate lives in ``tests/test_redaction.py``; this table is never transcribed into
+# the TOML, which would make the scanner red against this repo's committed
+# decoys on day one.
+
+#: The key half of a delimited key/value secret. Underscore/dot/dash-joined
+#: compounds around the keyword are deliberate: ``aws_secret_access_key`` is a
+#: real shape that a word-anchored ``\bsecret\b`` never matches.
+#: ``auth``/``authorization`` are excluded **on purpose** — P2 covers the header
+#: form, and a bare ``auth:`` key is far too common in this repo's auth-plan
+#: fixtures. That is the one entry on which this and ``SECRET_FLAG_HINTS``
+#: differ, because ``auth`` is a reliable signal in a *flag name*.
+_SECRET_KEY = (
+    r"[A-Za-z0-9_.\-]*"
+    r"(?:secret|passwd|password|token|api[_-]?key|apikey|credential)"
+    r"[A-Za-z0-9_.\-]*"
+)
+
+#: An explicit ``:`` or ``=`` is mandatory, and the optional quotes are what make
+#: ``"api_key": "…"`` match. **Never relax this to whitespace**: the measured
+#: 114 false positives — "token generation", "password hashing", "Token refresh"
+#: — all came from a whitespace-separated branch, and no real secret is emitted
+#: without a delimiter.
+_DELIM = r"[\"']?\s*[:=]\s*[\"']?"
+
+#: The candidate value, qualified further by :func:`_looks_like_credential`.
+_CAND = r"[^\s\"',;]{8,}"
+
+#: Punctuation that says "expression", not "credential". Model output routinely
+#: contains code, and code contains ``JWT_SECRET = os.environ.get(…)``.
+_CODEY = set("(){}[]<>$\\!`|&*")
+
+#: Values that are the keyword itself (``password=password``) or a placeholder.
+_PLACEHOLDER_VALUES = {
+    "password", "secret", "token", "apikey", "api_key", "credential", "passwd",
+    "changeme", "example", "redacted", "required", "optional",
+    "true", "false", "none", "null",
+}
+
+
+def _looks_like_credential(value: str) -> bool:
+    """Whether a delimited value is plausibly a credential rather than code.
+
+    Delimiter-anchoring alone is not sufficient — it still fires on
+    ``password=password``, ``JWT_SECRET = os.environ.get(…)`` and
+    ``password_hash=bcrypt.hashpw(…)`` in the e2e response fixtures. This is the
+    other half of the precision story, and it is not optional.
+    """
+    if len(value) < 8 or (_CODEY & set(value)):
+        return False
+    if value.strip("'\"").lower() in _PLACEHOLDER_VALUES:
+        return False
+    return (
+        any(c.isdigit() for c in value)
+        or (any(c.isupper() for c in value) and any(c.islower() for c in value))
+        or any(c in "-_./+=" for c in value)
+    )
+
+
+#: ``(name, compiled pattern, group to replace, predicate)``. The *value* is
+#: replaced, never the whole line, so surrounding text stays diffable and a
+#: redacted log is still a usable failure artifact.
+#:
+#: Order is load-bearing in one direction only: the multi-line and prefix shapes
+#: run before the generic key/value branch, so a value they already replaced
+#: reaches P1 as ``<redacted:…>`` — which ``_looks_like_credential`` rejects on
+#: its angle brackets. That is also what makes :func:`redact_text` idempotent.
+_REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
+    # P12 — multi-line, so it runs first: nothing else may chew its body.
+    (
+        "pem-private-key",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+        ),
+        0,
+        None,
+    ),
+    # P13 — identity/PII (§5.2). The **quoted-JSON key form** rather than a
+    # generic delimiter, because bare `shell = …` and `email = …` appear in
+    # ordinary prose and source. A bare unkeyed email pattern is deliberately
+    # not shipped: it would redact commit-message prose in container_turns/.
+    (
+        "identity-json",
+        re.compile(
+            r"[\"'](?:userEmail|email|terminalProgram|shell)[\"']\s*:\s*[\"']([^\"']{3,})[\"']"
+        ),
+        1,
+        None,
+    ),
+    # P3–P10 — vendor prefixes, every one qualified by length and charset so a
+    # short decoy is a non-match by construction rather than by exception.
+    ("sk-family", re.compile(r"\bsk-(?:ant-|proj-|or-v1-|live-)?[A-Za-z0-9_\-]{16,}\b"), 0, None),
+    ("slack", re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{8,}\b"), 0, None),
+    ("github", re.compile(r"\bgh[opusr]_[A-Za-z0-9]{16,}\b"), 0, None),
+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35,}"), 0, None),
+    ("aws-access-key-id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), 0, None),
+    ("gitlab-pat", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), 0, None),
+    ("huggingface", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"), 0, None),
+    (
+        "jwt",
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"),
+        0,
+        None,
+    ),
+    # P11 — the password half only; the username survives so the URL stays
+    # recognisable in a failure artifact.
+    ("url-basic-auth", re.compile(r"\b[a-z][a-z0-9+.\-]*://([^/\s:@]+):([^/\s@]+)@"), 2, None),
+    # P2 — the header form, and the one place `bearer`/`basic` are keywords.
+    (
+        "auth-scheme",
+        re.compile(r"(?i)\b(?:authorization\s*:\s*)?(?:bearer|basic)\s+([A-Za-z0-9._\-+/=]{8,})"),
+        1,
+        None,
+    ),
+    # P1 — the generic delimited key/value branch, last and predicate-gated.
+    (
+        "secret-kv",
+        re.compile(r"(?i)\b" + _SECRET_KEY + r"(?:" + _DELIM + r")(" + _CAND + r")"),
+        1,
+        _looks_like_credential,
+    ),
+]
+
+
+def _replace_group(match: "re.Match", group: int, name: str) -> str:
+    """The matched text with ``group`` swapped for ``<redacted:{name}>``."""
+    start, end = match.span(group)
+    if start < 0:  # an optional group that did not participate
+        return match.group(0)
+    base = match.start()
+    return match.group(0)[: start - base] + f"<redacted:{name}>" + match.group(0)[end - base:]
+
+
+def redact_text(text: str) -> str:
+    """Credential- and identity-shaped values in ``text``, replaced in place.
+
+    Applied to the **fully rendered** line — and always *before* any truncation
+    cap, which is why L3 and L4 land together. The matched value is replaced with
+    ``<redacted:{name}>``; the surrounding text is untouched.
+
+    Out of scope, stated rather than implied: a high-entropy value with no
+    keyword, no prefix and no delimiter (a bare 40-char blob in prose) cannot be
+    caught by regex. That is accepted — keeping the credential out of the child's
+    environment in the first place is the primary control, and this is the
+    backstop.
+    """
+    if not text:
+        return text or ""
+    out = text
+    for name, pattern, group, predicate in _REDACTIONS:
+        def _sub(match, _name=name, _group=group, _predicate=predicate):
+            if _predicate is not None and not _predicate(match.group(_group)):
+                return match.group(0)
+            return _replace_group(match, _group, _name)
+
+        out = pattern.sub(_sub, out)
+    return out
+
+
 def redact_argv(argv: Sequence[str], prompt: str) -> List[str]:
     """The rendered argv with the prompt elided and any secret-shaped value cut.
 
     The prompt becomes ``<prompt sha256:… bytes:…>`` so the audit record proves
     *which* prompt ran without carrying its bytes.
+
+    Two passes, and the flag-hint one is **kept, not replaced** (§4.5.5): knowing
+    a value's *position* from ``--api-key`` is strictly stronger than any pattern
+    and catches the bare high-entropy blob no regex can. Every argument that
+    survives that pass then goes through :func:`redact_text`, which closes the
+    inverse hole — a secret in an argument that carries no hinted flag.
     """
     digest = _sha256_text(prompt)
     length = len((prompt or "").encode("utf-8"))
@@ -1119,7 +1307,7 @@ def redact_argv(argv: Sequence[str], prompt: str) -> List[str]:
             out.append(arg)
             redact_next = True
             continue
-        out.append(arg)
+        out.append(redact_text(arg))
     return out
 
 

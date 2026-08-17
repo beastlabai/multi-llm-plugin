@@ -51,16 +51,19 @@
 # (only overwrite its list, e.g. `<mode>: []`) — see the modes note below.
 #
 # ----------------------------------------------------------------------------
-# TRUST MODEL — provider definitions DO merge from this file (command stays inert)
+# TRUST MODEL — provider definitions DO merge, but no layer picks the binary
 # ----------------------------------------------------------------------------
 # An UNCOMMENTED `providers:` block here deep-merges OVER the base, exactly like
-# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`,
-# `supports_json_output`, and each `models:` list all take effect (lists replace).
+# the MULTI_LLM_PROVIDERS_CONFIG env layer: `default_timeout`, `max_concurrent`
+# and each `models:` list all take effect (lists replace). Those are the only
+# provider keys that DO anything — a key the base does not declare merges and is
+# then ignored, so writing one is a no-op, not a setting.
 # `--init` writes a full block for each detected provider so the file is a
 # complete, self-describing snapshot.
-#  * `command:` is DOCUMENTATION-ONLY and is NEVER executed — provider binaries
-#    are hardcoded in the plugin (utils/providers/). A `command:` value in ANY
-#    layer can never make the tool run a different program.
+#  * NO layer can choose the BINARY. Provider binaries are hardcoded in the
+#    plugin (utils/providers/); a `command:` value in ANY layer merges as inert
+#    metadata and can never make the tool run a different program. (The base
+#    config no longer declares one — it had zero readers.)
 #  * A provider name with no hardcoded adapter (e.g. one a newer plugin removed
 #    or renamed) still merges but is IGNORED at runtime — it lists no models and
 #    can never be selected.
@@ -100,24 +103,22 @@
 ## --- providers --------------------------------------------------------------
 ## Full provider definitions. `--init` uncomments the block for each DETECTED
 ## CLI; an uncommented block deep-merges OVER the base (lists replace).
-## `command:` is documentation-only and is NEVER executed.
+## No key here picks a binary — provider binaries are hardcoded in the plugin.
 # providers:
 #   claude-code:
-#     command: claude
 #     default_timeout: 1800
-#     supports_json_output: true
 #     max_concurrent: 2
 #     models:
 #       - sonnet
 #       - opus
 #       - fable
 #       - haiku
+#     fallback_models: {}
 
 #   cursor-agent:
-#     command: cursor-agent
 #     default_timeout: 1200
 #     max_concurrent: 2
-#     supports_json_output: true
+#     isolate_profile: auto
 #     models:
 #       - auto
 #       - glm-5.2-max
@@ -137,9 +138,7 @@
 #       - composer-2.5
 
 #   gemini:
-#     command: gemini
 #     default_timeout: 1200
-#     supports_json_output: true
 #     models:
 #       - gemini-3-flash
 #       - gemini-3-pro
@@ -148,17 +147,13 @@
 #       - gemini-2.5-pro
 
 #   grok:
-#     command: grok
 #     default_timeout: 1200
-#     supports_json_output: true
 #     models:
 #       - grok-4.5:high
 #       - grok-composer-2.5-fast
 
 #   opencode:
-#     command: opencode
 #     default_timeout: 1200
-#     supports_json_output: true
 #     models:
 #       - opencode/big-pickle
 #       - opencode/sonnet
@@ -170,9 +165,7 @@
 #       - openrouter/deepseek/deepseek-v4-flash-0731
 
 #   codex:
-#     command: codex
 #     default_timeout: 1800
-#     supports_json_output: true
 #     models:
 #       - gpt-5.5
 #       - gpt-5.5:high
@@ -181,25 +174,23 @@
 #       - gpt-5.6-sol:xhigh
 
 #   kilocode:
-#     command: kilocode
 #     default_timeout: 1200
-#     supports_json_output: false
 #     max_concurrent: 2
 #     models:
 #       - openrouter/moonshotai/kimi-k2.7-code
-#       - openrouter/moonshotai/kimi-k3:thinking
+#       - openrouter/moonshotai/kimi-k3:max
 #       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
 #       - openrouter/z-ai/glm-5.2:xhigh
 #       - kilo/z-ai/glm-5.2
 #       - openrouter/minimax/minimax-m2.7
-#       - openrouter/minimax/minimax-m3:xhigh
+#       - openrouter/minimax/minimax-m3:thinking
 #       - openrouter/x-ai/grok-4.20-multi-agent
 #       - openrouter/arcee-ai/trinity-large-thinking
 #       - openrouter/xiaomi/mimo-v2.5-pro
-#       - openrouter/qwen/qwen3.7-max:xhigh
+#       - openrouter/qwen/qwen3.7-max:max
 #       - openrouter/qwen/qwen3.8-max:xhigh
-#       - openrouter/tencent/hy3:xhigh
-#       - openrouter/stepfun/step-3.7-flash:xhigh
+#       - openrouter/tencent/hy3:high
+#       - openrouter/stepfun/step-3.7-flash:high
 #       - openrouter/openai/gpt-5.5-pro
 #       - openai/gpt-5.5-pro
 #       - openrouter/nex-agi/nex-n2-pro
@@ -211,9 +202,7 @@
 #       - openrouter/anthropic/claude-fable-5
 
 #   cline:
-#     command: cline
 #     default_timeout: 1200
-#     supports_json_output: true
 #     max_concurrent: 2
 #     models:
 #       - openrouter/z-ai/glm-5.2
@@ -221,27 +210,21 @@
 #       - openrouter/openai/gpt-5.5
 
 #   goose:
-#     command: goose
 #     default_timeout: 1200
-#     supports_json_output: true
 #     models:
 #       - openrouter/z-ai/glm-5.2
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/openai/gpt-5.5
 
 #   aider:
-#     command: aider
 #     default_timeout: 1200
-#     supports_json_output: false
 #     models:
 #       - openrouter/z-ai/glm-5.2
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/openai/gpt-5.5
 
 #   agy:
-#     command: agy
 #     default_timeout: 1200
-#     supports_json_output: true
 #     models:
 #       - Gemini 3.6 Flash (High)
 #       - Gemini 3.6 Flash (Medium)
@@ -256,17 +239,13 @@
 #       - GPT-OSS 120B (Medium)
 
 #   muse:
-#     command: muse
 #     default_timeout: 1800
-#     supports_json_output: true
 #     models:
 #       - muse-spark-1.2
 #       - muse-spark-1.2:xhigh
 
 #   pi:
-#     command: pi
 #     default_timeout: 1200
-#     supports_json_output: false
 #     models:
 #       - openrouter/z-ai/glm-5.2
 #       - openrouter/moonshotai/kimi-k2.7-code
@@ -324,11 +303,11 @@ defaults:
 #     - cursor-agent:gemini-3.6-flash-high
 #     - cursor-agent:cursor-grok-4.5-high
 #     - opencode:openrouter/deepseek/deepseek-v4-flash-0731
-#     - kilocode:openrouter/moonshotai/kimi-k3:thinking
-#     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:xhigh
+#     - kilocode:openrouter/moonshotai/kimi-k3:max
+#     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high
 #     - kilocode:openrouter/z-ai/glm-5.2:xhigh
-#     - kilocode:openrouter/minimax/minimax-m3:xhigh
-#     - kilocode:openrouter/xiaomi/mimo-v2.5-pro:xhigh
+#     - kilocode:openrouter/minimax/minimax-m3:thinking
+#     - kilocode:openrouter/xiaomi/mimo-v2.5-pro:high
 #     - kilocode:openrouter/qwen/qwen3.8-max:xhigh
 #     - claude-code:fable:high
 #     - codex:gpt-5.6-sol:xhigh

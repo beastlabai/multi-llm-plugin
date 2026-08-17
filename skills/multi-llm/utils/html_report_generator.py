@@ -416,6 +416,28 @@ def get_model_metadata(model_string: str) -> Dict[str, Any]:
     }
 
 
+def served_model_label(
+    model: str, served_models: Optional[Dict[str, Any]] = None
+) -> str:
+    """``model`` as a report label, carrying §3.6's served-model attribution.
+
+    One renderer for every markdown surface that names a model (the aggregate's
+    ``**Models:**`` line, the code review's per-issue ``**Model:**`` field), so
+    a fallback reads the same wherever it surfaces. Without an entry — which is
+    every run under the shipped, empty ``fallback_models`` — the bare model
+    string is returned and the report is byte-for-byte what it was.
+    """
+    entry = (served_models or {}).get(model)
+    if not isinstance(entry, dict):
+        return model
+    served = entry.get("served_model")
+    if not served or served == model:
+        return model
+    if entry.get("fallback"):
+        return f"{model} (served by {served}, fallback)"
+    return f"{model} (served by {served})"
+
+
 def extract_section_contexts(
     plan_content: str,
     section_refs: Set[str],
@@ -1040,6 +1062,7 @@ def generate_html_report(
     diff_data: Optional[Dict] = None,
     data_source: str = 'auto',
     file_snapshots: Optional[Dict[str, list]] = None,
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """Generate complete HTML report and return the HTML string.
 
@@ -1074,6 +1097,12 @@ def generate_html_report(
             provided, ``capture_file_context()`` uses these snapshots instead
             of reading files from disk, ensuring the report reflects file
             state at review start rather than at report-generation time.
+        served_models: Optional §3.6 attribution, ``{model_spec: {"served_model":
+            str, "fallback": bool}}``.  Only ever non-empty when a
+            ``fallback_models`` list is configured; an entry labels that model's
+            badge with the model that actually served the turn and adds
+            ``reportData.servedModels``.  Omitted (the shipped default) leaves
+            ``report_data.json`` and the embedded data exactly as they were.
 
     Returns:
         Complete HTML string for the report
@@ -1165,6 +1194,20 @@ def generate_html_report(
     model_metadata = {}
     for model in models:
         model_metadata[model] = get_model_metadata(model)
+        # §3.6: a report must never attribute a fallback model's output to the
+        # primary. The badge text is `metadata.model` in every template, so the
+        # served model is folded into it there rather than in three templates —
+        # and only when a fallback really fired, so an unconfigured run's badge
+        # (and its persisted report_data.json) is unchanged.
+        served_entry = (served_models or {}).get(model)
+        if isinstance(served_entry, dict) and served_entry.get("served_model"):
+            served = served_entry["served_model"]
+            model_metadata[model]["served_model"] = served
+            model_metadata[model]["fallback"] = bool(served_entry.get("fallback"))
+            if served_entry.get("fallback"):
+                model_metadata[model]["model"] = (
+                    f"{model_metadata[model]['model']} (fallback: {served})"
+                )
 
     # Extract plan title from markdown (first # heading), fallback to filename
     plan_title = ""
@@ -1486,6 +1529,12 @@ def generate_html_report(
             ),
         }
     }
+
+    # §3.6: the structured half of the attribution, added only when a fallback
+    # list was configured AND something came back — so a default run's
+    # report_data.json gains no key at all.
+    if served_models:
+        report_data["servedModels"] = served_models
 
     # Conditionally add diff data and file contexts
     if resolved_diff_data is not None:

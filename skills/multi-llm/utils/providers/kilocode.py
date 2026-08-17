@@ -2,10 +2,10 @@
 import json
 import re
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Reasoning variant names accepted by `kilocode run --variant` (verified on
 # kilocode 7.4.1). Variants are model-specific: effort words for
@@ -41,7 +41,14 @@ class KiloCodeProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("kilocode") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         if effort is not None:
             return ["kilocode", "run", "--auto", "-m", base_model, "--variant", effort, prompt]

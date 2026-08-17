@@ -1,0 +1,98 @@
+{
+  "_provenance": {
+    "captured": "2026-08-16",
+    "cli_version": "kilocode 7.4.19",
+    "commands": [
+      "kilocode models openrouter --verbose",
+      "kilocode models kilo --verbose",
+      "kilocode models openai --verbose"
+    ],
+    "credential_free": true,
+    "coverage": {
+      "openrouter": "201/351",
+      "kilo": "211/295",
+      "openai": "34/48"
+    },
+    "scope": "Only the kilocode model ids named in the base providers.yaml (defaults.models and providers.kilocode.models). Re-capture with the commands above when a kilocode row is added or the catalog drifts.",
+    "note": "`variants` is the per-model list `kilocode run --variant <name>` accepts. An unsupported variant is SILENTLY IGNORED by the CLI, which is why this capture exists: nothing at run time reports the mistake."
+  },
+  "variants": {
+    "kilo/z-ai/glm-5.2": [
+      "high",
+      "none",
+      "xhigh"
+    ],
+    "openai/gpt-5.5-pro": [
+      "high",
+      "medium",
+      "xhigh"
+    ],
+    "openrouter/arcee-ai/trinity-large-thinking": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "openrouter/minimax/minimax-m2.7": [
+      "instant",
+      "thinking"
+    ],
+    "openrouter/minimax/minimax-m3": [
+      "instant",
+      "thinking"
+    ],
+    "openrouter/moonshotai/kimi-k2.7-code": [
+      "instant",
+      "thinking"
+    ],
+    "openrouter/moonshotai/kimi-k3": [
+      "high",
+      "low",
+      "max"
+    ],
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b": [
+      "high",
+      "medium"
+    ],
+    "openrouter/openai/gpt-5.5-pro": [
+      "high",
+      "medium",
+      "xhigh"
+    ],
+    "openrouter/qwen/qwen3.7-max": [
+      "high",
+      "max"
+    ],
+    "openrouter/qwen/qwen3.8-max": [
+      "high",
+      "low",
+      "medium",
+      "minimal",
+      "xhigh"
+    ],
+    "openrouter/stepfun/step-3.7-flash": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "openrouter/tencent/hy3": [
+      "high",
+      "low",
+      "none"
+    ],
+    "openrouter/x-ai/grok-4.20-multi-agent": [
+      "high",
+      "low",
+      "medium",
+      "xhigh"
+    ],
+    "openrouter/xiaomi/mimo-v2.5-pro": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "openrouter/z-ai/glm-5.2": [
+      "high",
+      "xhigh"
+    ]
+  }
+}

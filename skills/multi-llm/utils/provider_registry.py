@@ -42,7 +42,7 @@ from .providers.kilocode import KiloCodeProvider
 from .providers.muse import MuseProvider
 from .providers.opencode import OpenCodeProvider
 from .providers.pi import PiProvider
-from .providers.base import LLMProvider
+from .providers.base import GIT_HELPER_AUTO, GIT_HELPER_POLICIES, LLMProvider
 
 # Built-in providers
 _PROVIDERS: Dict[str, LLMProvider] = {
@@ -68,9 +68,20 @@ _PROVIDERS: Dict[str, LLMProvider] = {
 _config: Optional[dict] = None
 _config_key: Optional[tuple] = None
 
+# The run's discovery anchor (§9.3.b): the absolute plan-file path this process
+# is working on, captured once during pre-flight. Consumed by _anchor_start_dir
+# whenever an explicit `anchor=` is absent, so a call site the sweep missed falls
+# back to THE RUN'S PLAN rather than to CWD — the difference between a residual
+# timeout bug and a silently wrong provider. It is a backstop, never the primary
+# mechanism: every accessor still takes and forwards `anchor=`.
+_RUN_ANCHOR: Optional[str] = None
+
 # Env var names.
 ENV_CONFIG_VAR = "MULTI_LLM_PROVIDERS_CONFIG"
 ENV_PERMISSIVE_VAR = "MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE"
+# §2.2's one-run debugging hatch for the credential-helper policy. Highest
+# precedence, above both config layers.
+ENV_GIT_CREDENTIAL_HELPER_VAR = "MULTI_LLM_GIT_CREDENTIAL_HELPER"
 
 # Stable, greppable prefix for every non-fatal config warning emitted here. Tests
 # capsys-assert on this exact prefix; do not vary it per call site. Fail-fast
@@ -120,12 +131,56 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def set_run_anchor(path: Union[str, Path]) -> None:
+    """Pin this process's discovery anchor to the run's plan file (§9.3.b).
+
+    Called once per process from each mode's pre-flight, right after
+    ``--plan-file`` has been resolved to an absolute path and before any model
+    or agent CLI runs. Two invariants keep it safe rather than order-dependent:
+
+    1. **Set once, before the run's decision reads.** The config cache is keyed
+       on the resolved anchor, so a value set after a load would leave earlier
+       reads on the CWD key and later reads on the anchor key — exactly the
+       half-anchored run this exists to forbid. A parser's ``--help`` epilog
+       legitimately reads config before a plan path exists, so rather than
+       refusing, changing the effective anchor **drops the cached slot**: no
+       value read on the CWD key survives into the anchored half of the run.
+    2. **Re-setting to a different path raises.** ``full`` runs several modes in
+       one interpreter, but always against one plan; a second, different anchor
+       means something multi-llm does not model is driving it, and failing
+       loudly beats interleaving two configs. Re-setting to the *same* path is a
+       no-op (``full``'s per-phase pre-flight does exactly that).
+    """
+    global _RUN_ANCHOR, _config, _config_key
+    resolved = os.path.abspath(str(path))
+    if _RUN_ANCHOR == resolved:
+        return
+    if _RUN_ANCHOR is not None:
+        raise RuntimeError(
+            "multi-llm: the process-wide run anchor is already pinned to "
+            f"{_RUN_ANCHOR!r} and cannot be re-pointed at {resolved!r}. One "
+            "process runs one plan; two anchors would interleave two configs."
+        )
+    _RUN_ANCHOR = resolved
+    # Invariant 1: nothing loaded on the pre-anchor key may be served afterwards.
+    _config = None
+    _config_key = None
+
+
+def get_run_anchor() -> Optional[str]:
+    """The pinned run anchor, or None when no pre-flight has set one."""
+    return _RUN_ANCHOR
+
+
 def _anchor_start_dir(anchor: Optional[Union[str, Path]]) -> str:
     """Directory to run git discovery from for an optional discovery anchor.
 
     ``anchor`` may be a plan-file path or a directory; when omitted, falls back
-    to CWD. CWD is a *fallback*, not a guarantee — see _find_project_config.
+    to the process-wide run anchor (:func:`set_run_anchor`) and then to CWD. CWD
+    is a *fallback*, not a guarantee — see _find_project_config.
     """
+    if anchor is None:
+        anchor = _RUN_ANCHOR
     if anchor is not None:
         anchor_str = str(anchor)
         if os.path.isdir(anchor_str):
@@ -350,11 +405,21 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     base_config = _load_base_config()
     config = base_config
     driver_overridden = False
+    git_env_overridden = False
     for layer_name, path in _override_paths(anchor):
         data = _load_override_layer(layer_name, path, permissive)
         if data:
             if "driver" in data:
                 driver_overridden = True
+            layer_providers = data.get("providers")
+            if "git_env" in data or (
+                isinstance(layer_providers, dict)
+                and any(
+                    isinstance(entry, dict) and "git_env" in entry
+                    for entry in layer_providers.values()
+                )
+            ):
+                git_env_overridden = True
             config = _deep_merge(config, data)
 
     # D3: `driver:` validation is fail-fast, and only for an EXPLICIT override.
@@ -367,6 +432,20 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     # to "no runner configured", which is the failure this check exists for.
     if driver_overridden:
         validate_driver_block(config.get("driver"))
+
+    # §2.2: `git_env:` follows the identical rule — validated only when an
+    # override layer asked for it, rejected rather than ignored, because
+    # `credential_helper: keeep` silently meaning `auto` would restore the hang
+    # the key exists to switch off and look like it had worked.
+    if git_env_overridden:
+        validate_git_env_block(config.get("git_env"), "git_env")
+        merged_providers = config.get("providers")
+        if isinstance(merged_providers, dict):
+            for name, entry in merged_providers.items():
+                if isinstance(entry, dict) and "git_env" in entry:
+                    validate_git_env_block(
+                        entry.get("git_env"), f"providers.{name}.git_env"
+                    )
 
     # Load-time guard (post-merge): a clone-authored override can deep-merge a
     # malformed (non-mapping) provider value, e.g. `providers: {claude-code: "x"}`,
@@ -463,9 +542,18 @@ def get_available_models(anchor: Optional[Union[str, Path]] = None) -> Dict[str,
     return result
 
 
-def get_all_model_specs() -> List[str]:
-    """Get all models as provider:model specs for interactive selection."""
-    models_by_provider = get_available_models()
+def get_all_model_specs(anchor: Optional[Union[str, Path]] = None) -> List[str]:
+    """Get all models as provider:model specs for interactive selection.
+
+    Args:
+        anchor: Optional discovery anchor (plan path / repo dir) threaded to
+                get_available_models. This list is what the "available models" /
+                "unknown model" messages echo, and validation is already
+                anchored (``is_model_valid(..., anchor=plan)``) — an anchored
+                rejection paired with a CWD-discovered suggestion list is its own
+                user-visible bug (§9.3.c).
+    """
+    models_by_provider = get_available_models(anchor=anchor)
     specs = []
     for provider, models in models_by_provider.items():
         for model in models:
@@ -473,9 +561,16 @@ def get_all_model_specs() -> List[str]:
     return specs
 
 
-def get_provider_timeout(provider_name: str) -> int:
-    """Get timeout for a specific provider."""
-    config = load_config()
+def get_provider_timeout(provider_name: str,
+                         anchor: Optional[Union[str, Path]] = None) -> int:
+    """Get timeout for a specific provider.
+
+    Args:
+        anchor: Optional discovery anchor (plan path / repo dir) threaded to
+                load_config, so a project-local ``default_timeout`` still binds
+                when the run starts outside that project (§9.3.c).
+    """
+    config = load_config(anchor=anchor)
     providers = config.get("providers", {})
     if provider_name in providers:
         return providers[provider_name].get("default_timeout", 1200)
@@ -1113,6 +1208,99 @@ def get_subagent_retries(anchor: Optional[Union[str, Path]] = None) -> int:
     return int(get_driver_config(anchor=anchor)["subagent_retries"])
 
 
+# ---------------------------------------------------------------------------
+# git_env: — the non-interactive git environment's one knob (§2.2)
+# ---------------------------------------------------------------------------
+
+#: The closed key set under `git_env:`, global and per provider. Like `driver:`,
+#: an unknown key is REJECTED rather than ignored.
+GIT_ENV_KEYS = ("credential_helper",)
+
+
+def validate_git_env_block(git_env: object, where: str = "git_env") -> None:
+    """Validate one merged ``git_env:`` block, raising :class:`ConfigError`.
+
+    Called from :func:`load_config` for the global block and for every
+    ``providers.<name>.git_env`` an **override** layer carried. Base is ours, so
+    a broken base is a test failure rather than a user's config error.
+
+    Fail-fast rather than fall-back-to-``auto``, because this key's whole purpose
+    is to switch a measured hang-avoidance off (or on): a typo that silently
+    resolved to the default would restore the behaviour the user was trying to
+    change while looking like it had worked.
+    """
+    if git_env is None:
+        return
+    if not isinstance(git_env, dict):
+        raise ConfigError(
+            f"multi-llm config error: `{where}:` must be a mapping, got "
+            f"{type(git_env).__name__}"
+        )
+    unknown = [key for key in git_env if key not in GIT_ENV_KEYS]
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under `{where}:`: "
+            f"{', '.join(sorted(unknown))}. Known keys: {', '.join(GIT_ENV_KEYS)}."
+        )
+    value = git_env.get("credential_helper")
+    if value is None:
+        return
+    if not isinstance(value, str) or value.strip() not in GIT_HELPER_POLICIES:
+        raise ConfigError(
+            f"multi-llm config error: {where}.credential_helper is {value!r} — "
+            f"expected one of {', '.join(GIT_HELPER_POLICIES)}. `auto` scopes the "
+            f"credential-helper wipe to the read-only lanes (generate, the Lane A "
+            f"fan-out, agent-readonly) and never applies it to agent-write; "
+            f"`keep` disables it everywhere; `wipe` applies it everywhere."
+        )
+
+
+def get_git_credential_helper(
+    provider_name: Optional[str] = None,
+    anchor: Optional[Union[str, Path]] = None,
+) -> str:
+    """Resolve ``git_env.credential_helper`` for one provider (§2.2).
+
+    Precedence: ``MULTI_LLM_GIT_CREDENTIAL_HELPER`` (a one-run debugging hatch) →
+    ``providers.<name>.git_env.credential_helper`` → the top-level
+    ``git_env.credential_helper`` → ``auto``.
+
+    The env var is the one input that is **not** fail-fast: it is read on every
+    dispatch, far from any parser, so an unrecognized value warns on stderr
+    naming the variable and falls back to ``auto`` rather than raising out of the
+    middle of a fan-out. Config values are validated at load time instead.
+    """
+    override = os.environ.get(ENV_GIT_CREDENTIAL_HELPER_VAR)
+    if override is not None and override.strip():
+        candidate = override.strip()
+        if candidate in GIT_HELPER_POLICIES:
+            return candidate
+        print(
+            f"{CONFIG_WARNING_PREFIX} ignoring "
+            f"{ENV_GIT_CREDENTIAL_HELPER_VAR}={override!r} (expected one of "
+            f"{', '.join(GIT_HELPER_POLICIES)}); using {GIT_HELPER_AUTO}",
+            file=sys.stderr,
+        )
+        return GIT_HELPER_AUTO
+
+    config = load_config(anchor=anchor)
+    for block in (
+        (config.get("providers") or {}).get(provider_name)
+        if provider_name and isinstance(config.get("providers"), dict)
+        else None,
+        config,
+    ):
+        if not isinstance(block, dict):
+            continue
+        git_env = block.get("git_env")
+        if not isinstance(git_env, dict):
+            continue
+        value = git_env.get("credential_helper")
+        if isinstance(value, str) and value.strip() in GIT_HELPER_POLICIES:
+            return value.strip()
+    return GIT_HELPER_AUTO
+
+
 def get_subagent_timeout(
     provider_name: str, anchor: Optional[Union[str, Path]] = None
 ) -> int:
@@ -1120,7 +1308,9 @@ def get_subagent_timeout(
     configured = get_driver_config(anchor=anchor)["subagent_timeout_s"]
     if isinstance(configured, int) and not isinstance(configured, bool):
         return configured
-    return get_provider_timeout(provider_name)
+    # Base ships `subagent_timeout_s: null`, so THIS is the default-on path:
+    # dropping the anchor here would leak the whole Lane B half to CWD (§9.3.c).
+    return get_provider_timeout(provider_name, anchor=anchor)
 
 
 def get_provider_max_concurrent(

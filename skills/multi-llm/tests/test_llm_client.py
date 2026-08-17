@@ -1,7 +1,6 @@
 """Comprehensive unit tests for llm_client module.
 
 This module tests the LLM client wrapper functionality including:
-- check_cursor_agent_available() - binary availability check
 - _save_log() - log file saving
 - invoke_with_provider() - primary LLM invocation
 - _is_valid_parsed_data() - parsed data validation
@@ -40,7 +39,6 @@ from utils.llm_client import (
     CMDLINE_CAP_UTF16_BATCH,
     CMDLINE_CAP_UTF16_NATIVE,
     CMDLINE_UTF16_HEADROOM,
-    check_cursor_agent_available,
     _save_log,
     _resolve_executable,
     _utf16_code_units,
@@ -57,37 +55,12 @@ from utils.llm_client import (
 from utils.providers.cursor_agent import CursorAgentProvider
 
 
-class TestCheckCursorAgentAvailable:
-    """Tests for check_cursor_agent_available() function."""
-
-    @patch("shutil.which")
-    def test_cursor_agent_binary_exists(self, mock_which):
-        """Return True when cursor-agent binary is found in PATH."""
-        mock_which.return_value = "/usr/local/bin/cursor-agent"
-
-        result = check_cursor_agent_available()
-
-        assert result is True
-        mock_which.assert_called_once_with("cursor-agent")
-
-    @patch("shutil.which")
-    def test_cursor_agent_binary_missing(self, mock_which):
-        """Return False when cursor-agent binary is not found."""
-        mock_which.return_value = None
-
-        result = check_cursor_agent_available()
-
-        assert result is False
-        mock_which.assert_called_once_with("cursor-agent")
-
-    @patch("shutil.which")
-    def test_cursor_agent_binary_alternative_path(self, mock_which):
-        """Return True for cursor-agent in alternative location."""
-        mock_which.return_value = "/home/user/.local/bin/cursor-agent"
-
-        result = check_cursor_agent_available()
-
-        assert result is True
+# `check_cursor_agent_available()` and its three tests are deleted (§9.5): the
+# helper had no caller anywhere in the skill, and availability is the adapter's
+# own `CursorAgentProvider.is_available()` — which is what
+# `tests/test_providers.py` covers. The rest of this module's legacy surface
+# (`invoke_subagent`, `parse_subagent_response`, `invoke_for_json`) stays: it is
+# live behind the shipped `--internal-validation` flag.
 
 
 class TestSaveLog:
@@ -1478,8 +1451,13 @@ class TestInvokeCommandResolution:
         """When which stops resolving (race), the bare name is kept."""
         mock_subprocess.return_value = self._success_result()
 
-        # First which call: is_available() detection; second: resolution.
-        with patch("shutil.which", side_effect=["/usr/bin/cursor-agent", None]):
+        # First which call: is_available() detection; second: M1's cursor flag
+        # gate looking for a binary to read `--help` from (this path does not
+        # exist, so the gate skips); third: resolution.
+        with patch(
+            "shutil.which",
+            side_effect=["/usr/bin/cursor-agent", "/usr/bin/cursor-agent", None],
+        ):
             invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
 
         cmd = mock_subprocess.call_args[0][0]
@@ -1565,6 +1543,14 @@ class TestPromptArgvIntegrity:
         child.write_text(
             "#!/usr/bin/env python3\n"
             "import json, sys\n"
+            # M1's per-flag gate reads this binary's own --help before the
+            # adapter will emit `--trust --mode ask`, so the stand-in answers it
+            # the way the real CLI does. Without it the slot is refused
+            # (version-too-low) and no launch happens at all.
+            "if sys.argv[1:] == ['--help']:\n"
+            "    print('  --trust  Trust the current workspace')\n"
+            "    print('  --mode <mode>  plan | ask')\n"
+            "    sys.exit(0)\n"
             'print(json.dumps({"type": "result", "result": json.dumps(sys.argv[1:])}))\n',
             encoding="utf-8",
         )

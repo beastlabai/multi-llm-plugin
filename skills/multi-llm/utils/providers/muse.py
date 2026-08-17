@@ -4,7 +4,7 @@ import shutil
 from typing import Any, Dict, Iterator, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, split_reasoning_effort
+from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 
 # Reasoning effort values accepted by `muse exec --reasoning-effort`
 # (verified live against Muse Code 0.1.0-R708.1). Unlike most providers here,
@@ -52,6 +52,29 @@ class MuseProvider(LLMProvider):
     rather than granting trust from inside a review run.
     """
 
+    # §7.2 — per-adapter pattern overrides, EXTENDING the base sets.
+    #
+    # muse's failures are structured: exit 1 with stderr carrying only "run
+    # ended with Failed", and the real cause on stdout in the
+    # `run.terminal.failed` record's `reason` — which is why `describe_failure`
+    # exists. Two recorded shapes the base English lists do not carry:
+    #
+    # * an unfunded account gives `API error 402 … Billing verification failed …
+    #   (after 10 provider attempts)`. That is a credit/quota condition, so it
+    #   belongs on the rate-limit rung (backoff, budget not consumed) rather
+    #   than on the generic transport rung.
+    # * `API error 401` is muse's auth spelling; the bare token `401` is not in
+    #   the base auth set at all (it is only a *context* word there).
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "api error 401",
+        "api error 403",
+    )
+    rate_limit_patterns = LLMProvider.rate_limit_patterns + (
+        "api error 402",
+        "billing verification failed",
+        "api error 429",
+    )
+
     @property
     def name(self) -> str:
         return "muse"
@@ -63,7 +86,14 @@ class MuseProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("muse") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # muse exec --json --disable-approval --model <model>
         #     [--reasoning-effort <effort>] "<prompt>"
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)

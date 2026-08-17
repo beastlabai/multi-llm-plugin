@@ -66,6 +66,12 @@ _PATH_PREFIXES = ("/work/", "/home/e2e", "/tmp/", "/opt/mllm/skill/",
 _ROW_DERIVED = {
     "--model": PLACEHOLDER_MODEL,
     "-m": PLACEHOLDER_MODEL,
+    # §3.6: the VALUE is a comma-separated list of row-derived model ids, so it
+    # normalizes to `<model>` like any other; the assertion is the flag's
+    # PRESENCE. Keeping the value verbatim would make the table churn on every
+    # `providers.claude-code.fallback_models` edit while proving nothing about
+    # command construction.
+    "--fallback-model": PLACEHOLDER_MODEL,
     "--provider": "<provider>",
     "-P": "<provider>",
     "--base-url": "<base-url>",
@@ -76,6 +82,20 @@ _ROW_DERIVED = {
 #: `key=value` config overrides whose VALUE is row-derived but whose KEY is the
 #: assertion (codex's `-c model_reasoning_effort=high`).
 _KV_ROW_DERIVED_KEYS = {"model_reasoning_effort", "model", "base_url"}
+
+#: §4.2's `--json-schema <inline json>`. The value is **policy** — it is the
+#: constraint the model is handed, and a schema swapped for another schema is
+#: exactly the regression this table exists to catch — so it is kept VERBATIM,
+#: never reduced to a placeholder (§14.1: "a new policy flag reduced to a
+#: placeholder makes the golden assertion vacuous").
+#:
+#: It needs its own entry rather than falling through to `_classify` because the
+#: generic path splits any token containing `=` at the first `=` and normalizes
+#: the tail, which would silently mangle a schema whose `pattern` or
+#: `description` happens to contain one. codex's `--output-schema <FILE>` is the
+#: mirror case and needs no entry: its value is a per-invocation temp path, which
+#: `_classify` already collapses to `<path>`.
+_VERBATIM_VALUE_FLAGS = {"--json-schema"}
 
 
 def _classify(token: str) -> str:
@@ -129,12 +149,18 @@ def normalize_argv(argv: list[str]) -> dict:
 
         if "=" in token and token.startswith("--"):
             flag, _, value = token.partition("=")
-            normalized = _ROW_DERIVED.get(flag) or _classify(value)
+            if flag in _VERBATIM_VALUE_FLAGS:
+                normalized = value
+            else:
+                normalized = _ROW_DERIVED.get(flag) or _classify(value)
         else:
             flag = token
             nxt = rest[index + 1] if index + 1 < len(rest) else None
             if nxt is not None and not nxt.startswith("-"):
-                normalized = _ROW_DERIVED.get(flag) or _classify(nxt)
+                if flag in _VERBATIM_VALUE_FLAGS:
+                    normalized = nxt
+                else:
+                    normalized = _ROW_DERIVED.get(flag) or _classify(nxt)
                 index += 1
             else:
                 normalized = None      # valueless flag

@@ -29,14 +29,13 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     get_or_create_state,
-    parse_subagent_response,
     load_prompt,
     get_output_paths,
     validate_code_review_issues,
@@ -96,11 +95,12 @@ from utils.provider_registry import (
     get_provider_timeout,
     get_provider_max_concurrent,
     is_model_valid,
+    set_run_anchor,
 )
 from utils.json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
 from utils.llm_client import invoke_with_provider, invoke_with_file_output
 from utils.git_utils import get_project_root, validate_git_ref, _run_git
-from utils.html_report_generator import generate_html_report, write_html_report, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
+from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -541,7 +541,8 @@ async def run_single_review(
     out_dir: Path,
     timeout: Optional[int] = None,
     tracked_files: Optional[List[Dict]] = None,
-    base_ref: str = "HEAD~1"
+    base_ref: str = "HEAD~1",
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
     """
     Run a single model code review using agent exploration with file-based output.
@@ -562,6 +563,12 @@ async def run_single_review(
         timeout: Optional timeout override in seconds. Uses provider default if not specified.
         tracked_files: Optional list of tracked files from implementation phase
         base_ref: Git reference to diff against (commit at implementation start)
+        served_models: Optional collector for §3.6's attribution.  When a
+            configured ``--fallback-model`` list produced a served model, this
+            slot's ``{model_spec: {"served_model", "fallback"}}`` entry is
+            written into it, so the report can name the model that really
+            answered.  The return tuple is deliberately unchanged — every caller
+            of it destructures three values.
 
     Returns:
         Tuple of (success, issues_list, error)
@@ -573,8 +580,9 @@ async def run_single_review(
     # correct working directory and can access project files.
     project_root = get_project_root(str(plan_path))
 
-    # Parse model spec to get provider info for display
-    provider_name, model_name = parse_model_spec(model_spec)
+    # Parse model spec to get provider info for display. Anchored on the plan
+    # (§9.3.a): the value already exists here, it just used to be dropped.
+    provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
     display_name = f"{provider_name}:{model_name}"
 
     # Generate log file path for debugging
@@ -601,7 +609,10 @@ async def run_single_review(
     }
 
     # Determine timeout: use provided override, or get provider-specific default
-    effective_timeout = timeout if timeout is not None else get_provider_timeout(provider_name)
+    effective_timeout = (
+        timeout if timeout is not None
+        else get_provider_timeout(provider_name, anchor=str(plan_path))
+    )
 
     print(f"[{display_name}] Starting code review with file-based output (timeout: {effective_timeout}s)...")
 
@@ -617,12 +628,24 @@ async def run_single_review(
         timeout=int(effective_timeout),
         log_file=str(log_file),
         prefer_arrays=True,
-        cwd=project_root
+        cwd=project_root,
+        anchor=str(plan_path),
     )
 
     duration = time.time() - start_time
     output_file = result.get("output_file", "")
     source = result.get("source", "unknown")
+
+    # §3.6: record which model served this slot before any of the branches
+    # below return, so a fallback that fired is attributed even on the paths
+    # that end in salvage. Only ever populated when a fallback is configured.
+    details = result.get("details", {}) or {}
+    if served_models is not None and details.get("served_model"):
+        served_models[model_spec] = {
+            "served_model": details["served_model"],
+            "fallback": bool(details.get("served_model_is_fallback")),
+        }
+
     print(f"[{display_name}] Log saved to: {log_file}")
     if output_file:
         print(f"[{display_name}] Output file: {output_file} (source: {source})")
@@ -718,7 +741,8 @@ async def run_all_reviews(
     max_parallel: int,
     tracked_files: Optional[List[Dict]] = None,
     base_ref: str = "HEAD~1",
-    skip_existing: bool = True
+    skip_existing: bool = True,
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
     """
     Run code review across all models using agent exploration.
@@ -741,6 +765,8 @@ async def run_all_reviews(
         max_parallel: Maximum concurrent model invocations
         tracked_files: Optional list of tracked files from implementation phase
         base_ref: Git reference to diff against
+        served_models: Optional §3.6 attribution collector, forwarded to each
+            :func:`run_single_review` (see its docstring)
 
     Returns:
         Dict mapping model spec to tuple of (success, issues_list, error)
@@ -749,15 +775,15 @@ async def run_all_reviews(
     # Per-provider semaphores for concurrency limiting
     provider_semaphores: Dict[str, asyncio.Semaphore] = {}
     for spec in model_specs:
-        prov, _ = parse_model_spec(spec)
+        prov, _ = parse_model_spec(spec, anchor=str(plan_path))
         if prov not in provider_semaphores:
-            limit = get_provider_max_concurrent(prov)
+            limit = get_provider_max_concurrent(prov, anchor=str(plan_path))
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
     results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
-        provider_name, model_name = parse_model_spec(model_spec)
+        provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
         display_name = f"{provider_name}:{model_name}"
 
         # Skip models that already have results (resume after partial failure)
@@ -790,13 +816,15 @@ async def run_all_reviews(
             async with prov_sem:
                 async with semaphore:
                     result = await run_single_review(
-                        model_spec, plan_path, out_dir, timeout, tracked_files, base_ref
+                        model_spec, plan_path, out_dir, timeout, tracked_files,
+                        base_ref, served_models=served_models,
                     )
                     return (model_spec, result)
         else:
             async with semaphore:
                 result = await run_single_review(
-                    model_spec, plan_path, out_dir, timeout, tracked_files, base_ref
+                    model_spec, plan_path, out_dir, timeout, tracked_files,
+                    base_ref, served_models=served_models,
                 )
                 return (model_spec, result)
 
@@ -808,7 +836,12 @@ async def run_all_reviews(
         base_timeout = timeout
     else:
         # Use maximum of all provider timeouts
-        base_timeout = max(get_provider_timeout(parse_model_spec(spec)[0]) for spec in model_specs)
+        base_timeout = max(
+            get_provider_timeout(
+                parse_model_spec(spec, anchor=str(plan_path))[0], anchor=str(plan_path)
+            )
+            for spec in model_specs
+        )
 
     stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
@@ -844,8 +877,17 @@ def generate_review_report(
     phase_dir: Optional[Path] = None,
     base_ref: Optional[str] = None,
     template_style: str = 'pr',
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    """Generate a markdown review report."""
+    """Generate a markdown review report.
+
+    ``served_models`` is §3.6's attribution
+    (``{model_spec: {"served_model", "fallback"}}``): every row that names a
+    model — the ``**Models:**`` summary, each issue's ``**Model:**`` field and
+    the HTML report's badges — names the model that actually served the turn
+    instead of silently crediting the primary. Empty (the shipped default, since
+    ``fallback_models`` ships empty) leaves the report byte-for-byte what it was.
+    """
     lines = [
         "# Code Review Report",
         "",
@@ -869,7 +911,10 @@ def generate_review_report(
         else:
             failed_models[model] = error or "No issues returned"
 
-    lines.append(f"**Models:** {', '.join(successful_models)}")
+    lines.append(
+        "**Models:** "
+        + ", ".join(served_model_label(m, served_models) for m in successful_models)
+    )
     lines.append(f"**Total Issues:** {len(all_issues)}")
 
     # Add validation summary if available
@@ -957,7 +1002,7 @@ def generate_review_report(
     if high:
         for issue in high:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason))
+            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
     else:
         lines.append("_No high priority issues._")
         lines.append("")
@@ -968,7 +1013,7 @@ def generate_review_report(
     if medium:
         for issue in medium:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason))
+            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
     else:
         lines.append("_No medium priority issues._")
         lines.append("")
@@ -979,7 +1024,7 @@ def generate_review_report(
     if low:
         for issue in low:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason))
+            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
     else:
         lines.append("_No low priority issues._")
         lines.append("")
@@ -1025,6 +1070,7 @@ def generate_review_report(
                 failed_models=failed_models,
                 base_ref=base_ref,
                 template_style=template_style,
+                served_models=served_models,
             )
             write_html_report(html_content, phase_dir)
             print(f"HTML report written to: {phase_dir / 'report.html'}")
@@ -1038,7 +1084,8 @@ def _format_issue(
     index: int,
     issue: Dict,
     validation_status: Optional[str] = None,
-    validation_reason: Optional[str] = None
+    validation_reason: Optional[str] = None,
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[str]:
     """Format a single issue for the report.
 
@@ -1047,6 +1094,10 @@ def _format_issue(
         issue: The issue dict with title, desc, type, file, model, etc.
         validation_status: The validation status (valid, invalid, needs-human-decision, etc.)
         validation_reason: The reason for the validation decision (shown for invalid/needs-human-decision)
+        served_models: Optional §3.6 attribution.  The ``**Model:**`` field is
+            the one place this report credits a finding to a model, so a slot
+            served by a configured fallback is named here too — otherwise the
+            row reads as if the primary produced it.
     """
     file_ref = issue.get("file", "unknown")
     line_range = issue.get("line_range")
@@ -1077,7 +1128,7 @@ def _format_issue(
         lines.append("- [ ] Let Claude decide")
 
     lines.extend([
-        f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {issue.get('model', 'unknown')}",
+        f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {served_model_label(issue.get('model', 'unknown'), served_models)}",
         "",
     ])
 
@@ -1366,6 +1417,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
 
+    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # and before any provider read that decides routing.
+    set_run_anchor(str(plan_path))
+
     # Derive prefix and output directory (needed for both normal and reaggregate modes)
     prefix = derive_prefix(plan_path)
     base_dir = plan_path.parent
@@ -1482,7 +1537,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         sys.exit(unattended_mod.fail_closed(e.message, site_id=e.site))
     except RuntimeError as e:
         print(f"ERROR: {e}")
-        available = get_all_model_specs()
+        available = get_all_model_specs(anchor=str(plan_path))
         print(f"Use --models flag. Available: {', '.join(available[:5])}...")
         sys.exit(1)
 
@@ -1504,7 +1559,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
     invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=str(plan_path))]
     if invalid_models:
         print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        available = get_all_model_specs()
+        # Anchored to match the rejection above (§9.3.c).
+        available = get_all_model_specs(anchor=str(plan_path))
         print(f"Available models: {', '.join(available[:10])}...")
 
     print(f"Plan file: {plan_path}")
@@ -1620,6 +1676,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
 
     fix_tasks_path = None
+    # §3.6: filled per slot by run_single_review when a configured fallback
+    # served the turn; empty under the shipped config, which is what keeps the
+    # report identical.
+    served_models: Dict[str, Dict[str, Any]] = {}
     with intent_to_add_untracked(changed_files):
         # Run reviews - agents receive tracked files list and base ref for git diff
         results = await run_all_reviews(
@@ -1630,7 +1690,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
             args.max_parallel,
             tracked_files,
             base_ref,
-            skip_existing=not args.rerun_all
+            skip_existing=not args.rerun_all,
+            served_models=served_models,
         )
 
         # Get the phase directory for code review outputs
@@ -1835,6 +1896,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         report = generate_review_report(
             plan_path, results, changed_files, validated_groups_for_report,
             phase_dir=phase_dir, base_ref=base_ref, template_style=args.report_style,
+            served_models=served_models or None,
         )
 
         # Save report

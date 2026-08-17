@@ -69,3 +69,15 @@ skills/multi-llm/tests/container/runs/*
 .DS_Store
 *.bak
 *.swp
+
+# Local Claude Code state. Named file by file and anchored at the root, never as
+# a bare `.claude/`: this repo dogfoods its own skill, so `.claude/skills/` holds
+# shared project tooling that must stay tracked, and a directory rule would
+# shadow it. Both entries below are per-machine by construction — a permissions
+# set someone accepted once, and a scheduler lock.
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
+
+# Personal scratch kept beside the checkout, not a repo artifact. Anchored, so a
+# `note.md` that a subdirectory ever means to track is unaffected.
+/note.md

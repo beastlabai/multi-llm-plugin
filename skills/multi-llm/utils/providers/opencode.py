@@ -1,5 +1,6 @@
 """OpenCode CLI provider implementation with NDJSON event stream parsing."""
 import json
+import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from .base import (
     PROFILE_GENERATE,
     USAGE_FULL,
     LLMProvider,
+    StructuredSchema,
     split_reasoning_effort,
 )
 
@@ -69,6 +71,32 @@ class OpenCodeProvider(LLMProvider):
     min_version = "1.17.15"
     verified_version = "1.18.12"
 
+    # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
+    # replacing them: the base entries are audited-clean and shared).
+    #
+    # `ProviderAuthError` is the `error.name` of a live opencode auth failure,
+    # captured in `tests/fixtures/opencode/provider_auth_error.jsonl` — 304 bytes
+    # on **stdout** with stderr empty. The `data.message` that accompanies it is
+    # the upstream SDK's, so it varies per provider ("… API key is missing …"
+    # happens to match the base list for Google and would not for another);
+    # the event *name* is opencode's own and does not.
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "providerautherror",
+    )
+    # No rate-limit override: opencode's measured rate-limit behaviour is to
+    # retry internally while writing to **neither** stream until the timeout
+    # fires, so there is no captured text to declare. Declaring a guessed one
+    # would be worse than declaring none — this is the honest "unmeasured".
+    rate_limit_patterns = LLMProvider.rate_limit_patterns
+
+    #: `opencode auth list` exits 0 whether or not anything is stored (§5.3), so
+    #: the count line is the only verdict. Measured 2026-08-16 against a scratch
+    #: HOME/XDG pair: a logged-out run prints exactly "└  0 credentials" and no
+    #: Environment section at all, while an env-key-only run prints the same
+    #: count *plus* "N environment variable(s)" and really can authenticate.
+    _EMPTY_CREDENTIALS = re.compile(r"\b0 credentials\b")
+    _ENVIRONMENT_KEYS = re.compile(r"\b\d+ environment variables?\b")
+
     @property
     def name(self) -> str:
         return "opencode"
@@ -80,7 +108,14 @@ class OpenCodeProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("opencode") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # opencode run --format json --print-logs --log-level ERROR
         #     --model <model> [--variant <effort>] "<prompt>"
         #
@@ -107,17 +142,27 @@ class OpenCodeProvider(LLMProvider):
         model: str,
         transport: str = "argv",
         prompt_file: Optional[str] = None,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Deliver the prompt on argv or on stdin (prompt omitted from argv)."""
         if transport != "stdin":
             return super().build_command_for_transport(
-                prompt, model, transport, prompt_file
+                prompt, model, transport, prompt_file, timeout_s=timeout_s,
+                schema=schema,
             )
-        cmd = self.build_command(prompt, model)
+        cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         return cmd[:-1], prompt
 
     def build_agent_command(
-        self, prompt: str, model: str, profile: str = PROFILE_AGENT_READONLY
+        self,
+        prompt: str,
+        model: str,
+        profile: str = PROFILE_AGENT_READONLY,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
         """Build ``opencode run`` under the profile's own agent (D3e).
 
@@ -127,11 +172,13 @@ class OpenCodeProvider(LLMProvider):
         permission set is opencode's own, and ``cwd`` is pinned by the executor.
         """
         if profile == PROFILE_AGENT_WRITE:
-            cmd = self.build_command(prompt, model)
+            cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
             return [*cmd[:2], "--agent", WRITE_AGENT, *cmd[2:]]
         if profile != PROFILE_AGENT_READONLY:
-            return super().build_agent_command(prompt, model, profile)
-        cmd = self.build_command(prompt, model)
+            return super().build_agent_command(
+                prompt, model, profile, timeout_s=timeout_s, schema=schema
+            )
+        cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         # `--agent` belongs to the `run` subcommand, so it goes after
         # `["opencode", "run"]` — never before it.
         return [*cmd[:2], "--agent", READONLY_AGENT, *cmd[2:]]
@@ -231,6 +278,31 @@ class OpenCodeProvider(LLMProvider):
             except json.JSONDecodeError:
                 pass
         return None
+
+    def classify_auth_probe(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[bool]:
+        """Read ``opencode auth list`` (§5.3/§7.2: exit 0 carries no verdict).
+
+        The base implementation reports ``True`` on a clean exit with no login
+        notice — and ``auth list`` *always* exits 0 and never prints one, so a
+        logged-out opencode was being recorded READY and discovered one dispatch
+        at a time. The count line is the verdict, and it is the only one:
+
+        * ``0 credentials`` with no ``Environment`` section — nothing stored and
+          nothing in the environment: ``False``, the one verdict that refuses a
+          run, so it is drawn from the narrowest possible evidence.
+        * ``0 credentials`` **plus** ``N environment variable(s)`` — opencode
+          found a provider key in the environment and really can authenticate,
+          so this must not refuse (it would fail closed on a working setup).
+        * anything else falls through to the base rule.
+        """
+        haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+        if self._EMPTY_CREDENTIALS.search(haystack) and not self._ENVIRONMENT_KEYS.search(
+            haystack
+        ):
+            return False
+        return super().classify_auth_probe(stdout, stderr, exit_code)
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """Recover the reason for a non-zero exit from the event stream.

@@ -1,16 +1,20 @@
 """LLM client wrapper for multi-provider LLM subprocess calls."""
 
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from . import structured_output
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
+from .providers.base import PROFILE_GENERATE, StructuredOutputUnavailable
 
 
 class LLMClientError(Exception):
@@ -69,11 +73,6 @@ _NODE_SHIM_TARGET_RE = re.compile(
     r'"%(?:~dp0|dp0%)[\\/]?(?P<rel>[^"%\r\n]+?\.(?:js|cjs|mjs))"',
     re.IGNORECASE,
 )
-
-
-def check_cursor_agent_available() -> bool:
-    """Check if cursor-agent CLI is available."""
-    return shutil.which("cursor-agent") is not None
 
 
 def _resolve_node_shim_target(shim_path: Path) -> Optional[List[str]]:
@@ -159,6 +158,28 @@ def _resolve_executable(name: str) -> Tuple[List[str], bool]:
             return node_target, False
         return [resolved], True
     return [resolved], False
+
+
+def expand_env_home(provider_env: Dict[str, str]) -> Dict[str, str]:
+    """Shell-expand a leading ``~`` in adapter/config-supplied env values.
+
+    Nothing expands ``~`` on the way to a child: ``CODEX_HOME='~/.codex_work'``
+    reaches codex verbatim, and codex 0.146.0 either refuses ("path does not
+    exist") or — if a literal ``./~/.codex_work`` happens to exist — resolves it
+    CWD-relative and runs **silently against the wrong auth directory**. The
+    expansion belongs at the two spawn sites rather than in each adapter, and it
+    is applied only to the provider/config **deltas**: ``os.environ`` values
+    reached us from a shell that already expanded them, and re-expanding an
+    inherited value would change bytes nobody asked us to touch.
+
+    ``os.path.expanduser`` is a no-op on any string that does not start with
+    ``~``, and on ``~unknown-user`` where the name does not resolve, so a value
+    that is not a home-relative path passes through unchanged.
+    """
+    return {
+        key: (os.path.expanduser(value) if isinstance(value, str) else value)
+        for key, value in provider_env.items()
+    }
 
 
 def _utf16_code_units(s: str) -> int:
@@ -269,6 +290,78 @@ def _batch_shim_metachar_error(
 
 MAX_LOGGED_PROMPT_LENGTH = 5000
 
+#: §4.4's storage caps. A *successful* ``review-plan`` against a provider
+#: emitting 3 MiB per stream wrote a 6,254,326 B ``log_gemini_*.txt``: this
+#: function truncated the prompt and nothing else. Lane B already ``_tail``s its
+#: failure captures at 64 KiB, so the log path is the one that was uncapped.
+#:
+#: Each stream keeps its **last** ``MAX_LOG_TAIL_LINES`` lines with every line
+#: cut to ``MAX_LOG_LINE_BYTES``; the per-stream and whole-file byte budgets are
+#: the backstops that make the ~100 KB total a property of the written file
+#: rather than of the input. Measured against the captured 6 MB artifact,
+#: 64 KiB/line + last-20 alone took it to ~17 KB.
+MAX_LOG_LINE_BYTES = 64 * 1024
+MAX_LOG_TAIL_LINES = 20
+MAX_LOG_TOTAL_BYTES = 100 * 1024
+#: Two streams plus a ≤5 KB prompt and the header stay inside the total.
+MAX_LOG_STREAM_BYTES = 45 * 1024
+
+
+def _redact(text: str) -> str:
+    """§4.5's one redaction boundary, imported late.
+
+    ``write_safety`` reaches this module through ``subagent_tasks``, so a
+    module-level import here would close an import cycle. The call is on a
+    per-invocation path, not a per-line one.
+    """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .write_safety import redact_text
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import redact_text
+    return redact_text(text)
+
+
+def _cut_bytes(text: str, limit: int, marker: str) -> str:
+    """``text`` cut to ``limit`` UTF-8 bytes, head kept, ``marker`` appended.
+
+    The marker is charged against ``limit`` rather than added on top, so a cap
+    stated as a number of bytes really is one — a "~100 KB" file that comes out
+    at 100 KB plus a footer is a cap nobody can assert on.
+    """
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return text
+    keep = max(0, limit - len(marker.encode("utf-8")))
+    return encoded[:keep].decode("utf-8", errors="ignore") + marker
+
+
+def _bound_stream(text: str) -> str:
+    """One captured stream, bounded per §4.4 — **after** it has been redacted.
+
+    Order is normative and is the reason L3 and L4 are one atomic change: every
+    cut below slices by construction, and a cut applied first leaves a remnant no
+    pattern matches. The last-20-lines rule would decapitate a PEM block's
+    ``-----BEGIN`` header and keep its body; the per-line cut would keep a value
+    whose key name it had just removed. Neither is recoverable downstream.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) > MAX_LOG_TAIL_LINES:
+        dropped = len(lines) - MAX_LOG_TAIL_LINES
+        lines = [
+            f"... [{dropped} earlier line(s) truncated; last {MAX_LOG_TAIL_LINES} kept]"
+        ] + lines[-MAX_LOG_TAIL_LINES:]
+    bounded = [
+        _cut_bytes(line, MAX_LOG_LINE_BYTES, f" ... [line truncated at {MAX_LOG_LINE_BYTES} B]")
+        for line in lines
+    ]
+    return _cut_bytes(
+        "\n".join(bounded),
+        MAX_LOG_STREAM_BYTES,
+        f"\n... [stream truncated at {MAX_LOG_STREAM_BYTES} B]",
+    )
+
 
 def _save_log(
     log_file: Union[str, Path],
@@ -297,10 +390,23 @@ def _save_log(
 
     Returns:
         True if log was saved successfully, False otherwise
+
+    Every rendered field is passed through §4.5's ``redact_text`` **first** and
+    bounded by §4.4's caps **second**. This is the sink where all nine planted
+    secret shapes landed on a *successful* run, and the sink that wrote a
+    6,254,326 B log for one ``review-plan``.
     """
     try:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # §4.5 before §4.4: redact the fully rendered text, then cap it. Reversing
+        # these two would slice a secret across a cut and leave a remnant nothing
+        # downstream can match.
+        prompt = _redact(prompt or "")
+        stdout = _bound_stream(_redact(stdout or ""))
+        stderr = _bound_stream(_redact(stderr or ""))
+        error = _redact(error) if error else error
 
         lines = [
             "=" * 80,
@@ -343,13 +449,53 @@ def _save_log(
             "",
         ])
 
+        # The whole-file backstop, so "~100 KB" is a property of the bytes on
+        # disk rather than an inference from the per-stream budgets. Safe to cut
+        # blind: everything above was redacted before it got here.
+        rendered = _cut_bytes(
+            "\n".join(lines),
+            MAX_LOG_TOTAL_BYTES,
+            f"\n... [log truncated at {MAX_LOG_TOTAL_BYTES} B]\n",
+        )
+
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(rendered)
 
         return True
     except (IOError, OSError) as e:
         print(f"WARNING: Failed to save log to {log_file}: {e}")
         return False
+
+
+def _served_model_attribution(
+    provider: Any, model: str, stdout: str
+) -> Optional[Tuple[str, bool, Optional[str]]]:
+    """§3.6's ``(served_model, is_fallback, warning)`` for one attempt, or None.
+
+    **Gated on a configured fallback list, which ships empty.** Attribution is
+    mandatory *whenever a fallback is configured* — without it a report
+    attributes a haiku answer to the sonnet the user asked for. With nothing
+    configured there is no substitution to disclose, so nothing is parsed,
+    nothing is recorded and nothing is printed: the result dict is byte-for-byte
+    what it has always been.
+
+    Only claude-code answers here (its envelope carries ``modelUsage``); §4.6
+    stays closed, so every other adapter lacks both methods and returns None.
+
+    **Read, never depended on.** Any failure to answer degrades to None — an
+    attribution field never fails an otherwise-successful attempt.
+    """
+    resolve = getattr(provider, "resolve_served_model", None)
+    configured = getattr(provider, "fallback_models", None)
+    if resolve is None or configured is None:
+        return None
+    try:
+        fallbacks = configured(model)
+        if not fallbacks:
+            return None
+        return resolve(stdout, model, fallbacks)
+    except Exception:  # noqa: BLE001 - attribution never fails a good attempt
+        return None
 
 
 def invoke_with_provider(
@@ -359,6 +505,8 @@ def invoke_with_provider(
     log_file: Optional[Union[str, Path]] = None,
     cwd: Optional[str] = None,
     prompt_transport: Optional[str] = None,
+    anchor: Optional[Union[str, Path]] = None,
+    schema_phase: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -382,6 +530,26 @@ def invoke_with_provider(
             byte-identical. Refused with SUBPROCESS_FAILED when the adapter does
             not declare support, rather than silently falling back to argv and
             re-introducing the cap the caller was avoiding.
+        anchor: Optional discovery anchor (the run's plan-file path). Threaded
+            into BOTH ``parse_model_spec`` and ``get_provider_timeout`` so a bare
+            (prefix-less) spec resolves its ``default_provider`` — and its
+            timeout — against the plan-derived project config rather than CWD's.
+            This is the spawn site: unanchored, a run started from a foreign CWD
+            launches a different binary than the project configured (§9.3.c).
+        schema_phase: §4.2's phase name (``review-plan``, ``code-review``, …),
+            or ``None``. **``None`` is the default and changes nothing**: no
+            schema is resolved, no flag is emitted and the returned dict is
+            byte-for-byte what it has always been.
+
+            When set, this is §4.2.2's "the caller reads the flag before
+            dispatch" leg: the phase's schema file is resolved through
+            ``utils.structured_output``, the adapter's
+            ``structured_output_support`` decides whether it is passed at all,
+            codex's sidecar is written and removed in a ``finally``, and
+            §4.2.1's failure policy is applied to the envelope afterwards. The
+            verdict lands on ``details['structured_output']`` as ``native`` /
+            ``recovered`` / ``unvalidated``; a refusal replaces the result with
+            a failure carrying ``details['failure_reason']``.
 
     Returns:
         Dict with 'success' key and either:
@@ -398,7 +566,7 @@ def invoke_with_provider(
         PROMPT_UNSAFE: Prompt carries cmd.exe metacharacters and the provider
             only resolves to a Windows .cmd/.bat shim
     """
-    provider_name, model = parse_model_spec(model_spec)
+    provider_name, model = parse_model_spec(model_spec, anchor=anchor)
     provider = get_provider(provider_name)
 
     if provider is None:
@@ -424,7 +592,7 @@ def invoke_with_provider(
         }
 
     # Use provided timeout or provider's default
-    effective_timeout = timeout or get_provider_timeout(provider_name)
+    effective_timeout = timeout or get_provider_timeout(provider_name, anchor=anchor)
 
     # Build command using provider, resolving cmd[0] to an absolute path
     # (and past any Windows .cmd/.bat npm shim, to a sibling .exe or the
@@ -441,7 +609,67 @@ def invoke_with_provider(
             "error_code": ERROR_SUBPROCESS_FAILED,
             "details": {"provider": provider_name, "model": model},
         }
-    cmd, stdin_text = provider.build_command_for_transport(prompt, model, transport)
+    # §4.2.2's pre-dispatch read, and M7's one call site. `schema_phase=None`
+    # skips all of it, so every existing caller renders the same argv it always
+    # did. `schema_for_dispatch` is what consults `structured_output_support`:
+    # an adapter that declares `False` — or a schema this CLI provably cannot
+    # carry — comes back `None` here and the phase runs its prompt-level JSON
+    # path, marked `recovered`/`unvalidated` and never `native`.
+    schema = None
+    structured_marker = structured_output.MARKER_UNVALIDATED
+    schema_cleanup = contextlib.ExitStack()
+    if schema_phase:
+        try:
+            schema, structured_marker = structured_output.schema_for_dispatch(
+                provider, schema_phase
+            )
+            if schema is not None and provider.structured_output_transport == "file":
+                # One `mkdtemp` per invocation, written by the CALLER: adapters
+                # are singletons under a concurrent fan-out and cannot hold this.
+                # The stack's `close()` in the `finally` below removes it on
+                # success, on timeout, on kill-path teardown and on exception.
+                schema = schema_cleanup.enter_context(
+                    structured_output.schema_sidecar(schema)
+                )
+        except structured_output.SchemaConfigError as exc:
+            schema_cleanup.close()
+            return {
+                "success": False,
+                "error": f"structured output: {exc}",
+                "error_code": ERROR_SUBPROCESS_FAILED,
+                "details": {
+                    "provider": provider_name,
+                    "model": model,
+                    "failure_reason": structured_output.FAILURE_CONFIG_ERROR,
+                    "retryable": False,
+                },
+            }
+
+    # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
+    # already resolved here, so an adapter with an internal cutoff of its own
+    # (agy's `--print-timeout`) can hold it under the deadline this same call
+    # passes to `subprocess.run` below, instead of hardcoding a value that has to
+    # be kept in sync by hand. Twelve of the thirteen adapters ignore it, and
+    # dropping the keyword restores every rendered argv byte-for-byte.
+    try:
+        cmd, stdin_text = provider.build_command_for_transport(
+            prompt, model, transport, timeout_s=effective_timeout, schema=schema
+        )
+    except StructuredOutputUnavailable as exc:
+        # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
+        # the CLI. A configuration error, never retried.
+        schema_cleanup.close()
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_code": ERROR_SUBPROCESS_FAILED,
+            "details": {
+                "provider": provider_name,
+                "model": model,
+                "failure_reason": structured_output.FAILURE_CONFIG_ERROR,
+                "retryable": False,
+            },
+        }
     launcher, is_batch_shim = _resolve_executable(cmd[0])
     cmd = [*launcher, *cmd[1:]]
 
@@ -455,6 +683,7 @@ def invoke_with_provider(
                 prompt, provider_name, model, cmd[0]
             )
             if metachar_error is not None:
+                schema_cleanup.close()
                 return metachar_error
 
         # Prompt-on-argv transport hits hard command-line length caps on
@@ -464,12 +693,17 @@ def invoke_with_provider(
         # the prompt. Never enforced on POSIX.
         length_error = _prompt_length_error(cmd, prompt, provider_name, model, is_batch_shim)
         if length_error is not None:
+            schema_cleanup.close()
             return length_error
 
     start_time = time.time()
 
-    # Build subprocess environment: add provider vars, remove blacklisted ones
-    provider_env = provider.get_env(model)
+    # Build subprocess environment: add provider vars, remove blacklisted ones.
+    # `resolve_env`, not `get_env`: the Lane A fan-out IS the `generate` profile
+    # (§2.2), so it gets the global non-interactive git block plus the scoped
+    # `credential.helper=""` wipe. Naming the profile rather than leaning on the
+    # default keeps the scoping greppable — `agent-write` must never appear here.
+    provider_env = expand_env_home(provider.resolve_env(model, PROFILE_GENERATE, anchor=anchor))
     remove_env = provider.get_remove_env()
     if provider_env or remove_env:
         env = {**os.environ, **provider_env}
@@ -533,17 +767,39 @@ def invoke_with_provider(
                     duration_seconds=duration
                 )
 
+            details = {
+                "exit_code": result.returncode,
+                "stderr": result.stderr,
+                "provider": provider_name,
+                "model": model,
+                "duration_seconds": duration
+            }
+            if schema_phase:
+                # §4.2.1 cases 2 and 4 both arrive here as a non-zero exit, and
+                # they are NOT the same failure: the CLI exhausting its own
+                # structured-output budget is a `schema_violation` our ladder
+                # must not re-run, while a malformed schema is a configuration
+                # error that made **zero requests** and cost nothing. Classifying
+                # here is what keeps the second from being retried as if it were
+                # transient.
+                verdict = structured_output.classify_attempt(
+                    schema,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    exit_code=result.returncode,
+                    phase=schema_phase,
+                    model=f"{provider_name}:{model}",
+                )
+                if verdict.failure_reason:
+                    details["failure_reason"] = verdict.failure_reason
+                    details["retryable"] = verdict.retryable
+                if verdict.warning:
+                    print(f"[WARN] {verdict.warning}", file=sys.stderr)
             return {
                 "success": False,
                 "error": error_message,
                 "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {
-                    "exit_code": result.returncode,
-                    "stderr": result.stderr,
-                    "provider": provider_name,
-                    "model": model,
-                    "duration_seconds": duration
-                }
+                "details": details,
             }
 
         # Parse output using provider
@@ -555,6 +811,61 @@ def invoke_with_provider(
             "model": model,
             "duration_seconds": duration
         }
+
+        # §3.6: a fallback that fired rides out on the same details dict the
+        # provider/model pair travels on, so every downstream record that names
+        # the requested model can name the model that actually served the turn.
+        # One WARN per slot — the adapter owns the text; there is no second one.
+        attribution = _served_model_attribution(provider, model, result.stdout)
+        if attribution is not None:
+            served, is_fallback, warning = attribution
+            parsed["details"]["served_model"] = served
+            parsed["details"]["served_model_is_fallback"] = is_fallback
+            if warning:
+                print(f"[WARN] {warning}", file=sys.stderr)
+
+        # §4.2.1's rule, stated as a rule and not only as a case: **no**
+        # combination of exit 0, `subtype: success` and `is_error: false` is by
+        # itself a success for a schema-carrying phase. The only success is
+        # `structured_output` present (→ `native`) or a recovered document that
+        # validates against the SAME schema file (→ `recovered`, one WARN).
+        # Anything else is `schema_violation`, handed to the retry ladder like
+        # any other parse failure. Applied here, on the parsed envelope, so no
+        # adapter can silently upgrade prose to validated output.
+        if schema_phase:
+            verdict = structured_output.classify_attempt(
+                schema,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                phase=schema_phase,
+                model=f"{provider_name}:{model}",
+            )
+            if verdict.warning:
+                print(f"[WARN] {verdict.warning}", file=sys.stderr)
+            if verdict.failure_reason:
+                parsed = {
+                    "success": False,
+                    "error": (
+                        f"{provider_name} returned no schema-conformant document "
+                        f"for {schema_phase} ({verdict.failure_reason})"
+                    ),
+                    "error_code": ERROR_PARSE_ERROR,
+                    "data": None,
+                    "details": {
+                        **parsed.get("details", {}),
+                        "failure_reason": verdict.failure_reason,
+                        "retryable": verdict.retryable,
+                        "structured_output": None,
+                    },
+                }
+            else:
+                parsed["details"]["structured_output"] = (
+                    verdict.marker or structured_marker
+                )
+                if verdict.data is not None:
+                    parsed["success"] = True
+                    parsed["data"] = verdict.data
 
         # If parse_output indicates failure, add error_code
         if not parsed.get("success", False) and "error_code" not in parsed:
@@ -657,6 +968,13 @@ def invoke_with_provider(
             }
         }
 
+    finally:
+        # §4.2.1: codex's per-invocation schema directory is removed in a
+        # `finally` so it is cleaned up on success, on timeout, on kill-path
+        # teardown and on exception alike. A no-op when `schema_phase` is unset
+        # or the adapter's transport is inline.
+        schema_cleanup.close()
+
 
 def _is_valid_parsed_data(data: Any) -> bool:
     """Check if parsed data is valid JSON (not just a raw wrapper).
@@ -686,7 +1004,8 @@ def invoke_with_file_output(
     timeout: Optional[int] = None,
     log_file: Optional[Union[str, Path]] = None,
     prefer_arrays: bool = True,
-    cwd: Optional[str] = None
+    cwd: Optional[str] = None,
+    anchor: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -708,6 +1027,8 @@ def invoke_with_file_output(
         timeout: Optional timeout override in seconds
         log_file: Optional path to save full output log
         prefer_arrays: If True, prefer array candidates when extracting JSON
+        anchor: Optional discovery anchor (the run's plan-file path), forwarded
+            verbatim to :func:`invoke_with_provider` (§9.3.c)
 
     Returns:
         Dict with keys:
@@ -717,7 +1038,10 @@ def invoke_with_file_output(
         - 'output_file': Path to the output file (if generated)
         - 'error': Error message (if failed)
         - 'file_error': File-specific error (if file read failed)
-        - 'details': Provider execution details
+        - 'details': Provider execution details, forwarded verbatim on every
+          return path — including §3.6's ``served_model`` /
+          ``served_model_is_fallback``, so the JSON's origin travels with it
+          whichever channel (file, extracted file, stdout) supplied it
     """
     from .json_extractor import generate_output_path, read_json_from_file
 
@@ -742,7 +1066,8 @@ def invoke_with_file_output(
         }
 
     # Invoke provider
-    result = invoke_with_provider(prompt, model_spec, timeout, log_file, cwd=cwd)
+    result = invoke_with_provider(prompt, model_spec, timeout, log_file, cwd=cwd,
+                                  anchor=anchor)
 
     # Check for hard failures that mean the command didn't run properly
     # (as opposed to parse errors which may still have written to file)

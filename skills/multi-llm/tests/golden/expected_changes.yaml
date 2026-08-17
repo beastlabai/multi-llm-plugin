@@ -48,6 +48,250 @@ changes:
       root, with the same positional shift. `review-plan` is the only phase in
       this fixture that writes a checkpoint at all, so it is the only dir that
       gains a mutex.
+  # ---------------------------------------------------------------------------
+  # L1 (§9.3.d) — canonicalised model specs.
+  #
+  # `resolve_models` used to hand back `--models` / `defaults.models` verbatim,
+  # bare (prefix-less) entries included, and every consumer re-resolved the same
+  # bare string through its *own* `parse_model_spec` — only some of them
+  # anchored. That is what let one `sonnet` become the project's `gemini:sonnet`
+  # in validation and `cursor-agent:sonnet` at the spawn, in one run. It now
+  # resolves each entry once, against the anchor it already accepts, and returns
+  # `provider:model`, so the spec set entering both lanes is closed under
+  # `parse_model_spec` and no later site can change the provider.
+  #
+  # This guard's fixture drives `--models cursor-agent` — a bare spec that
+  # happens to be spelled like a provider name — which resolves against the
+  # fixture's `default_provider: cursor-agent` to `cursor-agent:cursor-agent`.
+  # Same provider, same model, same routing; only the spelling moved. It shows up
+  # in two places, both declared below rather than discovered: model
+  # *attribution* strings copied from the resolved spec list, and the per-model
+  # artifact names, which `sanitize_model_name` derives from the same spec.
+  #
+  # Pointers are leaf-exact on purpose. JSON-pointer prefixes cannot express "any
+  # index", so naming the *field* means naming the leaf; a container-level
+  # pointer (`…/grouped.json/groups`) would also excuse a changed group id or
+  # count, which is precisely what this guard exists to catch. The fixture is
+  # pinned, so these indices do not churn without a deliberate re-capture.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/fixes/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/fixes/1/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/fixes/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/fixes/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/1/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/2/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/3/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/0/suggestions/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/1/suggestions/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/2/suggestions/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/3/suggestions/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/1/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/2/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/3/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/suggestions/0/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/suggestions/0/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/suggestions/0/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/3/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/3/suggestions/0/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/3/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/issues.json/0/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/issues.json/1/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/issues.json/2/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/artifacts/issues.json/3/model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/0/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/0/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/1/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/1/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/2/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/2/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/3/models/0
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/3/suggestions/0/source_model
+    rationale: >
+      L1 / §9.3.d — a model *attribution* string copied from the resolved spec
+      list: the fixture's bare `cursor-agent` now reads
+      `cursor-agent:cursor-agent`. See the block comment above.
+  - pointer: /phases/code-review/created_paths/0
+    rationale: >
+      L1 / §9.3.d, file-name half — `sanitize_model_name` derives the per-model
+      result and log file names from the resolved spec, so `cursor-agent.json`
+      / `log_cursor-agent.txt` become `cursor-agent_cursor-agent.json` /
+      `log_cursor-agent_cursor-agent.txt`. The resume predicate looks for the
+      current name, so a run started before L1 and resumed after it re-runs its
+      bare-spec models once — stated, not discovered. The identical rename in
+      `review-plan` and at the output root falls under the two entries above.
+  - pointer: /phases/code-review/created_paths/3
+    rationale: >
+      L1 / §9.3.d, file-name half — `sanitize_model_name` derives the per-model
+      result and log file names from the resolved spec, so `cursor-agent.json`
+      / `log_cursor-agent.txt` become `cursor-agent_cursor-agent.json` /
+      `log_cursor-agent_cursor-agent.txt`. The resume predicate looks for the
+      current name, so a run started before L1 and resumed after it re-runs its
+      bare-spec models once — stated, not discovered. The identical rename in
+      `review-plan` and at the output root falls under the two entries above.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

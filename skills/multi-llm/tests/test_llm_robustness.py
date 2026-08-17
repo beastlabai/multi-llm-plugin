@@ -509,6 +509,115 @@ class TestRateLimiting:
         error_type = _classify_validation_error("Request timeout", http_status=429)
         assert error_type == ERROR_TYPE_RATE_LIMITED
 
+
+@pytest.mark.robustness
+class TestLaneARateLimitIsBoundaryAware:
+    """L2 (§7.1.a) — Lane A's two bare ``'429'`` substring tests, narrowed.
+
+    The measured defect: ``run_single_model``'s ``'429' in str(result['error'])``
+    fired on filler text containing the digits, and its ``retry_count < 3``
+    then re-dispatched the slot **four** times, each with a *fresh* full
+    timeout, plus 5 s + 10 s + 20 s of backoff — quadrupling attempts and
+    failure artifacts on a run that was never rate limited.
+
+    Both sites now route through ``providers/base.py``'s ``matches_any``, which
+    is the same helper the adapters' own ``rate_limit_patterns`` use. That
+    adapter list was suspected of the same flaw and **measured clean**; it is
+    deliberately not touched, and ``TestClassifyFailure`` must stay green.
+    """
+
+    def _dispatches(self, error_text):
+        """Run ``run_single_model`` against a provider that always fails.
+
+        Returns the number of times the invocation leg was entered — 1 means
+        the slot was dispatched once and the error was *not* read as a rate
+        limit; 4 is the defect (one initial dispatch plus ``retry_count < 3``).
+        """
+        import asyncio
+
+        from utils import review_orchestrator_base as rob
+
+        calls = []
+
+        def _fake_invoke(**kwargs):
+            calls.append(kwargs)
+            return {
+                "success": False,
+                "error": error_text,
+                "details": {"stderr": error_text},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = str(Path(tmp) / "plan.md")
+            Path(plan_path).write_text("plan", encoding="utf-8")
+            with patch.object(rob, "invoke_with_file_output", _fake_invoke), \
+                 patch.object(rob, "get_project_root", lambda _p: tmp), \
+                 patch.object(rob, "get_provider_timeout", lambda *a, **k: 30), \
+                 patch.object(rob.asyncio, "sleep", _no_sleep):
+                asyncio.run(
+                    rob.run_single_model(
+                        model_spec="cursor-agent:auto",
+                        plan_path=plan_path,
+                        prompt_template="{prefix}{output_json_path}",
+                        prompt_context={},
+                        phase_name="review-plan",
+                        invoke_phase="plan_review",
+                        timeout=30,
+                        out_dir=tmp,
+                        prefix="plan",
+                    )
+                )
+        return len(calls)
+
+    # A realistic Lane A failure: the wrapper says "failed to parse", and the
+    # model's own prose — which is what makes the message long — happens to
+    # contain the digits. Today's `'429' in str(error)` fires on the prose;
+    # `matches_any` does not, because the only error-context words are >48
+    # characters away, in the wrapper's own prefix.
+    PROSE_WITH_DIGITS = (
+        "Failed to parse JSON output from cursor-agent. Raw output follows.\n"
+        "The reviewer walked the repository and summarised what it saw:\n"
+        "the module under review spans 429 lines and imports nothing unusual.\n"
+    )
+
+    def test_prose_containing_429_dispatches_once(self):
+        """A model that wrote ``spans 429 lines`` is not rate limited.
+
+        Red today: four dispatches, each with a fresh full timeout.
+        """
+        assert self._dispatches(self.PROSE_WITH_DIGITS) == 1
+
+    def test_token_counts_and_costs_are_not_rate_limits(self):
+        """The two shapes ``_ERROR_CONTEXT`` exists for: counts and costs."""
+        assert self._dispatches("completed after 14290 output tokens") == 1
+        assert self._dispatches('step finished {"cost":0.0429}') == 1
+
+    def test_a_real_429_still_retries(self):
+        """Green-stays-green: the narrowing may not disable the real path.
+
+        Four dispatches is the *correct* count here — one initial plus
+        ``retry_count < 3``. M9 later replaces the recursion with a bounded
+        ladder; L2 only narrows what enters it.
+        """
+        assert self._dispatches("HTTP 429 Too Many Requests") == 4
+
+    def test_reason_line_is_boundary_aware_too(self):
+        """``format_failure_details`` at :442 — the sentence a user acts on."""
+        from utils.review_orchestrator_base import _format_failure_details
+
+        prose = _format_failure_details(1, self.PROSE_WITH_DIGITS, "")
+        assert "Rate limited" not in prose
+
+        real = _format_failure_details(1, "", "HTTP status 429 returned")
+        assert "Reason: Rate limited" in real
+
+
+def _no_sleep(_delay):
+    """Awaitable no-op, so a retrying test does not really back off."""
+    async def _noop():
+        return None
+    return _noop()
+
     @patch("shutil.which")
     @patch("utils.llm_client.subprocess.run")
     def test_rate_limit_in_stderr(self, mock_run, mock_which):

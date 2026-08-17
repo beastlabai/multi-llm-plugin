@@ -22,6 +22,22 @@ declaration-vs-implementation spirit as ``tests/test_providers.py``.
    ``auth_check`` — and for no other, since a probe the real CLI does not offer
    is as much a fabrication as a wire format it never emits.
 
+**Its counterpart: a one-off adapter is a *plugin*, never a sixth identity.**
+The five parts above are the price of an identity because an identity is
+permanent, shared and asserted. A *probe* that needs one fake provider to behave
+unusually for one run — a multi-megabyte payload, a malformed envelope, a
+version below a gate — pays none of it and must not edit this shared mock to get
+it: set ``MOCK_LLM_PLUGIN=<path>.py`` (``SkillRunner(mock_plugin=…)``) at a
+throwaway module **outside the tree**, which ``mock_llm.py`` imports after its
+own tables are built, under ``MULTI_LLM_TEST_MODE=1`` only, to replace exactly
+``parse_provider_args`` / ``format_output`` / ``get_response_content`` /
+``VERSION_STRINGS``. That injection point exists because its absence already
+cost: a probe overwrote ``tests/mocks/mock_llm.py`` in place (1275 lines → 40)
+and broke this file and ``test_mock_adapter_roundtrip`` by collection error
+(plans/harness-invocation-improvements.md §13.1). ``tests/
+test_mock_plugin_hook.py`` owns the hook; adding a row here is still the only
+way to make a *lane* promise, and it still costs five parts.
+
 **The two directions, and why the second one is not C5's literal wording.**
 C5 was written before the Phase 1 spike and expected up to seven CLIs to drop
 into this lane; it therefore asked for "a roster entry with no mock identity

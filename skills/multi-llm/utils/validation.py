@@ -15,6 +15,21 @@ from typing import Any, Dict, List, Optional, Tuple
 # Import the invoke_for_json utility
 try:
     from .llm_client import invoke_for_json
+    from .providers.base import (
+        CATEGORY_CONNECTION_ERROR,
+        CATEGORY_INVALID_MODEL,
+        CATEGORY_PERMISSION_DENIED,
+        CATEGORY_SERVER_ERROR,
+        classify_streams,
+    )
+    from .retry_ladder import (
+        STATUS_AUTH_FAILED,
+        STATUS_CONTEXT_LENGTH_EXCEEDED,
+        STATUS_RATE_LIMITED,
+        STATUS_RUNNER_ERROR,
+        STATUS_SPAWN_FAILED,
+        STATUS_TIMEOUT,
+    )
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .cli_common import durable_reaggregate_fields, reaggregate_command
     from .subagent_prompts import build_validation_prompt
@@ -28,6 +43,21 @@ try:
     )
 except ImportError:
     from utils.llm_client import invoke_for_json
+    from utils.providers.base import (
+        CATEGORY_CONNECTION_ERROR,
+        CATEGORY_INVALID_MODEL,
+        CATEGORY_PERMISSION_DENIED,
+        CATEGORY_SERVER_ERROR,
+        classify_streams,
+    )
+    from utils.retry_ladder import (
+        STATUS_AUTH_FAILED,
+        STATUS_CONTEXT_LENGTH_EXCEEDED,
+        STATUS_RATE_LIMITED,
+        STATUS_RUNNER_ERROR,
+        STATUS_SPAWN_FAILED,
+        STATUS_TIMEOUT,
+    )
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.cli_common import durable_reaggregate_fields, reaggregate_command
     from utils.subagent_prompts import build_validation_prompt
@@ -88,6 +118,57 @@ RECOVERABLE_ERROR_TYPES = frozenset({
 })
 
 
+#: Our *own* extraction failing, which is not a transport category at all — the
+#: provider answered, and this codebase could not turn the answer into JSON.
+#: Lane B's equivalent is D3k rung 5 (``unparseable_result``), not anything
+#: ``classify_failure`` returns, which is why this half deliberately stays local
+#: while the four transport categories delegate (§7.1.a).
+#:
+#: The bare ``"json"`` this list used to open with is gone: it classified *any*
+#: error merely **naming** a ``.json`` path — "output file …/plan_review.json was
+#: never written" — as a parsing error, hence ``recoverable``, hence worth a
+#: whole revalidation dispatch on a condition no re-ask can fix. Every entry now
+#: names a parse *event*.
+_PARSING_PATTERNS = (
+    "json parse",
+    "parse json",
+    "json decode",
+    "jsondecodeerror",
+    "invalid json",
+    "no valid json",
+    "no json found",
+    "malformed json",
+    "parse error",
+    "parsing error",
+    "decode error",
+    "decodeerror",
+    "syntax error",
+    "unexpected token",
+    "expecting value",
+    "expecting property",
+)
+
+#: The shared classifier's categories, mapped onto the vocabulary this module
+#: **persists** (§7.1.a). The mapping is deliberately lossy in one direction
+#: only: several distinct infrastructure verdicts collapse onto
+#: ``ERROR_TYPE_MODEL_FAILURE``, which is correctly **not** in
+#: :data:`RECOVERABLE_ERROR_TYPES` — none of them is fixed by re-asking.
+_CATEGORY_TO_ERROR_TYPE = {
+    STATUS_RATE_LIMITED: ERROR_TYPE_RATE_LIMITED,
+    STATUS_TIMEOUT: ERROR_TYPE_TIMEOUT,
+    CATEGORY_CONNECTION_ERROR: ERROR_TYPE_MODEL_FAILURE,
+    CATEGORY_SERVER_ERROR: ERROR_TYPE_MODEL_FAILURE,
+    STATUS_AUTH_FAILED: ERROR_TYPE_MODEL_FAILURE,
+    STATUS_SPAWN_FAILED: ERROR_TYPE_MODEL_FAILURE,
+    CATEGORY_PERMISSION_DENIED: ERROR_TYPE_MODEL_FAILURE,
+    CATEGORY_INVALID_MODEL: ERROR_TYPE_MODEL_FAILURE,
+    STATUS_RUNNER_ERROR: ERROR_TYPE_MODEL_FAILURE,
+    # A prompt that does not fit is terminal (§7.6(a)) and must never be
+    # recorded recoverable: a revalidation pass would resend it unchanged.
+    STATUS_CONTEXT_LENGTH_EXCEEDED: ERROR_TYPE_MODEL_FAILURE,
+}
+
+
 def _classify_validation_error(error: str, http_status: Optional[int] = None) -> str:
     """
     Classify a validation error by type.
@@ -96,6 +177,17 @@ def _classify_validation_error(error: str, http_status: Optional[int] = None) ->
     For genuine ambiguity where the LLM returns needs-human-decision, use
     ERROR_TYPE_AMBIGUOUS directly in the validation result handler.
 
+    **Signature, return vocabulary and the ``http_status`` fast path are frozen**
+    (§7.1.a): callers branch on the ``ERROR_TYPE_*`` constants, and
+    ``error_type``/``recoverable`` are written into every persisted group result
+    and read downstream by ``filtering.RECOVERABLE_ERROR_TYPES``. What changed is
+    the *body*: this used to be a second, complete classifier — five ordered
+    substring lists including a bare ``"429"`` with the same boundary flaw Lane A
+    had, and a bare ``"json"`` — living three modules away from the one in
+    ``providers/base.py`` and disagreeing with it. The four transport categories
+    now delegate, and only the parse half stays local, because that classifies
+    *our own* extraction failure rather than the provider's transport.
+
     Args:
         error: The error message string
         http_status: Optional HTTP status code if available (e.g., 429 for rate limit)
@@ -103,9 +195,10 @@ def _classify_validation_error(error: str, http_status: Optional[int] = None) ->
     Returns:
         One of the ERROR_TYPE_* constants
     """
-    error_lower = error.lower()
+    error_lower = (error or "").lower()
 
-    # Check HTTP status codes first (most reliable)
+    # Check HTTP status codes first (most reliable). It stays *first* and stays
+    # local: it is the one input that needs no patterns at all.
     if http_status:
         if http_status == 429:
             return ERROR_TYPE_RATE_LIMITED
@@ -114,72 +207,15 @@ def _classify_validation_error(error: str, http_status: Optional[int] = None) ->
         elif http_status in (500, 502, 503):
             return ERROR_TYPE_MODEL_FAILURE
 
-    # Parsing errors - be specific to avoid false positives
-    parsing_patterns = [
-        "json",
-        "parse error",
-        "parsing error",
-        "decode error",
-        "decodeerror",
-        "syntax error",
-        "no valid json",
-        "unexpected token",
-        "malformed",
-        "invalid json",
-        "expecting value",
-        "expecting property",
-    ]
-    if any(pattern in error_lower for pattern in parsing_patterns):
+    if any(pattern in error_lower for pattern in _PARSING_PATTERNS):
         return ERROR_TYPE_PARSING
 
     # Also classify non-success-but-parsable responses (raw/malformed data) as parsing errors
     if "raw" in error_lower and ("response" in error_lower or "output" in error_lower):
         return ERROR_TYPE_PARSING
 
-    # Timeout errors
-    timeout_patterns = [
-        "timeout",
-        "timed out",
-        "deadline exceeded",
-        "connection timed",
-        "request timed",
-    ]
-    if any(pattern in error_lower for pattern in timeout_patterns):
-        return ERROR_TYPE_TIMEOUT
-
-    # Rate limiting - use specific phrases to avoid matching unrelated "rate" or "limit" words
-    rate_limit_patterns = [
-        "rate limit",
-        "rate-limit",
-        "ratelimit",
-        "too many requests",
-        "quota exceeded",
-        "quota limit",
-        "throttled",
-        "throttling",
-        "429",
-    ]
-    if any(pattern in error_lower for pattern in rate_limit_patterns):
-        return ERROR_TYPE_RATE_LIMITED
-
-    # Model/infrastructure failures
-    model_failure_patterns = [
-        "binary not found",
-        "not found in path",
-        "model not found",
-        "service unavailable",
-        "internal server error",
-        "server error",
-        "connection refused",
-        "connection failed",
-        "api key",
-        "authentication",
-        "unauthorized",
-    ]
-    if any(pattern in error_lower for pattern in model_failure_patterns):
-        return ERROR_TYPE_MODEL_FAILURE
-
-    return ERROR_TYPE_UNKNOWN
+    category = classify_streams(error or "", "")
+    return _CATEGORY_TO_ERROR_TYPE.get(category, ERROR_TYPE_UNKNOWN)
 
 
 VALIDATION_PROMPT_TEMPLATE = '''You are validating review suggestions/issues for accuracy.

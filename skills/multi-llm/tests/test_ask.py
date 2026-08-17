@@ -107,7 +107,8 @@ class FakeInvoker:
     def configure(self, model_spec, **behavior):
         self.behaviors[model_spec] = behavior
 
-    def __call__(self, prompt, model_spec, timeout=None, log_file=None, cwd=None):
+    def __call__(self, prompt, model_spec, timeout=None, log_file=None, cwd=None,
+                 anchor=None):
         self.calls.append(model_spec)
         self.prompts[model_spec] = prompt
         b = self.behaviors.get(model_spec, {"write_file": True})

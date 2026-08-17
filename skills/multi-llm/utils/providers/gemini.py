@@ -1,10 +1,10 @@
 """Gemini CLI provider implementation."""
 import json
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider
+from .base import LLMProvider, StructuredSchema
 
 
 class GeminiProvider(LLMProvider):
@@ -21,7 +21,14 @@ class GeminiProvider(LLMProvider):
     def is_available(self) -> bool:
         return shutil.which("gemini") is not None
 
-    def build_command(self, prompt: str, model: str) -> List[str]:
+    def build_command(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+    ) -> List[str]:
         # gemini --output-format json --model <model> "<prompt>"
         return ["gemini", "--output-format", "json", "--model", model, prompt]
 

@@ -19,7 +19,6 @@ from .git_utils import (
 from .llm_client import (
     LLMClientError,
     SubagentTimeoutError,
-    check_cursor_agent_available,
     invoke_subagent,
     parse_subagent_response,
     invoke_for_json,
@@ -178,19 +177,22 @@ from .provider_registry import (
     has_quick_models,
 )
 
-from .providers import (
-    LLMProvider,
-    AgyProvider,
-    AiderProvider,
-    ClineProvider,
-    CodexProvider,
-    CursorAgentProvider,
-    GeminiProvider,
-    GooseProvider,
-    GrokProvider,
-    OpenCodeProvider,
-    PiProvider,
-)
+# providers — GENERATED from provider_registry._PROVIDERS (§9.1).
+#
+# The hand-written list this replaced omitted THREE adapters (ClaudeCode,
+# KiloCode, Muse) and nothing noticed, because deleting an export left the suite
+# green. `_PROVIDERS` is the one adapter table and it is already fully imported
+# by the block above, so the roster is read off it rather than retyped: adding
+# an adapter to the registry exports it here by construction.
+from .providers import LLMProvider
+from .provider_registry import _PROVIDERS as _REGISTERED_PROVIDERS
+
+_PROVIDER_CLASSES = {
+    type(provider).__name__: type(provider)
+    for provider in _REGISTERED_PROVIDERS.values()
+}
+globals().update(_PROVIDER_CLASSES)
+_PROVIDER_EXPORTS = tuple(sorted(_PROVIDER_CLASSES))
 
 __all__ = [
     # git_utils
@@ -210,7 +212,6 @@ __all__ = [
     # llm_client
     "LLMClientError",
     "SubagentTimeoutError",
-    "check_cursor_agent_available",
     "invoke_subagent",
     "parse_subagent_response",
     "invoke_for_json",
@@ -337,16 +338,7 @@ __all__ = [
     "has_default_models",
     "get_quick_models",
     "has_quick_models",
-    # providers
+    # providers — generated from provider_registry._PROVIDERS (see above)
     "LLMProvider",
-    "AgyProvider",
-    "AiderProvider",
-    "ClineProvider",
-    "CodexProvider",
-    "CursorAgentProvider",
-    "GeminiProvider",
-    "GooseProvider",
-    "GrokProvider",
-    "OpenCodeProvider",
-    "PiProvider",
+    *_PROVIDER_EXPORTS,
 ]

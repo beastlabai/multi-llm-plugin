@@ -45,7 +45,22 @@ def main() -> int:
     # Parse arguments
     parser = argparse.ArgumentParser(description="Mock cursor-agent CLI")
     parser.add_argument("--print", dest="print_mode", action="store_true")
-    parser.add_argument("-f", "--force", action="store_true")
+    # `-f`/`--yolo` stay accepted (the real CLI still has them), but the adapter
+    # no longer emits them: M1/§3.1 replaced `-f` with `--trust --mode ask`.
+    # Both replacements must appear in the parser **and** in `--help`, because
+    # M1's §5.4.1 gate confirms them by reading the resolved binary's help.
+    parser.add_argument("-f", "--force", "--yolo", action="store_true")
+    parser.add_argument(
+        "--trust",
+        action="store_true",
+        help="Trust the current workspace without prompting",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["plan", "ask"],
+        default=None,
+        help="Start in the given execution mode (plan | ask)",
+    )
     parser.add_argument("--output-format", dest="output_format", default="json")
     parser.add_argument("--model", default="auto")
     parser.add_argument("prompt", nargs="?", default="")
