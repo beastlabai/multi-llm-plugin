@@ -1724,8 +1724,8 @@ class TestUsageMetrics:
         assert provider.parse_usage("not json at all", "") is None
 
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "cline", "gemini", "goose", "grok",
-        "kilocode", "muse", "pi",
+        "agy", "aider", "cline", "copilot", "gemini", "goose", "grok",
+        "kilocode", "kimi", "muse", "pi", "qwen-code", "vibe",
     ])
     def test_every_other_adapter_declares_usage_none(self, name):
         """Duration-only runners say so rather than promising token counts."""

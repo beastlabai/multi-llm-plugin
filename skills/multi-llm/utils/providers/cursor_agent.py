@@ -940,6 +940,23 @@ class CursorAgentProvider(LLMProvider):
     # honest declaration is `partial`.
     usage_support = USAGE_PARTIAL
 
+    #: ``--mode ask`` refuses every write, so this adapter can never produce the
+    #: ``{output_json_path}`` file the review prompts used to demand. Measured
+    #: 2026-08-18 on ``cursor-agent:gpt-5.6-sol-xhigh``, reproduced three times:
+    #: the run *succeeds* (``{"type":"result","subtype":"success",
+    #: "is_error":false,…}``) and its whole ``result`` is
+    #: ``"I can't write the requested file while Ask mode is active. Switch to
+    #: Agent mode and resend the request."`` — no JSON, no file, and the slot
+    #: fails on ``JSON parsing failed from both file and stdout``. (A sibling
+    #: model that ignores its own mode restriction and writes the file anyway is
+    #: not a counterexample; it is the same argv producing undeclared behaviour.)
+    #:
+    #: The fix is the prompt, **not** the argv: the write refusal is the point of
+    #: :data:`CURSOR_REQUIRED_FLAGS`, so this adapter asks for the JSON array on
+    #: stdout — the channel ``--output-format json`` already gives it, and the
+    #: one :meth:`parse_output` already unwraps.
+    supports_file_output = False
+
     #: §7.2/§5.3 — cursor-agent exited **0 in all six auth states measured**, so
     #: for this CLI the exit code carries no verdict whatsoever and only a
     #: stream field does. Two shapes, both measured on 2026-08-16:
@@ -957,6 +974,26 @@ class CursorAgentProvider(LLMProvider):
     exit_zero_failure_markers = (
         re.compile(r'"is_error"\s*:\s*true'),
     )
+
+    #: The build ``tests/fixtures/cursor-agent/``'s two rows were captured from,
+    #: and the one lane that can capture them: `success` is HARVESTED from a
+    #: credentialed live run against api2.cursor.sh
+    #: (``tests/container/runs/20260819T145322Z/live-cursor-agent``), because
+    #: cursor-agent reaches no surface any stub in this repo can serve — after
+    #: its JSON handshake every call is `POST /aiserver.v1.<Service>/<Method>`
+    #: in binary protobuf over Connect-RPC (``tests/container/redirect.yaml``).
+    #: There is therefore no free re-capture, which is exactly why the version
+    #: this parser was last confirmed against is worth writing down.
+    #:
+    #: ``min_version`` stays empty ON PURPOSE and independently of that: this
+    #: adapter declares ``version_cmd = ()`` because nothing here is
+    #: version-gated by a number — the gate is the *help text*, read by
+    #: :func:`_probe_help_tokens` and enforced through
+    #: :class:`CursorFlagsUnconfirmed` (see :data:`VERSION_TOO_LOW`). A floor
+    #: declared here would be compared against nothing, since
+    #: ``_detect_version`` only enforces one when a ``version_cmd`` probe
+    #: actually read a version.
+    verified_version = "2026.08.11-e8db854"
 
     @property
     def name(self) -> str:
@@ -1119,6 +1156,19 @@ class CursorAgentProvider(LLMProvider):
 
         This method unwraps that format and attempts to parse the inner result
         as JSON, with fallback strategies for various response formats.
+
+        **It does not read ``is_error``**, and that is measured rather than
+        assumed: ``tests/fixtures/cursor-agent/``'s ``exit-zero-failure`` row is
+        the harvested live envelope with that one field flipped to ``true``, and
+        this method still returns ``{"success": True, "data": ["ok"]}`` for it,
+        because :func:`parse_result_envelope` branches only on the presence of a
+        ``result`` key. The flag is seen exclusively by
+        :meth:`classify_failure`, through :attr:`exit_zero_failure_markers`. So
+        an envelope cursor flagged as an error whose ``result`` still holds a
+        parseable document is served as the answer by the parser and reported as
+        ``runner_error`` by the classifier — §7.2 step 6's ordering makes that
+        survivable, but the division of labour is real and both halves have to
+        stay in place for it to be.
 
         Args:
             stdout: The standard output from cursor-agent.

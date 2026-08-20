@@ -1,0 +1,5 @@
+{"role": "meta", "type": "system.version", "version": "0.36.1"}
+{"role": "assistant", "content": "Let me look at the plan first."}
+{"role": "tool", "name": "Read", "content": "<file contents elided>"}
+{"role": "assistant", "content": "[{\"title\":\"No rollback path\",\"severity\":\"high\",\"step\":1,\"detail\":\"The pool change has no documented rollback.\"}]"}
+{"role": "meta", "type": "session.resume_hint", "session_id": "session_synthetic", "command": "kimi -r session_synthetic", "content": "To resume this session: kimi -r session_synthetic"}

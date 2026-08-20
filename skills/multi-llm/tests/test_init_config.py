@@ -212,9 +212,9 @@ def _real_init(detected_list):
 class TestD2aGuard:
     def test_gemini_only_injects_first_model(self):
         parsed, expected, notices = _real_init(["gemini"])
-        assert parsed["defaults"]["models"] == ["gemini:gemini-3-flash"]
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-3-flash"]
-        assert expected == ["gemini:gemini-3-flash"]
+        assert parsed["defaults"]["models"] == ["gemini:gemini-2.5-flash"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-2.5-flash"]
+        assert expected == ["gemini:gemini-2.5-flash"]
         assert any("gemini" in n and "defaults.models" in n for n in notices)
 
     def test_cline_only_injects_first_model(self):
@@ -226,11 +226,11 @@ class TestD2aGuard:
     def test_multi_offpanel_injects_both_and_names_both(self):
         parsed, _expected, notices = _real_init(["gemini", "cline"])
         assert parsed["defaults"]["models"] == [
-            "gemini:gemini-3-flash",
+            "gemini:gemini-2.5-flash",
             "cline:openrouter/z-ai/glm-5.2",
         ]
         # quick_models gets only the FIRST detected provider's first model.
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-3-flash"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-2.5-flash"]
         models_notice = next(n for n in notices if "defaults.models" in n)
         assert "gemini" in models_notice and "cline" in models_notice
 
@@ -265,11 +265,11 @@ class TestD2aGuard:
                 ["gemini"],
                 {
                     "gemini": [
-                        "gemini-3-flash",
-                        "gemini-3-pro",
-                        "gemini-3.1-pro",
                         "gemini-2.5-flash",
                         "gemini-2.5-pro",
+                        "gemini-3-flash-preview",
+                        "gemini-3.1-pro-preview",
+                        "gemini-flash-latest",
                     ]
                 },
             ),
@@ -277,11 +277,11 @@ class TestD2aGuard:
                 ["gemini", "cline"],
                 {
                     "gemini": [
-                        "gemini-3-flash",
-                        "gemini-3-pro",
-                        "gemini-3.1-pro",
                         "gemini-2.5-flash",
                         "gemini-2.5-pro",
+                        "gemini-3-flash-preview",
+                        "gemini-3.1-pro-preview",
+                        "gemini-flash-latest",
                     ],
                     "cline": cline_catalog,
                 },
@@ -364,8 +364,8 @@ class TestEndToEndInit:
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
         _reset_cache()
-        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-3-flash"]
-        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-3-flash"]
+        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-2.5-flash"]
+        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-2.5-flash"]
         _reset_cache()
 
     def test_modes_example_safe_when_claude_and_cursor_detected(self, tmp_path, monkeypatch):

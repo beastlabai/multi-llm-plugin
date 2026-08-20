@@ -91,6 +91,27 @@ class AgyProvider(LLMProvider):
     "response" and an "error" message. The model's answer is the "response"
     field.
 
+    That error claim was UNVERIFIED until 2026-08-19 and is now MEASURED, on
+    agy 1.1.15 offline: exit 1 with exactly
+    ``{"conversation_id":"","status":"ERROR","response":"","error":
+    "authentication failed or timed out", ...}`` on stdout
+    (``tests/fixtures/agy/auth-error.stdout.txt``). Two things the claim leaves
+    out, both load-bearing:
+
+    * **stderr is not empty on that path, and it carries the only classifiable
+      string.** agy also writes ~900 bytes to stderr — an interactive Google
+      OAuth consent URL, ``Waiting for authentication (timeout 60s)...`` and
+      ``Error: authentication timed out.`` — after blocking for the full 60 s.
+      The envelope's own wording matches nothing in any base table; what makes
+      ``classify_failure`` answer ``auth_failed`` is stderr's ``Authentication
+      required.`` So :meth:`parse_output` (stdout only) and ``classify_failure``
+      (both streams) read different channels here, and dropping stderr anywhere
+      in the chain makes a logged-out agy classify as nothing at all.
+    * **Every failure that does not reach print mode is the mirror image**: 0
+      bytes on stdout with everything on stderr — ``agy --help`` (rc 0), an
+      unknown flag (rc 2), ``--print-timeout 1170`` → Go's ``missing unit in
+      duration`` (rc 2), and ``agy models`` (rc 1).
+
     Config model names are the exact DISPLAY NAMES from `agy models`,
     with spaces and parentheses (e.g. "Gemini 3.1 Pro (High)"), passed
     verbatim as a single argv element to --model (list-form subprocess,
@@ -102,6 +123,15 @@ class AgyProvider(LLMProvider):
     to its default model and still reports status SUCCESS — so configured
     names must match `agy models` output exactly.
 
+    That gotcha is UNSETTLED and the disagreement is in this tree, not in the
+    reader: `providers.yaml`'s agy block states the opposite ("An unknown name
+    is rejected outright: agy returns an ERROR envelope … listing the valid
+    names", verified 2026-07-29). The §6.2 capture could not settle it — offline
+    the auth gate wins first, and `--model definitely-not-a-model-xyz` produced
+    stdout byte-identical to the auth failure (md5
+    dc30d77eed870733053e445f556afa14) — so it is recorded here rather than
+    guessed at. Settling it costs one credentialed run.
+
     --new-project is REQUIRED: without it print mode reuses a previous
     project whose workspace may be bound to a DIFFERENT directory (it then
     silently reads the wrong repo). --new-project binds the workspace to
@@ -111,6 +141,26 @@ class AgyProvider(LLMProvider):
     ~/.gemini/antigravity-cli/); no API keys are involved. An auth lapse
     degrades to the machine-readable ERROR envelope.
     """
+
+    #: The build ``tests/fixtures/agy/``'s one row was captured from — the §6
+    #: step-5 probe, ``--network none``, no credential and no server, because
+    #: agy needs none to fail: its auth resolves BEFORE the first RPC. Measured
+    #: on the same day with `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`
+    #: and `GOOGLE_GEMINI_BASE_URL` all pointed at a live `stub_server.py`, the
+    #: run produced byte-identical stdout with ZERO requests in the stub's log —
+    #: which is why eleven of §6.2's twelve rows are permanently
+    #: "not applicable" for this adapter rather than pending.
+    #:
+    #: ``min_version`` is deliberately left empty: this adapter declares no
+    #: ``version_cmd``, and ``_detect_version`` only enforces a floor when a
+    #: probe actually read a version, so one here would be a gate compared
+    #: against nothing. agy also **releases daily** (1.1.13 → 1.1.15 in the six
+    #: days around this capture, and it was measured rewriting its own binary
+    #: mid-run when `AGY_CLI_DISABLE_AUTO_UPDATE` was set to `1` instead of the
+    #: string `true`), so a numeric floor would rot faster than it could
+    #: protect anything. ``tests/container/cli-versions.lock`` pins the same
+    #: build for the image.
+    verified_version = "1.1.15"
 
     @property
     def name(self) -> str:

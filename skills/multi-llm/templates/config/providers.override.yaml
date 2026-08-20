@@ -71,6 +71,12 @@
 #    SET of provider keys to whatever the plugin shipped then. Re-run
 #    `--init --force` after a plugin update to refresh pinned metadata AND prune
 #    providers the new base dropped.
+#  * NO LAYER SETS ENVIRONMENT FOR A PROVIDER, so there is no `env:` key here —
+#    not even a commented one. Endpoint/credential wiring (e.g. pointing
+#    claude-code at GLM/Z.ai or at OpenRouter) is SHELL configuration this plugin
+#    neither owns nor validates. An `env:` block written here would merge and
+#    then be ignored — it would fail SILENTLY, which is worse than not existing.
+#    The recipes live in README "Pointing a provider CLI at a different endpoint".
 #
 # ----------------------------------------------------------------------------
 # ONE OVERRIDE PER REPO
@@ -140,11 +146,11 @@
 #   gemini:
 #     default_timeout: 1200
 #     models:
-#       - gemini-3-flash
-#       - gemini-3-pro
-#       - gemini-3.1-pro
 #       - gemini-2.5-flash
 #       - gemini-2.5-pro
+#       - gemini-3-flash-preview
+#       - gemini-3.1-pro-preview
+#       - gemini-flash-latest
 
 #   grok:
 #     default_timeout: 1200
@@ -250,6 +256,32 @@
 #       - openrouter/z-ai/glm-5.2
 #       - openrouter/moonshotai/kimi-k2.7-code
 #       - openrouter/openai/gpt-5.5
+
+#   kimi:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - moonshotai/kimi-k2.5
+
+#   qwen-code:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - qwen/qwen3.8-27b
+
+#   copilot:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - openai/gpt-5.6-luna
+#       - openai/gpt-4.1-mini
+#       - openai/gpt-4o-mini
+
+#   vibe:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - openai/gpt-5.6-luna
 
 ## --- default_provider -------------------------------------------------------
 ## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).

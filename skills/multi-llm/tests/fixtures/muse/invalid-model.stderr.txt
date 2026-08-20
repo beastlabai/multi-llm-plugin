@@ -1,0 +1,2 @@
+muse: workspace root: /work/sample-project (cwd default)
+run ended with Failed

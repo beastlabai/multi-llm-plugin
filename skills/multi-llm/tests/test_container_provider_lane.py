@@ -251,7 +251,21 @@ class TestTheEvidenceSurvivedTheContainer:
                 f"{record['cli']}: the live key name reached the child environment"
             )
             assert not (leaked - {"OPENAI_API_KEY", "META_API_KEY", "XAI_API_KEY",
-                                  "ANTHROPIC_API_KEY", "GEMINI_API_KEY"}), (
+                                  "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+                                  # kimi's row declares this in credential_vars,
+                                  # so the wrapper fills it with the fake
+                                  # per-exec stub key -- the name is expected
+                                  # here, the host's value never is (the
+                                  # OPENROUTER_API_KEY assertion above is what
+                                  # pins that, and it covers kimi too).
+                                  "KIMI_MODEL_API_KEY",
+                                  # copilot's row declares this in
+                                  # credential_vars for the same reason, and the
+                                  # variable is also its BYOK ACTIVATION switch's
+                                  # partner: without a provider key beside the
+                                  # provider base URL the CLI falls through to
+                                  # the GitHub seat path.
+                                  "COPILOT_PROVIDER_API_KEY"}), (
                 f"{record['cli']}: unexpected credential-shaped variable {leaked}"
             )
 

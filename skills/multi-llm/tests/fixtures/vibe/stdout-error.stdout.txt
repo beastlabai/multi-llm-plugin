@@ -1,0 +1,3 @@
+Invalid configuration (1 error(s)):
+  - models.stub.thinking: Input should be 'off', 'low', 'medium', 'high' or 
+'max'

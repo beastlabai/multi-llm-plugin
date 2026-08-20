@@ -1,0 +1,6 @@
+{
+  "text": "[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]\n",
+  "stopReason": "EndTurn",
+  "sessionId": "01a01afb-6257-7f20-a67e-7bfafec99fc4",
+  "requestId": "aa278cee-207a-444b-bf9f-021616ecef48"
+}

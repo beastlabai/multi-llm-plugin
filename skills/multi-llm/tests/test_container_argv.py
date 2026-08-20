@@ -300,6 +300,75 @@ class TestEveryRecordIsExplained:
             )
 
 
+class TestRowDerivedTimeoutValues:
+    """The other half of the `<timeout>` placeholder (§3.3, §7 step 6).
+
+    `expected_argv.yaml` reduces `--max-wall-time` to `<timeout>` because its
+    seconds come from the slot, so pinning them verbatim would freeze one run's
+    slot length into the table. But a placeholder alone would normalize a WRONG
+    number to green — 5 s, 0 s, `--max-wall-time 1170s` when the CLI wants bare
+    seconds, or a value ABOVE the parent's deadline, all normalize identically.
+
+    So the value is read RAW out of the call log here, and checked against the
+    two things that actually matter: it is a bare integer, and it is strictly
+    below the slot timeout the adapter was handed, by the shutdown margin. That
+    inner-under-outer ordering is the whole reason the flag is wired — qwen must
+    reach its own bound and write its structured `FatalBudgetExceededError`
+    envelope BEFORE the parent kills it, or the harness reports a bare TIMEOUT
+    instead of qwen's own reason.
+
+    Note the bound compared against is the **provider's resolved slot timeout**
+    (`providers.yaml`'s `default_timeout`, which `llm_client` also passes to
+    `subprocess.run(timeout=…)`), NOT the row's `row_timeout_s`. Those are
+    different bounds: `row_timeout_s` caps the whole `docker run`, while this
+    flag is held under the per-dispatch deadline. Conflating them would assert
+    something the product never promises.
+    """
+
+    FLAG = "--max-wall-time"
+
+    def _raw_values(self, records):
+        found = []
+        for record in records:
+            argv = record.get("argv") or []
+            if self.FLAG in argv:
+                index = argv.index(self.FLAG)
+                if index + 1 < len(argv):
+                    found.append((record.get("cli"), argv[index + 1]))
+        return found
+
+    def test_the_rendered_seconds_are_a_bare_integer(self, records):
+        values = self._raw_values(records)
+        if not values:
+            pytest.skip(f"no call log in this bundle carries {self.FLAG}")
+        for cli, value in values:
+            assert value.isdigit(), (
+                f"{cli}: {self.FLAG} rendered {value!r}, which is not bare "
+                f"integer seconds. qwen accepts `30s`/`5m` too, but the adapter "
+                f"renders bare seconds deliberately — that removes a rounding "
+                f"rule instead of specifying one."
+            )
+
+    def test_the_inner_bound_is_strictly_under_the_slot_timeout(self, records):
+        values = self._raw_values(records)
+        if not values:
+            pytest.skip(f"no call log in this bundle carries {self.FLAG}")
+
+        import sys
+        sys.path.insert(0, str(harness.HERE.parent.parent))
+        from utils.provider_registry import get_provider_timeout
+
+        for cli, value in values:
+            outer = get_provider_timeout(cli)
+            assert 0 < int(value) < outer, (
+                f"{cli}: {self.FLAG}={value} against a resolved slot timeout of "
+                f"{outer}s. The inner bound must be strictly under the outer one "
+                f"or the CLI is still running when the parent's deadline fires, "
+                f"and the harness reports TIMEOUT instead of the CLI's own "
+                f"structured budget error."
+            )
+
+
 class TestEveryEntryStillDoesWork:
     def test_no_entry_matches_nothing(self, records):
         """A stale row is as much a finding as an unmatched record."""

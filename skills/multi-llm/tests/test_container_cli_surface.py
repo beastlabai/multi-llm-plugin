@@ -60,16 +60,49 @@ ROWS = _rows()
 IDS = [cli for cli, _ in ROWS]
 
 
-def _in_image(argv: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
-    """Run a command in the pinned image, offline and unprivileged."""
+def _in_image(argv: list[str], timeout: int = 180,
+              env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    """Run a command in the pinned image, offline and unprivileged.
+
+    ``env_extra`` is the row's own ``redirect.yaml`` block and nothing more. One
+    CLI needs it to print its own help at all: copilot's npm entry point is a
+    loader that self-extracts its native runtime into ``$XDG_CACHE_HOME``, the
+    image pre-warms ``/opt/mllm/copilot-cache``, and without the variable the
+    loader lands on the noexec tmpfs ``$HOME`` and answers ``Failed to load
+    package index ... Native addon "runtime" not found``. Probing without it
+    grades the harness, not upstream — which is why copilot had no row here for
+    as long as this file has existed.
+    """
+    env_argv = []
+    for name, value in (env_extra or {}).items():
+        env_argv += ["-e", f"{name}={value}"]
     return subprocess.run(
         ["docker", "run", "--rm", "--network", "none",
          "--user", "10001:10001", "--cap-drop", "ALL",
          "--security-opt", "no-new-privileges",
          "--tmpfs", "/home/e2e:rw,mode=0700,uid=10001,gid=10001",
          "--tmpfs", "/tmp:rw,mode=1777",
+         *env_argv,
          "--entrypoint", argv[0], IMAGE, *argv[1:]],
         capture_output=True, text=True, timeout=timeout)
+
+
+def _row_env(cli: str) -> dict:
+    """The `redirect.yaml` `env_extra` for this row, or an empty mapping.
+
+    Read straight from the file rather than through
+    `seed_cli_surface.adapter_contract()`: that function resolves redirect.yaml
+    at `/opt/mllm/rig/`, which exists only INSIDE the image, so calling it from
+    this host-side module raises FileNotFoundError. Swallowing that would hand
+    every row an empty env and quietly restore the bug this helper exists to
+    fix — which is exactly what a first draft of it did.
+    """
+    data = yaml.safe_load(
+        (harness.HERE / "redirect.yaml").read_text(encoding="utf-8")) or {}
+    for row in data.get("clis") or []:
+        if row.get("cli") == cli:
+            return {str(k): str(v) for k, v in (row.get("env_extra") or {}).items()}
+    return {}
 
 
 #: Written beside the run bundles, like `host-lane-census.json` and
@@ -206,7 +239,7 @@ def probe(request):
     parts = str(row["help_invocation"]).split()
     real = f"/opt/mllm/real/{row['binary']}"
     started = time.time()
-    completed = _in_image([real, *parts[1:]])
+    completed = _in_image([real, *parts[1:]], env_extra=_row_env(cli))
     # "It ran, and it took this long" — deliberately not a verdict. A help
     # invocation's exit status is not what this module grades (several CLIs
     # print help and exit non-zero), so the census records the clock the row
@@ -238,13 +271,15 @@ class TestTheOptionsWeDependOnStillExist:
 
         # The control first: if this CLI ignores unknown flags, "accepted" below
         # would be worthless and the whole assertion vacuous.
-        control = _in_image([real, "--mllm-definitely-not-a-flag", "--help"])
+        row_env = _row_env(cli)
+        control = _in_image([real, "--mllm-definitely-not-a-flag", "--help"],
+                            env_extra=row_env)
         assert control.returncode != 0, (
             f"{cli}: accepts a bogus flag, so flag acceptance proves nothing here "
             f"— the hidden-option assertion below would be vacuous"
         )
         for option in hidden:
-            accepted = _in_image([real, option, "--help"])
+            accepted = _in_image([real, option, "--help"], env_extra=row_env)
             assert accepted.returncode == 0, (
                 f"{cli} {row['version']}: no longer accepts {option!r} "
                 f"(exit {accepted.returncode}). It was undocumented but working "

@@ -51,8 +51,9 @@
 #   * `applied` bytes through a real host (the claude-code native write row)
 #
 # ---------------------------------------------------------------------------
-# WHY FIVE ROWS STILL CARRY NO `args` — AND WHY ADDING ONE WOULD NOT HELP
-# (verified 2026-08-15)
+# WHY FIVE ROWS CARRIED NO `args` — AND WHY ADDING ONE WOULD NOT HAVE HELPED
+# (verified 2026-08-15; SUPERSEDED 2026-08-19/20 — read to the end of this
+#  block, all three blockers are now answered and all five rows are wired)
 #
 # `codex-apply-executor`, `opencode-apply-executor`, `claude-code-apply-native`,
 # `codex-auth-negative` and `opencode-auth-negative` are authored down to their
@@ -97,13 +98,82 @@
 # row-design question (which phase is supposed to supply this lane's only
 # applied bytes) and is left open rather than answered by widening a matcher.
 #
-# The `args:` strings are not the hard part and are fully determined once those
-# land: `args` is what the OPERATOR types, `command` is what the shim must build
-# from it, so `args` = the `--<mode>` flag form of `command`'s mode word, the
-# same quoted positionals, and only the flags the host does NOT bake — never
-# `--host`, never `--detach` (the shim adds it per its own step 5), never
+# --- UPDATE 2026-08-19: (1) AND (2) HAVE LANDED. (3) HAS NOT. ---------------
+#
+# Both rig gaps are now implemented, and all five rows declare the cells they
+# need:
+#
+#   (1) THE PRE-COMMAND LEG. `entrypoint.run_pre_commands` runs a row's
+#       `pre_commands:` in order, in the row's own workspace, BEFORE the host
+#       process starts, and stops the row at the first non-zero exit rather than
+#       launching a host against a half-prepared workspace. All five rows
+#       declare the one command they were missing —
+#       `review-plan … --yes --quick --exec-subagents` — plus the
+#       `container_full_chain.yaml` scenario that leg needs to produce a real
+#       suggestions document.
+#       The leg's receipts land in `receipts/<row>-pre/`, NOT in
+#       `receipts/<row>/`. That separation is the whole design: every host-lane
+#       assertion about "the agent really ran our dispatcher" reads the latter,
+#       and a leg writing there would let a row pass its receipt anchor on the
+#       RIG's own invocation — the exact false positive the anchor exists to
+#       prevent.
+#
+#   (2) `remove_seed` IS IMPLEMENTED. `entrypoint.drop_seeded_credential`
+#       deletes the named file from `/work/homes/<identity>` — the tree
+#       `wrapper.seed_invocation_root` copies every per-invocation provider root
+#       from, so it is gone from every dispatch of that CLI — and RAISES if the
+#       path matched nothing, because a no-op deletion reproduces the exact
+#       silence this cell had for its whole life. Never the host's own `$HOME`:
+#       the host must still be able to run, or the row leaves no receipt to
+#       grade the refusal on.
+#       ITS CALL SITE IS ORDERED, not incidental: after `stage_host` and after
+#       the leg. `install-host codex --global` row 5 probes the configured
+#       runner's auth and exits 3 without the seed (see codex `stage.measured`),
+#       and the leg's own fan-out crosses the same gate — so removing the
+#       credential any earlier returns from the row before `apply-suggestions`
+#       is ever dispatched, and a refusal with no receipt proves nothing.
+#
+# --- UPDATE 2026-08-20: ALL FIVE ROWS NOW CARRY `args`. ---------------------
+#
+# The derivation rule, restated because it is what the five strings below were
+# built from: `args` is what the OPERATOR types, `command` is what the shim must
+# build from it, so `args` = the `--<mode>` flag form of `command`'s mode word,
+# the same quoted positionals, and only the flags the host does NOT bake —
+# never `--host`, never `--detach` (the shim adds it per its own step 5), never
 # `--yes`/`--exec-subagents` on codex or opencode, and `--yes` explicitly on
 # claude-code, whose shim bakes none of them (`must_type_explicitly` below).
+#
+# Applied, one line each:
+#
+#   codex-apply-executor    --apply-suggestions "plans/auth-feature.md"
+#   opencode-apply-executor --apply-suggestions "plans/auth-feature.md"
+#   codex-auth-negative     --apply-suggestions "plans/auth-feature.md"
+#   opencode-auth-negative  --apply-suggestions "plans/auth-feature.md"
+#   claude-code-apply-native
+#                           --apply-code-fixes "plans/auth-feature.md" --yes
+#
+# ONE DISCREPANCY BETWEEN THIS RULE AND THE ROWS THAT ALREADY PASS, recorded
+# rather than resolved by silence: `must_type_explicitly: ["--yes"]` says the
+# claude-code operator types `--yes`, and NEITHER green claude-code row does —
+# `claude-code-ask` and `claude-code-review-plan` both spell `args` without it
+# and both measured a receipt carrying `--yes`, i.e. the AGENT supplied it. The
+# rule is followed here anyway, because the row below is a write phase running
+# unattended: a phase that stops to ask is a dead row, and `must_type_explicitly`
+# is the cell that says whose job it is to prevent that. If the row passes, the
+# two green rows are the ones out of step with the rule, not this one.
+#
+# WHAT THE FIVE ROWS' FIRST RUN IS ACTUALLY MEASURING, since all three of the
+# cells under them are still unrun: the pre-command leg (D1), the credential
+# removal (D2), and — on claude-code only — the retarget that answers D3 below.
+#
+#   (3) IS NOW ANSWERED, AND THE ANSWER IS (a): THE ROW WAS POINTED AT THE WRONG
+#       PHASE. `bytes_must_change: true` with `paths: ["src/**"]` was never
+#       satisfiable under `apply-suggestions`, whose only declared artifact is
+#       the plan file. `claude-code-apply-native` therefore now dispatches
+#       `apply-code-fixes`, the write phase whose declared files ARE source
+#       files, and its byte assertion is carried across UNCHANGED, character for
+#       character. The full derivation — and why (b) and (c) were rejected — is
+#       written into that row's own note.
 # ---------------------------------------------------------------------------
 
 version: 1
@@ -392,6 +462,76 @@ hosts:
         /opt/mllm/bin, so "the fan-out is stubbed" is true of the provider
         subprocesses on every host and of the SUBAGENT BATCHES only on the two
         executor hosts.
+    # -----------------------------------------------------------------------
+    # STRUCTURAL LIMIT: THIS HOST CANNOT TAKE A `--full` ROW.
+    #
+    # Recorded as a cell rather than left as an absence, because the other two
+    # hosts each carry one (`codex-full`, `opencode-full`) and a matrix that
+    # simply omits the third row says "nobody got to it" where the truth is "the
+    # product forbids it here". §6.3's rule: a committed, measured "not
+    # applicable, because …" is an acceptable cell; an untested one is not.
+    #
+    # DERIVED 2026-08-19 from `full_workflow_orchestrator.py` read offline, not
+    # from a run — no `--full` row has ever been launched on any host. Provenance
+    # is `derived`, and the first `codex-full` pass is what would promote it.
+    #
+    # `forbidden_flags` above is the whole cause: this host's own shim refuses
+    # both `--exec-subagents` and `--detach`, so a `full` invocation here is
+    # necessarily foreground AND necessarily native-subagent. Two walls follow,
+    # in the order a run would hit them:
+    #
+    # (1) PHASE 1 NEVER COMPLETES. `full` runs each phase by calling that phase's
+    #     `main(argv)` in-process (`run_mode`), and forwards `--exec-subagents`
+    #     only if it was given (`common_flags`). Without it, `review-plan` fans
+    #     out to the native invoker, stops at [VALIDATION_PENDING], prints the
+    #     `--reaggregate` follow-up as `next` and exits 0 with the phase
+    #     DELIBERATELY not recorded — exactly what `claude-code-review-plan`
+    #     measured on 2026-08-14. `_verify` grades the artifact, not the claim
+    #     ("exited 0 but state.json records no completion for 'review-plan'"),
+    #     `_phase_failed` prints the follow-up and exits 3, and no later phase
+    #     runs. There is no invoker inside `full` to run those Task batches: the
+    #     agent would have to re-invoke `next` from outside the process it is
+    #     waiting on.
+    # (2) AND PAST IT, PHASE 2 STALLS THE SAME WAY FOR A DIFFERENT REASON. Even
+    #     granting an agent that re-invokes `next` until review-plan records
+    #     itself, `apply-suggestions` is a write phase that marks itself
+    #     completed when it EMITS its batch document. `_unexecuted_batches`
+    #     exists for precisely that lie: with `--exec-subagents` unset it counts
+    #     the emitted batches, `_unexecuted_write_phase` prints
+    #     [WRITE_PHASE_NOT_EXECUTED] — "nothing applied them: `full` runs every
+    #     phase inside this one process, so with --exec-subagents unset there is
+    #     no invoker between this phase and the next" — and the workflow exits 3
+    #     again. Three of the remaining phases are write phases and would each do
+    #     the same.
+    #
+    # AND THE AGENT HAS ALREADY FAILED THE ONE THING THAT COULD RESCUE IT, TWICE.
+    # Both walls are only survivable by an agent that re-invokes the printed
+    # `next` between phases. This host's measured record on that is
+    # `claude-code-review-plan`: it dispatched, stopped at the marker, began
+    # running the validation batches through its own Task tool and never
+    # re-invoked the dispatcher — on BOTH model attempts. A `--full` row would be
+    # asking the same host to do that up to eight times in a row, at
+    # $0.239-per-review-plan spend, to reach a state the other two hosts reach in
+    # one turn.
+    #
+    # NOT PAPERED OVER, and specifically not by any of the three tempting fixes:
+    # dropping `--exec-subagents` from `forbidden_flags` would make the rig
+    # launch an invocation the shipped shim tells the agent never to type; adding
+    # `--detach` would convert this host's one NATIVE-dispatch row set into
+    # executor rows and delete the only native coverage in the matrix; and
+    # widening `_verify` to accept a phase that recorded no completion would
+    # break the artifact-over-claim rule that makes every other row mean
+    # anything.
+    full_row: not-applicable
+    full_row_provenance: derived
+    full_row_reason: >
+      Its shim forbids --exec-subagents and --detach, so `full` stops at
+      review-plan's [VALIDATION_PENDING] (exit 3, phase not recorded) and, past
+      that, at apply-suggestions' [WRITE_PHASE_NOT_EXECUTED] — both survivable
+      only by an agent that re-invokes the printed `next`, which this host has
+      measurably failed to do twice. 8-of-8 phase coverage through a real host
+      is carried by `codex-full` and `opencode-full` instead.
+    # -----------------------------------------------------------------------
     rows:
       - id: claude-code-ask
         args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
@@ -473,29 +613,108 @@ hosts:
             dedicated key's own `usage` delta is a spend figure on this lane.
         note: "carries a validation batch and a consolidation batch of its own — both real spend"
       - id: claude-code-apply-native
-        command: "apply-suggestions plans/auth-feature.md --yes"
+        # RETARGETED 2026-08-20 from `apply-suggestions` to `apply-code-fixes`.
+        # This is D3's answer; the derivation and the two rejected alternatives
+        # are in `note` below. Nothing else about the row moved: the byte
+        # assertion it exists for is carried across character for character.
+        args: '--apply-code-fixes "plans/auth-feature.md" --yes'
+        command: "apply-code-fixes plans/auth-feature.md --yes"
+        # THE PRE-COMMAND LEG (header finding (1), landed 2026-08-19). Ordered
+        # dispatcher invocations the ENTRYPOINT runs in this row's workspace
+        # before the host process starts, so the row's mode has the prerequisite
+        # phase it exits 1 in `_setup` without. Not the host's work and never
+        # counted as it: the leg's receipts land in `receipts/<row>-pre/`, one
+        # directory across from the ones every "the agent really ran our
+        # dispatcher" assertion reads.
+        # No `--host`: this is the rig dispatching, not an agent following a
+        # shim. `--exec-subagents` so the validation batches run in-process
+        # against the stub, which is the same two-command shape the provider
+        # lane's applied-bytes row already uses.
+        #
+        # `review-code`, NOT `review-plan`, and it is a one-for-one swap rather
+        # than a longer chain: `check_workflow_prerequisites.PHASE_PREREQUISITES`
+        # gives `apply-code-fixes` exactly ONE prerequisite, `code-review`, and
+        # gives `code-review` none at all. (`implement`, the other phase that
+        # writes `src/**`, needs `apply-suggestions` AND `generate-tasks`, i.e. a
+        # three-command leg, and its task fixture also declares
+        # `tests/test_security.py` — so it would have forced `paths` open too.)
+        # `review-code` is also what this workspace was built for:
+        # `seed_workspace.py` labels the committed tree "what `review-code` diffs
+        # against" and writes the uncommitted diff the fixtures were captured on.
+        pre_commands:
+          - "review-code plans/auth-feature.md --yes --quick --exec-subagents"
+        # The leg fans out, so it needs the same scenario the review-plan rows
+        # do: a scenario-less stub answers a bare "OK", which is not a review
+        # document, and the leg would fail with "JSON parsing failed from both
+        # file and stdout" before the host ever launched. This scenario answers
+        # both of the leg's turns — the code-review fan-out
+        # (`container_issues.json`) and the code-review validation
+        # (`code_review_valid.json`, all five groups `valid`).
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # The container-side cap. Stated rather than defaulted because the
+        # driver derives the whole row's docker timeout from it
+        # (`wall_clock_s + 500`, test_container_host_lane.py) and that budget now
+        # has to cover the pre-command leg as well as the host turn.
+        wall_clock_s: 900
         expect:
           run: none
           exit: 0
-          phases: [apply-suggestions]
+          phases: [apply-code-fixes]
           receipts_min: 2
           write_outcome: applied
+          # UNCHANGED, and deliberately so: this pair is the row's whole reason
+          # to exist and the retarget above exists to make it satisfiable, not
+          # the other way round.
           bytes_must_change: true
           paths: ["src/**"]
+        provenance: unmeasured
         note: >
           The ONE row on either lane where an `applied` batch is a pass rather than
           a rig bug, and this plan's only applied-byte coverage through a real
           host. Explicitly WITHOUT --exec-subagents: the shipped shim says "Never
           pass --exec-subagents on this host". An all-clean-failure result is
           reported as a FAILED row ("dispatched, nothing landed"), not a green one.
-          NO `args` YET, DELIBERATELY — see "WHY FIVE ROWS STILL CARRY NO `args`"
-          in the header. This row is blocked by all three findings there. The
-          third is its own: `paths: ["src/**"]` cannot be met by a mode whose
-          declared artifact is the plan file, and the grader drops everything
-          under `plans/` as a workflow output. The plan's wording is "the named
-          fixture file's SHA must differ", i.e. plans/auth-feature.md — so the
-          path set, the mode and the grader's filter are three different answers
-          to one question, and picking one is a row-design call, not a prompt.
+          D3 IS ANSWERED HERE, AND THE ANSWER IS "THE ROW NAMED THE WRONG PHASE".
+          The row demands `bytes_must_change: true` under `paths: ["src/**"]`, and
+          `apply-suggestions` declares exactly one file — the plan
+          (`write_phase_bridge.py:80-82`, "The plan file is THE artifact") — which
+          the grader's `_source_delta` then drops with everything else under
+          `plans/` as workflow output. Two phases write `src/**`
+          (`write_phase_bridge.py:117-171`): `implement` and `apply-code-fixes`.
+          `apply-code-fixes` is the one chosen, for three measured reasons: its
+          only prerequisite is `code-review`, so the leg stays ONE command; every
+          issue in `code_review/container_issues.json` names `src/security.py` or
+          `src/auth.py`, so `paths: ["src/**"]` needs no widening at all; and the
+          batcher partitions by `file_key`, so each batch's declared file set IS a
+          `src/**` path. `implement` would have cost a three-command leg and a
+          `tests/**` entry in `paths`.
+          THE TWO ALTERNATIVES, AND WHY THEY LOSE. (b) "keep the mode, point
+          `paths` at `plans/**` and relax `_source_delta`" fails twice over: the
+          filter is SHARED with the two executor rows, which assert `not delta`,
+          so letting `plans/` through turns every phase artifact they legitimately
+          write into a failure — and even scoped per row it would move the verdict
+          off source bytes onto a plan document the workflow itself rewrites for
+          tracking and state reasons, i.e. a weaker assertion wearing the same
+          name. (c) "drop the byte assertion" deletes the only applied-byte
+          evidence either lane has through a real host, leaving a row that proves
+          a batch was dispatched and nothing about whether anything landed. (a)
+          costs one pre-command word and keeps the assertion verbatim.
+          WHAT THIS ROW STILL CANNOT BE GRADED ON, and it is not the retarget's
+          doing — it was true of `apply-suggestions` here too, and is recorded now
+          because wiring `args` is what makes it reachable. `write_batch_report.json`
+          is written ONLY by `utils/write_batch_scheduler.WriteBatchScheduler`,
+          and `apply_orchestrator_base.run_write_executor` returns None — "not
+          requested, carry on natively" — unless `--exec-subagents` or
+          `--dry-run-subagents` was passed. This host's shim forbids the first and
+          the row does not use the second, so the executor's per-batch account
+          structurally does not exist here; the native loop records prose
+          summaries through `util prior-changes append` and nothing machine
+          readable. `TestTheWriteRowsAreGradedOnBytes` therefore grades the native
+          row on its ABSENCE (a report appearing means the agent typed the flag
+          its shim forbids) and on the SHA census, which is the byte-level verdict
+          this row was always for.
+          UNMEASURED. Nothing about this row has ever run: not the leg, not the
+          retarget, not one byte of `apply-code-fixes` through a real host.
 
   # ===========================================================================
   codex:
@@ -723,37 +942,185 @@ hosts:
             "completed" — completion is recorded in `state.json.phases_completed`
             and in `run.state`, and grading the in-phase checkpoint would fail
             this passing row.
+      - id: codex-full
+        args: '--full "plans/auth-feature.md" --quick'
+        command: "full plans/auth-feature.md --yes --exec-subagents --quick --detach"
+        expect:
+          run: done
+          exit: 0
+          # WHAT THE RECEIPTS NAME — and it is deliberately not what `phases`
+          # below says, because the two are different facts about this row.
+          # `full` runs every phase by calling that phase's own `main(argv)`
+          # IN-PROCESS (`full_workflow_orchestrator.run_mode`: "the dispatcher
+          # owns one MULTI_LLM_RESULT line and one result context per
+          # invocation, and nesting it would emit a second line"), so a `--full`
+          # turn is ONE dispatcher invocation carrying ONE result line, whose
+          # `phase` is whatever `modes.py` gives the mode — and for `full` that
+          # is the string `full` (it owns no workflow phase but does own a run
+          # dir, which is what `--detach` needs somewhere to put `.status.json`).
+          # Grading the eight phase names against the receipts would fail a
+          # perfect row over a fact about our own dispatcher.
+          receipt_phase: full
+          # ...and WHAT state.json MUST RECORD, which is the whole reason this
+          # row exists: all eight workflow phases, in one host turn, against a
+          # real host. Cross-checked against `test_container_full_chain.py`'s
+          # CHAIN_PHASES, which asserts the same eight on the provider lane.
+          # NOTE the one place the mode word and the phase name differ: mode
+          # `review-code` records phase `code-review`.
+          phases:
+            - review-plan
+            - apply-suggestions
+            - generate-tasks
+            - review-tasks
+            - apply-task-suggestions
+            - implement
+            - code-review
+            - apply-code-fixes
+          # The same floor the review-plan row declares, and for the same reason:
+          # a minimum, not a count. This row's observed shape should be four
+          # (`util instructions full`, the launcher, the worker re-exec, the
+          # status poll) but the floor a PASS actually needs is the launcher plus
+          # one terminal read-back. `artifacts_min` is left unstated — the
+          # default of 1 holds structurally, because `detach.launch` records the
+          # run log and `.status.json` on the launcher's own receipt.
+          receipts_min: 2
+        wall_clock_s: 900
+        # The same scenario the review-plan row declares, for the same measured
+        # reason: a scenario-less stub answers a bare "OK", which is not a
+        # suggestions document. `full` needs strictly more of it — this scenario
+        # is the one written for the eight-phase chain, and it is what the
+        # provider lane's `container_full_chain` row already drives.
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: unmeasured
+        note: >
+          THE CHEAPEST PATH TO 8-OF-8 PHASES THROUGH A REAL HOST, and the reason
+          it is one row rather than six: `full` runs the whole workflow inside a
+          single process with no invoker between phases, so one host turn covers
+          every phase this matrix could otherwise only reach by adding a row per
+          phase — each with its own prerequisite seeding, its own host turn and
+          its own spend. Derived from `codex-review-plan` cell for cell: same
+          `run`, same `exit`, same `receipts_min`, same scenario, same
+          `wall_clock_s`; only `phases` and `receipt_phase` differ, and both
+          differ because `full` is one invocation over eight phases rather than
+          one invocation over one.
+          `args` is the OPERATOR form of `command`, per the header's rule: the
+          mode word as a `--` flag, the same quoted positional, and only the
+          flags this host does NOT bake — so `--quick` is typed and `--yes`,
+          `--exec-subagents`, `--host codex` and `--detach` are not (the first
+          three are baked by the shim, the fourth is added by its own step 5).
+          UNMEASURED, and that is the honest state: nothing about this row has
+          run. It is written against three things that HAVE been measured — the
+          provider lane's eight-phase chain under this exact scenario, the
+          `codex-review-plan` row's detach-poll-terminal shape, and `run_mode`'s
+          in-process dispatch — and the first run of it is the measurement.
+          ONE THING IT WILL NOT GRADE: the chain's write phases really do move
+          bytes under `src/**` (`implement`), and this row declares no
+          `write_outcome`, so `TestTheWriteRowsAreGradedOnBytes` skips it by
+          name. That is deliberate — the applied-byte question belongs to the
+          apply rows, which declare an outcome to grade — and it is recorded here
+          so a later reader does not mistake the skip for an oversight.
+          TWO BOUNDS TO WATCH ON THE FIRST RUN, named here rather than discovered
+          from a red row. (a) `wall_clock_s: 900` is the same bound a ONE-phase
+          review-plan row carries, and that row measured 219 s (codex) / 304 s
+          (opencode) of host wall clock. Eight phases inside one detached worker
+          is not eight times that — the host's own turns are the poll loop, not
+          the work — but 900 s has never been measured against this shape, and a
+          `timed_out` host with complete receipts is reported as "dispatched,
+          host did not terminate" rather than as a failure to run. (b) the lane
+          cap: `MLLM_E2E_MATRIX_TIMEOUT_S` defaults to 3600 s and the
+          credentialed tier already measures ~21 min, so the two `--full` rows
+          are the ones most likely to push a later row into `never_started`.
+          Raise it deliberately for the run that first measures these.
       - id: codex-apply-executor
+        # WIRED 2026-08-20, per the header's derivation rule: the mode word as a
+        # `--` flag, the same quoted positional, and only the flags this host
+        # does NOT bake — so nothing else is typed at all. `--yes` and
+        # `--exec-subagents` are in `baked_flags`, `--detach` is added by the
+        # shim's own step 5, and this row's `command` carries no `--quick`, so
+        # there is no fourth token to type.
+        args: '--apply-suggestions "plans/auth-feature.md"'
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents --detach"
+        # The pre-command leg — see claude-code-apply-native for the full cell.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # Stated rather than defaulted: the driver derives the row's whole docker
+        # timeout from it (`wall_clock_s + 500`) and that budget now has to cover
+        # the pre-command leg as well as the host turn.
+        wall_clock_s: 900
         expect:
           run: done
           exit: 0
           phases: [apply-suggestions]
           write_outcome: clean-failure
           bytes_must_change: false
+        provenance: unmeasured
         note: >
           C4 option (b), chosen deliberately: a real executor CLI pointed at a
           tool-call-free stub can only ever produce a clean failure, so the row
           asserts that outcome instead of hoping for an applied one. An `applied`
           batch here fails just as loudly — bytes landing from a tool-call-free
           stub means the redirect leaked.
-          NO `args` YET, DELIBERATELY — blocked by header finding (1): this lane
-          launches one host process against a workspace with no review-plan
-          output, and `apply-suggestions` exits 1 before it reaches a batch.
+          `args` WIRED 2026-08-20. Header finding (1) — one host process against a
+          workspace with no review-plan output, `apply-suggestions` exiting 1
+          before it reaches a batch — is answered by the `pre_commands` leg above,
+          and this row's first run is the leg's first execution as well as its
+          own. UNMEASURED: neither cell has run in a container.
       - id: codex-auth-negative
+        # WIRED 2026-08-20, and it is the SAME string the executor row types —
+        # which is the point: the two rows differ only in `remove_seed`, so a
+        # difference in outcome is attributable to the credential and to nothing
+        # an operator typed.
+        args: '--apply-suggestions "plans/auth-feature.md"'
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+        # The pre-command leg, and on a NEGATIVE row its ordering is the row.
+        # The leg runs while the seeded credential is still in place — it fans
+        # out through the CONFIGURED RUNNER and would be refused by the very gate
+        # this row exists to trip — and `remove_seed` below is honoured
+        # immediately after it, and after the stage step, which also probes that
+        # runner. entrypoint.main states that order explicitly at the call sites.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         remove_seed: ".codex/auth.json"
-        expect: {exit: 3, reason: not_authenticated, stub_requests: 0, within_s: 30}
+        # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
+        # timeout and it now has to cover the pre-command leg too. It is NOT the
+        # refusal's bound — `expect.within_s` is, and it is 30 s.
+        wall_clock_s: 900
+        expect:
+          exit: 3
+          reason: not_authenticated
+          # ZERO REQUESTS **AFTER THE CREDENTIAL WAS REMOVED**, not zero in the
+          # container. The pre-command leg fans out to the stub by design, while
+          # the seed is still in place, so the grader counts against the
+          # watermark `entrypoint` writes to `stub-watermark.json` at the moment
+          # the host process starts. Counting raw would have made this cell
+          # unsatisfiable the day the leg landed.
+          stub_requests: 0
+          within_s: 30
         note: >
-          NO `args` YET, DELIBERATELY — blocked by header findings (1) and (2).
-          Note also that `command` omits --detach on purpose: the auth gate this
-          row trips is `write_batch_scheduler`'s per-dispatch `preflight_runner`,
-          which runs INSIDE the worker, so a detached invocation puts the exit-3
-          refusal on the worker's receipt while the launcher's reads exit 0 —
-          and the grader takes the last `apply-suggestions` receipt. The shim,
-          meanwhile, tells the agent to add --detach to a fan-out mode. Wiring
-          this row therefore also needs an answer to "who decides the foreground
-          form", which is not something an `args` string can settle.
+          `args` WIRED 2026-08-20, and the string is deliberately identical to
+          `codex-apply-executor`'s. Header findings (1) and (2) are both answered
+          above — `pre_commands` supplies the review-plan output, and
+          `remove_seed` is now really removed — and this row's first run is the
+          first execution of either.
+          "WHO DECIDES THE FOREGROUND FORM" IS ANSWERED, AND THE ANSWER IS "NOT
+          THE OPERATOR". `command` omits --detach because the auth gate this row
+          trips is `write_batch_scheduler`'s per-dispatch `preflight_runner`,
+          which runs INSIDE the worker; the shim, meanwhile, tells the agent to
+          add --detach to a fan-out mode, and an `args` string has no token that
+          can forbid it. So the row does NOT try to force the foreground form —
+          it is graded so that either form is legible. On a detached run the
+          launcher's receipt reads exit 0 and the WORKER's carries the exit-3
+          refusal; receipts are named `NNN.receipt.json` at completion time, so
+          the worker's sorts last and `_mode_receipts(...)[-1]` — the grader's own
+          rule — picks it. The refusal's prose then lands in
+          `{phase}/orchestrator-run.log` rather than on the host's stdout, which
+          is why the transcript the `reason` is looked for in now includes the
+          exported run log (this host's own `result_source` cell already named it
+          as where the verdict comes from). If the agent runs it foreground
+          instead, both halves are on the host's stdout and the same assertions
+          hold. UNMEASURED either way.
 
   # ===========================================================================
   opencode:
@@ -952,31 +1319,112 @@ hosts:
             pass. This is a MODEL-following failure on a mode with a long
             instruction core, not a shim defect: the same host followed the shim
             exactly on `ask`.
+      - id: opencode-full
+        args: '--full "plans/auth-feature.md" --quick'
+        command: "full plans/auth-feature.md --yes --exec-subagents --quick --detach"
+        expect:
+          run: done
+          exit: 0
+          # See codex-full for the full derivation; the cells are identical
+          # because the fact they encode is about OUR dispatcher, not about the
+          # host. `full` calls each phase's `main(argv)` in-process, so one host
+          # turn is one dispatcher invocation and one MULTI_LLM_RESULT line,
+          # carrying `modes.py`'s phase for `full` — the string `full`.
+          receipt_phase: full
+          # What state.json must record: the eight workflow phases, cross-checked
+          # against test_container_full_chain.py's CHAIN_PHASES. Mode
+          # `review-code` records phase `code-review`.
+          phases:
+            - review-plan
+            - apply-suggestions
+            - generate-tasks
+            - review-tasks
+            - apply-task-suggestions
+            - implement
+            - code-review
+            - apply-code-fixes
+          receipts_min: 2
+        wall_clock_s: 900
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: unmeasured
+        note: >
+          The second host on the same row shape, and it is not redundant with
+          `codex-full`: the two hosts follow the shim differently and this matrix
+          has already measured that difference on the mode that matters here.
+          `opencode-review-plan` completed its workflow while IMPROVISING the
+          invocation — it polled before starting anything, dropped every baked
+          flag and omitted `--detach` on a host where `detach: required` — so on
+          this host the risk `full` runs is a shim-following one, not a workflow
+          one. `--full` is a longer instruction core than `--review-plan`, which
+          makes this the row most likely to reproduce that failure and the row
+          worth having a second copy of.
+          `args` is the OPERATOR form: this host takes it VERBATIM after `--`
+          (`prompt_template: null`), so the string is what an end user types.
+          UNMEASURED. Nothing about this row has run.
       - id: opencode-apply-executor
+        # WIRED 2026-08-20. Byte-identical to codex-apply-executor's, and that is
+        # correct rather than lazy: the two hosts bake the same three flags
+        # (`--host <id>`, `--yes`, `--exec-subagents`) and both add `--detach`
+        # from their own shim step, so the operator form of the same `command` is
+        # the same string. On this host it is ALSO the whole prompt —
+        # `prompt_template: null`, so opencode takes it verbatim after `--`.
+        args: '--apply-suggestions "plans/auth-feature.md"'
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents --detach"
+        # The pre-command leg — see claude-code-apply-native for the full cell.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
+        # timeout and it now has to cover the pre-command leg too.
+        wall_clock_s: 900
         expect:
           run: done
           exit: 0
           phases: [apply-suggestions]
           write_outcome: clean-failure
           bytes_must_change: false
+        provenance: unmeasured
         note: >
-          NO `args` YET, DELIBERATELY — blocked by header finding (1), exactly as
-          codex-apply-executor is: one host process, a workspace with no
-          review-plan output, and `apply-suggestions` exiting 1 before any batch.
+          `args` WIRED 2026-08-20, exactly as codex-apply-executor is: the
+          `pre_commands` leg above answers header finding (1), and this row's
+          first run is that leg's first execution.
+          THE RISK THIS ROW CARRIES THAT CODEX'S DOES NOT is already measured on
+          this host: `opencode-review-plan` completed its workflow while
+          IMPROVISING the invocation — it dropped every baked flag and omitted
+          `--detach` on a host where `detach: required`. `expect.run: done`
+          therefore fails here for a shim-following reason rather than a workflow
+          one, and that is the correct verdict, not a bound to loosen.
+          UNMEASURED.
       - id: opencode-auth-negative
+        # WIRED 2026-08-20, the same string as the three rows above it.
+        args: '--apply-suggestions "plans/auth-feature.md"'
         command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+        # The pre-command leg, ordered before the removal — see
+        # codex-auth-negative for why that order is the row rather than a detail.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         remove_seed: ".local/share/opencode/auth.json"
+        # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
+        # timeout and it now has to cover the pre-command leg too.
+        wall_clock_s: 900
         expect:
           # NOT not_authenticated — see the auth_check finding above. This row is
           # recorded so the difference from codex is asserted rather than assumed.
           exit: unknown
           reason: "probe passes while logged out; failure surfaces at dispatch"
           provenance: unmeasured
+          # DELIBERATELY NO `stub_requests` CELL. codex's gate closes before the
+          # first model call and can name a number; this one opens, so calls
+          # reaching the stub are the documented behaviour rather than a failure —
+          # `test_no_request_reached_the_stub` skips by name on the absence.
         note: >
-          NO `args` YET, DELIBERATELY — blocked by header findings (1) and (2).
-          This row's own assertion is the weakest of the five and it is the one
-          worth wiring FIRST once they land: `exit: unknown` means the grader
-          only files evidence, so the row cannot fail for the model's behaviour,
-          and what it records — that this gate OPENS where codex's closes — is a
-          product finding nobody has observed yet.
+          `args` WIRED 2026-08-20. Header findings (1) and (2) are answered above
+          and this row's first run is the first execution of either.
+          This row's own assertion is the weakest of the five and it is still the
+          one worth wiring FIRST, precisely because those two cells are unrun:
+          `exit: unknown` means the grader only files evidence, so the row cannot
+          fail for the model's behaviour, and what it records — that this gate
+          OPENS where codex's closes — is a product finding nobody has observed
+          yet. The evidence lands in `negative-auth-observed.json`.
+          UNMEASURED.

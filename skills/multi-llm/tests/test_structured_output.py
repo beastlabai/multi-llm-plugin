@@ -396,11 +396,13 @@ class TestSchemaKeywordIsInertWhenUnset:
 
         table, _models, _prompt = self._table()
         assert set(table) == set(_PROVIDERS)
-        assert len(table) == 13
+        assert len(table) == 17
 
     @pytest.mark.parametrize("name", sorted(so.__dict__.get("_ADAPTERS", ())) or [
-        "agy", "aider", "claude-code", "cline", "codex", "cursor-agent", "gemini",
-        "goose", "grok", "kilocode", "muse", "opencode", "pi",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "gemini",
+        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "vibe",
     ])
     def test_explicit_none_renders_the_pre_m7_argv(self, name):
         from utils.provider_registry import _PROVIDERS
@@ -411,8 +413,10 @@ class TestSchemaKeywordIsInertWhenUnset:
         assert provider.build_command(prompt, models[name], schema=None) == table[name]
 
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "cursor-agent", "gemini",
-        "goose", "grok", "kilocode", "muse", "opencode", "pi",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "gemini",
+        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "vibe",
     ])
     def test_omitting_the_keyword_is_the_same_as_passing_none(self, name):
         from utils.provider_registry import _PROVIDERS
@@ -425,8 +429,10 @@ class TestSchemaKeywordIsInertWhenUnset:
         )
 
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "cursor-agent", "gemini",
-        "goose", "grok", "kilocode", "muse", "opencode", "pi",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "gemini",
+        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "vibe",
     ])
     def test_the_other_three_builders_are_inert_too(self, name):
         from utils.provider_registry import _PROVIDERS
@@ -460,7 +466,13 @@ class TestSchemaKeywordIsInertWhenUnset:
                     prompt, model, profile, transport
                 )
 
-    def test_only_claude_code_and_codex_declare_structured_output_support(self):
+    def test_the_structured_output_roster_is_exactly_the_measured_three(self):
+        """Renamed from `..._only_claude_code_and_codex_...`: qwen-code is the
+        third, measured at 0.21.13 (OQ2). `--json-schema` really constrains the
+        output and fails closed on plain text, which is what licenses a `True` —
+        a flag that appears in `--help` without constraining would have been a
+        `False`, because the declaration is read as permission to mark a phase
+        `native`."""
         from utils.provider_registry import _PROVIDERS
 
         declared = {
@@ -468,7 +480,7 @@ class TestSchemaKeywordIsInertWhenUnset:
             for name, provider in _PROVIDERS.items()
             if provider.structured_output_support
         }
-        assert declared == {"claude-code", "codex"}
+        assert declared == {"claude-code", "codex", "qwen-code"}
 
     def test_an_adapter_without_support_ignores_the_schema_entirely(self, schema):
         from utils.provider_registry import _PROVIDERS

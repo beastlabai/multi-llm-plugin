@@ -26,6 +26,17 @@ one of three: ``opencode`` (via `opencode debug config`). ``codex`` and
 this tier reports them ``unavailable-without-credential`` rather than passing
 them, and says so in the census. That distinction is the whole point: "everything
 skipped" and "everything passed" are the two outcomes a lane must never conflate.
+
+Those two hosts are not left unevidenced, though — they are evidenced one tier
+up. Their credentialed ``ask`` rows already emit a ``util instructions <mode>``
+receipt, which is step 3 of the shim and is obtainable only by a host that found
+and read it, so ``TestDiscoveryOnTheHostsWithNoFreeSurface`` records
+``discovery: listed-via-prompted-turn`` from a turn this lane already pays for.
+It adds no row and costs nothing. The free tier's own verdict is untouched: the
+two tiers cannot see each other's data (the module-scoped ``discovery`` fixture's
+tests all run before the first credentialed row exists), and the answer to that
+is to grade the credentialed evidence where it lives rather than to let the free
+tier claim something it cannot observe.
 """
 
 from __future__ import annotations
@@ -159,7 +170,17 @@ class TestTheStagedCommandIsDiscoverable:
         )
 
     def test_the_host_enumerates_our_command(self, discovery):
-        """The assertion, where the host offers a credential-free way to ask."""
+        """The assertion, where the host offers a credential-free way to ask.
+
+        The skip below stays a skip, and deliberately: this tier runs with no
+        credential and `--network none`, so on a host with no listing surface
+        there is genuinely nothing here to read. Turning it into a pass would be
+        inventing a verdict, which is the one thing this module exists to stop.
+
+        The evidence those two hosts *do* produce is a credentialed one and is
+        graded where it exists — `TestDiscoveryOnTheHostsWithNoFreeSurface`, on
+        the same `ask` rows this lane already runs, at no extra cost.
+        """
         result, census, entry = discovery
         form = (entry.get("list_step") or {}).get("form")
         if form != "debug-config":
@@ -167,7 +188,11 @@ class TestTheStagedCommandIsDiscoverable:
                 f"{result.row.host}: no credential-free listing surface exists "
                 f"(measured — `doctor` included), so discovery here needs a "
                 f"prompted turn and a credential. Reported as "
-                f"'{census['discovery']}' in the census rather than as a pass."
+                f"'{census['discovery']}' in the census rather than as a pass. "
+                f"The prompted-turn evidence is graded by "
+                f"TestDiscoveryOnTheHostsWithNoFreeSurface in the credentialed "
+                f"tier, which writes 'listed-via-prompted-turn' beside that row's "
+                f"bundle."
             )
         assert census["discovery"] == "listed", (
             f"{result.row.host}: {census.get('reason')}\n"
@@ -211,6 +236,22 @@ CREDENTIALED_ROWS = [
     ("opencode", "opencode-review-plan"),
     ("codex", "codex-review-plan"),
     ("claude-code", "claude-code-review-plan"),
+    # The two `--full` rows: one host turn each, and between them the ONLY
+    # coverage on this lane of all eight workflow phases driven by a real host.
+    # `full` runs every phase in one process with no invoker between them, so
+    # this costs two rows rather than the sixteen a phase-per-row expansion would
+    # need — and it needs no pre-command leg, because the chain seeds each phase
+    # for the next one itself.
+    #
+    # THERE IS NO THIRD ONE, AND THAT IS RECORDED RATHER THAN MISSING.
+    # `host_matrix.yaml`'s claude-code entry carries `full_row: not-applicable`
+    # with its derivation: that host's shim forbids `--exec-subagents` and
+    # `--detach`, so `full` stops at review-plan's [VALIDATION_PENDING] and then
+    # at apply-suggestions' [WRITE_PHASE_NOT_EXECUTED], both survivable only by
+    # an agent that re-invokes the printed `next` — which that host has measurably
+    # failed to do twice.
+    ("codex", "codex-full"),
+    ("opencode", "opencode-full"),
     # The write rows, whose two shapes are deliberately opposite. A real executor
     # CLI pointed at a tool-call-free stub can only ever produce a CLEAN FAILURE,
     # so those rows assert that outcome and an `applied` batch there fails just as
@@ -228,6 +269,62 @@ CREDENTIALED_ROWS = [
     ("codex", "codex-auth-negative"),
     ("opencode", "opencode-auth-negative"),
 ]
+
+
+class TestTheScheduleMatchesTheMatrix:
+    """`CREDENTIALED_ROWS` is a hand-written list, so it can silently fall behind.
+
+    The `graded` fixture already checks one direction — a listed row that the
+    matrix does not name fails immediately. The other direction was unguarded and
+    is the dangerous one: a row **authored into `host_matrix.yaml` and never
+    added here simply does not run**, while the lane still reports green and the
+    census still says every declared row executed. That is the same
+    "everything skipped looks like everything passed" failure this module exists
+    to prevent, one level up — the census can only count what the schedule
+    declares.
+    """
+
+    def test_every_matrix_row_is_scheduled(self):
+        declared = {(host, row["id"]) for host, entry in HOSTS
+                    for row in (entry.get("rows") or [])}
+        scheduled = set(CREDENTIALED_ROWS)
+        unscheduled = sorted(declared - scheduled)
+        assert not unscheduled, (
+            f"host_matrix.yaml declares {unscheduled} and CREDENTIALED_ROWS does "
+            f"not schedule them, so they never run and nothing reports that they "
+            f"did not. Add them here, or delete them from the matrix — an "
+            f"authored row nobody runs is worse than no row, because the census "
+            f"counts it as covered.")
+
+    def test_a_host_that_declares_no_full_row_has_none(self):
+        """4.2's structural limit, enforced rather than only written down.
+
+        `full_row: not-applicable` is a claim about the product (claude-code's
+        shim forbids `--exec-subagents`/`--detach`, so `full` cannot complete
+        there). If someone later adds the row anyway, the cell would sit beside
+        it saying the opposite — and the cell is what a reader trusts.
+        """
+        for host, entry in HOSTS:
+            has_full = any(str(row.get("id", "")).endswith("-full")
+                           for row in (entry.get("rows") or []))
+            declared = entry.get("full_row")
+            if declared == "not-applicable":
+                assert not has_full, (
+                    f"{host}: declares `full_row: not-applicable` and carries a "
+                    f"`--full` row anyway. One of the two is wrong, and the "
+                    f"reason cell is the one a reader trusts.")
+                assert entry.get("full_row_reason"), (
+                    f"{host}: `full_row: not-applicable` with no "
+                    f"`full_row_reason`. §6.3's rule is that a committed, "
+                    f"measured 'not applicable, because …' is an acceptable "
+                    f"cell; an unexplained one is not.")
+            elif not has_full:
+                pytest.fail(
+                    f"{host}: has no `--full` row and declares no `full_row` "
+                    f"verdict, so 8-of-8 phase coverage on this host is "
+                    f"untested rather than recorded as impossible. Add the row, "
+                    f"or add `full_row: not-applicable` with its reason.")
+
 
 #: The pre-flight refusal, not a ceiling (C6). It is checked BETWEEN rows, which
 #: is what turns an overshoot into one blown row instead of six.
@@ -409,6 +506,18 @@ def graded(request, posture, utc):
         # stub answers a bare "OK", which is not a suggestions document, and the
         # row grades the stub's default answer instead of the host.
         scenario=matrix_row.get("scenario"),
+        # THE PRE-COMMAND LEG. Ordered dispatcher invocations the entrypoint runs
+        # in the row's workspace BEFORE the host process starts — the rig gap
+        # that kept `apply-suggestions` unrunnable on this lane, since it exits 1
+        # in `_setup` against a workspace with no review-plan output and this
+        # lane launches exactly one host process per row.
+        #
+        # `Row.commands` and the `--command` forwarding are the provider lane's
+        # existing plumbing; only the host branch of the entrypoint had never
+        # consumed them. The leg's receipts land in `receipts/<row>-pre/` rather
+        # than `receipts/<row>/`, so no assertion in this module can mistake the
+        # rig's own invocation for the host's.
+        commands=[str(c) for c in (matrix_row.get("pre_commands") or [])],
     )
     result = harness.run_row(row, posture=posture, utc=utc)
     _Census.record_ran(row_id, host, "openrouter")
@@ -437,6 +546,94 @@ def workflow(graded):
             f"{matrix_row.get('id')}: a negative auth row asserts a REFUSAL, not "
             f"a workflow — graded by TestTheNegativeAuthRowsRefuse")
     return graded
+
+
+class TestThePreCommandLegRan:
+    """A row's prerequisite phase, run by the RIG before the host process starts.
+
+    `host_matrix.yaml`'s header finding (1): this lane seeds one workspace per row
+    and launches exactly ONE host process against it, and `apply-suggestions`
+    exits 1 in `_setup` — "Run --review-plan first to generate validation results"
+    — against a workspace with no review-plan output. The provider lane's
+    applied-bytes row answers the same problem with two commands; the host lane
+    had nowhere to put the first one until `pre_commands` existed.
+
+    **This is not the host's work and is never counted as it.** The leg's receipts
+    are written to `receipts/<row>-pre/`, one directory across from the
+    `receipts/<row>/` that every "the agent really ran our dispatcher" assertion
+    reads, so a row can never satisfy its receipt anchor on the rig's own
+    invocation.
+
+    Graded on `graded` rather than `workflow`: the negative auth rows need the leg
+    too, and need it to run *before* their seeded credential is removed.
+    """
+
+    pytestmark = pytest.mark.live
+
+    def test_every_declared_pre_command_ran_and_exited_zero(self, graded):
+        result, matrix_row, _entry = graded
+        declared = [str(c) for c in (matrix_row.get("pre_commands") or [])]
+        if not declared:
+            pytest.skip(f"{matrix_row.get('id')}: the row declares no pre_commands")
+        # A ROW THAT CANNOT REACH THE LEG IS NOT A LEG FAILURE. `build_host_argv`
+        # runs BEFORE the leg and raises on a row with no `args`, so such a row
+        # aborts in ~1.5 s having spent nothing and having executed no
+        # pre-command. Asserting the leg ran there reports the same single blocker
+        # again, four more assertions per row, and buries the rows that are
+        # genuinely red. The missing `args` is the finding; this is not.
+        #
+        # SINCE 2026-08-20 NO ROW IN THE MATRIX IS IN THAT STATE — all five that
+        # were are wired — so this branch is a guard against a row losing its
+        # `args` again, not a description of the lane. If it ever fires, the fix
+        # is the `args` string, not this test.
+        if not matrix_row.get("args"):
+            pytest.skip(
+                f"{matrix_row.get('id')}: declares no `args`, so the container "
+                f"aborts in render_prompt before the pre-command leg is reached. "
+                f"The leg is untestable here until that row is wired.")
+        path = result.out_dir / "pre-commands.json"
+        assert path.is_file(), (
+            f"{result.row.host}: the row declares {len(declared)} pre-command(s) "
+            f"and the container wrote no pre-commands.json, so the leg never ran. "
+            f"Either the harness did not forward them or the host branch reached "
+            f"the launch without them — and a host launched against an unprepared "
+            f"workspace fails for the wrong reason.\n"
+            f"--- container stderr (tail) ---\n{result.stderr[-2000:]}")
+        records = json.loads(path.read_text(encoding="utf-8"))
+        failed = [record for record in records if record.get("exit") != 0]
+        assert not failed, (
+            f"{result.row.host}: pre-command leg failed: {failed}. The host was "
+            f"deliberately not launched — a prerequisite phase that did not "
+            f"complete leaves the row's real mode nothing to act on.")
+        assert [record.get("command") for record in records] == declared, (
+            f"{result.row.host}: the leg ran "
+            f"{[record.get('command') for record in records]}, and the row "
+            f"declares {declared}. Order is part of the declaration: a chain that "
+            f"ran a different set, or the same set in a different order, prepared "
+            f"a different workspace.")
+
+    def test_the_legs_receipts_stayed_out_of_the_hosts_directory(self, graded):
+        """The separation, asserted rather than assumed.
+
+        It is the one property that keeps this feature from being a way to pass
+        the receipt anchor without a host: if the leg ever wrote into
+        `receipts/<row>/`, a row whose host did nothing at all would still show a
+        `review-plan` receipt with a terminal payload.
+        """
+        result, matrix_row, _entry = graded
+        if not (matrix_row.get("pre_commands") or []):
+            pytest.skip(f"{matrix_row.get('id')}: the row declares no pre_commands")
+        if not matrix_row.get("args"):
+            pytest.skip(
+                f"{matrix_row.get('id')}: declares no `args` — see the sibling "
+                f"assertion. The leg is never reached, so it left no receipts to "
+                f"be in the wrong place.")
+        leg = result.out_dir / "receipts" / f"{result.row.row_id}-pre"
+        assert leg.is_dir() and any(leg.glob("*.receipt.json")), (
+            f"{result.row.host}: the leg ran but left no receipt under {leg}. "
+            f"Either MLLM_RECEIPT_DIR did not reach the dispatch or — the case "
+            f"that matters — the leg wrote into the host's own receipt directory, "
+            f"where its invocations would be graded as the host's.")
 
 
 class TestTheAgentReallyRanOurDispatcher:
@@ -471,9 +668,28 @@ class TestTheAgentReallyRanOurDispatcher:
             f"expected >= {minimum}: {[_mode_of(r) for r in dispatcher]}")
 
     def test_the_payload_names_the_expected_mode_and_phase(self, workflow):
+        """The phase the RECEIPTS name — which is not always the phases the row runs.
+
+        `expect.phases` is what `state.json` must record completed, and on every
+        one-mode row that is also what the receipt carries, so the two are one
+        list. A `--full` row breaks the identity: `full` runs all eight phases by
+        calling each phase's own `main(argv)` in-process
+        (`full_workflow_orchestrator.run_mode` — "the dispatcher owns one
+        MULTI_LLM_RESULT line and one result context per invocation, and nesting
+        it would emit a second line"), so the host makes ONE dispatcher
+        invocation carrying ONE result line, whose `phase` is `modes.py`'s phase
+        for the mode word: `full`.
+
+        `expect.receipt_phase` is that row's own answer, and it NARROWS this
+        assertion rather than relaxing it — the receipt must name exactly the
+        declared phase. Nothing is dropped: the eight phases stay graded, one
+        test down, against `state.json`'s `phases_completed`, which is the
+        artifact rather than the claim.
+        """
         result, matrix_row, _entry = workflow
         expect = matrix_row.get("expect") or {}
-        phases = expect.get("phases") or []
+        declared = expect.get("receipt_phase")
+        phases = [declared] if declared else (expect.get("phases") or [])
         payloads = [r["result"] for r in _dispatcher_receipts(result)
                     if isinstance(r.get("result"), dict)]
         assert payloads, (
@@ -569,6 +785,82 @@ class TestTheAgentReallyRanOurDispatcher:
         assert not missing, (
             f"{result.row.host}: receipt named artifacts that are absent or "
             f"empty on the bind mount: {missing}")
+
+
+class TestDiscoveryOnTheHostsWithNoFreeSurface:
+    """Discovery on `codex` and `claude-code`, proven by the turn we already pay for.
+
+    The free tier cannot ask these two hosts to enumerate our command: neither
+    has a credential-free listing surface, measured, `doctor` included. That is a
+    genuine upstream wall and this module reports it as one — `discovery:
+    unavailable-without-credential`, never a pass.
+
+    But "we cannot ask it to list" is not the same claim as "we have no evidence
+    it found the shim", and the credentialed `ask` rows have been producing the
+    stronger evidence all along. A `util instructions <mode>` receipt is step 3 of
+    the shim, printed nowhere else: to emit that exact command the host had to
+    locate the staged shim, load it, and read far enough to reach the read step.
+    A host that never found the file cannot produce it. So this records
+    `listed-via-prompted-turn` from evidence already on disk, at **$0.00** — it
+    schedules no row, and rides on the cheapest rows in the matrix.
+
+    THREE THINGS IT DELIBERATELY DOES NOT DO.
+
+    * It does not touch the free tier's verdict. That tier still has no evidence,
+      still skips, and still writes `unavailable-without-credential`. The two
+      tiers cannot see each other's data — the module-scoped `discovery` fixture's
+      tests all run before the first credentialed row exists — and the fix for
+      that is not to make the free tier guess; it is to grade the credentialed
+      evidence where it lives, which is here.
+    * It does not claim ENUMERATION. `opencode debug config` returns a list the
+      host itself compiled; this is one host, one turn, one command. The verdict
+      is spelled differently for exactly that reason, and `opencode` keeps the
+      stronger word.
+    * It does not grade every row. One row per host, the cheapest one, so a
+      review-plan or write row that fails for its own reasons does not also
+      report a discovery failure it did not cause.
+    """
+
+    pytestmark = pytest.mark.live
+
+    def test_a_prompted_turn_proves_the_host_found_our_shim(self, workflow):
+        result, matrix_row, entry = workflow
+        if (entry.get("list_step") or {}).get("form") != "none":
+            pytest.skip(
+                f"{result.row.host}: this host has a credential-free listing "
+                f"surface, and discovery on it is graded there — by "
+                f"TestTheStagedCommandIsDiscoverable, for free. A prompted turn "
+                f"is the fallback, never the preferred evidence.")
+        if not str(matrix_row.get("id") or "").endswith("-ask"):
+            pytest.skip(
+                f"{matrix_row.get('id')}: discovery is graded once per host, on "
+                f"its `ask` row — the only row with no subagent batch, so a "
+                f"failure here is about the shim being found rather than about "
+                f"anything a batch did")
+        evidence = [receipt for receipt in _dispatcher_receipts(result)
+                    if _mode_of(receipt) == "util instructions"]
+        assert evidence, (
+            f"{result.row.host}: the host ran no `util instructions <mode>`, so "
+            f"nothing in this row shows it read the staged shim. That command is "
+            f"step 3 of the shim and is printed nowhere else; a host that never "
+            f"found the file cannot emit it.\n"
+            f"  receipts    : {[_mode_of(r) for r in _dispatcher_receipts(result)]}\n"
+            f"  host argv   : {result.host_run.get('argv')}\n"
+            f"  host exit   : {result.host_run.get('exit')}")
+        (result.out_dir / "discovery-prompted.json").write_text(json.dumps({
+            "host": result.row.host,
+            "row": matrix_row.get("id"),
+            "tier": "credentialed",
+            "discovery": "listed-via-prompted-turn",
+            "reason": (
+                "no credential-free listing surface exists on this host "
+                "(measured, `doctor` included), so the host was asked instead: "
+                "it located and read the staged shim and ran the shim's own step "
+                "3 command. Weaker than `listed` — one command, not an "
+                "enumeration — and stronger than `unavailable-without-credential`, "
+                "which is all the free tier can honestly say."),
+            "evidence": [receipt.get("argv") for receipt in evidence],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 class TestTheWorkerNotTheLauncher:
@@ -732,12 +1024,46 @@ class TestTheWriteRowsAreGradedOnBytes:
     pytestmark = pytest.mark.live
 
     def test_the_report_exists_and_the_run_finalized(self, workflow):
-        result, matrix_row, _entry = workflow
+        result, matrix_row, entry = workflow
         _write_outcome(matrix_row)           # skips every non-write row by name
-        report = _write_report(result, _write_phase(matrix_row))
+        if _fan_out_is_native(matrix_row, entry):
+            # ON THE NATIVE ROW THE ASSERTION INVERTS, and it is still an
+            # assertion rather than a skip.
+            #
+            # `write_batch_report.json` is written ONLY by
+            # `utils/write_batch_scheduler.WriteBatchScheduler`, and
+            # `apply_orchestrator_base.run_write_executor` returns None — "not
+            # requested, carry on natively" — unless `--exec-subagents` or
+            # `--dry-run-subagents` was passed. This row's host is told by its own
+            # shipped shim to "Never pass `--exec-subagents` on this host"
+            # (`host_capabilities._SUBAGENTS["native"]`), and `host_matrix.yaml`
+            # lists the flag under `forbidden_flags`. So the executor's per-batch
+            # account cannot exist here — the native loop records prose summaries
+            # through `util prior-changes append` and nothing machine readable —
+            # and demanding it would fail this row for a category error rather
+            # than for anything the host did.
+            #
+            # Its ABSENCE, though, is worth asserting: a report appearing means
+            # the agent typed the flag its shim forbids, which converts this
+            # matrix's only NATIVE-dispatch row into an executor row and deletes
+            # the coverage it exists for. Nothing is lost by not reading the
+            # report: completion is graded from `state.json` by
+            # `test_the_phase_recorded_itself_completed`, and the outcome that
+            # matters — whether bytes actually landed — is graded by the two
+            # census assertions below, which is what a byte-level verdict is.
+            stray = _write_report(result, _write_phase_dir(matrix_row))
+            assert not stray, (
+                f"{result.row.host}: a write_batch_report.json exists on the "
+                f"NATIVE write row. Only WriteBatchScheduler writes that file and "
+                f"it only runs under --exec-subagents/--dry-run-subagents, so the "
+                f"host passed a flag its own shim tells it never to pass — this "
+                f"row is no longer the native-dispatch row it is declared to be: "
+                f"{stray.get('tasks')}")
+            return
+        report = _write_report(result, _write_phase_dir(matrix_row))
         assert report, (
             f"{result.row.host}: no write_batch_report.json under "
-            f"{_write_phase(matrix_row)}/ in the exported bundle — the write "
+            f"{_write_phase_dir(matrix_row)}/ in the exported bundle — the write "
             f"scheduler either never dispatched a batch or never wrote its report")
         assert report.get("finalized") is True, (
             f"{result.row.host}: write_batch_report.json records "
@@ -747,9 +1073,17 @@ class TestTheWriteRowsAreGradedOnBytes:
             f"{report.get('stopped_at_batch')!r})")
 
     def test_every_batch_recorded_the_declared_outcome(self, workflow):
-        result, matrix_row, _entry = workflow
+        result, matrix_row, entry = workflow
         declared = _write_outcome(matrix_row)
-        report = _write_report(result, _write_phase(matrix_row))
+        if _fan_out_is_native(matrix_row, entry):
+            pytest.skip(
+                f"{matrix_row.get('id')}: `write_outcome` is the EXECUTOR's "
+                f"per-task vocabulary and this row forbids the executor, so there "
+                f"is no per-batch record to read — see the sibling assertion, "
+                f"which owns the native case and grades the report's absence. "
+                f"What `applied` means on this row is graded on the SHA census "
+                f"below, by `test_the_bytes_moved_exactly_as_the_row_declares`.")
+        report = _write_report(result, _write_phase_dir(matrix_row))
         recorded = {task.get("task_id"): task.get("write_outcome")
                     for task in report.get("tasks") or []}
         assert recorded, (
@@ -836,11 +1170,30 @@ class TestTheNegativeAuthRowsRefuse:
                 f"{result.row.host}: this row declares no stub_requests — its gate "
                 f"opens rather than refusing, so a call reaching the stub is the "
                 f"documented behaviour and not a failure")
+        # COUNTED FROM THE WATERMARK, NOT FROM ZERO. The row's cell means "zero
+        # after the credential was removed" — the refusal lands before the first
+        # model call — and this lane now runs a pre-command leg that fans out to
+        # the stub *on purpose*, while the seed is still in place, through the
+        # very runner this row exists to have refused. `entrypoint` writes the
+        # boundary to `stub-watermark.json` at the moment the host process starts,
+        # after the leg and after the removal; everything at or below it is the
+        # rig's own traffic. Counting raw would grade the leg and make this cell
+        # unsatisfiable the day the leg landed.
         calls = [r for r in result.stub_log if r.get("surface") != "health"]
-        assert len(calls) == int(declared), (
-            f"{result.row.host}: {len(calls)} request(s) reached the stub, "
-            f"expected {declared}. The refusal is supposed to land BEFORE the "
-            f"first model call: {[r.get('surface') for r in calls]}")
+        before = _stub_watermark(result)
+        assert before is not None, (
+            f"{result.row.host}: the container wrote no stub-watermark.json, so "
+            f"the rig's own pre-command traffic cannot be told apart from the "
+            f"host's and this row has nothing it can honestly count. The "
+            f"watermark is written on every credentialed row immediately before "
+            f"the host launches.")
+        after = calls[before:]
+        assert len(after) == int(declared), (
+            f"{result.row.host}: {len(after)} request(s) reached the stub after "
+            f"the credential was removed, expected {declared} "
+            f"({before} earlier request(s) were the pre-command leg's and are not "
+            f"counted). The refusal is supposed to land BEFORE the first model "
+            f"call: {[r.get('surface') for r in after]}")
 
     def test_the_refusal_was_named_and_fast(self, graded):
         result, matrix_row, _entry = graded
@@ -849,7 +1202,7 @@ class TestTheNegativeAuthRowsRefuse:
             pytest.skip(
                 f"{result.row.host}: host_matrix.yaml records exit: unknown, "
                 f"provenance: unmeasured for this row — {expect.get('reason')}")
-        receipts = _mode_receipts(result, "apply-suggestions")
+        receipts = _mode_receipts(result, _row_mode(matrix_row))
         assert receipts, (
             f"{result.row.host}: no dispatcher receipt for the write mode, so the "
             f"row proves nothing about the gate: the command never ran at all")
@@ -877,7 +1230,7 @@ class TestTheNegativeAuthRowsRefuse:
         expect = _negative_expect(matrix_row)
         if expect.get("exit") != "unknown":
             pytest.skip(f"{result.row.row_id}: this row's expectation is measured")
-        receipts = _mode_receipts(result, "apply-suggestions")
+        receipts = _mode_receipts(result, _row_mode(matrix_row))
         assert receipts, (
             f"{result.row.host}: the row produced no dispatcher receipt, so it "
             f"recorded nothing — an unmeasured expectation still needs evidence "
@@ -891,7 +1244,14 @@ class TestTheNegativeAuthRowsRefuse:
                        "reason": expect.get("reason"),
                        "provenance": expect.get("provenance")},
             "observed": {"dispatcher_exit": receipts[-1].get("exit"),
-                         "stub_requests": len(calls),
+                         # Both halves, because "12 calls" and "12 calls, all of
+                         # them the rig's" are different observations and only the
+                         # second one says anything about the gate.
+                         "stub_requests_total": len(calls),
+                         "stub_requests_before_host": _stub_watermark(result),
+                         "stub_requests_after_removal": (
+                             None if _stub_watermark(result) is None
+                             else len(calls) - _stub_watermark(result)),
                          "phases_completed": sorted(
                              result.workflow_state().get("phases_completed") or {})},
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -941,9 +1301,42 @@ def _write_outcome(matrix_row: dict) -> str:
     return str(outcome)
 
 
-def _write_phase(matrix_row: dict) -> str:
+#: The phase name a write row declares -> the DIRECTORY that phase writes into.
+#: Three of the four are the same word and the fourth is not: mode
+#: `apply-code-fixes` records phase `apply-code-fixes` in `state.json` and in its
+#: receipt payload, while `apply_code_fixes_orchestrator.phase_name` is
+#: `apply-fixes`, so the artifacts land one directory over from the name the row
+#: declares. Kept in step with `test_container_full_chain.WRITE_PHASE_DIRS`,
+#: which maps the same four for the provider lane.
+WRITE_PHASE_DIRS = {
+    "apply-suggestions": "apply-suggestions",
+    "apply-task-suggestions": "apply-task-suggestions",
+    "implement": "implement",
+    "apply-code-fixes": "apply-fixes",
+}
+
+
+def _write_phase_dir(matrix_row: dict) -> str:
+    """Where this row's write artifacts land, not what the row calls the phase.
+
+    Looked up rather than assumed: a row declaring `phases: [apply-code-fixes]`
+    that globbed `*/apply-code-fixes/` would find nothing and report "the phase
+    did not schedule anything" about a phase that scheduled everything.
+    """
     phases = (matrix_row.get("expect") or {}).get("phases") or []
-    return str(phases[0]) if phases else "apply-suggestions"
+    phase = str(phases[0]) if phases else "apply-suggestions"
+    return WRITE_PHASE_DIRS.get(phase, phase)
+
+
+def _row_mode(matrix_row: dict) -> str:
+    """The dispatcher mode word this row's `command` names.
+
+    Read from the row rather than hardcoded, so a retargeted row (D3 moved the
+    native write row from `apply-suggestions` to `apply-code-fixes`) takes its
+    grader with it instead of quietly grading a mode it no longer runs.
+    """
+    command = str(matrix_row.get("command") or "").split()
+    return command[0] if command else "apply-suggestions"
 
 
 def _negative_expect(matrix_row: dict) -> dict:
@@ -952,6 +1345,21 @@ def _negative_expect(matrix_row: dict) -> dict:
         pytest.skip(f"{matrix_row.get('id')}: not a negative auth row (it removes "
                     f"no seeded credential)")
     return matrix_row.get("expect") or {}
+
+
+def _stub_watermark(result) -> int | None:
+    """Non-health stub requests already logged when the host process started.
+
+    `None` means the container wrote no watermark, which is a missing-evidence
+    condition rather than a zero: reading it as 0 would silently credit the rig's
+    own pre-command fan-out to the host.
+    """
+    path = result.out_dir / "stub-watermark.json"
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8")).get(
+        "non_health_calls_before_host")
+    return None if value is None else int(value)
 
 
 def _fan_out_is_native(matrix_row: dict, entry: dict) -> bool:
@@ -1001,6 +1409,16 @@ def _transcript(result) -> str:
         path = result.out_dir / name
         if path.is_file():
             chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    # AND THE DETACHED WORKER'S OWN LOG. On a detaching row the dispatcher's
+    # prose never reaches the host's stdout at all: `spawn_detached` sends the
+    # worker's stdio to /dev/null and the worker opens
+    # `{phase}/orchestrator-run.log` itself, which is exactly where each executor
+    # host's `result_source` cell already says its verdict comes from. Without
+    # this, "the row failed for a named reason" would be a test of whether the
+    # agent happened to run it in the foreground — and no `args` string can
+    # decide that, because the shim's own step 5 adds `--detach`.
+    for log in sorted((result.out_dir / "artifacts").rglob("orchestrator-run.log")):
+        chunks.append(log.read_text(encoding="utf-8", errors="replace"))
     return "\n".join(chunks)
 
 

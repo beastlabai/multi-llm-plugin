@@ -71,12 +71,24 @@ def _redirect_env_extra() -> dict:
     """Per-CLI variable names ``redirect.yaml`` sets on the child itself.
 
     The carry-over allowlist is not the only way a variable reaches the CLI:
-    ``build_child_env`` applies the row's ``env_extra`` *after* the scrub, with a
-    value the rig owns. For a **credential-capable** variable that is the only
-    correct route — carrying it over would hand every provider subprocess the
-    host's live key, which is precisely what the sibling test below forbids. So
-    this check has to accept it too, or the remedy the failure message offers is
-    one that cannot make the test pass.
+    ``build_child_env`` applies the row's own keys *after* the scrub, with values
+    the rig owns. For a **credential-capable** variable that is the only correct
+    route — carrying it over would hand every provider subprocess the host's live
+    key, which is precisely what the sibling test below forbids. So this check
+    has to accept it too, or the remedy the failure message offers is one that
+    cannot make the test pass.
+
+    **All four row keys the wrapper applies count, not just ``env_extra``.**
+    ``build_child_env`` writes ``config_roots`` (rule 3), ``credential_vars`` and
+    ``base_url_vars`` (rule 2) as well, each with a rig-owned per-invocation
+    value — and for those three that is the *only* admissible route, since a base
+    URL carried over from the host would point a container row at the host's
+    endpoint and a carried credential is the exact leak the scrub exists to stop.
+    This helper read ``env_extra`` alone until ``kimi`` became the first adapter
+    whose ``get_env`` sets a base URL, a credential **and** a config root; before
+    that no adapter exercised the other three keys, so the gap was invisible
+    rather than absent. Reading all four is what keeps the failure message's
+    advice true.
 
     Rows are indexed by both keys ``wrapper.load_row`` matches on (``cli`` and
     the optional ``binary`` alias), so a lookup by provider id behaves the same
@@ -88,6 +100,9 @@ def _redirect_env_extra() -> dict:
     out: dict = {}
     for row in data.get("clis") or []:
         declared = set(row.get("env_extra") or {})
+        declared |= set(row.get("config_roots") or {})
+        declared |= set(row.get("base_url_vars") or {})
+        declared |= set(row.get("credential_vars") or [])
         for field in ("cli", "binary"):
             if row.get(field):
                 out.setdefault(str(row[field]), set()).update(declared)

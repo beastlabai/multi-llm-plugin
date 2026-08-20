@@ -951,21 +951,33 @@ def bundle_block(out_dir: Path, archive_url: str | None = None) -> dict | None:
 
 
 def declared_command(row: Row) -> str:
-    """Every dispatcher invocation this row drives, as one string.
+    """Every dispatcher invocation **the subject of the row** drives, as one string.
 
     The provider lane types its commands into the run argv (`row.command`); the
     host lane does **not** — the entrypoint reads them out of `host_matrix.yaml`
     by row id, so a driver that looked only at the Row would conclude that every
     host row typed nothing at all, and would then never record a `--detach` or
     `--exec-subagents` row as evidence for the capability it exercised.
+
+    **On the host lane the PRE-COMMAND LEG is excluded, and that is the whole
+    point of the branch.** `Row.commands` now carries a host row's `pre_commands`
+    — dispatcher invocations *the rig* makes in the row's workspace before the
+    host process starts — and the old `" ".join([row.command, *row.commands])`
+    returned those instead of the row's own `command`, because a host row's
+    `row.command` is empty. Two things went wrong at once and both are silent:
+    the record's `mode` became the leg's mode word (`review-plan`) rather than
+    the row's (`apply-suggestions`), and `--exec-subagents` typed by the RIG
+    would have been promoted as evidence that the HOST exercised the executor.
+    That is the same false positive the `receipts/<row>-pre/` split exists to
+    prevent, one layer up: capability evidence has to come from the host's own
+    invocation or it is not evidence about the host.
     """
-    typed = " ".join([row.command, *row.commands]).strip()
-    if typed:
-        return typed
-    for entry in (load_host_matrix().get(row.host or "") or {}).get("rows") or []:
-        if entry.get("id") == row.row_id:
-            return str(entry.get("command") or "")
-    return ""
+    if row.lane == "host":
+        for entry in (load_host_matrix().get(row.host or "") or {}).get("rows") or []:
+            if entry.get("id") == row.row_id:
+                return str(entry.get("command") or "") or row.command
+        return row.command
+    return " ".join([row.command, *row.commands]).strip()
 
 
 def row_outcome(result: RowResult) -> tuple[str, str | None]:

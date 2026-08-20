@@ -85,6 +85,80 @@ artifacts:
     sha256: "50937b6470cd0edf28eb683c352a5e7af3bcb1b015cd9a3b21dbf79d22af8182"
     manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=0.1.0-R708.1&file=manifest.json"
     channel_url: "https://api.meta.ai/muse-code/channels/muse-stable"
+  cursor-agent:
+    version: "2026.08.11-e8db854"
+    # The documented install is `curl https://cursor.com/install | bash` -- a
+    # live remote input executing as root, which is the one shape this file
+    # exists to refuse. And the refusal is not merely stylistic: that script is
+    # SERVER-RENDERED, and the version is baked into its body as a literal
+    # `DOWNLOAD_URL=.../lab/<version>/linux/x64/agent-cli-package.tar.gz`. The
+    # URL never changes; what it installs does. Piping it into a shell would
+    # therefore pin nothing at all, so the installer is never run and the
+    # tarball it would have fetched is named here by its own bytes instead.
+    #
+    # Cursor publishes no checksum anywhere, so unlike muse's this sha256 is
+    # OURS: measured over the fetched artifact (84,532,310 bytes, content-type
+    # application/x-tar), and re-confirmable by re-fetching the same URL.
+    #
+    # One tarball, one root directory (`dist-package/`), hence
+    # `--strip-components=1`. 245 MiB unpacked, of which 129 MB is a second
+    # bundled node -- see the Dockerfile's §7 block for what that buys.
+    url: "https://downloads.cursor.com/lab/2026.08.11-e8db854/linux/x64/agent-cli-package.tar.gz"
+    sha256: "bfff4bf6f4e9dd30c1d0ef0a70b6077b074015dd2948e4c50685d53afdcfce5a"
+    # Where `latest` mode re-reads the version, the way muse re-reads its
+    # channel: the URL above is grepped back out of this script's body.
+    installer_url: "https://cursor.com/install"
+  agy:
+    version: "1.1.15"
+    # Google's Antigravity CLI. Like muse's and unlike cursor-agent's, this
+    # sha256 is UPSTREAM'S OWN: the GitHub release API publishes a `digest` per
+    # asset, so the value below is what Google says the bytes are, not what we
+    # measured after fetching them. The build still checks it -- an upstream
+    # digest is a claim until sha256sum --check --strict agrees.
+    #
+    # 55,556,510 bytes compressed -> 205,537,320 unpacked: +196 MiB of layer,
+    # second only to cursor-agent's 245, and the reason this row needs a stated
+    # justification rather than "it was easy to add". What it buys is the
+    # cli-surface help-drift probe (C8) -- see the `clis` row below.
+    #
+    # ONE MEMBER, named `antigravity`, at the ROOT of the tarball: no directory
+    # to strip, hence no --strip-components anywhere in its install, and the
+    # install renames it to `agy` -- the name providers.yaml configures, the
+    # adapter dispatches and the wrapper symlink answers to.
+    #
+    # Needs no runtime this image does not already have: a dynamically linked
+    # glibc binary, satisfied by node:22-bookworm-slim. No bundled node (unlike
+    # cursor-agent), no second interpreter (unlike vibe).
+    #
+    # RELEASES DAILY -- 1.1.14 on 2026-08-18, 1.1.15 on 2026-08-19, measured a
+    # day apart. This pin is one to re-confirm on the day a Dockerfile change
+    # lands, the way kimi's and qwen-code's notes already say of theirs, and it
+    # is the reason the auto-update opt-out below is load-bearing rather than
+    # tidy: a self-updating binary on a daily channel unpins itself within a day.
+    url: "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.15/agy_cli_linux_x64.tar.gz"
+    sha256: "d0b1d6f3678a061915caebc431930e240b863bf4059369c08c6ffceb24e66b5f"
+    # The single tarball member, named here rather than discovered by the RUN:
+    # `tar -xzf` into /tmp and then `install /tmp/<member>` is only correct while
+    # the member is what this file says it is, and a renamed member would
+    # otherwise fail with a bare "no such file" naming a path nobody wrote.
+    member: "antigravity"
+    # Where `latest` mode re-reads the version, the way muse re-reads its channel
+    # and cursor-agent greps its server-rendered installer: the release API's
+    # `tag_name`. It is also where the `digest` above comes from.
+    releases_url: "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
+  python312:
+    version: "3.12.11"
+    # vibe's interpreter, NOT the product's -- `mistral-vibe` needs >=3.12 and
+    # the base image ships 3.11.2. Pinned and hashed like every other download
+    # because `UV_PYTHON_DOWNLOADS=never` is set in the Dockerfile: uv is
+    # forbidden from fetching one, and an unhashed build-time interpreter would
+    # be the unpinned remote input C9 exists to prevent.
+    #
+    # `install_only_stripped`, not `install_only`: 99 MB unpacked against 333 MB,
+    # and nothing in this image debugs CPython. Both were measured building the
+    # venv and answering `vibe --version`.
+    url: "https://github.com/astral-sh/python-build-standalone/releases/download/20250818/cpython-3.12.11%2B20250818-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    sha256: "b5a4f189f25cbacba0f76c9bd6f3ea8c35d2064068aa74ccbb6863068caababd"
 
 # The runtime under every CLI at once. A base-digest bump moves all of it, which
 # is exactly why these are asserted rather than assumed to follow from the digest.
@@ -130,10 +204,53 @@ toolchain:
       command: ["git", "--version"]
       pattern: "^git version (?P<version>\\S+)"
 
-# The drift target. Every row here is a CLI Phase 1 verified as redirectable at a
-# local stub; the two it could not redirect (`cursor-agent`, `agy`) are NOT in the
-# image at all -- they stay on the fake-binary lane (C5) rather than shipping a
-# binary no row can drive.
+# The drift target -- which is NOT the same set as the provider lane, and this is
+# the file where the two part company.
+#
+# Most rows here are CLIs Phase 1 verified as redirectable at a local stub, and
+# for those the two sets coincide: the row is in the image, and an offline
+# provider row drives it. `cursor-agent` is the exception, and it is in the image
+# anyway.
+#
+# It cannot be stubbed. Not "stubbing it is expensive" -- there is nothing to
+# write. It talks to its own endpoint in binary protobuf over Connect-RPC, so a
+# stub would have to reimplement an undocumented wire format that is not JSON and
+# not inspectable from a call log, and would then be asserting our reconstruction
+# of Cursor's protocol rather than Cursor's CLI. Every other row in this file
+# reaches a stub by moving one base-URL environment variable; this one has no
+# such seam at any price.
+#
+# What it IS installed for is the two consumers that need the genuine binary and
+# no backend that answers:
+#
+#   the credentialed live lane   `live_provider.py` deliberately bypasses the
+#                                PATH wrapper and execs /opt/mllm/real/<binary>
+#                                against the real vendor, so a CLI with no stub
+#                                is exactly as runnable there as any other.
+#   the cli-surface probe        `seed_cli_surface.py` runs the recorded `--help`
+#                                invocation against /opt/mllm/real/<binary>,
+#                                offline, and diffs the flag surface our adapter
+#                                builds argv against. Help text drifts silently
+#                                and breaks a build_command nobody edited; that
+#                                probe is the only thing that catches it, and it
+#                                needs the real binary and nothing else.
+#
+# Both read the binary directly, which is why a row with no stub is still worth
+# 245 MiB of layer. `cursor-agent` keeps its fake-binary (C5) row for the
+# mock-based suite -- that lane is a host-side mock and is unaffected by what the
+# image contains.
+#
+# `agy` is the SECOND such row, and it used to be recorded here as staying out:
+# "no stub AND no live credential leaves nothing in this image for it to do".
+# The first half of that is permanent and re-measured (its auth resolves before
+# the first RPC, and GEMINI_API_KEY + GOOGLE_API_KEY + GOOGLE_GEMINI_BASE_URL
+# together produce a byte-identical auth failure with ZERO requests reaching a
+# stub); the conclusion drawn from it was wrong. The help-drift probe is the
+# second consumer above, it needs the binary and nothing else, and agy's adapter
+# emits six options and a `-p` whose prompt-carrying spelling is unusual enough
+# that it is exactly the surface a silent upstream rename would break. So agy is
+# IN, for the surface probe alone: `lane: fake` in redirect.yaml, no
+# provider-lane row, no argv golden, no full-chain bundle.
 clis:
   - id: codex
     binary: codex
@@ -202,6 +319,70 @@ clis:
       fetches a 3.6 MB models.dev catalog on a fresh $HOME; best-effort, and
       absent under --network none.
 
+  - id: kimi
+    binary: kimi
+    install: npm
+    package: "@moonshot-ai/kimi-code"
+    version: "0.36.1"
+    verify:
+      command: ["kimi", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      moved 0.33.0 -> 0.36.1 in three days, so this pin is one to re-confirm
+      rather than a range to trust. node-pty is an OPTIONAL dependency and skips
+      harmlessly, so the install needs no compiler (3 packages, ~8 s). Issues no
+      catalog GET: a clean dispatch is exactly one completion POST.
+
+  - id: copilot
+    binary: copilot
+    install: npm
+    package: "@github/copilot"
+    version: "1.0.80"
+    verify:
+      command: ["copilot", "--version"]
+      # MEASURED, and the anchoring is the whole point: `copilot --version`
+      # prints `GitHub Copilot CLI 1.0.80.` -- trailing period included -- AND a
+      # second line, "Run 'copilot update' to check for updates." A pattern
+      # anchored to end-of-output would therefore never match, however right the
+      # version part was.
+      pattern: "GitHub Copilot CLI (?P<version>\\d+\\.\\d+\\.\\d+)\\."
+    note: >-
+      PROPRIETARY (GitHub EULA), and the only non-open-source CLI in this image
+      -- named in the README disclaimer per harness-expansion.md §7.3. Tolerable
+      only because the image is build-local: both tags carry no registry
+      component so `docker push` fails by construction, and CI builds no image.
+      If the image or a CI layer cache ever becomes something published, this row
+      has to be revisited BEFORE that happens.
+      The npm entry point is a LOADER that self-extracts a 209 MB linux-x64
+      platform package into $XDG_CACHE_HOME on first run and executes from there,
+      so the Dockerfile pre-warms it into /opt at build time and the redirect row
+      pins XDG_CACHE_HOME at that path -- without both, the row dies on the
+      tmpfs `noexec` default with a message that reads like a corrupt install.
+      Image cost is ~420 MiB of layer plus the 209 MB extraction. The JSONL
+      schema is explicitly UNVERSIONED upstream (copilot-cli#3551), so this pin
+      is a parser contract, not just a version.
+      Issues no catalog GET: a clean dispatch is exactly one completion POST.
+
+  - id: qwen-code
+    binary: qwen
+    install: npm
+    package: "@qwen-code/qwen-code"
+    version: "0.21.13"
+    verify:
+      command: ["qwen", "--version"]
+      # MEASURED, not guessed: `qwen --version` prints a BARE semver with no
+      # product-name prefix, so the draft pattern in
+      # plans/harness-expansion/cli-lock-rows.yaml (a registry-metadata guess by
+      # its own admission) would never have matched.
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      id != binary: the provider key names the HARNESS (`qwen-code`), the npm
+      `bin` map ships `qwen`, and wrapper.py's BINARY_TO_CLI carries the mapping.
+      Publishes fast -- 592 versions, with 0.21.12 -> 0.21.13 plus a nightly
+      inside the probe window -- so re-pin on the day a Dockerfile change lands.
+      16 packages, no node-gyp step. Issues no catalog GET: a clean dispatch is
+      exactly one completion POST.
+
   - id: pi
     binary: pi
     install: npm
@@ -230,6 +411,19 @@ clis:
     verify:
       command: ["aider", "--version"]
       pattern: "^aider (?P<version>\\S+)$"
+
+  - id: vibe
+    binary: vibe
+    install: pypi
+    package: "mistral-vibe"
+    version: "2.24.1"
+    # A `--generate-hashes` lock of the WHOLE transitive tree (93 packages),
+    # installed with --require-hashes, on the pinned CPython 3.12 above rather
+    # than the base image's 3.11.2.
+    requirements: "vibe-requirements.txt"
+    verify:
+      command: ["vibe", "--version"]
+      pattern: "^vibe (?P<version>\\S+)$"
 
   - id: goose
     binary: goose
@@ -268,3 +462,76 @@ clis:
       are all served unauthenticated and the manifest publishes the sha256 -- so
       it is installable from a public source and is IN the image. What is not
       installed is the bash launcher; see artifacts.muse.
+
+  - id: cursor-agent
+    binary: cursor-agent
+    install: archive
+    artifact: cursor-agent
+    version: "2026.08.11-e8db854"
+    verify:
+      # MEASURED: `cursor-agent --version` prints a BARE calendar version and
+      # nothing else -- no product-name prefix, no second line. The date part is
+      # the release day and the suffix is the commit, so this is not semver and a
+      # `\d+\.\d+\.\d+` pattern would never match it.
+      command: ["cursor-agent", "--version"]
+      pattern: "^(?P<version>\\d{4}\\.\\d{2}\\.\\d{2}-[0-9a-f]+)$"
+    note: >-
+      REACHES NO STUB, and is therefore NOT a provider-lane row -- the only row
+      here that is in the image for something other than an offline provider run.
+      See the block comment above `clis:` for why (binary protobuf over
+      Connect-RPC) and for the two consumers that justify it anyway: the
+      credentialed live lane and the cli-surface help-drift probe, both of which
+      exec /opt/mllm/real/cursor-agent directly and bypass the PATH wrapper.
+      It is still WRAPPED, and that is deliberate rather than incidental:
+      verify_versions.py's check_path_shape walks every row in this block and
+      fails the build on any binary that does not resolve to /opt/mllm/bin, so an
+      unwrapped row here would be a red build, not a quiet exemption. The wrapper
+      finds no redirect.yaml row for it, returns an empty row, and still scrubs
+      the environment -- which for a CLI with no stub is the correct default.
+      What ships is a self-contained 245 MiB bundle carrying its own node; the
+      `cursor-agent` entry point is a bash launcher that resolves its own
+      directory through realpath, so the /opt/mllm/real symlink works the way
+      vibe's does. That launcher runs under `set -u` and dereferences $HOME
+      unguarded, so it exits 1 on an unset HOME -- every lane sets one (all three
+      land on a tmpfs), but a future runner that does not would fail here first.
+
+  - id: agy
+    binary: agy
+    install: archive
+    artifact: agy
+    version: "1.1.15"
+    verify:
+      # MEASURED: `agy --version` prints a BARE dotted version and nothing else
+      # -- no product-name prefix, no second line, no leading whitespace -- and
+      # it prints it OFFLINE, with no auth, no Google account and no D-Bus,
+      # which is the property that makes it usable as a build-time smoke call
+      # and as this row's verify command at all.
+      command: ["agy", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      REACHES NO STUB, and unlike cursor-agent that is settled rather than
+      merely expensive: agy resolves its auth BEFORE the first RPC, and
+      GEMINI_API_KEY + GOOGLE_API_KEY + GOOGLE_GEMINI_BASE_URL set together
+      were measured producing a byte-identical auth failure with ZERO requests
+      reaching a stub, so no environment variable selects an API-key path a
+      stub could answer. It is therefore NOT a provider-lane row and has no
+      argv golden and no full-chain bundle; what it is in the image for is the
+      cli-surface help-drift probe, which execs /opt/mllm/real/agy directly,
+      offline, and needs no credential. It is still WRAPPED, for the same
+      reason cursor-agent is: verify_versions.py's check_path_shape walks this
+      block and fails the build on any binary that does not resolve to
+      /opt/mllm/bin.
+      SELF-UPDATES, and through the opt-out you would have written first:
+      AGY_CLI_DISABLE_AUTO_UPDATE=1 was measured spawning a background updater
+      that rewrote the binary 1.1.13 -> 1.1.15 INSIDE A SINGLE RUN. Only the
+      string `true` disables it. So the variable is set image-wide, AND on the
+      install layer's own `--version` smoke call (that layer has network, and
+      an unguarded --version replaces the very bytes the checksum just
+      verified), AND again in redirect.yaml's `env_extra` -- because wrapper.py
+      rebuilds its child's environment from scratch, so the image ENV never
+      reaches a CLI dispatched through the wrapper.
+      `agy --help` prints to STDERR with stdout EMPTY and exits 0. The surface
+      probe concatenates both streams, so this row is a real `probe: ok`; a
+      probe reading stdout alone would have self-exempted it as `probe: none`,
+      which would have been an honest-looking false statement about a binary
+      that documents its flags perfectly well.

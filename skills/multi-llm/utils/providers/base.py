@@ -516,6 +516,27 @@ CONTEXT_OVERFLOW_MARKERS = _markers(
     r"exceeds the (?:model'?s )?(?:maximum )?context (?:window|length)",
     r"context window (?:of \d+ tokens )?exceeded",
     r"\btoo many tokens\b",
+    # Mistral Vibe, measured at 2.24.1: "The conversation context exceeds the
+    # model's maximum limit. Use /rewind ...". The row above does not reach it --
+    # vibe puts the noun first and calls the bound a "limit" rather than a
+    # "window" or a "length" -- and without this the run classifies as
+    # transport-shaped and burns the executor's whole bounded-retry path on a
+    # condition no retry can fix. "conversation context" is what keeps it off
+    # prose: an answer discussing a plan's Context section does not say it.
+    r"conversation context exceeds",
+    # aider, measured at 0.86.2 on the 2026-08-19 fixture capture: it SWALLOWS
+    # litellm's ContextWindowExceededError and prints its own help instead, so
+    # not one marker above appears anywhere in the run --
+    #     "Model openai/stub-model has hit a token limit!"
+    #     "Input tokens: ~103 of 0 -- possibly exhausted context window!"
+    # The upstream 400's wording never reaches stdout at all. Without these two
+    # the row classified as None, i.e. transport-shaped, and the executor spent
+    # its whole bounded-retry budget on the one condition §7.2 calls terminal.
+    # Both phrasings are specific enough to stay off prose: an answer discussing
+    # token budgets does not say "has hit a token limit" or "exhausted context
+    # window", and `_markers` anchors on the error context regardless.
+    r"hit a token limit",
+    r"exhausted context window",
 )
 
 #: Rate-limit shapes the adapters' declared English set does not carry, kept
@@ -721,6 +742,29 @@ class LLMProvider(ABC):
     # ``tests/test_provider_housekeeping.py`` checks the declaration against the
     # argv each adapter really renders, in both directions.
     prompt_argv_index: Optional[int] = -1
+
+    # Whether this adapter's ``generate`` invocation can write the per-model
+    # result file the Lane A review prompts name in their ``{output_location}``
+    # block (``llm_client.render_output_location``).
+    #
+    # ``True`` is the default and the honest one for a CLI agent that carries
+    # write tools — it is what ``invoke_with_file_output``'s whole file-first
+    # contract is built on. ``False`` is a *measured* refusal, never a
+    # preference, and it exists because two adapters deliberately run their CLI
+    # in a read-only chat mode: cursor under ``--mode ask`` (the write-refusal
+    # that replaced ``-f``/``--yolo`` — see
+    # :data:`~utils.providers.cursor_agent.CURSOR_REQUIRED_FLAGS`) and aider
+    # under ``/ask``. Handed a "write this file" instruction those two spend the
+    # whole turn explaining that they cannot, no file appears, and the slot dies
+    # on ``JSON parsing failed from both file and stdout`` — a refusal sentence
+    # is not a parse failure, so no retry rung can recover it either.
+    #
+    # The declaration is read at prompt-render time, so an adapter that cannot
+    # write is *asked* for stdout rather than being asked for a file and left to
+    # the fallback it can only reach by disobeying its own mode. Nothing about
+    # the parse side moves: ``invoke_with_file_output`` still reads the file
+    # first, so an adapter that writes one anyway is still served from it.
+    supports_file_output: bool = True
 
     # ------------------------------------------------------------------
     # Subagent-runner capability declarations (D3/D3e/D3j/D3m)

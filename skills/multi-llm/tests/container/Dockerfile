@@ -91,6 +91,37 @@ ARG GROK_SHA256=4e0738d3b5550f3c842bc0ae69f468815c6329c008a110d0c27a694dc3401135
 ARG MUSE_VERSION=0.1.0-R708.1
 ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=0.1.0-R708.1&file=muse-x86-linux
 ARG MUSE_SHA256=50937b6470cd0edf28eb683c352a5e7af3bcb1b015cd9a3b21dbf79d22af8182
+# The documented install is `curl https://cursor.com/install | bash`, and that
+# script is SERVER-RENDERED: it bakes the current version into its body as a
+# literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
+# Piping it into a shell would pin nothing, so the tarball is named by its bytes
+# here instead. The sha256 is ours -- Cursor publishes none.
+ARG CURSOR_AGENT_VERSION=2026.08.11-e8db854
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.08.11-e8db854/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=bfff4bf6f4e9dd30c1d0ef0a70b6077b074015dd2948e4c50685d53afdcfce5a
+# Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
+# API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
+# because Cursor publishes none. The build checks it anyway: a published digest
+# is a claim until sha256sum --check --strict agrees with it.
+#
+# agy RELEASES DAILY (1.1.14 on 2026-08-18, 1.1.15 on 2026-08-19), so this is a
+# pin to re-confirm whenever this file is touched.
+ARG AGY_VERSION=1.1.15
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.15/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=d0b1d6f3678a061915caebc431930e240b863bf4059369c08c6ffceb24e66b5f
+# vibe's interpreter, NOT the product's. `mistral-vibe` declares
+# `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
+# `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
+# (which is the point: an interpreter downloaded at build time with no hash
+# would be exactly the unpinned remote input C9 forbids). So it is pinned and
+# checksummed here like uv, goose, grok and muse.
+#
+# The `install_only_stripped` build is deliberate: the unstripped tarball
+# unpacks to 333 MB against this one's 99 MB, and nothing in this image debugs
+# CPython. Measured: the venv builds and `vibe --version` answers on both.
+ARG PYTHON312_VERSION=3.12.11
+ARG PYTHON312_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20250818/cpython-3.12.11%2B20250818-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+ARG PYTHON312_SHA256=b5a4f189f25cbacba0f76c9bd6f3ea8c35d2064068aa74ccbb6863068caababd
 
 LABEL org.opencontainers.image.title="multi-llm containerized E2E harness"
 LABEL org.opencontainers.image.description="Real coding-agent CLIs, stubbed backends, both lanes."
@@ -197,6 +228,31 @@ RUN /opt/mllm/real/uv pip install \
 # file -- base digest, platform, uv, every artifact checksum -- stays pinned in
 # both modes, so a red drift run points at the CLI that moved.
 # --------------------------------------------------------------------------- #
+# COPILOT NEEDS TWO EXTRA STEPS IN THIS LAYER, AND BOTH MUST BE IN *THIS* RUN.
+#
+# 1. PRUNE THE MUSL PAYLOAD. `npm ci` resolves optional platform packages by
+#    `os`/`cpu`, which cannot express glibc vs musl, so it installs BOTH
+#    @github/copilot-linux-x64 (378 MB, the one this Debian image runs) and
+#    @github/copilot-linuxmusl-x64 (371 MB, which it can never run). That is
+#    §7's prune-ladder step 1, and it has to happen in the same RUN: deleting in
+#    a later layer leaves the bytes in this one and the image never shrinks.
+#    (The probe saw only one payload because `npm install -g` resolves for the
+#    running platform; a lockfile install does not.)
+#
+# 2. PRE-WARM THE PACKAGE CACHE, without which the copilot row cannot start at
+#    all. The `copilot` npm entry point is a LOADER: on first run it
+#    self-extracts the 209 MB platform package into $XDG_CACHE_HOME and executes
+#    from there. At RUN time the wrapper points XDG_CACHE_HOME at the
+#    per-invocation root, which is a --tmpfs mount, and Docker's tmpfs default is
+#    NOEXEC -- so copilot dies with `failed to map segment from shared object`, a
+#    message that reads like a corrupt install and sends you into the adapter.
+#    COPILOT_HOME does NOT relocate this cache (measured); only XDG_CACHE_HOME
+#    does. Extracting once here, world-readable under /opt, also removes the
+#    209 MB extraction from every spawn, and needs NO posture.yaml change: the
+#    probe ran exactly this as UID 10001 under --read-only with the unmodified
+#    tmpfs mode strings. The copilot row's `env_extra` pins XDG_CACHE_HOME here.
+#    Set inline rather than as an image-wide ENV: every other CLI wants its own
+#    per-invocation cache.
 COPY skills/multi-llm/tests/container/package.json      /opt/mllm/npm/package.json
 COPY skills/multi-llm/tests/container/package-lock.json /opt/mllm/npm/package-lock.json
 COPY skills/multi-llm/tests/container/link_cli_bins.mjs /opt/mllm/npm/link_cli_bins.mjs
@@ -210,7 +266,14 @@ RUN cd /opt/mllm/npm \
         npm ci --no-audit --no-fund; \
     fi \
  && node /opt/mllm/npm/link_cli_bins.mjs /opt/mllm/npm /opt/mllm/real \
-        codex claude gemini opencode cline kilocode pi \
+        codex claude gemini opencode cline kilocode kimi pi qwen copilot \
+ && rm -rf /opt/mllm/npm/node_modules/@github/copilot-linuxmusl-x64 \
+ && mkdir -p /opt/mllm/copilot-cache \
+ && XDG_CACHE_HOME=/opt/mllm/copilot-cache \
+    COPILOT_OFFLINE=true COPILOT_AUTO_UPDATE=false \
+    /opt/mllm/real/copilot --version \
+ && chmod -R a+rX /opt/mllm/copilot-cache \
+ && test -d /opt/mllm/copilot-cache/copilot/pkg/linux-x64 \
  && npm cache clean --force
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +294,47 @@ RUN /opt/mllm/real/uv venv --python /usr/bin/python3 /opt/mllm/venvs/aider \
             --require-hashes -r /opt/mllm/lock/aider-requirements.txt; \
     fi \
  && ln -sf /opt/mllm/venvs/aider/bin/aider /opt/mllm/real/aider
+
+# --------------------------------------------------------------------------- #
+# 6b. vibe -- PyPI too, but on an interpreter this image does not otherwise have.
+#
+# `mistral-vibe` declares `requires_python >=3.12`; the base ships 3.11.2. uv
+# could fetch a standalone build, except `UV_PYTHON_DOWNLOADS=never` is set above
+# and an unpinned interpreter would be the exact unpinned remote input C9 exists
+# to forbid. So the interpreter is a hashed artifact like uv/goose/grok/muse, and
+# the venv is built against it.
+#
+# OWNERSHIP IS PART OF THE FIX, not tidiness. uv's own managed-interpreter
+# location is under the BUILD user's data dir and is unreachable to uid 10001, so
+# the interpreter, the venv and the symlink all live under /opt/mllm with
+# world-readable/executable modes -- the runtime user must be able to exec every
+# one of them.
+#
+# The wheel also installs `vibe-acp` and `vibe-app-server`; neither is wanted, so
+# only `vibe` is linked into /opt/mllm/real.
+# --------------------------------------------------------------------------- #
+COPY skills/multi-llm/tests/container/vibe-requirements.txt /opt/mllm/lock/vibe-requirements.txt
+RUN curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/python312.tar.gz "${PYTHON312_URL}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${PYTHON312_SHA256}  /tmp/python312.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned python312 artifact sha256: $(sha256sum /tmp/python312.tar.gz)"; \
+    fi \
+ && mkdir -p /opt/mllm/real/python312 \
+ && tar -xzf /tmp/python312.tar.gz -C /opt/mllm/real/python312 --strip-components=1 \
+ && rm -f /tmp/python312.tar.gz \
+ && /opt/mllm/real/python312/bin/python3.12 --version \
+ && /opt/mllm/real/uv venv --python /opt/mllm/real/python312/bin/python3.12 \
+        /opt/mllm/venvs/vibe \
+ && if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        /opt/mllm/real/uv pip install --python /opt/mllm/venvs/vibe/bin/python mistral-vibe; \
+    else \
+        /opt/mllm/real/uv pip install --python /opt/mllm/venvs/vibe/bin/python \
+            --require-hashes -r /opt/mllm/lock/vibe-requirements.txt; \
+    fi \
+ && ln -sf /opt/mllm/venvs/vibe/bin/vibe /opt/mllm/real/vibe \
+ && chmod -R a+rX /opt/mllm/real/python312 /opt/mllm/venvs/vibe
 
 # --------------------------------------------------------------------------- #
 # 7. The three CLIs that ship as a release artifact rather than a package.
@@ -304,6 +408,100 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
  && install -m 0755 /tmp/muse /opt/mllm/real/muse \
  && rm -f /tmp/muse
 
+# cursor-agent. The one CLI in this image that NO provider row drives: it speaks
+# binary protobuf over Connect-RPC to its own endpoint, so there is no stub to
+# write and no base-URL variable to move. It is here for the two consumers that
+# need the genuine binary and no backend that answers -- the credentialed live
+# lane (live_provider.py, which execs /opt/mllm/real/<binary> directly) and the
+# cli-surface help-drift probe (seed_cli_surface.py, likewise). cli-versions.lock
+# carries the full reasoning above its `clis:` block.
+#
+# COST, because it is the largest single thing in this image: +245 MiB unpacked
+# (254,358,760 bytes measured) from an 84 MB tarball -- and 129 MB of that is a
+# SECOND bundled node, on top of the base image's own. Cursor ships the bundle
+# self-contained and offers no variant that reuses the system runtime, so the
+# duplicate interpreter is the price of the row, not an oversight to trim later.
+#
+# The tarball has a single root (`dist-package/`), so --strip-components=1 lands
+# the bundle flat. `cursor-agent` inside it is a bash launcher that resolves its
+# own directory through realpath and execs `$SCRIPT_DIR/node index.js`, which is
+# why a symlink into /opt/mllm/real works here exactly as it does for vibe.
+#
+# No NODE_COMPILE_CACHE ENV is set, deliberately. The launcher defaults it to
+# ${XDG_CACHE_HOME:-$HOME/.cache}/cursor-compile-cache, and every lane's $HOME is
+# already a writable tmpfs (posture.yaml: /work/homes, /home/e2e and /tmp are all
+# tmpfs; the wrapper points $HOME at /tmp/mllm-inv/<cli>-<exec>). Pinning it
+# would only ADD risk: an unwritable cache directory is tolerated (measured --
+# exit 0, correct version), but a NODE_COMPILE_CACHE naming an uncreatable parent
+# was measured HANGING the CLI indefinitely. Leaving the launcher's own default
+# in place is the safe branch.
+RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        cursor_url="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://cursor.com/install | grep -oE 'https://downloads\.cursor\.com/lab/[^/]+/linux/x64/agent-cli-package\.tar\.gz' | head -n 1)"; \
+        [ -n "${cursor_url}" ] || { echo "cursor-agent: no download URL found in https://cursor.com/install -- the installer's shape changed" >&2; exit 1; }; \
+    else \
+        cursor_url="${CURSOR_AGENT_URL}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/cursor-agent.tar.gz "${cursor_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${CURSOR_AGENT_SHA256}  /tmp/cursor-agent.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned cursor-agent artifact sha256: $(sha256sum /tmp/cursor-agent.tar.gz)"; \
+    fi \
+ && mkdir -p /opt/mllm/real/cursor-agent-bundle \
+ && tar -xzf /tmp/cursor-agent.tar.gz -C /opt/mllm/real/cursor-agent-bundle --strip-components=1 \
+ && ln -sf /opt/mllm/real/cursor-agent-bundle/cursor-agent /opt/mllm/real/cursor-agent \
+ && chmod -R a+rX /opt/mllm/real/cursor-agent-bundle \
+ && rm -f /tmp/cursor-agent.tar.gz \
+ && /opt/mllm/real/cursor-agent --version
+
+# agy -- Google's Antigravity CLI, and the SECOND row in this image that no
+# provider row drives. cursor-agent's reason is "no stub can be written"; agy's
+# is stronger and settled: its auth resolves BEFORE the first RPC, and
+# GEMINI_API_KEY + GOOGLE_API_KEY + GOOGLE_GEMINI_BASE_URL set together were
+# measured producing a byte-identical auth failure with ZERO requests reaching a
+# stub. So there is no environment variable that selects an API-key path for a
+# stub to answer, and there never will be one to find. It is here for the ONE
+# consumer that needs the genuine binary and no backend at all: the cli-surface
+# help-drift probe (seed_cli_surface.py), which execs /opt/mllm/real/agy
+# directly, offline, as uid 10001, and diffs the flags our adapter emits against
+# the flags this version still documents.
+#
+# COST: +196 MiB unpacked (205,537,320 bytes) from a 55 MB tarball -- second
+# only to cursor-agent's 245 MiB. Nothing else in the image gets larger for it:
+# a dynamically linked glibc binary, no bundled node, no second interpreter.
+#
+# The goose pattern, not cursor-agent's: ONE tarball member, named `antigravity`
+# and sitting at the ROOT with no directory around it, so there is no
+# --strip-components here and `install` renames it to the name it answers to.
+#
+# AGY_CLI_DISABLE_AUTO_UPDATE=true ON THE SMOKE CALL IS LOAD-BEARING, and `true`
+# rather than `1` is the whole of it. `=1` was MEASURED spawning a background
+# updater that rewrote the binary 1.1.13 -> 1.1.15 inside a single run; only the
+# string `true` disables it. This build layer has a network, so an unguarded
+# `agy --version` here would replace the exact bytes sha256sum just verified and
+# the pin would be decorative. The image-wide ENV in step 8 repeats it for
+# everything downstream, and redirect.yaml's `env_extra` repeats it again for
+# anything dispatched through the wrapper -- which rebuilds its child's
+# environment from scratch and would otherwise drop it.
+RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        agy_version="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"; \
+        agy_url="https://github.com/google-antigravity/antigravity-cli/releases/download/${agy_version}/agy_cli_linux_x64.tar.gz"; \
+    else \
+        agy_url="${AGY_URL}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/agy.tar.gz "${agy_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${AGY_SHA256}  /tmp/agy.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned agy artifact sha256: $(sha256sum /tmp/agy.tar.gz)"; \
+    fi \
+ && tar -xzf /tmp/agy.tar.gz -C /tmp antigravity \
+ && install -m 0755 /tmp/antigravity /opt/mllm/real/agy \
+ && rm -f /tmp/agy.tar.gz /tmp/antigravity \
+ && AGY_CLI_DISABLE_AUTO_UPDATE=true /opt/mllm/real/agy --version
+
 # --------------------------------------------------------------------------- #
 # 8. The rig, and the wrapper tree it is the source of (C2).
 #
@@ -316,6 +514,19 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
 # keeps one source of truth and one identity mechanism. A hard copy per CLI would
 # be eleven files to keep in step.
 #
+# EVERY cli-versions.lock row is linked here, including `cursor-agent`, which has
+# no stub to be redirected to. That is not an oversight in either direction:
+# verify_versions.py's check_path_shape walks the lock's `clis` block and fails
+# the build on any binary that does not resolve to /opt/mllm/bin, so omitting it
+# would be a red build. And wrapping it is harmless: cursor DOES have a
+# redirect.yaml row (`lane: fake`, plus the live-lane opt-in), but that row
+# carries no `base_url_vars`, no `credential_vars`, no `env_extra` and no
+# `config_roots` -- there is nothing in it for the wrapper to apply -- so what
+# the wrapper contributes is exactly the env scrub and the call log, which is the
+# right default for a CLI with no backend to point anywhere. Its two real
+# consumers (live_provider.py, seed_cli_surface.py) bypass /opt/mllm/bin entirely
+# and exec /opt/mllm/real/<binary>, so neither is affected by this loop at all.
+#
 # The .yaml sources are copied as a group rather than named one by one so that
 # redirect.yaml -- which Phase 3 writes beside posture.yaml -- lands without a
 # Dockerfile edit. Every file the glob can reach is inside context_manifest.txt.
@@ -325,11 +536,18 @@ COPY skills/multi-llm/tests/container/stub_server.py    /opt/mllm/rig/stub_serve
 COPY skills/multi-llm/tests/container/wrapper.py        /opt/mllm/rig/wrapper.py
 COPY skills/multi-llm/tests/container/seed_workspace.py /opt/mllm/rig/seed_workspace.py
 COPY skills/multi-llm/tests/container/seed_cli_surface.py /opt/mllm/rig/seed_cli_surface.py
+# The credentialed provider lane (harness-expansion.md §7.4). It is NOT reached
+# through entrypoint.py: the lane bypasses the PATH wrapper on purpose -- the
+# wrapper's whole job is to scrub the vendor credential and point the CLI at the
+# stub -- so its runner is invoked directly, the way `make e2e-version-delta`
+# already invokes verify_versions.py with `--entrypoint /usr/bin/python3`.
+COPY skills/multi-llm/tests/container/live_provider.py  /opt/mllm/rig/live_provider.py
+COPY skills/multi-llm/tests/container/egress_resolver.py /opt/mllm/rig/egress_resolver.py
 COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode pi aider goose grok muse uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null
@@ -373,12 +591,23 @@ ENV MLLM_SKILL_DIR=/opt/mllm/skill \
 #
 # OPENCODE_DISABLE_MODELS_FETCH pairs with the pre-baked catalog in step 9.
 #
+# AGY_CLI_DISABLE_AUTO_UPDATE IS `true`, NOT `1`, and that is measured rather
+# than stylistic: with `=1` agy spawned a background updater and rewrote itself
+# 1.1.13 -> 1.1.15 inside a single run. Normalising it to `1` for consistency
+# with the lines around it would silently unpin a CLI that releases DAILY.
+#
 # NOTE for Phase 3: wrapper.py builds its child's environment from scratch and
 # carries over only PATH/TERM/LANG/LC_ALL/TZ and MLLM_*, so these names do NOT
 # reach a CLI dispatched *through* the wrapper. They cover the entrypoint, the
 # build, and any direct invocation; the per-CLI copies belong in redirect.yaml.
 ENV CLINE_NO_AUTO_UPDATE=1 \
+    KIMI_CODE_NO_AUTO_UPDATE=1 \
+    KIMI_DISABLE_TELEMETRY=1 \
+    QWEN_TELEMETRY_ENABLED=false \
+    QWEN_USAGE_STATISTICS_ENABLED=false \
+    QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=1 \
     GROK_AUTO_UPDATE=0 \
+    AGY_CLI_DISABLE_AUTO_UPDATE=true \
     OPENCODE_DISABLE_MODELS_FETCH=1 \
     DO_NOT_TRACK=1 \
     NO_UPDATE_NOTIFIER=1 \

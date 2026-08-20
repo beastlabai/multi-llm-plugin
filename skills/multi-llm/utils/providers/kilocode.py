@@ -15,6 +15,39 @@ REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "thinking", "instant"}
 )
 
+#: The two names the Kilo Code CLI installs under, in preference order. Upstream
+#: ships both spellings; this adapter used to know only the first, so on a
+#: machine where the binary landed as `kilo` the provider was not merely degraded
+#: — `is_available()` said False and it was invisible to the fan-out. Order is
+#: load-bearing: where both resolve, `kilocode` wins, which is what keeps today's
+#: argv byte-identical everywhere the canonical name is installed (the container
+#: image installs `@kilocode/cli` as `binary: kilocode`).
+BINARY_NAMES = ("kilocode", "kilo")
+
+#: What `build_command` emits when neither name resolves. `is_available()` is
+#: False in that case, so the provider is filtered out of the fan-out before any
+#: spawn and this value never reaches a subprocess — but `build_command` is still
+#: called on a binary-free host by the argv-contract tests, the housekeeping
+#: `MODELS` table and `seed_expected_argv.py`, all of which pin the canonical
+#: spelling. Falling back to it is what makes the change a pure no-op wherever a
+#: `kilo`-only install is not in play.
+CANONICAL_BINARY = BINARY_NAMES[0]
+
+
+def _resolve_binary() -> str:
+    """The Kilo Code binary name to place at ``argv[0]``.
+
+    Returns the first of :data:`BINARY_NAMES` that ``shutil.which`` resolves, so
+    the argv names a binary that is really there rather than a literal this
+    module hardcoded. With neither installed it returns
+    :data:`CANONICAL_BINARY` — see that constant for why the nothing-installed
+    case has a value at all.
+    """
+    for name in BINARY_NAMES:
+        if shutil.which(name) is not None:
+            return name
+    return CANONICAL_BINARY
+
 
 class KiloCodeProvider(LLMProvider):
     """Provider for Kilo Code CLI tool.
@@ -28,6 +61,12 @@ class KiloCodeProvider(LLMProvider):
     ``openai-native/gpt-5.5:high``), translated to ``--variant <effort>``.
     Valid efforts are listed in REASONING_EFFORTS; anything else passes
     through verbatim as the model name (keeping ``:free``-style ids intact).
+
+    The CLI ships under **two** binary names, ``kilocode`` and ``kilo``
+    (:data:`BINARY_NAMES`). Both ``is_available()`` and ``build_command`` go
+    through :func:`_resolve_binary`, so a ``kilo``-only install is a working
+    provider rather than an invisible one, and ``argv[0]`` always names a binary
+    the resolver actually found.
     """
 
     @property
@@ -39,7 +78,7 @@ class KiloCodeProvider(LLMProvider):
         return 600
 
     def is_available(self) -> bool:
-        return shutil.which("kilocode") is not None
+        return any(shutil.which(name) is not None for name in BINARY_NAMES)
 
     def build_command(
         self,
@@ -49,10 +88,11 @@ class KiloCodeProvider(LLMProvider):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
+        binary = _resolve_binary()
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         if effort is not None:
-            return ["kilocode", "run", "--auto", "-m", base_model, "--variant", effort, prompt]
-        return ["kilocode", "run", "--auto", "-m", model, prompt]
+            return [binary, "run", "--auto", "-m", base_model, "--variant", effort, prompt]
+        return [binary, "run", "--auto", "-m", model, prompt]
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse output from Kilo Code CLI.

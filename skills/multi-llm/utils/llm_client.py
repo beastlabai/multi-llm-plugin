@@ -871,6 +871,20 @@ def invoke_with_provider(
         if not parsed.get("success", False) and "error_code" not in parsed:
             parsed["error_code"] = ERROR_PARSE_ERROR
 
+        # WHAT THE MODEL ACTUALLY SAID, kept on the failure. A parse failure is
+        # the one class where the error message describes our disappointment
+        # rather than the event: "JSON parsing failed from both file and stdout"
+        # is what a cursor `--mode ask` write refusal looked like from the
+        # outside, and reading the sentence that caused it ("I can't write the
+        # requested file while Ask mode is active") cost three 450 s runs and a
+        # hand-driven CLI invocation, because nothing downstream carried the
+        # text. Redacted and bounded by the same §4.5/§4.4 boundary the log
+        # writer uses — never the raw stream.
+        if not parsed.get("success", False):
+            excerpt = _bound_stream(_redact(result.stdout or "")).strip()
+            if excerpt:
+                parsed.setdefault("details", {})["stdout_excerpt"] = excerpt
+
         # Save log if requested
         if log_file:
             _save_log(
@@ -995,6 +1009,68 @@ def _is_valid_parsed_data(data: Any) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# The ``{output_location}`` block the three review prompts end with
+# ---------------------------------------------------------------------------
+
+#: What a file-capable adapter is asked for. Byte-identical to the text
+#: ``prompts/{code,plan,task}_review.txt`` carried inline before the placeholder
+#: existed, so the rendered prompt of every adapter that declares
+#: ``supports_file_output`` is unchanged to the character — the golden container
+#: turns under ``tests/golden/container_turns/`` are captured from those bytes.
+FILE_OUTPUT_LOCATION = (
+    "CRITICAL: Write your JSON output to this file: {path}\n"
+    "Do NOT print JSON to stdout. Write ONLY the JSON array to the specified "
+    "file path.\n"
+    'After writing, confirm by printing: "JSON written to {path}"\n'
+    "\n"
+    "The file must contain ONLY valid JSON - no markdown, no code blocks, no "
+    "explanation. Just the raw JSON array."
+)
+
+#: What an adapter that declares ``supports_file_output = False`` is asked for
+#: instead. Two adapters run their CLI in a read-only chat mode on purpose
+#: (cursor ``--mode ask``, aider ``/ask``), and the file instruction is one they
+#: can only answer with a refusal sentence. Stdout is the channel they *do*
+#: have, it is the one ``invoke_with_file_output`` already falls back to, and
+#: the parsed array lands in exactly the same per-model result file either way —
+#: ``save_model_result`` writes it from the returned data, not from the model's
+#: own file.
+STDOUT_OUTPUT_LOCATION = (
+    "CRITICAL: Return your JSON output on stdout as your final message. Do NOT "
+    "write it to a file — you are running in a read-only mode and any file "
+    "write will be refused.\n"
+    "Your final message must be ONLY the raw JSON array - no markdown, no code "
+    "blocks, no explanation, no preamble and no closing remarks."
+)
+
+
+def render_output_location(
+    output_json_path: Union[str, Path],
+    model_spec: str,
+    anchor: Optional[Union[str, Path]] = None,
+) -> str:
+    """The ``{output_location}`` block for ``model_spec``'s rendered prompt.
+
+    One decision, taken from the adapter's declared
+    :attr:`~utils.providers.base.LLMProvider.supports_file_output` rather than
+    from a provider name spelled out in an orchestrator: the caller that renders
+    a prompt does not need to know *which* CLIs refuse to write, only that this
+    one does. An unknown provider (a config naming an adapter this build no
+    longer ships) renders the file block, which is what every caller did before
+    this function existed.
+
+    ``anchor`` is the run's plan path (§9.3.c): a bare, prefix-less spec resolves
+    its ``default_provider`` against the plan-derived project config, so the
+    block matches the binary that will actually be spawned.
+    """
+    provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
+    provider = get_provider(provider_name)
+    if provider is not None and not provider.supports_file_output:
+        return STDOUT_OUTPUT_LOCATION
+    return FILE_OUTPUT_LOCATION.format(path=output_json_path)
+
+
 def invoke_with_file_output(
     prompt_template: str,
     model_spec: str,
@@ -1011,7 +1087,11 @@ def invoke_with_file_output(
 
     This function instructs the LLM to write JSON output to a specified file
     instead of relying on stdout parsing. The prompt is formatted with an
-    {output_json_path} variable that the LLM should use.
+    {output_json_path} variable that the LLM should use, and an
+    {output_location} block rendered from the adapter's declared
+    ``supports_file_output`` — a CLI running in a read-only mode is asked for
+    the array on stdout rather than for a file it is going to refuse (see
+    :func:`render_output_location`). Both channels are read below either way.
 
     Fallback strategy:
     1. Primary: Read from output file (with extraction fallback for code blocks)
@@ -1051,8 +1131,19 @@ def invoke_with_file_output(
     prefix = prompt_context.get("prefix", "output")
     output_json_path = generate_output_path(output_dir, prefix, phase, model_spec)
 
-    # Inject output path into prompt context
-    full_context = {**prompt_context, "output_json_path": str(output_json_path)}
+    # Inject output path into prompt context, plus the channel instruction that
+    # path belongs to: an adapter whose CLI cannot write files is asked for the
+    # array on stdout instead of being asked for a file it will refuse. The path
+    # itself is still handed over (a template may name it outside the block, and
+    # every caller-supplied template in the test suite does), and the file is
+    # still read first below, so a provider that writes one anyway is unaffected.
+    full_context = {
+        **prompt_context,
+        "output_json_path": str(output_json_path),
+        "output_location": render_output_location(
+            output_json_path, model_spec, anchor=anchor
+        ),
+    }
 
     # Format prompt
     try:

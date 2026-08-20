@@ -1,0 +1,21 @@
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-08eea7bf77b0/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-39-430Z.json ModelNotFoundError: The model `gemini-2.5-flash` does not exist or you do not have access to it.
+    at classifyGoogleError (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/googleQuotaErrors.js:74:16)
+    at retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:130:37)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:553:20)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/nonInteractiveCli.js:192:34
+    at async main (file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/gemini.js:462:9) {
+  code: 404
+}
+{
+  "session_id": "6a5f3c0b-eb0b-4628-b108-9eb565869b43",
+  "error": {
+    "type": "Error",
+    "message": "[object Object]",
+    "code": 1
+  }
+}

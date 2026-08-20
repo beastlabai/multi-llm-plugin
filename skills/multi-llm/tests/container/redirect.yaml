@@ -165,8 +165,21 @@ clis:
     help_invocation: "aider --help"
     version_offline: true
     egress_beyond_stub:
-      hosts: ["185.199.108-111.133 (raw.githubusercontent.com — litellm model metadata)"]
+      # SPELLED AS A HOSTNAME, because a5's second half matches this list with
+      # `endswith`. The previous value was an IP range carrying the hostname in a
+      # parenthetical, so it matched nothing and graded nothing -- a declaration
+      # that looked like coverage and was not. The addresses observed were
+      # 185.199.108-111.133; they belong in this comment, where they cannot
+      # pretend to be a matcher.
+      hosts: ["raw.githubusercontent.com"]
       fatal_when_blocked: false          # actually FASTER blocked: 2.06 s vs 2.87 s
+      # PERMITTED on the credentialed live lane, and that is a policy statement
+      # this field does not make: `hosts` is the FACTUAL list of what the row
+      # reaches past the stub. Which of them are tolerated lives in
+      # ALLOWED_EGRESS (tests/test_container_live_provider.py), which adds this
+      # name to the resolver's allowlist and then asserts it was answered. What
+      # is fetched is litellm's model cost map -- pricing and context windows,
+      # not an updater and not telemetry.
     container_status: green
     container_note: >
       Green only after a wrapper fix, and the failure was worth the trip.
@@ -259,6 +272,27 @@ clis:
     seed_recipe: "cline auth -p openai -b <base_url> -k <fake> -m stub-model"
     env_extra:
       CLINE_NO_AUTO_UPDATE: "1"
+    egress_beyond_stub:
+      # MEASURED ON THE CREDENTIALED LIVE LANE (2026-08-19), which is the only
+      # lane that can see this at all: the provider lane is `--network none`,
+      # where a call-home is a connection error rather than a fact. cline 3.0.55
+      # queried BOTH of these on a run where `CLINE_NO_AUTO_UPDATE=1` (this row's
+      # own, plus the image's) and `DO_NOT_TRACK=1` were present in the resolved
+      # env and asserted by name. `data.cline.bot` is its analytics sink and
+      # `otel.cline.bot` its OTLP one.
+      #
+      # THERE IS NO THIRD OPT-OUT TO TRY. The only UPDATE/TELEMETRY/TRACK-shaped
+      # name in the 3.0.55 tree is CLINE_NO_AUTO_UPDATE itself, and the bundle
+      # carries posthog and sentry.io clients beside it. So configuration cannot
+      # silence these, exactly as with cursor-agent's statsig and sentry calls,
+      # and the DNS allowlist is the control that actually holds: the resolver
+      # returns NXDOMAIN, the run is unaffected, and `test_a5_egress` FAILS the
+      # row if either name is ever ANSWERED. On a user's own machine there is no
+      # such allowlist and these requests do go out — a product fact worth
+      # knowing, not a lane defect. Re-check on the next version bump.
+      hosts: ["data.cline.bot", "otel.cline.bot"]
+      opt_out_vars: ["CLINE_NO_AUTO_UPDATE", "DO_NOT_TRACK"]
+      fatal_when_blocked: false
     http_log:
       - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
     turns: 1
@@ -301,6 +335,265 @@ clis:
       container per row makes that safe by construction; a shared container would not.
 
   # -------------------------------------------------------------------------
+  - cli: qwen-code
+    provenance: verified
+    lane: provider
+    # id != binary (§8.1's one such pair in this plan besides claude-code). The
+    # row id MUST be the registry key or test_redirect_matrix_claims.py fails at
+    # COLLECTION with "no built-in adapter"; the binary key is what the wrapper
+    # resolves through BINARY_TO_CLI to find homes/<id> and home_seed/<id>/.
+    binary: qwen
+    # CHAIN ROW ONLY. qwen-code declares no `agent-write` profile -- it is
+    # `(generate,)` only, like every adapter harness-expansion.md adds -- so the
+    # executor's runner is a second binary and is DECLARED rather than tolerated.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL trio drives the generic OpenAI backend; QWEN_HOME relocates every write"
+    # MUST equal env_extra.OPENAI_MODEL below, byte for byte. `-m` WINS over
+    # OPENAI_MODEL (measured), so a drift between the two would have the flag
+    # override the variable and `test_the_stub_saw_only_this_row_s_model` would
+    # grade a value that never reached the wire.
+    model_arg: "stub-model"
+    # MEASURED (§7 step 4), all three forms: qwen appends `/chat/completions` to
+    # OPENAI_BASE_URL VERBATIM and adds no version segment of its own, so a
+    # session-prefixed base arrives intact as
+    # `/s/<exec-id>/v1/chat/completions`. Full, not `partial` -- there is no
+    # catalog GET to keep the prefix off.
+    session_prefix: true
+    config_roots:
+      # NOT $HOME/.qwen and NOT a HOME redirect: QWEN_HOME replaces the
+      # `.qwen` directory itself, and `$HOME/.qwen` is then never created.
+      QWEN_HOME: ".qwen"
+    base_url_vars:
+      # The `/v1` is load-bearing: qwen adds none of its own.
+      OPENAI_BASE_URL: "{base_url}"
+    credential_vars: [OPENAI_API_KEY]
+    env_extra:
+      OPENAI_MODEL: "stub-model"
+      # The adapter sets these three; the image sets them ENV-wide too, but
+      # build_child_env starts from scratch and carries over only the
+      # allowlist, so the per-CLI copies are what actually reach the CLI.
+      QWEN_TELEMETRY_ENABLED: "false"
+      QWEN_USAGE_STATISTICS_ENABLED: "false"
+      QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: "1"
+    # The env trio needs no config file at all: it drives the CLI with no auth
+    # step and no settings.json, measured. (`--auth-type openai` exists as an
+    # explicit selector but the trio alone was measured sufficient.)
+    seed_files: []
+    # MEASURED: one completion POST per clean dispatch, streamed, with a full
+    # `tools` array -- qwen advertises tools to the model even in headless mode,
+    # which is precisely why `--max-tool-calls 0` is in the shipped argv. No
+    # catalog GET is issued at any point.
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "0.21.13"
+    # NOT `qwen --help`, and the reason is a measurement rather than taste.
+    # FIVE of the flags this adapter emits -- --bare, --chat-recording,
+    # --max-session-turns, --max-tool-calls and --max-wall-time -- are HIDDEN
+    # options: real, accepted, and absent from `qwen --help`. Probing the visible
+    # help would report five permanently-MISSING options forever, which trains a
+    # reader to ignore the drift report.
+    #
+    # The `hidden_options` key is not the answer here either: its assertion runs
+    # a control first (`<binary> --bogus-flag --help` must FAIL, or "the binary
+    # accepts it" proves nothing), and qwen returns 0 for a bogus flag whenever
+    # --help is present -- so that assertion would be vacuous for this CLI, which
+    # is exactly what its control exists to catch.
+    #
+    # An unknown argument WITHOUT --help makes yargs dump the complete option
+    # list, deterministically (two runs byte-equal) and with a non-zero exit that
+    # seed_cli_surface.run_help already tolerates when there is text. So the
+    # drift probe reads the surface we actually depend on.
+    help_invocation: "qwen --mllm-force-full-help"
+    version_offline: true
+    notes: >
+      EXITS 0 ON EVERY API-ERROR CLASS -- 401, 404, 400-overflow and 500 alike
+      all produce rc=0, `subtype: "success"`, `is_error: false`, EMPTY stderr,
+      and an answer of "[API Error: <upstream text>]". So §6 step 3's two named
+      traps (errors on stdout with an empty stderr, and exit-0 failures)
+      coincide in one shape, and the adapter declares `[API Error:` as an
+      exit-zero failure marker, matched by SEARCH because the truncated-stream
+      shape puts it after ten characters of concatenated partial text.
+      `-o json` is the shipped mode rather than `stream-json`, whose `result`
+      record drops the `stats` block that corroborates the classification.
+      `--json-schema` is real (OQ2: inline, claude-code's spelling) but ends the
+      session on a TOOL CALL, which the committed stub deliberately never emits
+      -- so this lane cannot grade it, and its coverage is unit tests plus the
+      §7.4 live smoke. Growing the stub to emit a tool call would be rig growth.
+
+  # -------------------------------------------------------------------------
+  - cli: copilot
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. copilot's adapter declares no `agent-write` profile (it is
+    # `(generate,)` only, like every adapter harness-expansion.md adds), so the
+    # executor's runner is a second binary and is DECLARED rather than tolerated.
+    chain_write_runner: codex
+    # OQ5 RESOLVED, on its preferred branch: `chat`, and
+    # COPILOT_PROVIDER_WIRE_API is NOT set. The `responses` wire was measured
+    # working against the COMMITTED stub too, so the fallback for a future
+    # reasoning-slug parser bug (copilot-cli#4196) is proven available without
+    # any rig growth -- it is simply not needed today.
+    surface: chat
+    mechanism: "COPILOT_PROVIDER_BASE_URL is the BYOK activation switch (+_TYPE/_API_KEY); no GitHub account, no PAT, no gh auth login"
+    # MUST equal env_extra's model surface below -- but note copilot's is a FLAG,
+    # not a variable: the adapter passes `--model`, which was measured to OVERRIDE
+    # COPILOT_MODEL. So the id `test_the_stub_saw_only_this_row_s_model` reads out
+    # of the request body comes from argv, and COPILOT_MODEL is stripped by
+    # get_remove_env rather than set here.
+    model_arg: "stub-model"
+    # MEASURED (§7 step 4), all three base-URL forms, resolving BOTH of the
+    # unknowns that stack for this CLI: the base URL is used VERBATIM and copilot
+    # appends exactly `/chat/completions` (never `/v1/chat/completions`), so the
+    # `/v1` belongs in the base and the feared `.../v1/v1/chat/completions` 404
+    # cannot occur. Full, not `partial` -- copilot fetches NO catalog at all.
+    session_prefix: true
+    config_roots:
+      # Config and state only. This deliberately does NOT cover the 209 MB
+      # self-extracted package cache: COPILOT_HOME does not relocate it
+      # (measured), XDG_CACHE_HOME does, and the image pre-warms that at build
+      # time into an exec-capable /opt path -- see the Dockerfile.
+      COPILOT_HOME: ".copilot"
+    base_url_vars:
+      # The `/v1` is load-bearing: copilot adds no version segment of its own.
+      COPILOT_PROVIDER_BASE_URL: "{base_url}"
+    credential_vars: [COPILOT_PROVIDER_API_KEY]
+    env_extra:
+      COPILOT_PROVIDER_TYPE: "openai"
+      # Measured NOT to block the BYOK provider call, despite the vendor doc's
+      # "requires a local model provider" wording. It disables GitHub auth,
+      # telemetry, web tools, the GitHub MCP server and auto-update.
+      COPILOT_OFFLINE: "true"
+      COPILOT_AUTO_UPDATE: "false"
+      # The pinned token pair, at the adapter's conservative floor. The stub has
+      # no real context window, so pinning the floor keeps the row's env and its
+      # argv deterministic rather than tracking a catalog.
+      COPILOT_PROVIDER_MAX_PROMPT_TOKENS: "32000"
+      COPILOT_PROVIDER_MAX_OUTPUT_TOKENS: "8000"
+      # THE ROW WOULD NOT START WITHOUT THIS LINE, and the reason is not obvious
+      # from any error it produces. The `copilot` npm entry point is a LOADER: on
+      # first run it self-extracts a 209 MB platform package into
+      # $XDG_CACHE_HOME and executes from there. `build_child_env` points
+      # XDG_CACHE_HOME at the per-invocation root (wrapper.py step 3), which is a
+      # --tmpfs mount, and Docker's tmpfs default is NOEXEC -- so copilot dies
+      # with `Native addon "runtime" not found ... failed to map segment from
+      # shared object`, which reads like a broken install rather than a mount
+      # option. COPILOT_HOME does NOT relocate that cache (measured); only this
+      # variable does. The image pre-warms the path at build time, so pointing at
+      # it here also removes a 209 MB extraction from every single spawn.
+      # `env_extra` is applied AFTER step 3, which is what lets it win.
+      XDG_CACHE_HOME: "/opt/mllm/copilot-cache"
+    # The BYOK env family needs no config file: COPILOT_PROVIDER_BASE_URL alone
+    # activates the mode, and there is no trust prompt in `-p` mode.
+    seed_files: []
+    # MEASURED: exactly ONE completion POST per clean dispatch and NO catalog GET
+    # at any point, so `test_the_stub_saw_only_this_row_s_model` sees exactly one
+    # id. `stream: false` because the adapter ships `--stream off`; a full `tools`
+    # array rides every request regardless, since copilot advertises tools to the
+    # model even at §6.5 tier 1 (which is why the tier is a claim about OUR flags
+    # and the filesystem canary is the claim about the child).
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: false, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    # copilot's own retry chain is UNBOUNDED where a backend sends `Retry-After`
+    # (measured: ~61/71/68/66 s gaps, a chain past 300 s) and it exposes no knob
+    # to shorten it, so this outer bound is the only one there is.
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "1.0.80"
+    help_invocation: "copilot --help"
+    version_offline: true
+    notes: >
+      BYOK needs NO GitHub account: COPILOT_PROVIDER_BASE_URL is the activation
+      switch and GitHub's own docs say authentication is not required in this
+      mode. The seat path is stripped rather than configured
+      (COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN), and so is COPILOT_ALLOW_ALL,
+      which is the env twin of --allow-all-tools and would widen the §6.5 tier
+      with no argv change at all. Errors arrive as a `session.error` JSONL record
+      ON STDOUT with stderr at 0 bytes; the one exit-0 failure shape (an empty
+      provider 200) carries no error text anywhere and is detected structurally
+      in parse_output rather than by a marker.
+
+  - cli: kimi
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. kimi's adapter declares no `agent-write` profile (it is
+    # `(generate,)` only, like every adapter harness-expansion.md adds), so the
+    # executor's runner is a second binary and is DECLARED rather than tolerated.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "KIMI_MODEL_* env family synthesizes one provider+model under the fixed ids __kimi_env__/__kimi_env_model__; KIMI_CODE_HOME isolates every write"
+    # MUST equal env_extra.KIMI_MODEL_NAME below, byte for byte: that variable is
+    # the ONLY place the slug exists. `kimi -m <slug>` is a hard failure
+    # ("Model ... is not configured in config.toml"), so no model token ever
+    # reaches argv and `test_the_stub_saw_only_this_row_s_model` reads the id out
+    # of the request body that this variable produced.
+    model_arg: "stub-model"
+    # MEASURED (§7 step 4), not assumed: kimi appends `/chat/completions` to the
+    # base URL VERBATIM and inserts no version segment of its own, so a
+    # session-prefixed base arrives intact as `/s/<exec-id>/v1/chat/completions`.
+    # Full, not `partial` — there is no catalog GET to keep the prefix off.
+    session_prefix: true
+    config_roots:
+      KIMI_CODE_HOME: ".kimi-code"
+    base_url_vars:
+      # The `/v1` is load-bearing: kimi adds none of its own.
+      KIMI_MODEL_BASE_URL: "{base_url}"
+    credential_vars: [KIMI_MODEL_API_KEY]
+    env_extra:
+      # The enable switch. With no member of the family set, `kimi provider list
+      # --json` returns empty and the CLI silently reverts to its config-file
+      # route -- so a partial set is a run on somebody else's credential, not a
+      # degraded one.
+      KIMI_MODEL_NAME: "stub-model"
+      KIMI_MODEL_PROVIDER_TYPE: "openai"
+      # The pinned output ceiling. kimi otherwise asks for 131072 output tokens
+      # on every call; a capped upstream rejects that outright rather than
+      # clamping it (measured live: "Requested maximum tokens of 131072 exceeds
+      # the maximum output tokens limit: 102400"). Pinned here as well as in
+      # get_env so the container row runs the configuration the product ships.
+      KIMI_MODEL_MAX_TOKENS: "8192"
+      # The pinned retry knob. Without it a 5xx row would make TEN completion
+      # POSTs over ~145 s inside one dispatch instead of one, blowing both the
+      # row timeout and the single-request expectation in http_log below.
+      KIMI_LOOP_MAX_ATTEMPTS_PER_STEP: "1"
+      # The image sets these two ENV-wide, but build_child_env starts from
+      # scratch and carries over only the allowlist, so the per-CLI copies are
+      # what actually reach the CLI.
+      KIMI_CODE_NO_AUTO_UPDATE: "1"
+      KIMI_DISABLE_TELEMETRY: "1"
+    # The env family needs no config file at all: it is the only path that reads
+    # process.env, and it writes nothing of its own (the config.toml
+    # `[providers.<n>.env]` sub-table merely NAMES variables and is not a
+    # shell-env reader).
+    seed_files: []
+    # MEASURED: one completion POST per clean dispatch, `stream: true` always,
+    # and a full `tools` array on every request -- kimi advertises tools to the
+    # model even in `-p` mode. No catalog GET is issued at any point.
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "0.36.1"
+    help_invocation: "kimi --help"
+    version_offline: true
+    notes: >
+      Plain KIMI_API_KEY does NOTHING -- verified inert on its own. The
+      KIMI_MODEL_* family is the only path that reads process.env.
+      Assistant text is on stdout and stderr is EXACTLY 0 bytes on success,
+      carrying one classified `error: failed to run prompt: <class>: <detail>`
+      line on every failure; the exit code is authoritative in every shape (0
+      success, 1 failure), so the adapter declares no exit-zero markers.
+      The trailing `session.resume_hint` record also carries a `content` key,
+      which is why the parser filters on `role == "assistant"`.
+
   - cli: kilocode
     provenance: verified
     lane: provider
@@ -315,6 +608,44 @@ clis:
     model_arg: "stub/stub-model"
     session_prefix: true
     seed_files: [".config/kilo/kilo.jsonc"]
+    env_extra:
+      # THE TWO OPT-OUTS KILOCODE SHIPS, which until 2026-08-20 nothing set. The
+      # 2026-08-19 live row measured five call-home queries from this CLI —
+      # models.dev, us.i.posthog.com twice, the registry.npmjs.org + github.com
+      # update-check pair 6 ms apart, and api.kilo.ai — while the image's own
+      # step-8 ENV block covers `DO_NOT_TRACK` and cline's updater but neither of
+      # these, and this row's `env_extra` was empty. The names come from the
+      # 7.4.19 bundle itself, not from documentation:
+      #
+      #   KILO_DISABLE_AUTOUPDATE  is in the CLI's env schema beside
+      #                            KILO_ALWAYS_NOTIFY_UPDATE and
+      #                            KILO_DISABLE_PRUNE.
+      #   KILO_TELEMETRY_LEVEL     gates the PostHog client, and the gate is
+      #                            `level ? level === "all" : config.enabled` —
+      #                            so ANY value other than `all` disables it, and
+      #                            `off` is the one we set. The bundle's own
+      #                            description says the CLI "reads
+      #                            KILO_TELEMETRY_LEVEL once at spawn".
+      #
+      # THEIR HOME IS HERE and not in the Dockerfile, for the reason the wrapper
+      # contract at the top of this file states: wrapper.py rebuilds the child
+      # environment from scratch, so an image-wide ENV never reaches a CLI
+      # dispatched through it. The credentialed live lane inherits the image ENV
+      # directly and would have been covered either way; the provider and chain
+      # lanes would not.
+      #
+      # MEASURED AFTER, 2026-08-20, on the live row (green, 15.5 s): the DNS log
+      # went from six names to five — **us.i.posthog.com is gone** and nothing
+      # else moved. KILO_TELEMETRY_LEVEL does what its bundle says; the
+      # registry.npmjs.org + github.com update-check pair survives
+      # KILO_DISABLE_AUTOUPDATE, and models.dev and api.kilo.ai are untouched by
+      # either. Both stay set: one works, and the other is the shipped opt-out
+      # for the behaviour observed, so unsetting it would misreport the finding
+      # as "nobody tried". The residue is declared in REFUSED_EGRESS
+      # (tests/test_container_live_provider.py) with the same measurement, and
+      # the DNS allowlist is what actually refuses it.
+      KILO_DISABLE_AUTOUPDATE: "1"
+      KILO_TELEMETRY_LEVEL: "off"
     http_log:
       - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false}
       - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
@@ -393,6 +724,16 @@ clis:
     chain_write_runner: codex
     surface: chat
     mechanism: "GROK_MODELS_BASE_URL + XAI_API_KEY (a documented custom-endpoint mode)"
+    # WRITTEN DOWN RATHER THAN INHERITED. Both container lanes fall back to the
+    # literal `stub-model` when a row omits this key, so grok was the one row
+    # whose model under test was decided by a default instead of a declaration
+    # (harness-expansion.md §14.7 gap 7). This value is byte-identical to what the
+    # fallback already produced, and it must NOT be providers.yaml's models[0]:
+    # `grok-4.5:high` carries an `:effort` suffix that makes the adapter add
+    # `--reasoning-effort high`, which no row emits and expected_argv.yaml does not
+    # carry. `stub-model` is also CATALOG_MODELS[0] in stub_server.py, which this
+    # row needs — grok exits 1 on a -m value absent from GET /v1/models.
+    model_arg: "stub-model"
     session_prefix: true
     base_url_vars:
       GROK_MODELS_BASE_URL: "{base_url}"
@@ -533,6 +874,45 @@ clis:
     version_measured: "2.1.232"
     help_invocation: "claude --help"
     version_offline: true
+    #: THE CREDENTIALED LIVE LANE'S ENDPOINT for this row: the bare `/api`
+    #: origin, NOT `/api/v1`. Claude Code appends `/v1/messages` itself, so the
+    #: `/api/v1` every other OpenRouter row uses would produce
+    #: `/api/v1/v1/messages` and a 404 that reads like an auth failure. Identical
+    #: to `entrypoint.py`'s OPENROUTER_ANTHROPIC_BASE, which has been driving the
+    #: host lane's claude-code rows against OpenRouter since 2026-08-14.
+    #:
+    #: The variable this URL is EXPORTED in (ANTHROPIC_BASE_URL), the
+    #: present-and-empty ANTHROPIC_API_KEY beside it, and the credential's alias
+    #: (ANTHROPIC_AUTH_TOKEN) all live in the test module's lane-shaping tables
+    #: rather than here. That is not a preference: `wrapper.build_child_env`
+    #: applies `env_extra` AFTER `base_url_vars`, so an ANTHROPIC_BASE_URL in this
+    #: row's `env_extra` would override the provider lane's per-exec stub URL and
+    #: leave that lane green while testing nothing.
+    live_base_url: "https://openrouter.ai/api"
+    #: MEASURED ON THE FIRST CREDENTIALED RUN (2026-08-20, exit 0 in 7.9 s,
+    #: `modelUsage` keyed by `anthropic/claude-haiku-4.5`, DNS log naming
+    #: openrouter.ai and nothing else): the wire was fine and the OUTPUT CHANNEL
+    #: was not. `claude -p` under this adapter's argv had no permission grant, so
+    #: the model's `Write` call came back as
+    #: `permission_denials: [{"tool_name": "Write", …}]`, the run ended
+    #: `is_error: false, subtype: "success", terminal_reason: "completed"` with
+    #: exit 0, and the answer on stdout was "Permission is required to write to
+    #: the file. Please approve the write operation to proceed." — which
+    #: `ClaudeCodeProvider.parse_output` then failed on ("No valid JSON found in
+    #: text"). The adapter declares `supports_file_output = True`, so the live
+    #: lane's a7 failed the row, and that was the assertion doing its job: the
+    #: agent-write profile passed `--permission-mode acceptEdits` while the
+    #: generate profile — the one whose prompt ASKS for a file — passed no
+    #: permission flag at all.
+    #:
+    #: FIXED IN THE ADAPTER, NOT HERE (2026-08-20): `build_command` now emits
+    #: `--permission-mode acceptEdits` in the policy region, so the generate argv
+    #: carries the same narrow grant every other file-output adapter already had
+    #: (codex `--sandbox workspace-write`, opencode's write-capable `run` agent,
+    #: kilocode `--auto`). The re-run is 7/7 green with
+    #: `observed_output_channel: file`, a real file on disk and
+    #: `permission_denials: []`. Nothing here was ever seeded to paper over it,
+    #: and nothing here changed to make it pass.
     notes: >
       TWO REQUESTS PER EXEC, NOT ONE. The first is Claude Code's own session-title
       generator - tool-free, 2.3 KB, and it uses the SAME model as the session, so
@@ -584,6 +964,38 @@ clis:
     version_measured: "0.25.2"
     help_invocation: "gemini --help"
     version_offline: true
+    #: THE SECOND NON-OPENROUTER VENDOR ON THE CREDENTIALED LIVE LANE, and the
+    #: first that had to be one for a protocol reason rather than a stub one.
+    #: OpenRouter serves the three surfaces every other row speaks (Chat
+    #: Completions, Responses, Anthropic Messages) and does NOT serve Google's
+    #: `:generateContent`, so there is no way to point this CLI at the lane's
+    #: default endpoint. Google's own API is the only live endpoint gemini has,
+    #: and the key for it is a free-tier one with per-model, per-minute and
+    #: per-day caps — one one-shot per row is well inside them.
+    #:
+    #: The credential is `GEMINI_API_KEY` rather than the lane default, which the
+    #: driver's `_run_argv` reads: a row naming its own `credential_env` is
+    #: forwarded THAT variable and only that one, so the OpenRouter key never
+    #: reaches a binary with no use for it.
+    live_lane: true
+    live_vendor: google
+    live_base_url: "https://generativelanguage.googleapis.com"
+    #: NARROWED TO THE ENDPOINT, deliberately, and not to the `googleapis.com`
+    #: suffix: gemini-cli's usage statistics go to `play.googleapis.com/log`
+    #: (Clearcut, compiled into the 0.25.2 bundle) and the wider suffix would
+    #: ALLOW that sink to resolve. Its opt-out is the `usageStatisticsEnabled`
+    #: key in ~/.gemini/settings.json and there is no environment equivalent, so
+    #: the DNS allowlist is the only control this lane can apply — the same
+    #: position cursor-agent's row is in.
+    live_allow: ["generativelanguage.googleapis.com"]
+    credential_env: GEMINI_API_KEY
+    egress_beyond_stub:
+      #: MEASURED IN THE BINARY, not in the DNS log yet — `play.googleapis.com`
+      #: is where the CLI's Clearcut client posts. Declared so a5's second half
+      #: asserts it was REFUSED rather than merely hoping the allowlist held.
+      hosts: ["play.googleapis.com"]
+      opt_out_vars: []
+      fatal_when_blocked: false
     notes: >
       THE VARIABLE IS NOT GEMINI-CLI'S. GOOGLE_GEMINI_BASE_URL appears nowhere in
       @google/gemini-cli 0.25.2 or -core; it is read by the bundled @google/genai
@@ -660,6 +1072,103 @@ clis:
       hazard is still live for a materialized prompt beginning with "--", and
       cli-surface.yaml must not record a separator the product does not send.
 
+  - cli: vibe
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. vibe's adapter declares no `agent-write` profile (it is
+    # `(generate,)` only, like every adapter harness-expansion.md adds), so the
+    # executor's runner is a second binary and is DECLARED rather than tolerated.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "seeded config.toml [[providers]] backend=generic/api_style=openai; the endpoint and the KEY VARIABLE NAME live in the file, the model in VIBE_ACTIVE_MODEL"
+    # THE SEED ALIAS, WHICH IS DELIBERATELY THE REAL SLUG. vibe is the one row
+    # here whose model surface is an indirection: `model_arg` is what the driver
+    # spec carries and what the adapter puts in VIBE_ACTIVE_MODEL, and the seed's
+    # [[models]] entry maps that ALIAS to a WIRE name. Only the wire name differs
+    # per lane ({{model_name}} -> `stub-model` here, the slug itself live), so
+    # this value is byte-identical in three places -- here, providers.yaml's
+    # `models:`, and the seed's `alias` -- and none of them invents a nickname.
+    # The request body therefore carries `stub-model`, which
+    # test_the_stub_saw_only_this_row_s_model already allows as the stub default.
+    model_arg: "openai/gpt-5.6-luna"
+    # MEASURED (§7 step 4), all three api_base forms: vibe appends exactly
+    # `/chat/completions` to the base VERBATIM and never re-origins it, so the
+    # `/v1` belongs in the base and a session-prefixed base is preserved intact.
+    # Full, not `partial` -- vibe fetches NO catalog at all (zero GET /models
+    # across 25 POSTs), which is also why `--max-price` is decidable offline.
+    session_prefix: true
+    config_roots:
+      # vibe writes on EVERY run -- session logs, vibehistory, trusted_folders.toml
+      # -- and reads its catalog from $VIBE_HOME/config.toml, so this is both the
+      # isolation root and the seed's destination.
+      VIBE_HOME: ".vibe"
+    # NO base_url_vars: vibe has no base-URL environment variable at all. The
+    # endpoint is `api_base` inside the seeded config.toml, rendered from
+    # {{base_url}} by wrapper.py's copytree substitution.
+    base_url_vars: {}
+    # The seed names this variable through {{api_key_env}}; the wrapper binds
+    # that token to STUB_API_KEY here and live_provider.py binds the SAME
+    # template to OPENROUTER_API_KEY on the credentialed lane.
+    credential_vars: [STUB_API_KEY]
+    seed_files: [".vibe/config.toml"]
+    env_extra:
+      # Every VIBE_* the adapter's get_env sets. The wrapper rebuilds the child
+      # environment FROM SCRATCH, so without these the row would run under a
+      # configuration the product never ships -- and for VIBE_ACTIVE_MODEL that
+      # would mean no model selected at all, since vibe has no --model flag.
+      # Kept BYTE-EQUAL to the adapter; test_wrapper_env_contract.py fails if any
+      # declared name is missing here.
+      # BYTE-COUPLED TO THREE OTHER PLACES, and missing this one broke the row:
+      # providers.yaml `models[0]`, this row's `model_arg`, the seed's
+      # `[[models]] alias`, and here. The 2026-08-19 move to gpt-5.6-luna updated
+      # the first three and left this at gpt-4.1-mini, so the wrapper — which
+      # rebuilds the child env FROM SCRATCH and applies `env_extra` last — pinned
+      # VIBE_ACTIVE_MODEL to an alias the rendered catalog no longer contained.
+      # vibe selected nothing, fell back to its built-in `mistral` provider and
+      # died on `Missing MISTRAL_API_KEY`: exit 1, zero requests, and the lane
+      # reported "the stub recorded no model id at all". The LIVE lane was
+      # unaffected and stayed green, which is why it took a provider-lane run to
+      # surface — there `provider.resolve_env(model)` is applied last and the
+      # adapter's own VIBE_ACTIVE_MODEL wins over this value.
+      VIBE_ACTIVE_MODEL: "openai/gpt-5.6-luna"
+      # The pinned inner bound. The vendor default is 720 s over 3 attempts --
+      # a ~36-minute worst case in one slot -- and the adapter's declared
+      # `max_wall_s` is computed from this number, so the two cannot drift.
+      VIBE_API_TIMEOUT: "90"
+      # §6.5's rung, pinned in env as well as argv: `default_agent` is
+      # `accept-edits`, whose AgentSafety is DESTRUCTIVE.
+      VIBE_DEFAULT_AGENT: "plan"
+      VIBE_THINKING: "off"
+      VIBE_ENABLE_TELEMETRY: "false"
+      VIBE_ENABLE_UPDATE_CHECKS: "false"
+      VIBE_ENABLE_NOTIFICATIONS: "false"
+    # MEASURED: exactly one completion POST per clean dispatch and NO catalog GET
+    # at any point.
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    # vibe's own chain is 3 attempts x the pinned 90 s api_timeout plus ~1.6 s of
+    # backoff, and `Retry-After` is NOT honoured -- so unlike copilot's, this
+    # inner bound is real and the outer one only has to clear it.
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "2.24.1"
+    help_invocation: "vibe --help"
+    version_offline: true
+    notes: >
+      The plan's §4.2 wrinkle does not exist: VIBE_ACTIVE_MODEL selects the model
+      from the ENVIRONMENT, and two concurrent slots with different models were
+      measured succeeding while sharing one VIBE_HOME and one read-only
+      config.toml -- so there is no per-run file to template and §1's
+      `prepare_run` hook has no consumer. The seed is static and committed.
+      §6.5's ladder is inverted at the bottom for this CLI: a bare `vibe -p` runs
+      `default_agent = accept-edits`, whose AgentSafety is DESTRUCTIVE and whose
+      write_file/edit permission is `always`, so rung 1 is `--agent plan` (SAFE)
+      and the adapter never emits anything wider. Config-validation errors print
+      on STDOUT with stderr empty (the opencode trap); every other failure mode
+      measured exits 1 on stderr, so no exit-0 markers are declared.
+
   # -------------------------------------------------------------------------
   # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE
   # about mock_llm.py (C5): cursor-agent is already one of its six identities;
@@ -682,34 +1191,149 @@ clis:
       protobuf schema, which is not a stub. `bedrock` mode is not an escape: its own
       self-test validates against the backend.
 
+    # THE ROW IS BOTH, and `lane: fake` is deliberately unchanged. Moving it to a
+    # third lane value would silently drop cursor out of
+    # `tests/test_fake_lane_roster.py`'s five-part promise — the ONLY thing that
+    # checks this adapter's argv, its parser and its version gate against a
+    # binary — and every reader of `lane` is a positive-match filter, so nothing
+    # would have gone red. So the live lane is an ORTHOGONAL opt-in field beside
+    # it, not a replacement for it.
+    #
+    # WHY CURSOR IS ON THE CREDIT-SPENDING LANE WHEN THE OTHER TWELVE EARN THEIR
+    # GRADE FOR FREE: the reason above is not a gap to be closed later, it is a
+    # permanent one. There is no stub, therefore no free behavioural lane, and
+    # cursor-agent is `providers.yaml`'s `default_provider` and most of both
+    # `defaults.models` and `quick_models`. It shipped a release under
+    # `--mode ask` answering every review slot with "I can't write the requested
+    # file while Ask mode is active" and no lane here could see it. A live row is
+    # what the alternative to that is.
+    live_lane: true
+    live_vendor: cursor
+    #: Not OpenRouter: cursor's models are reached through Cursor's own backend.
+    live_base_url: "https://api2.cursor.sh"
+    #: The one name this row may resolve. `api2.cursor.sh` is the endpoint;
+    #: `cursor.sh` covers it by dot-suffix. Telemetry is DELIBERATELY not here —
+    #: see `egress_beyond_stub` below.
+    live_allow: ["cursor.sh"]
+    #: Cursor's credential is a FILE, not a variable. `~/.config/cursor/auth.json`
+    #: (mode 0600, the developer's uid) is the store the CLI itself resolves on
+    #: Linux — `$XDG_CONFIG_HOME/cursor/auth.json`, a rule consulting neither
+    #: CURSOR_CONFIG_DIR nor CURSOR_DATA_DIR. A `:ro` bind of it is UNREADABLE in
+    #: this container (uid 10001; `posture.yaml` rejects `--user $(id -u)` by
+    #: name), so the host driver reads it and the runner stages the bytes into
+    #: the run's own disposable HOME. `CURSOR_API_KEY` is the other supported
+    #: shape and needs none of this — a row may switch to it by dropping
+    #: `credential_file` and naming `credential_env: CURSOR_API_KEY`.
+    credential_file: ".config/cursor/auth.json"
+    credential_source: "~/.config/cursor/auth.json"
+    #: `default_timeout` is 600; the inner bound stays strictly under the outer.
+    row_timeout_s: 300
+    egress_beyond_stub:
+      #: Unfixable from our side: the bundle carries no DO_NOT_TRACK, no
+      #: CURSOR_TELEMETRY_* and no other opt-out variable, so unlike
+      #: copilot/kimi/qwen/vibe this row's opt-out set is EMPTY *by measurement*
+      #: and configuration cannot silence any of these. `live_allow` is
+      #: `cursor.sh` alone, so each gets NXDOMAIN, and `test_a5_egress` asserts
+      #: none of them was ANSWERED rather than merely hoping.
+      #:
+      #: MEASURED on the first live row (2026-08-19, run 20260819T112857Z):
+      #: `registry.npmjs.org` was refused — a real call-home this row's
+      #: allowlist stopped, and the reason that name is first in the list. The
+      #: statsig and sentry names are compiled into the bundle and did not
+      #: appear in that run's dns.jsonl; they are kept because a cold profile is
+      #: what triggers the ~703 KB statsig fetch and this run had a warm one.
+      #: Refusing them costs a degraded telemetry fetch, never the row.
+      hosts: ["registry.npmjs.org", "featureassets.org", "prodregistryv2.org",
+              "statsigapi.net", "o4504648565915648.ingest.us.sentry.io"]
+      opt_out_vars: []
+    #: What the `cursor.sh` suffix really covers, measured in the same run: 33
+    #: queries to `api2.cursor.sh` plus `api3.cursor.sh` and
+    #: `agentn.global.api5.cursor.sh`. Recorded so a future narrowing of
+    #: `live_allow` to the bare endpoint is a deliberate choice rather than a
+    #: surprise outage.
+    live_hosts_observed: ["api2.cursor.sh", "api3.cursor.sh",
+                          "agentn.global.api5.cursor.sh"]
+
   - cli: agy
     provenance: none
     lane: fake
     startup_s: 0.051
+    #: The spike's binary, and the version every `repo_corrections` entry below
+    #: was measured against. The IMAGE pins 1.1.15 (cli-versions.lock), which is
+    #: two daily releases later; the surface contract records what was really
+    #: installed, so the two numbers differing here is data, not drift.
     version_measured: "1.1.13"
     help_invocation: "agy --help"
-    attempts: ["CLOUD_CODE_URL", "settings.json modelProvider + GEMINI_API_KEY"]
+    attempts: ["CLOUD_CODE_URL", "settings.json modelProvider + GEMINI_API_KEY",
+               "GEMINI_API_KEY + GOOGLE_API_KEY + GOOGLE_GEMINI_BASE_URL"]
     reason: >
       CLOUD_CODE_URL is a real, working endpoint override (the binary logs
       "Overriding CloudCodeServerURL via CLOUD_CODE_URL") and the protocol is JSON,
       not protobuf: /v1internal:loadCodeAssist, :setUserSettings, :listExperiments.
-      Two things still block it. (a) agy never reaches a model surface — it fails at
-      the ELIGIBILITY gate on :loadCodeAssist, whose response schema is
-      Google-internal. (b) auth is not in $HOME at all but in the OS KEYRING, so
-      there is nothing to seed and a container's silent auth simply fails.
+      What blocks the provider lane is that agy never reaches a model surface at
+      all: it fails at the ELIGIBILITY gate on :loadCodeAssist, whose response
+      schema is Google-internal, and its AUTH RESOLVES BEFORE THE FIRST RPC — so
+      the failure happens with zero requests leaving the process. Re-measured
+      2026-08-19: GEMINI_API_KEY, GOOGLE_API_KEY and GOOGLE_GEMINI_BASE_URL set
+      together produce a BYTE-IDENTICAL auth failure with ZERO requests reaching
+      the stub, so no environment variable selects an API-key path a stub could
+      answer. This row is therefore permanently `lane: fake`; it is not a gap
+      waiting on effort.
+      THE PREVIOUS TEXT HERE WAS WRONG ON TWO COUNTS, both corrected below and
+      both worth stating because each argued against work that is now done:
+      it said auth "is not in $HOME at all but in the OS KEYRING, so there is
+      nothing to seed" — true only while D-Bus is reachable — and it rated a
+      settings.json `modelProvider` API-key path at "~30 minutes of follow-up".
+    #: NOT a lane, and deliberately not one. `lane: fake` is a PROMISE about
+    #: mock_llm.py (C5) that `tests/test_fake_lane_roster.py` grades, and every
+    #: reader of `lane` is a positive-match filter, so re-labelling this row to
+    #: get it probed would silently drop it out of that five-part promise with
+    #: nothing going red — the same trap the `live_lane` comment above
+    #: cursor-agent describes. So this is a THIRD orthogonal opt-in beside both:
+    #: it says only "run the cli-surface help probe against this binary", which
+    #: needs the binary, no stub, no credential and no network.
+    #:
+    #: What it buys: agy's adapter emits six options plus a `-p` that carries
+    #: the PROMPT AS ITS VALUE rather than as a positional (`-p` is the short
+    #: alias of `--print`), which is exactly the shape a silent upstream rename
+    #: breaks without any test in this repo noticing — the argv golden compares
+    #: our argv against our own table and stays green through it.
+    surface_probe: true
+    #: The image sets this ENV-wide, and that is not enough: wrapper.py rebuilds
+    #: its child's environment from scratch (PATH/TERM/LANG/LC_ALL/TZ and MLLM_*
+    #: only), so nothing dispatched THROUGH the wrapper inherits it. `true`, not
+    #: `1`: with `=1` agy was measured spawning a background updater and
+    #: rewriting itself 1.1.13 -> 1.1.15 inside a single run, and it releases
+    #: daily, so an un-opted-out invocation unpins the image within a day.
+    env_extra:
+      AGY_CLI_DISABLE_AUTO_UPDATE: "true"
     repo_corrections:
-      # Three things this row contradicts in the tree today.
-      - "providers.yaml and the adapter docstring say auth is persisted in
-         ~/.gemini/antigravity-cli/. It is the OS keyring: seeding $HOME does NOT
-         de-authenticate agy. Any future probe must also break the keyring
-         (DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-bus) or it silently uses
-         the developer's real Google token."
+      # Things this row contradicts in the tree today -- and, for the two marked
+      # RETRACTED, things an earlier version of this row got wrong itself.
+      - "RETRACTED, and the retraction is what unblocked the image row.
+         providers.yaml and the adapter docstring say auth is persisted in
+         ~/.gemini/antigravity-cli/, and this row used to answer 'no, it is the
+         OS keyring, so there is nothing to seed'. Measured: that holds only
+         where D-Bus is REACHABLE. Headless — which is every container — agy
+         logs 'Failed to load token from keyring, falling back to file' and
+         openat()s $HOME/.gemini/antigravity-cli/antigravity-oauth-token. That
+         file is seedable exactly the way cursor-agent's auth.json already is
+         (host-side read, forwarded by name, written 0600 into the disposable
+         HOME, redacted from every record). So the docstring is right for the
+         container case and this row was wrong. It still matters ON A LAPTOP:
+         a probe run where D-Bus IS reachable silently uses the developer's real
+         Google token, so any such probe must break the bus deliberately
+         (DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-bus)."
       - "agy SELF-UPDATES with no --no-auto-update flag; the opt-out is
-         AGY_CLI_DISABLE_AUTO_UPDATE. It rewrote the developer's own binary
-         (1.1.8 -> 1.1.13) during the spike."
-      - "'Google OAuth only, no API keys at all' is true only of the DEFAULT path.
-         The binary carries a geminiAPIKeyAuth method gated on settings.json
-         modelProvider plus GEMINI_API_KEY/GOOGLE_API_KEY, alongside
-         GOOGLE_GEMINI_BASE_URL. If that path can be selected agy would speak plain
-         :generateContent — which the stub already serves — and become a
-         provider-lane candidate. Rated ~30 minutes of follow-up."
+         AGY_CLI_DISABLE_AUTO_UPDATE, and its value must be `true` — `=1` was
+         measured spawning a background updater that rewrote the binary
+         1.1.13 -> 1.1.15 INSIDE A SINGLE RUN. It had already rewritten the
+         developer's own binary (1.1.8 -> 1.1.13) during the spike."
+      - "RETRACTED. This row used to claim the binary carries a geminiAPIKeyAuth
+         method gated on a settings.json `modelProvider` key plus
+         GEMINI_API_KEY/GOOGLE_API_KEY, and rated selecting it at '~30 minutes
+         of follow-up'. That follow-up was spent: NO SUCH SETTINGS KEY EXISTS,
+         and the three variables set together produce a byte-identical auth
+         failure with zero requests reaching a stub. 'Google OAuth only' is
+         accurate for every path reachable from the environment, agy is not a
+         provider-lane candidate, and nobody should spend that half hour again."

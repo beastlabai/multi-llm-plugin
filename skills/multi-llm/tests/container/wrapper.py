@@ -186,7 +186,11 @@ def collapse_prompt(argv: list[str], prompt_min: int = 200) -> list[str]:
 #: provider id — so without this map a `claude` invocation looks up a row and a
 #: seed directory that do not exist, and silently gets neither its redirect nor
 #: its synthesized config.
-BINARY_TO_CLI = {"claude": "claude-code"}
+#: The two ids that differ from their binary name. Both name the HARNESS
+#: rather than the model family, and both are §8.1-frozen: a binary whose
+#: name differs from its id and has no entry here runs against a
+#: `home_seed/<id>/` directory nobody seeded — silently, with no error.
+BINARY_TO_CLI = {"claude": "claude-code", "qwen": "qwen-code"}
 
 
 def resolve_cli_id(binary: str) -> str:
@@ -318,6 +322,25 @@ def seed_invocation_root(cli: str, root: Path, row: dict) -> None:
         "{{base_url}}": base_url,
         "{{base_url_root}}": base_url.rsplit("/v1", 1)[0],
         "{{stub_session_key}}": f"mllm-stub-{Path(root).name.rsplit('-', 1)[-1]}",
+        # A CLI that names its key VARIABLE inside its config file (vibe's
+        # `api_key_env_var`) needs that name to differ per lane while the
+        # committed template stays single: `STUB_API_KEY` here, and
+        # `OPENROUTER_API_KEY` when live_provider.py renders the SAME tree for
+        # the credentialed lane. One template, two bindings — a parallel
+        # `home_seed-live/` is the artifact that rots the first time this row's
+        # config changes. Only the name is substituted; the key's value never
+        # enters a seed file, which is what keeps a rendered tree from being a
+        # committed credential.
+        "{{api_key_env}}": "STUB_API_KEY",
+        # The WIRE model name, for a seed whose catalog maps an alias to it
+        # (vibe's `[[models]]` `name`). It is the one value that genuinely
+        # differs per lane -- the stub answers `stub-model`, OpenRouter answers
+        # the slug -- and §7 step 6 sanctions exactly this extension for a seed
+        # that cannot otherwise express its row's model ("extend the home_seed
+        # copytree tokens ... never `config_files`"). The ALIAS is not templated:
+        # it is byte-identical across providers.yaml, the redirect row and the
+        # seed, so only the wire name moves.
+        "{{model_name}}": "stub-model",
     }
     for path in root.rglob("*"):
         if not path.is_file():

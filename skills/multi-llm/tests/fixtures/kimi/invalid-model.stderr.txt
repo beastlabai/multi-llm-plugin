@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.api_error: 404 The model `no-such-model-xyz` does not exist
+See log: /home/e2e/.kimi-code/logs/kimi-code.log

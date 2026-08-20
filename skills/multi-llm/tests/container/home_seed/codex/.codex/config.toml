@@ -6,7 +6,12 @@
 # it, finds nothing, and goes straight to api.openai.com over a WebSocket
 # transport (wss://api.openai.com/v1/responses) before falling back to HTTPS.
 # A custom base_url avoids that transport entirely: the redirected run went
-# straight to http://127.0.0.1:<port>/v1/responses.
+# straight to the container stub's own /v1/responses on loopback. (The address
+# is deliberately not spelled out here: the credentialed live lane renders this
+# same file against openrouter.ai and its `seed_guards` fails any row whose
+# rendered tree still names a loopback endpoint — a prose mention is
+# indistinguishable from a hardcoded one to a grep, and the guard is right to
+# refuse both.)
 #
 # {{base_url}} is substituted per exec by the PATH wrapper, so each invocation
 # carries its own session id in the path.
@@ -15,8 +20,45 @@ model_provider = "stub"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 
+# CODEX'S OWN SANDBOX CANNOT INITIALIZE UNDER THIS HARNESS'S POSTURE, and no
+# setting in this file changes that — recorded here because this is where the
+# next person will look for the knob.
+#
+# `sandbox_mode` above is moot on both container lanes anyway: CodexProvider's
+# `_BASE_ARGV` passes `--sandbox workspace-write` on every spawn and argv wins.
+# What matters is WHICH sandbox codex builds for that mode. MEASURED 2026-08-20
+# on the credentialed live lane — the only lane that could ever see it, because
+# the container stub never emits a tool call and an unbuilt sandbox is invisible:
+#
+#   bwrap: No permissions to create a new namespace, likely because the kernel
+#   does not allow non-privileged user namespaces.
+#
+# The message blames the kernel and the kernel is innocent: the host's
+# `/proc/sys/user/max_user_namespaces` is 160397 and `unshare -Un true` succeeds
+# in the same image with `--security-opt seccomp=unconfined` and `--cap-drop
+# ALL` still applied. It is DOCKER'S DEFAULT SECCOMP PROFILE denying
+# CLONE_NEWUSER to a container with no CAP_SYS_ADMIN — i.e. exactly the
+# containment this rig exists to keep, so the posture is not the thing to change.
+#
+# codex's other Linux sandbox was tried and does not help: with
+# `[features] use_legacy_landlock = true` every tool call still failed, and
+# codex printed `[features].use_legacy_landlock is deprecated and will be removed
+# soon` as an error item on stdout for its trouble. Both runs timed out at the
+# 180 s inner bound with the model retrying the write, at ~$0.026 each. The flags
+# are therefore NOT set here — a setting that changes nothing but adds an error
+# line to every parse is worse than no setting — and the live row records a
+# measured skip instead (NEEDS_INNER_USERNS in tests/test_container_live_provider.py).
+
 [model_providers.stub]
 name = "stub"
 base_url = "{{base_url}}"
 wire_api = "responses"
-env_key = "STUB_API_KEY"
+# THE KEY'S VARIABLE NAME, TEMPLATED — never its value. The provider lane
+# binds {{api_key_env}} to STUB_API_KEY (byte-identical to what this line
+# used to read) and the credentialed live lane binds it to
+# OPENROUTER_API_KEY, so one committed template serves both bindings and
+# neither carries a secret. Written for harness-full-coverage.md Wave 3.2:
+# without it this row could not join the live lane at all, because a seed
+# naming the stub's variable would have codex look up a key that lane
+# never sets.
+env_key = "{{api_key_env}}"
