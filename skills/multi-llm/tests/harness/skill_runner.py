@@ -127,6 +127,17 @@ class SkillRunner:
         "code_review": "code_review_orchestrator.py",
         "apply_fixes": "apply_code_fixes_orchestrator.py",
         "apply_task_suggestions": "apply_task_suggestions_orchestrator.py",
+        # THE EIGHTH PHASE, absent until 2026-08-19 (harness-expansion.md §14.7
+        # gap 10). Its omission was invisible because
+        # tests/test_review_tasks_integration.py carries its OWN subprocess
+        # helper and drives the orchestrator in reaggregate mode, so the phase
+        # had integration coverage but had never been driven by a fake binary.
+        # `run_orchestrator` rejects anything absent from this map, so the map
+        # WAS the roster. Needs no special-casing: the orchestrator takes
+        # --plan-file and none of the --output-format/--no-confirm handling
+        # below. A caller must still seed a tasks file, or the orchestrator
+        # fail-closes by design.
+        "review_tasks": "review_tasks_orchestrator.py",
     }
 
     def __init__(

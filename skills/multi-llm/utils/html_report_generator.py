@@ -64,6 +64,13 @@ def _make_letter_icon_data_uri(letter: str, color: str) -> str:
 
 
 # Mapping from icon key to (icon_filename_or_None, fallback_letter, fallback_color)
+#
+# Provenance rule (orca-harness-parity.md §6.2): Orca's MIT grant covers its
+# copyright in the PNGs it bundles, NOT the third-party trademarks they depict.
+# So Orca is used only as the *catalog* — which agent wears which mark — and each
+# asset here is fetched from the vendor's own favicon/brand source, preferring
+# SVG. A mark with no reachable first-party SVG gets the letter-icon fallback
+# rather than a redrawn or re-hosted logo.
 _ICON_DEFS: Dict[str, tuple] = {
     "anthropic":  ("Anthropic.svg", "A", "#CC9B7A"),
     "openai":     ("OpenAI.svg", "O", "#10A37F"),
@@ -78,9 +85,26 @@ _ICON_DEFS: Dict[str, tuple] = {
     "codex":      ("Codex.svg", "C", "#111111"),
     "nvidia":     ("Nvidia.svg", "N", "#77B900"),
     "qwen":       ("Qwen.svg", "Q", "#615CED"),
-    # No svgl.app logo available — letter-icon fallback only
+    # SVG sourced from mistral.ai/favicon.svg
+    "mistral":    ("Mistral.svg", "M", "#FA520F"),
+    # SVG sourced from block/goose:ui/desktop/src/images/icon.svg
+    "goose":      ("Goose.svg", "G", "#0F172A"),
+    # SVG sourced from pi.dev/favicon.svg
+    "pi":         ("Pi.svg", "P", "#09090B"),
+    # SVG sourced from Primer Octicons' copilot-16 icon (MIT)
+    "copilot":    ("Copilot.svg", "C", "#24292F"),
+    # No first-party SVG reachable — letter-icon fallback only
     "xiaomi":     (None, "M", "#FF6900"),
     "arcee":      (None, "T", "#3B82F6"),
+    "deepseek":   (None, "D", "#4D6BFE"),
+    "cline":      (None, "C", "#0EA5A4"),
+    "aider":      (None, "A", "#14B8A6"),
+    # Google Antigravity keeps its own key rather than borrowing "google": the
+    # Gemini mark would mislabel the CLI as the model family it fans out to.
+    "antigravity": (None, "A", "#4285F4"),
+    # Orca's catalog has no mark for muse either — letter icon is the outcome,
+    # not a placeholder waiting on a fetch.
+    "muse":       (None, "M", "#7C3AED"),
 }
 
 
@@ -93,6 +117,23 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "cursor-agent": "cursor",
     "kilocode":     "kilocode",
     "opencode":     "opencode",
+    # Backfill: these ship today and had no provider-icon row, so the provider
+    # column rendered nothing whenever the model name matched no family.
+    "grok":         "xai",
+    "cline":        "cline",
+    "goose":        "goose",
+    "aider":        "aider",
+    "agy":          "antigravity",
+    "muse":         "muse",
+    "pi":           "pi",
+    # harness-expansion.md Wave 1/2 candidates. Keys are the frozen provider
+    # keys of §8.1. Inert until the adapter registers — this dict is only ever
+    # read through .get(), and no roster test cross-checks it against
+    # _PROVIDERS — so a §6.3 demotion is a one-line delete here, not a bug.
+    "copilot":      "copilot",
+    "kimi":         "moonshotai",
+    "qwen-code":    "qwen",
+    "vibe":         "mistral",
 }
 
 
@@ -136,6 +177,10 @@ def _resolve_model_icon_key(provider: str, model_name: str) -> str:
         return "nvidia"
     if "qwen" in full:
         return "qwen"
+    if "deepseek" in full:
+        return "deepseek"
+    if "mistral" in full:
+        return "mistral"
     if any(k in full for k in ("mimo", "xiaomi")):
         return "xiaomi"
     if any(k in full for k in ("trinity", "arcee")):

@@ -1,0 +1,14 @@
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-00d41f0d09da/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-32-748Z.json Error: Incomplete JSON segment at the end
+    at ApiClient.processStreamResponse_1 (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11495:35)
+    at processStreamResponse_1.next (<anonymous>)
+    at resume (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:6276:44)
+    at fulfill (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:6278:31)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+{
+  "session_id": "ff773774-0aae-4538-820e-beab45e61eae",
+  "error": {
+    "type": "Error",
+    "message": "[object Object]",
+    "code": 1
+  }
+}

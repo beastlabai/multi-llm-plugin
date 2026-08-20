@@ -1,0 +1,273 @@
+# The §6.2 fixture manifest for aider. Graded by tests/test_provider_fixture_rows.py,
+# which owns the format (its module docstring is the spec).
+#
+# Every byte under this directory is raw aider stdout/stderr as the CLI wrote it.
+# No row here is synthesized; where a row's ANSWER text came from the stub rather
+# than a real model, the bytes on disk are still aider's own rendering of it, and
+# `notes:` says so.
+schema_version: 1
+provider: aider
+cli_version: "0.86.2"
+captured: "2026-08-19"
+method: >-
+  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  mounted read-only at /rig, and NO credential (OPENAI_API_KEY is the literal
+  string `stub-key-not-a-credential`, which litellm requires to be non-empty
+  before it will dispatch at all). The probe container runs the servers itself:
+  `python3 /rig/stub_server.py --port 8080 --scenario <inline answers>` for the
+  three answering rows, and `python3 /rig/failserver.py --port 8080 --mode <mode>`
+  for the seven failure rows. argv is `AiderProvider.build_command`'s output
+  verbatim (`--model openai/stub-model`, `--message "/ask …"`, `--no-pretty`,
+  `--no-stream`, …), env is `get_env`'s (`BROWSER=true`, `COLUMNS=10000`) plus
+  `OPENAI_API_BASE=http://127.0.0.1:8080/v1` — redirect.yaml's declared mechanism
+  for this row. Never wrapped in `timeout(1)`: the zero-byte-hang artifact.
+notes: >-
+  Two facts hold across EVERY row and are load-bearing rather than incidental.
+  (1) aider exits **0** on all eleven measured outcomes, success and failure
+  alike, and (2) stderr is **0 bytes** on all eleven: the whole diagnosis rides
+  stdout. (3) Under `--network none` litellm's import-time fetch of
+  model_prices_and_context_window.json fails and aider prints that failure — with
+  the words "Temporary failure in name resolution", a literal member of
+  base.CONNECTION_ERROR_MARKERS — as the first line of every capture. That line is
+  exactly what `AiderProvider._TOLERATED_STDOUT_LINES` exists to excise, so each
+  row below declares the classification the ADAPTER produces; a plain
+  `base.classify_streams` on the same bytes answers `connection_error` for eight
+  of the ten rows, which is the defect the excision fixes.
+
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    wall_s: 3.07
+    requests: 1
+    notes: >-
+      The plain, non-reasoning shape: aider prints the reply bare, with NO
+      `► **ANSWER**` marker at all, so parse_output's no-marker fallback
+      (extract_json_from_text over the whole of stdout) is the path a normal run
+      takes — not the marker path the unit tests exercise.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains:
+        # The tolerated-line excision is keyed on this FILENAME; if upstream
+        # renames the fetch, `classify_failure: null` below silently becomes
+        # connection_error on every successful offline run.
+        - "model_prices_and_context_window.json"
+        - "Temporary failure in name resolution"
+      classify_failure: null
+
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 0
+    wall_s: 78.26
+    requests: 27
+    notes: >-
+      failserver `--mode trunc --trunc-bytes 60`: 200 headers promising a full
+      Content-Length, then 60 bytes of the body, then the socket closes. The
+      openai client reports it as `Connection error.`, aider retries 9 times
+      (0.2 s → 32 s, three HTTP attempts per aider attempt = 27 requests) and
+      gives up at 78 s, still exiting 0. **Byte-identical** to the zero-byte
+      response (failserver `--mode empty`), which is why that shape is not a
+      second committed file — see README.
+    expect:
+      success: false
+      error_contains: ["No JSON found in aider output"]
+      raw_contains: ["litellm.InternalServerError", "Connection error."]
+      # NOT connection_error: aider's own gloss for a 5xx is "The API provider's
+      # servers are down or overloaded", and `overloaded` is a member of
+      # base.rate_limit_patterns, which is consulted before the connection table.
+      classify_failure: "rate_limited"
+
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 0
+    wall_s: 3.08
+    requests: 1
+    notes: >-
+      An all-noise run. The answer carried a reasoning block and nothing else, so
+      aider's own renderer emitted the THINKING/ANSWER frame with an EMPTY answer
+      after it and then the `Tokens:` accounting line — and `Tokens:` is precisely
+      what parse_output strips. Everything on disk is what the parser filters, so
+      the run must be a failure rather than an empty-string success. The reasoning
+      block reached aider inside its own `<thinking-content-7bbeb8e1…>` tag (the
+      literal `reasoning_tags.REASONING_TAG` constant aider wraps a response's
+      `reasoning_content` in), because stub_server.py serves no `reasoning_content`
+      field; the marker bytes are still aider's, from `replace_reasoning_tags`.
+    expect:
+      success: false
+      error_contains: ["Empty answer after ANSWER marker"]
+      raw_contains: ["► **THINKING**", "► **ANSWER**", "Tokens: 1 sent"]
+      classify_failure: null
+
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 3.05
+    requests: 1
+    notes: >-
+      Two THINKING/ANSWER segments in one run, each with its own JSON array. The
+      first says `FIRST ANSWER (must NOT be selected)`. LAST-wins is the rule the
+      adapter documents (rsplit on the last marker), and this is what would catch
+      first-wins or silent concatenation — the muse trap. Same tag mechanism as
+      `ephemeral-only`; the markers are aider's rendering, not text pasted here.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)"]
+      classify_failure: null
+
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 0
+    wall_s: 66.97
+    requests: 9
+    notes: >-
+      failserver `--mode errbody`: HTTP **200** whose body is a provider error
+      object. The measured result is worse than "the error text is served as the
+      answer" — the text is LOST: litellm renders it as
+      `litellm.APIError: APIError: OpenAIException - ` with an empty message, so
+      nothing from the provider reaches any pattern table. The only thing that
+      says this run failed at all is aider's own `litellm.*Error` prefix, which is
+      `exit_zero_failure_markers`. **This is the one row where that table is
+      load-bearing**, and it is consulted last by construction (§7.2 step 6).
+    expect:
+      success: false
+      error_contains: ["No JSON found in aider output"]
+      raw_contains: ["litellm.APIError: APIError: OpenAIException - "]
+      classify_failure: "runner_error"
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    wall_s: 78.82
+    requests: 27
+    notes: >-
+      failserver `--mode 500`, fail-forever. Exit **0** on a run that produced no
+      answer at all — the shape §6.2 names — and the whole §6.1.1 envelope in one
+      capture: 27 HTTP requests (9 aider attempts × litellm's own 3), exponential
+      backoff 0.2 → 32 s, 78.8 s wall. It classifies `rate_limited` rather than
+      `server_error` or `runner_error`, and that ordering is deliberate: aider's
+      gloss for a 5xx contains `overloaded`, a base rate-limit pattern, and the
+      auth/rate step precedes both the server table and the exit-0 markers.
+    expect:
+      success: false
+      raw_contains:
+        - "litellm.InternalServerError"
+        - "The server had an error while processing your request."
+        - "Retrying in 32.0 seconds..."
+      classify_failure: "rate_limited"
+
+  stdout-error:
+    not_applicable: >-
+      Measured, not assumed: aider exits **0** on every failure mode reachable
+      from the rig — 401, 404, 400 context-length, 500-forever, 429-forever, a
+      truncated body, a zero-byte response and a 200 carrying an error object —
+      so the "nonzero exit" half of this row has no producer at aider 0.86.2. The
+      half that IS the trap (diagnosis on stdout with stderr empty) is pinned by
+      all seven failure rows here, each of which commits a 0-byte
+      `<row>.stderr.txt` beside its stdout to record it.
+
+  empty:
+    not_applicable: >-
+      Unreachable while aider runs at all: the banner block (litellm's cost-map
+      failure, `Aider v0.86.2`, `Model:`, `Git repo:`, `Repo-map:`) is written
+      before the first HTTP request, so the smallest capture in this set is
+      **594 bytes** on stdout and none is smaller than that. Zero bytes on both
+      channels would mean the process was killed before it wrote a line, which is
+      a harness artifact rather than a CLI behaviour — and manufacturing one with
+      `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids.
+      parse_output's empty branch is still covered, by unit assertion in
+      test_providers.py::TestAiderProvider.
+
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 0
+    wall_s: 3.08
+    requests: 1
+    notes: >-
+      failserver `--mode 401`. **One** request — no retry, terminal. The words
+      that classify it are aider's own gloss, `The API provider is not able to
+      authenticate you.`; not one of base.auth_error_patterns' ten entries
+      appears anywhere in this capture, which is what the adapter's two added
+      patterns are for.
+    expect:
+      success: false
+      raw_contains:
+        - "litellm.AuthenticationError"
+        - "not able to authenticate"
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 0
+    wall_s: 78.65
+    requests: 27
+    notes: >-
+      failserver `--mode 429`, fail-forever. aider **does** retry 429s
+      internally — 27 requests over 78.7 s, the same envelope as the 5xx row — so
+      an executor-level re-dispatch of a rate-limited aider slot doubles a wait
+      that already ran for a minute and a quarter (§7.6(b)'s rule 6b).
+    expect:
+      success: false
+      raw_contains:
+        - "litellm.RateLimitError"
+        - "has rate limited you"
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 0
+    wall_s: 3.02
+    requests: 1
+    notes: >-
+      failserver `--mode 404`. One request, terminal. The failure NAMES the model
+      — and names it as `stub-model`, NOT as the `openai/stub-model` spec that
+      was passed to `--model`, because litellm strips the provider prefix before
+      dispatch. That asymmetry is what makes a stray `:effort` suffix findable at
+      all, and it is why the assertion below is on the bare slug.
+    expect:
+      success: false
+      raw_contains:
+        - "litellm.NotFoundError"
+        - "The model `stub-model` does not exist or you do not have access to it."
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 0
+    wall_s: 3.07
+    requests: 1
+    notes: >-
+      failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
+      OpenAI wording). aider SWALLOWS the upstream text: it catches litellm's
+      ContextWindowExceededError and prints its own token-limit help instead, so
+      the string `maximum context length` — and every other member of
+      base.CONTEXT_OVERFLOW_MARKERS as they stood before this capture — is absent
+      from the bytes. When first captured the row classified as **null**, i.e.
+      transport-shaped, i.e. the executor spent its whole bounded-retry budget on
+      the one condition §7.2 says must be terminal. THIS FIXTURE IS WHAT FOUND
+      THAT, and the fix landed the same day: `hit a token limit` and
+      `exhausted context window` are now members of CONTEXT_OVERFLOW_MARKERS,
+      carrying this capture as their recorded evidence. The bytes are unchanged;
+      only the expectation moved, and it moved because the product did.
+    expect:
+      success: false
+      error_contains: ["No JSON found in aider output"]
+      raw_contains:
+        - "has hit a token limit!"
+        - "possibly exhausted context window"
+      classify_failure: context_length_exceeded

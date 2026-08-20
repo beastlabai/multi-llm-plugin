@@ -1,0 +1,70 @@
+# vibe's first-run catalog, seeded into $VIBE_HOME (harness-expansion.md §7 step 5).
+#
+# ONE TEMPLATE, TWO BINDINGS -- there is deliberately no home_seed-live/ tree.
+# The provider lane renders the base-URL token to the stub's per-exec
+# /s/<exec-id>/v1 origin and the key-variable token to STUB_API_KEY (wrapper.py);
+# the credentialed lane (§7.4) renders the SAME file to openrouter.ai and
+# OPENROUTER_API_KEY (live_provider.py). A parallel live tree is the artifact
+# that rots the first time this row's config changes.
+#
+# ONLY THE KEY'S VARIABLE NAME EVER ENTERS THIS FILE. `api_key_env_var` names a
+# variable; the value reaches vibe through the process environment and nowhere
+# else. A rendered secret inside a seed tree is a committed credential (§3.3
+# rule 4), and the live lane's pre-flight guard fails the row if any
+# double-brace token survives rendering. (Do not write that token literally in a
+# comment here -- the guard scans the WHOLE file, so an illustrative one reads as
+# a real unsubstituted placeholder and skips the row. It cost one live-smoke
+# attempt to learn that.)
+#
+# WHY A FILE AT ALL, when the model is an env var. `VIBE_ACTIVE_MODEL` SELECTS
+# among configured models; it cannot CREATE one. The [[providers]] and [[models]]
+# tables are sub-tables that no flat VIBE_* variable can express -- verified for
+# `emits_finish_reason` specifically -- so the catalog is committed here and only
+# the per-run selection is environment. That is also why this adapter needs no
+# per-run file write and therefore no §1 `prepare_run` hook.
+
+active_model = "openai/gpt-5.6-luna"
+
+[[providers]]
+# NOT named `mistral`. §2.2's vibe row claims a seed missing `backend =
+# "generic"` selects the Mistral backend; measured, `ProviderConfig.backend`
+# DEFAULTS to generic and the real special case is a provider *named* `mistral`,
+# which is routed to the legacy Mistral path. Naming it `openrouter` avoids that
+# by construction, and `backend` is still stated rather than defaulted.
+name = "openrouter"
+backend = "generic"
+api_style = "openai"
+api_base = "{{base_url}}"
+api_key_env_var = "{{api_key_env}}"
+# vibe treats a stream with no `finish_reason` as a hard error and exits 1 -- one
+# POST, no retry (§6.1.1 experiment 6, which is what proved §4.2's predicted
+# retry loop does not exist). The committed stub emits one on every chunk, so
+# this is `true` there; it is the knob to flip if an endpoint ever omits it.
+emits_finish_reason = true
+
+[[models]]
+# `alias` is what providers.yaml lists, what the redirect row's `model_arg` must
+# equal BYTE-FOR-BYTE, and what the adapter puts in VIBE_ACTIVE_MODEL. It is set
+# to the real OpenRouter slug rather than to a nickname on purpose: vibe is the
+# only adapter here whose model surface is an indirection, and giving the alias a
+# second spelling would put a name in `providers.yaml` that exists nowhere else
+# in the system.
+#
+# `name` is what reaches the WIRE, and it is the one value that genuinely
+# differs per lane -- the stub answers `stub-model`, OpenRouter answers the slug.
+# So it is a copytree token, which is exactly the extension §7 step 6 sanctions
+# ("extend the home_seed copytree tokens ... never config_files") for a seed that
+# cannot express its row's model otherwise.
+alias = "openai/gpt-5.6-luna"
+name = "{{model_name}}"
+provider = "openrouter"
+# vibe never issues GET /models (measured: zero catalog requests across 25
+# POSTs), so `--max-price` is decided entirely from these numbers rather than
+# from a served catalog -- which is why §4.2's "the stub serves no prices" worry
+# does not fire.
+# Updated 2026-08-19 with the move to gpt-5.6-luna: OpenRouter lists $0.20/M in
+# and $1.20/M out. vibe issues no catalog GET, so these numbers are the ONLY
+# input to `--max-price`; leaving the previous pair would have under-counted
+# spend against the cap by 4x on output.
+input_price = 0.2
+output_price = 1.2

@@ -87,6 +87,17 @@ WRITE_ALLOWED_TOOLS = (
 )
 WRITE_DENIED_TOOLS = ("Task",)
 
+# The permission grant itself, named once. Two callers emit it and they must
+# never both emit it into the SAME argv: `--permission-mode` is not repeatable,
+# and a doubled pair normalizes to `acceptEdits+` in
+# `tests/golden/normalize_argv.py`'s flag view — i.e. it fails
+# `tests/container/expected_argv.yaml`'s agent-write row rather than passing
+# silently. `_render_argv`'s `permission_mode` parameter is what makes that
+# structurally impossible: the flag is emitted from exactly one place, and each
+# profile says once whether it wants it.
+PERMISSION_MODE_FLAG = "--permission-mode"
+PERMISSION_MODE_ACCEPT_EDITS = "acceptEdits"
+
 # §9.8. `--allowed-tools` / `--disallowed-tools` take `<tools...>`, so every
 # token after one of them — up to a separator — is part of its VALUE. The agent
 # profiles used to emit the prompt immediately after `--disallowed-tools`, and
@@ -352,6 +363,43 @@ class ClaudeCodeProvider(LLMProvider):
 
     When invoked from within a Claude Code session, the CLAUDECODE env var is
     stripped to avoid the nested-session guard.
+
+    Everything below was **measured** by the §6 step-5 probe on 2026-08-19
+    against ``claude 2.1.232`` driven offline at a localhost Anthropic stub
+    (``--network none``, no credential); the raw captures are
+    ``tests/fixtures/claude-code/`` and its README carries the full record.
+
+    **The whole diagnosis rides stdout and stderr is 0 bytes** — on all eleven
+    measured outcomes, success and failure alike. Every failure the envelope
+    reports is prefixed ``API Error:``.
+
+    **The exit code is authoritative at this version.** Eight injected failure
+    modes (401, 429, 404, 400 context-length, 5xx-forever, a truncated stream, a
+    zero-byte response, a 200 carrying an error object) all exit **1**; both
+    answering runs exit **0**. That is what makes this adapter's empty
+    :attr:`exit_zero_failure_markers` correct today — measured, not assumed.
+
+    **Two requests per exec, not one.** The first is claude-code's own
+    session-title generator: tool-free, *same model*, same surface, so only the
+    presence of ``tools`` separates the two on the wire. A failure-injection run
+    therefore hits the injected error on the title call first, and the measured
+    request counts are 4 per API call × 2 calls at the pinned
+    ``CLAUDE_CODE_MAX_RETRIES=3``.
+
+    **Three classification results this parser produces are wrong**, and the
+    fixtures pin them rather than hiding them: a 401 answers ``server_error``
+    (the CLI's ``Failed to authenticate. API Error: 401 …`` matches none of
+    :data:`base.LLMProvider.auth_error_patterns`, while the ``api error`` word-boundary pattern in
+    ``SERVER_ERROR_MARKERS`` matches the universal prefix); a 404 answers
+    ``None`` (the CLI replaces the vendor sentence with *"There's an issue with
+    the selected model (X). It may not exist…"*, which no
+    ``INVALID_MODEL_MARKERS`` entry matches); and both connection-shaped failures
+    answer ``server_error`` for the same ``API Error:`` reason. Separately,
+    :meth:`parse_output` reads only ``result`` and ignores the envelope's own
+    ``is_error`` / ``terminal_reason`` / ``api_error_status`` verdicts, and two
+    JSON documents in one ``result`` are resolved **first**-wins by
+    ``extract_json_from_text``. Each is a one-line fix that would edit both this
+    class and that manifest, which is why they are recorded and not applied here.
     """
 
     # `claude -p` reads the prompt from stdin when no prompt argument is given,
@@ -379,8 +427,27 @@ class ClaudeCodeProvider(LLMProvider):
     # (D3c) and a login notice is still caught reactively by auth_error_patterns.
     login_cmd = "claude login"
     version_cmd = ("claude", "--version")
+    #: The declared floor stays 2.0.0 — §5.4.1(a): a measured-at version is an
+    #: upper bound on the true floor, never the floor itself, and raising it
+    #: would disable installs that work.
     min_version = "2.0.0"
-    verified_version = "2.1.224"
+    #: 2.1.232 is where every fixture under ``tests/fixtures/claude-code/`` was
+    #: captured (``manifest.yaml``'s ``cli_version``), and it is what the image
+    #: really installs — ``tests/container/cli-versions.lock`` pins it and
+    #: ``verify_versions.py`` fails the build if the layer resolved anything
+    #: else. Re-confirmed 2026-08-20 by running the pinned binary directly:
+    #: ``docker run --rm --network none --entrypoint /opt/mllm/real/claude
+    #: mllm-e2e:local --version`` prints ``2.1.232 (Claude Code)`` on stdout,
+    #: which the base :meth:`parse_version` reads without an override.
+    #:
+    #: It was left at 2.1.224 through the fixture capture only because this
+    #: string is pinned in a second place — ``tests/mocks/mock_llm.py``'s
+    #: ``VERSION_STRINGS``, which ``test_subagent_executor.py::
+    #: test_the_mock_version_matches_each_verified_version`` asserts this value
+    #: is a substring of. Both are moved together; that test names no version
+    #: itself, so it is the pair that has to stay coherent, not a third
+    #: expectation.
+    verified_version = "2.1.232"
 
     @property
     def name(self) -> str:
@@ -517,12 +584,59 @@ class ClaudeCodeProvider(LLMProvider):
                 here — the asymmetry with codex's file is encoded in the two
                 adapters, not in the caller.
 
+        This is the **fan-out** invocation, and it carries
+        ``--permission-mode acceptEdits`` because its own prompt asks the model
+        to write the answer to a file (``supports_file_output = True``). See the
+        splice comment in :meth:`_render_argv` for the measurement that made the
+        grant necessary, and that method's docstring for why `agent-readonly`
+        does not get it.
+
         Returns:
             Command arguments for Claude Code CLI invocation.
         """
+        return self._render_argv(
+            prompt,
+            model,
+            timeout_s=timeout_s,
+            schema=schema,
+            permission_mode=PERMISSION_MODE_ACCEPT_EDITS,
+        )
+
+    def _render_argv(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        timeout_s: Optional[int] = None,
+        schema: Optional[StructuredSchema] = None,
+        permission_mode: Optional[str],
+    ) -> List[str]:
+        """The one argv renderer every profile goes through.
+
+        ``permission_mode`` is the single knob the three profiles disagree on,
+        and it is a **parameter rather than a post-hoc splice or strip** so the
+        flag has exactly one emission site:
+
+        * ``generate`` (:meth:`build_command`) passes ``acceptEdits`` — the write
+          grant its own prompt asks for, see the comment at the splice below;
+        * ``agent-write`` passes ``acceptEdits`` too, and no longer appends a
+          second copy of its own. `--permission-mode` is not repeatable, and the
+          duplicate this parameter replaced was a real defect: it rendered
+          ``--permission-mode acceptEdits --permission-mode acceptEdits``, which
+          `normalize_argv` collapses to ``acceptEdits+`` and
+          `tests/container/expected_argv.yaml`'s agent-write row then rejects;
+        * ``agent-readonly`` passes ``None`` and emits the flag **not at all**.
+          That profile's whole contract is that Claude Code's own permission
+          mechanism refuses edits, and its dispatches never need a write: the
+          executor captures stdout and writes ``output_path`` itself, so the
+          model only prints. Handing it an edit-accepting permission mode would
+          contradict the profile in words even though `READONLY_DENIED_TOOLS`
+          still refuses `Write` in fact.
+        """
         # claude -p --output-format json [--json-schema <json>]
         #        --model <model> [--effort <effort>]
-        #        [--fallback-model <m1,m2>] <prompt>
+        #        [--permission-mode acceptEdits] [--fallback-model <m1,m2>]
+        #        <prompt>
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         cmd = [
             "claude",
@@ -569,6 +683,32 @@ class ClaudeCodeProvider(LLMProvider):
         # two directions: build_command_for_transport's stdin branch returns
         # cmd[:-1] and would ship a valueless --fallback-model, and the agent
         # profiles splice their tool policy in after cmd[-1].
+        # THE WRITE GRANT THE FAN-OUT ALWAYS NEEDED, and whose absence was a
+        # measured defect (harness-expansion.md §17). `supports_file_output` is
+        # True here, so `render_output_location` ends the review prompt with
+        # "write your JSON output to this file: <path>" — and this argv granted
+        # nothing, so headless `claude -p` DENIED the model's own Write. Measured
+        # 2026-08-20 on the credentialed live lane: exit 0, `is_error: false`,
+        # `subtype: "success"`, `permission_denials: [{"tool_name": "Write"}]`,
+        # the answer "Permission is required to write to the file", and the slot
+        # then dying in `parse_output`. Every other file-output adapter already
+        # grants this on the SAME fan-out path -- codex `--sandbox
+        # workspace-write`, opencode's write-capable `run` agent, kilocode
+        # `--auto` -- so claude-code was the outlier, not the exception.
+        #
+        # `--permission-mode acceptEdits` and NOT `--allowed-tools Write`: it is
+        # non-variadic, so it cannot swallow the trailing positional (§9.8) and
+        # `cmd[-1] is the prompt` still holds for the stdin transport's
+        # `cmd[:-1]`. It auto-accepts FILE EDITS only; Bash and the rest still hit
+        # the headless prompt and are denied, which is the narrow grant this path
+        # wants. It is deliberately NOT `--yolo`/`-f`: that is the write bypass
+        # §3.1 removed, and this is not it.
+        #
+        # Emitted here for `generate` and `agent-write` and OMITTED for
+        # `agent-readonly` — see `_render_argv`'s own docstring for why the knob
+        # is a parameter and not a splice the agent branches undo.
+        if permission_mode is not None:
+            cmd += [PERMISSION_MODE_FLAG, permission_mode]
         fallbacks = self.fallback_models(model)
         if fallbacks and self._fallback_flag_supported():
             cmd += [FALLBACK_MODEL_FLAG, ",".join(fallbacks)]
@@ -617,21 +757,29 @@ class ClaudeCodeProvider(LLMProvider):
         anything this repo enforces after the fact, which is what makes it safe
         to hand an untrusted (plan/diff/review) prompt to.
 
-        ``agent-write`` swaps that policy for the edit-capable one and adds
+        ``agent-write`` swaps that policy for the edit-capable one and keeps
         ``--permission-mode acceptEdits``, which is what makes a headless apply /
         implement batch possible at all. It is deliberately **not** a
         ``--dangerously-skip-permissions``-class bypass: the executor pins ``cwd``
         to the resolved repo root (D3h), enforces ``driver.write_paths`` on both
         sides of the run and snapshots every file the batch may touch (D3l).
+
+        Both branches render through :meth:`_render_argv` rather than through
+        :meth:`build_command`, so the permission grant `generate` needs is
+        **asked for once per profile** instead of being inherited and then
+        patched: `agent-write` requests it (one pair, never two) and
+        `agent-readonly` declines it.
         """
         if profile == PROFILE_AGENT_WRITE:
-            cmd = self.build_command(
-                prompt, model, timeout_s=timeout_s, schema=schema
+            cmd = self._render_argv(
+                prompt,
+                model,
+                timeout_s=timeout_s,
+                schema=schema,
+                permission_mode=PERMISSION_MODE_ACCEPT_EDITS,
             )
             return [
                 *cmd[:-1],
-                "--permission-mode",
-                "acceptEdits",
                 "--allowed-tools",
                 ",".join(WRITE_ALLOWED_TOOLS),
                 "--disallowed-tools",
@@ -643,8 +791,11 @@ class ClaudeCodeProvider(LLMProvider):
             return super().build_agent_command(
                 prompt, model, profile, timeout_s=timeout_s, schema=schema
             )
-        cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
-        # build_command appends the prompt last; splice the policy in before it.
+        cmd = self._render_argv(
+            prompt, model, timeout_s=timeout_s, schema=schema,
+            permission_mode=None,
+        )
+        # _render_argv appends the prompt last; splice the policy in before it.
         return [
             *cmd[:-1],
             "--allowed-tools",

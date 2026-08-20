@@ -21,6 +21,16 @@ class PiProvider(LLMProvider):
     stderr — the runner turns that into a failure before parse_output runs,
     so parse_output only ever sees exit-0 plain text.
 
+    That last sentence is now MEASURED rather than claimed, across nine
+    failure modes at 0.80.6 (tests/fixtures/pi/manifest.yaml), and it holds
+    with one exception that matters. stdout is **zero bytes** on every
+    failure and the diagnosis is on stderr behind a bare HTTP-status prefix
+    (`401: {...}`), carrying the vendor's JSON error object verbatim — but a
+    **400 context-length** is swallowed whole: nothing on either channel and
+    exit **0**. That run is byte-identical to a model answering with the
+    empty string, so on the one condition §7.2 declares terminal there is
+    no signal at all for parse_output or classify_failure to read.
+
     Model names are pi model patterns passed VERBATIM to --model — pi
     resolves "provider/id" forms itself (e.g. "openrouter/z-ai/glm-5.2",
     "anthropic/claude-opus-4-8") — no partition/splitting. Auth is pi's own:
@@ -41,6 +51,38 @@ class PiProvider(LLMProvider):
     headless file reads/writes review prompts rely on work unattended with
     no extra flags.
     """
+
+    version_cmd = ("pi", "--version")
+    #: 0.80.6 is where every fixture in ``tests/fixtures/pi/`` was captured — the
+    #: §6 step-5 probe, ``--network none``, the stub and the failserver both
+    #: running inside the container, no credential — and the release
+    #: ``tests/container/cli-versions.lock`` pins. It is a pin to re-confirm
+    #: rather than a range to trust, and what the parser depends on is not a
+    #: string it can grep for but the ABSENCE of one: pi print mode writes the
+    #: answer to stdout bare, and on a failure writes **zero bytes** there and
+    #: puts the diagnosis on stderr behind an HTTP-status prefix; the class
+    #: docstring's claim to that effect is measured across nine failure modes in
+    #: ``tests/fixtures/pi/manifest.yaml``. A release that started printing a
+    #: banner, a spinner or a `Tokens:` footer would break :meth:`parse_output`
+    #: with no marker to warn on.
+    #:
+    #: **There is deliberately no ``min_version``.** A draft declared
+    #: ``min_version = "0.80.6"`` — the version the capture happened to run on —
+    #: which is `harness-invocation-improvements.md` §5.4.1(a)'s error exactly: a
+    #: measured-at version is an upper bound on the true floor, never the floor.
+    #: pi is a **pre-existing** adapter, nothing measured says 0.79 fails, and
+    #: the hazard above is a *future* release growing a banner, which a floor
+    #: cannot catch and a ``verified_version`` warning names. ``min_version`` is
+    #: a hard exit-3 refusal in ``subagent_executor._detect_version`` and
+    #: ``verified_version`` is a one-line warning; only the warning is earned.
+    #:
+    #: ``version_cmd`` stays, because it is the only thing that can ever make
+    #: ``verified_version`` speak: with no probe the detected version is
+    #: ``unknown`` and the warning is skipped. Confirmed against the pinned
+    #: binary 2026-08-20 (``docker run --rm --network none --entrypoint
+    #: /opt/mllm/real/pi mllm-e2e:local --version``): a bare ``0.80.6`` on
+    #: stdout, which the base :meth:`parse_version` reads without an override.
+    verified_version = "0.80.6"
 
     @property
     def name(self) -> str:

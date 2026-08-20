@@ -62,8 +62,10 @@ All typed at the checkout root, no `-C`: the build context *is* the repo root.
 ## What the provider lane covers, measured
 
 Phase 1 pointed every configured CLI at a local three-surface stub and recorded
-what it did on the wire. **11 of 13 CLIs are redirectable** (`redirect.yaml`
-carries the full row per CLI, including the exact mechanism and the HTTP footprint):
+what it did on the wire; the four CLIs `harness-expansion.md` added afterwards
+were probed the same way. **15 of the 17 configured CLIs are redirectable**
+(`redirect.yaml` carries the full row per CLI, including the exact mechanism and
+the HTTP footprint):
 
 | CLI | mechanism | surface | turns | one generate call |
 | --- | --- | --- | --- | --- |
@@ -78,8 +80,17 @@ carries the full row per CLI, including the exact mechanism and the HTTP footpri
 | `pi` | `~/.pi/agent/models.json` provider block | chat | 1 | 0.39 s |
 | `grok` | `GROK_MODELS_BASE_URL` + `XAI_API_KEY` | chat | 1 | 0.27 s |
 | `muse` | `muse exec --base-url` (**argv only**) | responses | 17 | 0.91 s |
+| `qwen-code` | the `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL` trio | chat | 1 | not timed |
+| `copilot` | `COPILOT_PROVIDER_BASE_URL` — the BYOK activation switch | chat | 1 | not timed |
+| `kimi` | the `KIMI_MODEL_*` env family | chat | 1 | not timed |
+| `vibe` | a seeded `config.toml` `[[providers]]` block (no env var exists) | chat | 1 | not timed |
 
-Not one of the plan's `documented` guesses turned out to be wrong, and both
+**The last four rows are later arrivals, and the table says so in one column.**
+Their mechanism, surface and turn count are measured exactly like the others,
+but none carries a `turn_s` or a `chain_s`, so every *timing* figure in this
+file is over the original eleven and says which.
+
+Not one of Phase 1's `documented` guesses turned out to be wrong, and both of its
 surprises went our way: `pi` (the one `unknown` row) and `grok` (predicted
 unredirectable) both verified.
 
@@ -114,9 +125,37 @@ first line matches on the fake-binary lane and matches nothing at all here.
   for it.
 - **`agy`** — `CLOUD_CODE_URL` is a working override and the protocol is JSON, but
   agy never reaches a model surface: it fails at Google's *eligibility* gate on
-  `:loadCodeAssist`. Its auth is in the **OS keyring**, not `$HOME`, so there is
-  nothing to seed. Fake-binary lane; it is the one provider still owed the five
-  mock parts.
+  `:loadCodeAssist`, and **its auth resolves before the first RPC**. Re-measured
+  2026-08-19 with `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
+  `GOOGLE_GEMINI_BASE_URL` all pointed at a live stub: a byte-identical failure
+  envelope and **zero requests in the stub's log**. No environment variable
+  selects an API-key path a stub could answer, so this row is permanently
+  `lane: fake` — settled, not a gap waiting on effort.
+
+  > **Two earlier claims here were wrong, and `redirect.yaml`'s agy row carries
+  > the retraction.** (1) *"Its auth is in the OS keyring, not `$HOME`, so there
+  > is nothing to seed"* holds only where **D-Bus is reachable**. Headless —
+  > which is every container — agy logs `Failed to load token from keyring,
+  > falling back to file` and opens
+  > `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`, which is seedable
+  > exactly the way cursor-agent's `auth.json` is. It still matters on a laptop:
+  > a probe run where D-Bus *is* reachable silently uses the developer's real
+  > Google token, so break the bus deliberately
+  > (`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-bus`). (2) *"It is the one
+  > provider still owed the five mock parts"* — it is not, and has not been since
+  > the identity landed: `mock_llm.py` carries all five (the name in
+  > `get_provider_name`'s `known_providers` and in `SkillRunner.PROVIDERS`, an
+  > `agy` branch in `parse_provider_args`, `format_agy_output`, a
+  > `VERSION_STRINGS` entry, and part 5's *empty* case — `AgyProvider` declares
+  > no `auth_check`, so the absence of an `AUTH_PROBE_ARGS` row is the correct
+  > answer and `test_fake_lane_roster.py` asserts exactly that).
+
+  agy is also **in the image** (1.1.15) and has a fixture set
+  (`tests/fixtures/agy/`), neither of which contradicts the above: it is
+  installed for the `cli-surface` help-drift probe, which needs the binary and
+  no backend, and the fixture set is **one graded row and eleven written
+  reasons** — every unreachable cell recorded as a measurement rather than left
+  pending.
 
 ### Two modules, two questions
 
@@ -135,8 +174,10 @@ salvage, revalidation or human-decision turn is reached when every validation
 answers `valid`.
 
 Those 25 are the *product's* turns. What a row's stub log actually shows depends
-on the CLI's own bookkeeping. Measured across the matrix — 410 model turns in
-total, **zero** `unmatched` and **zero** `unhandled` records on every row:
+on the CLI's own bookkeeping. Measured across the **eleven Phase-1 chain rows** —
+410 model turns in total, **zero** `unmatched` and **zero** `unhandled` records
+on every row (`qwen-code`, `copilot`, `kimi` and `vibe` have no recorded chain
+turn count, so they are absent here rather than folded into the total):
 
 | turns | rows | why |
 | --- | --- | --- |
@@ -162,8 +203,9 @@ Three things about that row are not optional:
 - **Both driver keys.** `providers.tmpl.yaml` renders `driver.subagent_runner`
   *and* `driver.subagent_runner_cheap`; an unset cheap key keeps base's
   `claude-code:haiku` and adds a second binary to every row.
-- **Eight of the eleven CLIs declare no `agent-write` profile**, so their chain
-  row's executor is a second binary — `codex`, named per row in `redirect.yaml`'s
+- **Twelve of the fifteen CLIs declare no `agent-write` profile** — only
+  `claude-code`, `codex` and `opencode` do — so their chain row's executor is a
+  second binary: `codex`, named per row in `redirect.yaml`'s
   `chain_write_runner` and carried as that row's one `allowed_helper`. A plain-CI
   test cross-checks the key against the adapters in both directions.
 
@@ -197,7 +239,7 @@ invocation's `MULTI_LLM_RESULT` line and exit code, and which workspace files
 outside the output dir moved. Timestamps, durations, usage, pids and run ids are
 folded to type tokens; prompts and any text over 200 chars to a digest (a change
 is still a diff, the review is not two kilobytes of prose); `runner_versions` to a
-type token, because a moved CLI pin is C9's subject and must not turn all eleven
+type token, because a moved CLI pin is C9's subject and must not turn all fifteen
 baselines red at once.
 
 Re-capture is a **deliberate, reviewed** step — there is no `--update` flag on the
@@ -225,12 +267,14 @@ total, but a row is a *chain*, and each phase pays its CLI's cold start again.
 
 **Measured, one green run per CLI** (`chain_s` in `redirect.yaml`, wall clock
 including container start and the workspace seed): 20 s (`claude-code`) to 119 s
-(`codex`), **17 m 42 s** for the whole matrix of 11 chains plus the
-no-`--exec-subagents` control. The spread is not about the CLI under test — it is
-about **whose binary the executor dispatches**: a row that is its own
-`agent-write` runner (`claude-code` 20 s, `opencode` 51 s) pays one cheap startup
-per subagent, while the eight rows that borrow `codex` pay codex's `exec` startup
-21 times.
+(`codex`), **17 m 42 s** for the eleven chains that carry a `chain_s`, plus the
+no-`--exec-subagents` control. The matrix is **fifteen** chain rows: `qwen-code`,
+`copilot`, `kimi` and `vibe` each declare a `chain_row_timeout_s` and ship a
+golden bundle but record no `chain_s`, so budget for them and do not read 17 m 42 s
+as the whole lane. The spread is not about the CLI under test — it is about
+**whose binary the executor dispatches**: a row that is its own `agent-write`
+runner (`claude-code` 20 s, `opencode` 51 s) pays one cheap startup per subagent,
+while the twelve rows that borrow `codex` pay codex's `exec` startup 21 times.
 
 Two caps keep that bounded rather than open-ended:
 
@@ -285,6 +329,16 @@ The two without a surface are reported `unavailable-without-credential` rather
 than passed. **A green `install-host --check` is not discovery** — it reads our own
 bytes at a path we chose — so it is never substituted for one.
 
+That verdict is about *this* tier and nothing wider. Since 2026-08-19 the
+**credentialed** rows record `listed-via-prompted-turn` for both hosts, from a
+`discovery-prompted.json` the agent wrote carrying the argv it actually ran
+(`multi_llm.py util instructions ask`) — evidence obtainable only by locating and
+reading the staged shim. It costs **$0.00**, because it rides receipts the
+`--ask` row already paid for. It is weaker than opencode's `listed` (one command,
+not an enumeration) and much stronger than the only thing a credential-free run
+can honestly say, which is why both facts are recorded rather than one replacing
+the other.
+
 > `opencode debug skill` is the trap, and it looks right: it lists *skills*, our
 > shim installs as a *command*, and it exits 0 listing only a built-in. A green
 > command that proves nothing.
@@ -328,6 +382,16 @@ run this yourself:
   runs `uv run --project /opt/mllm/skill …` happily and then auto-rejects a
   *read* under the same tree (`permission requested: external_directory`), which
   ends the run with no dispatch. The config now grants that path explicitly.
+
+**Re-run 2026-08-19** (`records/20260819T150929Z-*`, 13 rows, 21:51 wall,
+**$0.0726** total): all three `review-plan` rows passed, and a `full` row on
+`codex` and on `opencode` each completed **all eight phases** against a real
+model in one process. Nothing above was fixed to make that happen — the recorded
+cause of the two earlier `review-plan` outcomes is model-following variance on a
+long instruction core — so read the greener run as *observed*, not as resolved,
+and expect either shape. The costs also moved with the model: `claude-code
+--review-plan` was **$0.017** on that run against the $0.239 recorded above, so
+treat these figures as the range a real row has produced rather than as a quote.
 
 **Where `MULTI_LLM_RESULT` landed in each host's stream** — the observation the
 design wanted before deciding whether the receipt is the primary anchor or the

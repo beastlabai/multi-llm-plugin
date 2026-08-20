@@ -36,6 +36,51 @@ class ClineProvider(LLMProvider):
     through verbatim as the model name (keeping ``:free``-style ids intact).
     """
 
+    version_cmd = ("cline", "--version")
+    #: 3.0.55 is where every fixture in ``tests/fixtures/cline/`` was captured —
+    #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
+    #: running inside the container, no credential — and it is the version
+    #: ``tests/container/cli-versions.lock`` pins.
+    #:
+    #: 3.0.39 is the *other* release this parser has been run against (the ``user
+    #: not found`` auth pattern below was measured there), and the gap between
+    #: the two is not cosmetic — **the exit code changed inside it**. At 3.0.39 a
+    #: provider failure exited **0** (the measurement recorded on
+    #: ``exit_zero_failure_markers``); at 3.0.55 every one of nine failure modes
+    #: exits **1** (401, 404, 400 context-length, 500-forever, 429-forever, a
+    #: truncated body, a zero-byte response, a 200 carrying an error object and
+    #: an empty completion — ``tests/fixtures/cline/manifest.yaml`` records the
+    #: nine captures and why `exit-zero-failure` is not-applicable there). The
+    #: markers stay declared: :func:`base.classify_streams` consults them
+    #: regardless of exit code and they are the last-resort verdict on five of
+    #: the committed rows. That is what makes ``verified_version`` worth
+    #: re-confirming on every bump.
+    #:
+    #: **What 3.0.39 is not is a ``min_version``.** A draft declared one, and it
+    #: would have been `harness-invocation-improvements.md` §5.4.1(a)'s error
+    #: with an extra step: 3.0.39 is merely the oldest release anyone happened to
+    #: run, which is an upper bound on the true floor, not the floor. Nothing
+    #: measured says 3.0.38 fails — and the one behaviour known to differ across
+    #: that range is *already handled by declaration* rather than by a version
+    #: comparison, since ``exit_zero_failure_markers`` are consulted whatever the
+    #: exit code is. cline is a **pre-existing** adapter, so a floor here refuses
+    #: installs that were working yesterday to protect against nothing.
+    #: ``min_version`` is a hard exit-3 refusal in
+    #: ``subagent_executor._detect_version`` and ``verified_version`` is a
+    #: one-line warning; the evidence supports the warning only.
+    #:
+    #: ``version_cmd`` stays, because it is the only thing that can ever make
+    #: ``verified_version`` speak: with no probe the detected version is
+    #: ``unknown`` and the warning is skipped. Confirmed against the pinned
+    #: binary 2026-08-20 (``docker run --rm --network none --entrypoint
+    #: /opt/mllm/real/cline mllm-e2e:local --version``): a bare ``3.0.55`` on
+    #: stdout, which the base :meth:`parse_version` reads without an override.
+    #: It is the SLOW probe of the set — cline makes ~10 outbound connects on
+    #: ``--version`` alone and takes 8.7 s when egress is blackholed — but that
+    #: is well inside ``_run_probe``'s 30 s timeout, and it runs at most once per
+    #: process.
+    verified_version = "3.0.55"
+
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets.
     #
     # Measured on cline 3.0.39, 2026-08-16, with an invalid OPENROUTER_API_KEY:

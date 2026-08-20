@@ -47,6 +47,9 @@ from utils.llm_client import (
     invoke_with_provider,
     _is_valid_parsed_data,
     invoke_with_file_output,
+    FILE_OUTPUT_LOCATION,
+    STDOUT_OUTPUT_LOCATION,
+    render_output_location,
     invoke_subagent,
     parse_subagent_response,
     _extract_json_from_text,
@@ -769,6 +772,112 @@ class TestInvokeWithFileOutput:
         assert result["success"] is False
         assert "Missing prompt variable" in result["error"]
         assert result["error_code"] == "PROMPT_FORMAT_ERROR"
+
+
+class TestOutputLocationBlock:
+    """The `{output_location}` block is rendered from a declared capability.
+
+    An adapter running its CLI in a read-only chat mode (cursor `--mode ask`,
+    aider `/ask`) cannot write the result file, and asking it to spends the whole
+    turn on a refusal sentence: the measured cursor reply was "I can't write the
+    requested file while Ask mode is active", after which the slot failed on
+    "JSON parsing failed from both file and stdout". These pin that such an
+    adapter is asked for stdout instead — and that every other adapter's prompt
+    is byte-for-byte what it was.
+    """
+
+    def test_file_capable_provider_is_asked_for_the_file(self):
+        block = render_output_location("/tmp/out/codex_gpt-5_5.json", "codex:gpt-5.5")
+
+        assert block == FILE_OUTPUT_LOCATION.format(
+            path="/tmp/out/codex_gpt-5_5.json"
+        )
+        assert "Write your JSON output to this file" in block
+        assert "/tmp/out/codex_gpt-5_5.json" in block
+
+    @pytest.mark.parametrize(
+        "model_spec", ["cursor-agent:auto", "aider:openrouter/z-ai/glm-5.2"]
+    )
+    def test_read_only_provider_is_asked_for_stdout(self, model_spec):
+        block = render_output_location("/tmp/out/result.json", model_spec)
+
+        assert block == STDOUT_OUTPUT_LOCATION
+        assert "Write your JSON output to this file" not in block
+        assert "/tmp/out/result.json" not in block
+        assert "stdout" in block
+
+    def test_unknown_provider_keeps_the_file_block(self):
+        """A config naming an adapter this build no longer ships renders what
+        every caller rendered before the capability existed."""
+        block = render_output_location("/tmp/out/result.json", "no-such-provider:m")
+
+        assert block == FILE_OUTPUT_LOCATION.format(path="/tmp/out/result.json")
+
+    def test_shipped_review_prompts_carry_the_placeholder(self):
+        """The three JSON review prompts delegate their tail to the renderer."""
+        from utils.prompt_loader import load_prompt
+
+        for name in ("code_review.txt", "plan_review.txt", "task_review.txt"):
+            template = load_prompt(name)
+            assert template.rstrip("\n").endswith("{output_location}"), name
+            assert "Write your JSON output to this file" not in template, name
+
+    def test_invoke_with_file_output_sends_the_stdout_prompt_to_cursor(self, tmp_path):
+        """End-to-end: the prompt cursor's process really receives asks for stdout.
+
+        The output path is still generated and still read first (a provider that
+        writes the file anyway is served from it), but nothing in the prompt
+        instructs cursor to write one.
+        """
+        with patch("utils.llm_client.invoke_with_provider") as mock_invoke, \
+             patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_invoke.return_value = {
+                "success": True,
+                "data": [{"title": "from stdout"}],
+                "details": {"provider": "cursor-agent"},
+            }
+            mock_read.return_value = {"success": False, "error": "File not found"}
+
+            result = invoke_with_file_output(
+                prompt_template="Review it.\n\n## Output Location\n{output_location}\n",
+                model_spec="cursor-agent:auto",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="code_review",
+            )
+
+        call_args = mock_invoke.call_args
+        prompt = call_args.kwargs.get("prompt") or call_args[0][0]
+        assert STDOUT_OUTPUT_LOCATION in prompt
+        assert "Write your JSON output to this file" not in prompt
+        assert str(tmp_path) not in prompt
+
+        # The stdout array still lands on the same per-model result path the
+        # orchestrator reads — only the channel it arrived on changed.
+        assert result["success"] is True
+        assert result["data"] == [{"title": "from stdout"}]
+        assert result["source"] == "stdout_fallback"
+        assert result["output_file"].endswith("cursor-agent_auto.json")
+
+    def test_invoke_with_file_output_still_names_the_file_for_codex(self, tmp_path):
+        """The unchanged half: a file-capable adapter's prompt is untouched."""
+        with patch("utils.llm_client.invoke_with_provider") as mock_invoke, \
+             patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_invoke.return_value = {"success": True, "data": [], "details": {}}
+            mock_read.return_value = {"success": True, "data": [], "source": "file"}
+
+            invoke_with_file_output(
+                prompt_template="Review it.\n\n## Output Location\n{output_location}\n",
+                model_spec="codex:gpt-5.5",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="code_review",
+            )
+
+        call_args = mock_invoke.call_args
+        prompt = call_args.kwargs.get("prompt") or call_args[0][0]
+        assert "Write your JSON output to this file" in prompt
+        assert str(tmp_path / "code-review" / "codex_gpt-5_5.json") in prompt
 
 
 class TestInvokeSubagent:

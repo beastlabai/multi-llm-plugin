@@ -252,6 +252,12 @@ _HEADER = """\
 #    SET of provider keys to whatever the plugin shipped then. Re-run
 #    `--init --force` after a plugin update to refresh pinned metadata AND prune
 #    providers the new base dropped.
+#  * NO LAYER SETS ENVIRONMENT FOR A PROVIDER, so there is no `env:` key here —
+#    not even a commented one. Endpoint/credential wiring (e.g. pointing
+#    claude-code at GLM/Z.ai or at OpenRouter) is SHELL configuration this plugin
+#    neither owns nor validates. An `env:` block written here would merge and
+#    then be ignored — it would fail SILENTLY, which is worse than not existing.
+#    The recipes live in README "Pointing a provider CLI at a different endpoint".
 #
 # ----------------------------------------------------------------------------
 # ONE OVERRIDE PER REPO
@@ -948,7 +954,9 @@ def _write_config(
             "No supported provider CLIs found on PATH; wrote an inert "
             ".multi-llm/providers.yaml that inherits the built-in defaults.\n"
             "Install one of: claude, cursor-agent, gemini, grok, opencode, "
-            "codex, kilocode, cline, goose, aider, agy, pi, muse and re-run `--init`."
+            "codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, "
+            "vibe and "
+            "re-run `--init`."
         )
     else:
         chosen = detected_list[0]  # validation guarantees default_provider == this

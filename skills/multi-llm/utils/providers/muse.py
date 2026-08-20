@@ -65,6 +65,23 @@ class MuseProvider(LLMProvider):
     #   than on the generic transport rung.
     # * `API error 401` is muse's auth spelling; the bare token `401` is not in
     #   the base auth set at all (it is only a *context* word there).
+    #
+    # MEASURED 2026-08-19 AND NOT YET FIXED — the two entries below did not fire
+    # on the one 401 this repo has actually captured. `tests/fixtures/muse/`'s
+    # `auth-error` row is a real 401 from `failserver.py --mode 401`, and muse
+    # SWALLOWS the vendor text: the strings `401`, `API error` and
+    # `Incorrect API key provided` appear **nowhere** in the 17 KB capture.
+    # What muse writes instead is its own gloss, in the `run.terminal.failed`
+    # record's `reason` — "your API key from META_API_KEY was rejected — update
+    # or unset it" — which matches none of the twelve patterns this tuple then
+    # holds, so a rejected muse credential classifies as **None** and lands on
+    # the transport rung with a full retry budget. The one-line fix is a marker
+    # for muse's own wording (`was rejected` / `api key from`), the way vibe's
+    # `conversation context exceeds` was added; it is left undone here on
+    # purpose so the committed fixture pins today's behaviour and the fix is a
+    # visible edit to both this tuple and that manifest. The entries are NOT
+    # removed: they are still what the live 402 shape's sibling statuses
+    # spell, and nothing has measured a live 401 against a real Meta endpoint.
     auth_error_patterns = LLMProvider.auth_error_patterns + (
         "api error 401",
         "api error 403",
@@ -74,6 +91,38 @@ class MuseProvider(LLMProvider):
         "billing verification failed",
         "api error 429",
     )
+
+    # A THIRD MEASURED SHAPE, recorded rather than fixed, and it is a base-table
+    # ORDERING fact rather than a missing pattern here. muse prefixes every
+    # vendor error it does not gloss with `API error <status>: <vendor text>`,
+    # and `\bapi error\b` is a member of `base.SERVER_ERROR_MARKERS`, which
+    # `classify_streams` consults BEFORE `INVALID_MODEL_MARKERS`. So muse's 404
+    # — which is otherwise ideal, keeping the vendor sentence verbatim and
+    # NAMING the model ("API error 404: The model `muse-spark-9.9-nonexistent`
+    # does not exist or you do not have access to it.") — classifies as
+    # `server_error`, a retryable transport category, instead of the terminal
+    # `invalid_model` whose fix is a config edit. Pinned by
+    # `tests/fixtures/muse/`'s `invalid-model` row, which asserts the
+    # classification the code produces today. The 402/429 rungs above are
+    # unaffected: rate limits are checked before the server table.
+
+    #: The build every fixture in ``tests/fixtures/muse/`` was captured from —
+    #: the §6 step-5 probe, ``--network none``, ``stub_server.py`` and
+    #: ``failserver.py`` both running inside the container, no credential. Ten
+    #: of §6.2's twelve rows — plus two extra truncation rows — are raw
+    #: ``muse exec --json`` bytes from this build, so it is what the JSONL
+    #: envelope shape above is *known* to be true of, not a range to trust.
+    #:
+    #: ``min_version`` is deliberately left empty rather than pinned to the same
+    #: string, and the reason is that this adapter declares no ``version_cmd``:
+    #: ``_detect_version`` only compares against a floor when a probe actually
+    #: read a version, so a ``min_version`` here would be enforced by nothing
+    #: while reading, in every listing, as a gate that exists. Declaring the
+    #: probe would take a ``parse_version`` override first — ``muse --version``
+    #: prints ``Muse Code 0.1.0 (0.1.0-R708.1)``, two version strings on one
+    #: line, and the base parser reads neither of them the way this field
+    #: spells it. ``tests/container/cli-versions.lock`` pins the same build.
+    verified_version = "0.1.0-R708.1"
 
     @property
     def name(self) -> str:
@@ -213,6 +262,29 @@ class MuseProvider(LLMProvider):
         deltas), but ``tool.result`` reliably separates turns. The deltas after
         the last tool result are therefore tried first, and the full text only
         as a fallback — for single-turn runs the two are identical.
+
+        All of that is now a **committed capture** rather than a description:
+        ``tests/fixtures/muse/multi-assistant.stdout.txt`` is raw JSONL from a
+        run whose terminal ``text`` reads ``Draft: [{…DRAFT…}][{…S001…}]``, and
+        the manifest asserts both halves — ``extract_json_from_text`` over the
+        whole string returns the DRAFT, the tail after the last ``tool.result``
+        returns the answer. It is the only test in the repo that would notice
+        this rule being removed, which is why it took a probe-local stub driving
+        a real ``read_file`` call to produce (see that directory's README).
+
+        MEASURED 2026-08-19, recorded rather than fixed: **a FAILED run whose
+        salvaged text happens to parse is returned as a success.** The first
+        branch below fails a non-``completed`` run only ``and not full``, so with
+        any text present control falls through to ``_direct_json(tail)`` and
+        returns before the terminal state is consulted again.
+        ``tests/fixtures/muse/truncated-json-answer.stdout.txt`` is the capture:
+        exit **1**, ``run.terminal.failed`` reading "model failed after 10
+        attempts: stream ended before terminal event", and this method answering
+        ``success: True`` with the array. ``llm_client`` is safe by accident (it
+        short-circuits on ``returncode != 0`` and never calls this), but
+        ``subagent_executor`` is not — it treats the exit code as evidence rather
+        than verdict and accepts a schema-valid result from a non-zero exit. The
+        fix is one clause; the fixture pins today's behaviour until it lands.
 
         Residual limit: two JSON documents inside the SAME closing turn (a draft
         and an answer with no tool call between them) still resolve to the first,

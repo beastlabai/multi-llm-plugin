@@ -1,0 +1,19 @@
+
+HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /BerriAI/litellm/main/model_prices_and_context_window.json (Caused by NameResolutionError("HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to resolve 'raw.githubusercontent.com' ([Errno -3] Temporary failure in name resolution)"))
+Aider v0.86.2
+Model: openai/stub-model with whole edit format
+Git repo: .git with 0 files
+Repo-map: using 1024 tokens, auto refresh
+
+
+--------------
+► **THINKING**
+
+Weighing severity ordering before answering. No answer yet.
+
+------------
+► **ANSWER**
+
+
+
+Tokens: 1 sent, 1 received.

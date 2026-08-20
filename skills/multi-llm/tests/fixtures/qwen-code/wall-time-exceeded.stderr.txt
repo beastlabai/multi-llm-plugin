@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "FatalBudgetExceededError",
+    "message": "Run aborted: wall-clock budget of 5s exceeded (--max-wall-time).",
+    "code": 55
+  }
+}

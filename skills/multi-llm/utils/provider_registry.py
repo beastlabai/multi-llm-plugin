@@ -34,14 +34,18 @@ from .providers.aider import AiderProvider
 from .providers.claude_code import ClaudeCodeProvider
 from .providers.cline import ClineProvider
 from .providers.codex import CodexProvider
+from .providers.copilot import CopilotProvider
 from .providers.cursor_agent import CursorAgentProvider
 from .providers.gemini import GeminiProvider
 from .providers.goose import GooseProvider
 from .providers.grok import GrokProvider
 from .providers.kilocode import KiloCodeProvider
+from .providers.kimi import KimiProvider
 from .providers.muse import MuseProvider
 from .providers.opencode import OpenCodeProvider
 from .providers.pi import PiProvider
+from .providers.qwen_code import QwenCodeProvider
+from .providers.vibe import VibeProvider
 from .providers.base import GIT_HELPER_AUTO, GIT_HELPER_POLICIES, LLMProvider
 
 # Built-in providers
@@ -51,14 +55,18 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "claude-code": ClaudeCodeProvider(),
     "cline": ClineProvider(),
     "codex": CodexProvider(),
+    "copilot": CopilotProvider(),
     "cursor-agent": CursorAgentProvider(),
     "gemini": GeminiProvider(),
     "goose": GooseProvider(),
     "grok": GrokProvider(),
     "kilocode": KiloCodeProvider(),
+    "kimi": KimiProvider(),
     "muse": MuseProvider(),
     "opencode": OpenCodeProvider(),
     "pi": PiProvider(),
+    "qwen-code": QwenCodeProvider(),
+    "vibe": VibeProvider(),
 }
 
 # Process-global config cache. Keyed on the resolved discovery anchor + env (see

@@ -224,11 +224,16 @@ def test_every_download_verifies_a_checksum(instructions):
         )
 
 
-@pytest.mark.parametrize("artifact", ["uv", "goose", "grok", "muse"])
+@pytest.mark.parametrize(
+    "artifact",
+    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "python312"])
 def test_artifact_args_match_the_lock(artifact, build_args, lock):
     """Two copies of a checksum that can disagree are worse than one."""
     entry = lock["artifacts"][artifact]
-    prefix = artifact.upper()
+    # A lock artifact key is the CLI's id, which may carry a hyphen
+    # (`cursor-agent`); a Dockerfile ARG may not, so the two spellings differ by
+    # exactly this substitution and by nothing else.
+    prefix = artifact.upper().replace("-", "_")
     assert build_args[f"{prefix}_VERSION"] == str(entry["version"]), (
         f"ARG {prefix}_VERSION and cli-versions.lock disagree"
     )
@@ -254,6 +259,15 @@ def test_every_lock_cli_is_wrapped(dockerfile_text, lock):
     C2's whole mechanism is that the wrapper is first on PATH. A CLI installed
     into /opt/mllm/real and never linked into /opt/mllm/bin would run against
     whatever backend it defaults to, which on the host lane means a real one.
+
+    This is every lock row, with no exemption for a row that reaches no stub.
+    ``cursor-agent`` is the case that will tempt one: it has no redirect.yaml
+    row, so linking it buys no redirection. It is still required here, because
+    ``verify_versions.py``'s ``check_path_shape`` walks this same ``clis`` block
+    and fails the build on any binary that does not resolve to /opt/mllm/bin --
+    so an "obviously pointless" link dropped from the loop is a red build, and
+    this assertion is where that gets said in plain CI rather than after a
+    twenty-minute image build.
     """
     wrapper_loop = re.search(
         r"for b in ([^;]+); do\s*\\?\s*ln -sf /opt/mllm/rig/wrapper\.py",

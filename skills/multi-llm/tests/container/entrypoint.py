@@ -543,6 +543,162 @@ def seed_homes(identities: list[str]) -> None:
         log(f"home {home} seeded from {seed if seed.is_dir() else '<nothing>'}")
 
 
+def drop_seeded_credential(identities: list[str], relative: str | None) -> None:
+    """A negative auth row's ``remove_seed``, actually removed.
+
+    Until this existed `remove_seed` was a **dead cell**: `host_matrix.yaml`
+    declared it on both negative rows, and its only readers anywhere were in
+    `test_container_host_lane.py`, which used its mere PRESENCE to classify a row
+    as negative and never acted on its value. Nothing deleted the file, so both
+    rows would have run with the seeded credential in place and could not have
+    been refused for the reason they declare.
+
+    **`/work/homes/<identity>`, never the host's own `$HOME`**, and the
+    distinction is the row rather than a detail:
+
+    * the gate a negative row trips is `preflight_runner`'s `auth_check` of the
+      CONFIGURED RUNNER — a *provider* dispatch — and `wrapper.py`'s
+      `seed_invocation_root` copies every per-invocation provider root from
+      `/work/homes/<cli>`. Removing it there removes it from every dispatch of
+      that CLI, including two concurrent ones.
+    * the HOST must still be able to run, or the row proves nothing about the
+      gate: a host that cannot authenticate never reaches our dispatcher and
+      leaves no receipt to grade the refusal on. On opencode the two files even
+      share a spelling — `wire_credentials` writes the same relative path into
+      the host's `$HOME` — and that copy is the host's credential, not the
+      runner's.
+
+    **A removal that matched nothing raises.** That silence is precisely the
+    failure this cell already had for its whole life, and a no-op deletion would
+    reproduce it one layer down: the row would run green having been graded as a
+    refusal it never made.
+    """
+    if not relative:
+        return
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise SystemExit(
+            f"entrypoint: remove_seed {relative!r} does not name a path inside a "
+            f"seeded home. It must be relative to `/work/homes/<identity>` and "
+            f"may not climb out of it.")
+    removed: list[Path] = []
+    for identity in identities:
+        target = HOMES / identity / candidate
+        if target.is_file() or target.is_symlink():
+            target.unlink()
+            removed.append(target)
+            log(f"remove_seed: deleted {target}")
+    if not removed:
+        searched = [str(HOMES / identity) for identity in identities]
+        raise SystemExit(
+            f"entrypoint: remove_seed names {relative!r} and no seeded home "
+            f"carries it — searched {searched or '<no seeded identity>'}. A "
+            f"removal that deletes nothing is the silent failure this cell "
+            f"exists to prevent: the row would dispatch with the credential "
+            f"still in place and be graded as a refusal it never made.")
+
+
+def run_pre_commands(row_id: str, commands: list[str]) -> int:
+    """The host lane's PRE-COMMAND LEG: ordered dispatcher invocations that run
+    before the host process starts.
+
+    `harness.Row.commands` and the `--command` forwarding have existed since the
+    provider lane's chain rows, but the host branch of :func:`main` returns
+    before the dispatch loop that consumes them — so on this lane the cell had
+    never executed. That is the rig gap behind `host_matrix.yaml`'s header
+    finding (1): the lane seeds one workspace and launches exactly ONE host
+    process against it, and `apply-suggestions` exits 1 in `_setup` against a
+    workspace with no review-plan output, before any batch, runner or auth gate.
+
+    **The receipts land in a SIBLING directory**, `receipts/<row>-pre/`, and that
+    is the whole reason this is a separate function rather than three lines
+    inline. Every host-lane assertion about "the agent really ran our dispatcher"
+    reads `receipts/<row>/`; a leg that wrote there would let a row pass
+    `test_a_receipt_exists_for_the_row` — and even
+    `test_the_payload_names_the_expected_mode_and_phase` — on **the rig's own
+    invocation**, which is the exact false positive the receipt anchor exists to
+    prevent. The evidence is still kept, one directory across, where a human can
+    read it and no grader can mistake it for the host's work.
+
+    Runs in the row's workspace with PATH wrapper-first, exactly like the
+    entrypoint's own `install-host` dispatch, so the leg's own fan-out lands on
+    the stub. Stops at the first non-zero exit and returns it: a host launched
+    against a half-prepared workspace would fail for the wrong reason.
+    """
+    if not commands:
+        return 0
+    receipts = OUT / "receipts" / f"{row_id}-pre"
+    results: list[dict] = []
+    failed = 0
+    for raw in commands:
+        # A leading `NAME=value` applies to THIS invocation only, the same rule
+        # the provider lane's chain rows are written under.
+        command_env, argv_one = split_command_env(shlex.split(raw))
+        code = dispatch(argv_one, env={**os.environ,
+                                       "MLLM_RECEIPT_DIR": str(receipts),
+                                       **command_env})
+        results.append({"command": raw, "exit": code,
+                        "env": sorted(command_env)})
+        log(f"pre-command {argv_one!r} -> exit {code}"
+            + (f" (env: {sorted(command_env)})" if command_env else ""))
+        if code != 0:
+            failed = code
+            break
+    (OUT / "pre-commands.json").write_text(
+        json.dumps(results, indent=2), encoding="utf-8")
+    return failed
+
+
+def record_stub_watermark(row_id: str, removed: str | None) -> None:
+    """How many model calls the RIG had already made when the host started.
+
+    A negative auth row declares ``stub_requests: 0`` and means *zero after the
+    credential was removed* — "the refusal lands BEFORE the first model call".
+    That cell was written for a lane with no pre-command leg. The leg fans out to
+    the stub **by design** (it runs while the seed is still in place, through the
+    very runner the row exists to have refused), so from the day it landed the
+    container's stub log carries the rig's own calls and a grader counting raw
+    would measure the leg instead of the row.
+
+    So the boundary is written down at the one moment it is unambiguous: after
+    :func:`run_pre_commands` has returned and after
+    :func:`drop_seeded_credential`, immediately before the host process starts.
+    Every record already in ``stub.jsonl`` is the rig's; everything after it is
+    the host's. Health checks are excluded here for the same reason the grader
+    excludes them: they are the stub proving it is up, not a model call.
+
+    Written on EVERY credentialed row, not only the negative ones — a watermark
+    that exists only where an assertion currently reads it is a watermark the
+    next assertion cannot trust.
+    """
+    log_path = OUT / "stub.jsonl"
+    calls = 0
+    if log_path.is_file():
+        for line in log_path.read_text(encoding="utf-8",
+                                       errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                # A torn last line is evidence, never a failure path: the
+                # watermark is a floor and one unparsed record cannot move it in
+                # the direction that hides a call.
+                continue
+            if record.get("surface") != "health":
+                calls += 1
+    (OUT / "stub-watermark.json").write_text(json.dumps({
+        "row": row_id,
+        "removed_seed": removed,
+        "non_health_calls_before_host": calls,
+        "meaning": ("every stub request logged at or below this count was made "
+                    "by the rig's pre-command leg, before the host process "
+                    "started and before any declared credential was removed"),
+    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    log(f"stub watermark before host launch: {calls} non-health request(s)")
+
+
 def substitute_placeholders(root: Path, mapping: dict[str, str]) -> None:
     """Fill {{placeholder}}s in the value-free seed templates."""
     for path in root.rglob("*"):
@@ -668,6 +824,15 @@ def _host_matrix() -> dict:
     if not path.is_file():
         return {}
     return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("hosts", {})
+
+
+def _matrix_row(host: str | None, row_id: str) -> dict:
+    """One row out of `host_matrix.yaml`, or `{}` — the single spelling of that
+    lookup, because two of them read the row at two different points in the run
+    (the seeding step and the launch step) and must never disagree about it."""
+    entry = _host_matrix().get(host) or {}
+    return next((dict(r) for r in (entry.get("rows") or [])
+                 if r.get("id") == row_id), {})
 
 
 # --------------------------------------------------------------------------- #
@@ -1285,6 +1450,14 @@ def poll_terminal_run(plan: Path, timeout: float = 180.0) -> dict:
     A `--detach` invocation returns 0 with `state: done` **before the workflow has
     run**, so on a detaching row the verdict comes from the worker's own `run`
     block. Grading before it settles would grade a launch.
+
+    ONLY the status files that carry a `run` block are runs. Every phase writes
+    `{phase}/.status.json` whether or not it detached (`status_file.py` is the
+    one writer, and `detach.py`: "a foreground run's `.status.json` gains no new
+    keys"), so a `--full` row's plan dir holds the detached `full/` run's file
+    PLUS one checkpoint per in-process phase. Counting the checkpoints as runs
+    made this loop wait out its whole timeout for a `state` that is structurally
+    `None`, and then hand the grader phantom rows to fail a passing row on.
     """
     root = plan.parent / plan.stem
     deadline = time.time() + timeout
@@ -1296,8 +1469,16 @@ def poll_terminal_run(plan: Path, timeout: float = 180.0) -> dict:
         # reports "no run recorded" on precisely the cheapest row in the matrix.
         for status in sorted(root.rglob(".status.json")):
             try:
-                block = json.loads(status.read_text(encoding="utf-8")).get("run") or {}
+                document = json.loads(status.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                continue
+            block = document.get("run") if isinstance(document, dict) else None
+            if not isinstance(block, dict):
+                # A phase checkpoint, not a run. Skipped rather than recorded as
+                # `state: None`: absence of a run block here is not evidence of a
+                # run that failed to reach a terminal state, and a row whose
+                # detached worker never claimed one still ends with `seen` empty,
+                # which the grader already reports as "graded on a launch".
                 continue
             key = str(status.parent.relative_to(root))
             seen[key] = {k: block.get(k) for k in
@@ -1549,8 +1730,7 @@ def main(argv=None) -> int:
 
             if args.lane == "host":
                 entry = dict(_host_matrix().get(args.host) or {})
-                row = next((dict(r) for r in (entry.get("rows") or [])
-                            if r.get("id") == args.row), {})
+                row = _matrix_row(args.host, args.row)
                 key = os.environ.get("OPENROUTER_API_KEY", "")
                 overlay: dict = {}
                 secrets: list[str] = []
@@ -1639,6 +1819,40 @@ def main(argv=None) -> int:
                         log("--dry-run-host: wiring and argv rendered, no host "
                             "process started")
                         return 0
+
+                    # THE ORDER OF THE NEXT FOUR STEPS IS THE DESIGN, and each
+                    # one is where it is because the others put it there.
+                    #
+                    # 1. Render the argv FIRST. A row that declares no `args`
+                    #    aborts in `render_prompt` — and it must keep doing that
+                    #    in ~1.5 s having spent nothing, exactly as it does
+                    #    today. Rendering after the leg would turn a fast, honest
+                    #    abort into a slow one that prepared a workspace for a
+                    #    host process that was never going to launch.
+                    build_host_argv(entry, row)
+                    # 2. Then the pre-command leg, while the seeded credential is
+                    #    still in place: the prerequisite read phase (`review-plan`
+                    #    on four rows, `review-code` on the native write row) fans
+                    #    out through the CONFIGURED RUNNER and would be refused by
+                    #    the very gate a negative row exists to trip.
+                    code = run_pre_commands(args.row, args.commands)
+                    if code != 0:
+                        log(f"pre-command leg exited {code}; not launching the "
+                            f"host — it would run against a workspace whose "
+                            f"prerequisite phase never completed")
+                        return code
+                    # 3. Only then remove it. Not at seeding time, and not before
+                    #    `stage_host`: `install-host codex --global`'s row 5
+                    #    probes the configured runner's auth and exits 3 without
+                    #    it (host_matrix.yaml, codex `stage.measured`), so an
+                    #    earlier removal returns above with no `apply-suggestions`
+                    #    receipt at all — and a refusal with no receipt is a row
+                    #    that proves nothing about the gate.
+                    drop_seeded_credential(identities, row.get("remove_seed"))
+                    # 4. And mark the line the host's own calls start after.
+                    #    Everything logged up to here belongs to the rig.
+                    record_stub_watermark(args.row, row.get("remove_seed"))
+
                     record = run_host(args.host, entry, row, Path.home(),
                                       overlay, key, creds=args.creds,
                                       secrets=secrets)

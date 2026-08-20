@@ -1,0 +1,348 @@
+# The §6.2 fixture manifest for claude-code. Graded by
+# tests/test_provider_fixture_rows.py, which owns the format (its module
+# docstring is the spec).
+#
+# Every byte under this directory is raw `claude -p --output-format json`
+# stdout/stderr as the CLI wrote it. No row here is synthesized; where a row's
+# ANSWER text came from the stub rather than a real model, the bytes on disk are
+# still claude-code's own envelope around it, and `notes:` says so.
+schema_version: 1
+provider: claude-code
+cli_version: "2.1.232"
+captured: "2026-08-19"
+method: >-
+  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  mounted read-only at /rig, and NO credential — ANTHROPIC_API_KEY is the
+  wrapper's fake per-exec session key `mllm-stub-<id>`, meaningful only on
+  127.0.0.1. The CLI is driven through the PATH wrapper (`/opt/mllm/bin/claude`
+  IS `wrapper.py`), so redirect.yaml's claude-code row applies verbatim:
+  ANTHROPIC_BASE_URL at the stub's origin, a per-exec `/s/<id>/v1` session
+  prefix, and a fresh $HOME seeded from `tests/container/home_seed/claude-code/`
+  (`.claude.json`, which is what makes the run non-interactive). argv was
+  `ClaudeCodeProvider.build_command`'s output verbatim AS OF THE CAPTURE
+  (`claude -p --output-format json --model haiku <5,018-byte review-plan
+  prompt>`), env is `get_env`'s. That argv gained one pair on 2026-08-20 —
+  `--permission-mode acceptEdits`, spliced in the policy region ahead of the
+  prompt — and THESE BYTES WERE NOT RE-CAPTURED, deliberately: the flag changes
+  what claude is PERMITTED TO DO (it pre-approves the model's own file edits),
+  not what it prints. Every row here is an envelope shape, an exit code and a
+  stderr byte count, none of which the grant moves, and the one behaviour it does
+  move — the fan-out's file-output channel — has no row in this directory at all.
+  Re-capturing to change nothing would retire a measurement for a cosmetic
+  match. The probe container runs the servers itself:
+  `python3 /rig/stub_server.py --port 8099 --scenario <inline answers>` for the
+  three answering rows and `python3 /rig/failserver.py --port 8099 --mode <mode>`
+  for the rest. Never wrapped in `timeout(1)`: the zero-byte-hang artifact.
+notes: >-
+  Four facts hold across EVERY row here and are load-bearing rather than
+  incidental.
+  (1) **stderr is 0 bytes on all eleven** — success and failure alike, the whole
+  diagnosis rides stdout inside the result envelope. The empty `*.stderr.txt`
+  files are committed rather than omitted, because "stderr was empty" is the
+  measurement.
+  (2) **The exit code IS authoritative at 2.1.232.** Every one of the seven
+  injected failures exits **1**; every answering run exits **0**. That is what
+  makes the adapter's empty `exit_zero_failure_markers` correct today, and it is
+  measured here rather than assumed — see the `exit-zero-failure` cell.
+  (3) **TWO requests per exec, not one.** The first is claude-code's own
+  session-title generator: tool-free, same model, same surface, so only
+  `has_tools` (false vs true) separates the two in the stub's log. Every
+  `requests:` count below is therefore *both* calls, and a failure-injection run
+  hits the injected error on the TITLE call first.
+  (4) The measured envelope is the **pinned** configuration, not the
+  out-of-the-box one: `get_env` sets `CLAUDE_CODE_MAX_RETRIES=3` (declared
+  `max_requests=4`) and `API_TIMEOUT_MS=300000`, and the wrapper's
+  `ENV_CARRY_EXACT` carries both into the child. 4 requests per API call × 2
+  calls = the 7-8 seen on the fail-forever rows (7 vs 8 is a race between the two
+  concurrent calls, not a retry-count difference).
+
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    wall_s: 0.53
+    requests: 2
+    notes: >-
+      The whole answer arrives as one single-line JSON object whose `result` is
+      the model's text; `parse_result_envelope` unwraps it and `json.loads`es the
+      inner string, so the fast path (`inner_result.startswith("[")`) is what a
+      normal run takes. `num_turns: 1`, `is_error: false`, `subtype: "success"`.
+      NOTE the model id in `modelUsage`: the alias `haiku` passed to `--model` is
+      resolved to `claude-haiku-4-5-20251001` BEFORE the request leaves, so the
+      wire never carries the alias — which is why `invalid-model` below names the
+      resolved id and not the spec.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains:
+        - '"type":"result"'
+        - '"is_error":false'
+        - "claude-haiku-4-5-20251001"
+      classify_failure: null
+
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    wall_s: 0.48
+    requests: 4
+    notes: >-
+      failserver `--mode trunc --trunc-bytes 300`, against the **anthropic**
+      surface — the fix that made this row mean what it claims: before it,
+      `trunc` rendered an OpenAI `chat.completion` object whatever surface asked,
+      so claude-code would have recorded a malformed-response capture rather than
+      a truncated one. The SSE stream is cut inside `content_block_start`
+      (frame 2 of 7), and claude-code then **retries the same call
+      non-streamed** — visible in the stub log as stream true/false alternating —
+      where the 300-byte cut lands inside a 322-byte body. 4 requests = 2 calls ×
+      (1 streamed + 1 non-streamed). Exit **1**; the CLI's gloss is
+      `Connection to the API was lost (ECONNRESET)`.
+    expect:
+      success: false
+      raw_contains:
+        - "API Error: Connection to the API was lost (ECONNRESET)"
+        - '"is_error":true'
+      # NOT connection_error: none of base.CONNECTION_ERROR_MARKERS matches
+      # "connection to the api was lost", while `\bapi error\b` — a
+      # SERVER_ERROR marker — matches claude-code's universal "API Error:"
+      # prefix. See README, defect 3.
+      classify_failure: "server_error"
+
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 0
+    wall_s: 0.48
+    requests: 3
+    notes: >-
+      An all-noise run, in the only shape `--output-format json` can express it.
+      The CLI emits exactly ONE record — the result envelope — and everything in
+      it except `result` is bookkeeping `parse_result_envelope` discards (usage,
+      modelUsage, cost, session_id, ttft, uuid). The stub answered with an empty
+      assistant message, so `result` is `""`: 1,164 bytes on disk, every one of
+      them filtered, and the run must be a failure rather than an empty-string
+      success. claude-code retried the empty answer once (3 requests = title +
+      2 main) and still reported `is_error: false`, `subtype: "success"`,
+      **exit 0** — so the ONLY thing separating this from a good run is that the
+      answer is empty.
+    expect:
+      success: false
+      error_contains: ["No valid JSON found in text"]
+      raw_contains: ['"result":""', '"is_error":false', '"num_turns":2']
+      classify_failure: null
+
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 0.48
+    requests: 2
+    notes: >-
+      **FIRST-wins, and it is the wrong answer.** Two JSON documents in one
+      answer, the first reading `FIRST ANSWER (must NOT be selected)`;
+      `parse_result_envelope` falls through to
+      `extract_json_from_text(prefer_arrays=True)` and returns the FIRST array.
+      The row pins today's behaviour unweakened — see README, defect 1.
+      The literal §6.2 shape (two assistant *messages*) is unreachable through
+      this CLI: `--output-format json` prints a single result envelope with one
+      `result` string, so multiple assistant turns are concatenated by the CLI
+      before the parser ever sees them, and two documents inside that one string
+      is the only form the selection rule can be exercised in.
+    expect:
+      success: true
+      data:
+        - {id: "S000", title: "FIRST ANSWER (must NOT be selected)", severity: "low"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)", "Bound the retry ladder"]
+      classify_failure: null
+
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 0.53
+    requests: 4
+    notes: >-
+      failserver `--mode errbody`: HTTP **200** whose body is a provider error
+      object. claude-code does not serve it as the answer — it detects the shape
+      and substitutes its own sentence, `API returned an empty or malformed
+      response (HTTP 200) — check for a proxy or gateway intercepting the
+      request` — so the provider's text is LOST rather than mis-served. Note the
+      envelope contradicts itself: `is_error: true` and `terminal_reason:
+      "api_error"` next to `subtype: "success"`. `parse_output` reads NEITHER —
+      it only looks at `result` — which is safe here because the substituted
+      sentence carries no JSON, and is the reason defect 2 in the README is
+      worth stating.
+    expect:
+      success: false
+      error_contains: ["No valid JSON found in text"]
+      raw_contains:
+        - "API returned an empty or malformed response (HTTP 200)"
+        - '"is_error":true'
+        - '"subtype":"success"'
+      classify_failure: "server_error"
+
+  exit-zero-failure:
+    not_applicable: >-
+      Measured, not assumed, and the measurement is the point: at 2.1.232 every
+      failure the rig can inject exits **1** — 401, 429, 404, 400 context-length,
+      500-forever, a truncated stream, a zero-byte response and a 200 carrying an
+      error object, eight modes, eight exit codes of 1 — so there is no producer
+      for "an error the CLI prints while still exiting 0". The nearest exit-0
+      non-answer is the `ephemeral-only` row (exit 0, `is_error: false`, empty
+      `result`), and it prints no error at all, so it would give
+      `exit_zero_failure_markers` nothing to match. The adapter's empty marker
+      tuple is therefore correct at this version, and this cell is what would
+      have to change first if a later release stopped reporting through the exit
+      code.
+
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    stderr: stdout-error.stderr.txt
+    exit_code: 1
+    wall_s: 4.40
+    requests: 8
+    notes: >-
+      failserver `--mode 500`, fail-forever — §6 step 3's opencode trap in a
+      second CLI, and claude-code has it on EVERY failure: a nonzero exit whose
+      entire diagnosis is on **stdout** with stderr at 0 bytes. 8 requests over
+      4.4 s is the full pinned envelope in one capture (4 per API call ×
+      2 calls, `CLAUDE_CODE_MAX_RETRIES=3`). The 5xx text also proves the harness
+      is talking to the stub and not to a vendor: the CLI's own gloss names
+      `127.0.0.1:8099` as the inference gateway.
+    expect:
+      success: false
+      raw_contains:
+        - "API Error: 500"
+        - "The server had an error while processing your request."
+        - '"api_error_status":500'
+      classify_failure: "server_error"
+
+  empty:
+    not_applicable: >-
+      Zero bytes on both of the CLI's own channels is unreachable while
+      claude-code runs at all: `--output-format json` always prints the result
+      envelope, so the smallest capture in this set is **853 bytes** and none is
+      smaller. Producing one would mean killing the process, which is the
+      `timeout(1)` zero-byte-hang artifact §6 step 3 forbids manufacturing. The
+      SERVER-side half of the shape is captured instead, as the extra
+      `zero-byte-response` row below (failserver `--mode empty`: accept the
+      request, write zero bytes, close), and `parse_output`'s own empty branch is
+      covered by unit assertion in test_providers.py.
+
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 4.66
+    requests: 8
+    notes: >-
+      failserver `--mode 401`. claude-code **retries a 401** — 8 requests over
+      4.7 s, the same envelope as the 5xx row — which is itself worth knowing:
+      no retry fixes a bad credential. The classification measured here is
+      `server_error`, NOT `auth_failed`, and that is the most consequential
+      finding in this set (README, defect 3): the CLI's gloss is `Failed to
+      authenticate. API Error: 401 …`, not one of base.auth_error_patterns' ten
+      entries matches it, and `\bapi error\b` in SERVER_ERROR_MARKERS matches the
+      universal `API Error:` prefix. Auth is consulted BEFORE server, so two
+      added patterns would fix it — the row pins today's behaviour unweakened.
+    expect:
+      success: false
+      raw_contains:
+        - "Failed to authenticate. API Error: 401"
+        - "Incorrect API key provided"
+        - '"api_error_status":401'
+      classify_failure: "server_error"
+
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 4.35
+    requests: 7
+    notes: >-
+      failserver `--mode 429`, fail-forever, no `Retry-After`. claude-code
+      **does** retry rate limits internally (7 requests / 4.4 s), which is the
+      measurement §7.5 rule 6(b) reads: an executor-level re-dispatch of a
+      rate-limited claude-code slot would turn 4 requests per call into 20
+      against the same upstream for the same verdict. This is the one failure row
+      that classifies on the vendor's own words rather than on claude-code's
+      prefix — `429` and `rate limit` are both base rate-limit patterns, and rate
+      limit is consulted before the server table.
+    expect:
+      success: false
+      raw_contains:
+        - "API Error: Request rejected (429)"
+        - "Rate limit reached for stub-model"
+        - '"api_error_status":429'
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 0.58
+    requests: 4
+    notes: >-
+      failserver `--mode 404`, whose body names the model the request carried.
+      The failure DOES name it — and names it `claude-haiku-4-5-20251001`, the
+      resolved wire id, not the `haiku` alias handed to `--model`, because
+      claude-code resolves the alias before dispatch. That asymmetry is what
+      makes a stray `:effort` suffix findable at all, and it is why the assertion
+      below is on the resolved id. **The measured classification is `None`**:
+      claude-code replaces the vendor's `The model \`X\` does not exist` with its
+      own `There's an issue with the selected model (X). It may not exist or you
+      may not have access to it.`, which no INVALID_MODEL_MARKERS entry matches —
+      see README, defect 4.
+    expect:
+      success: false
+      raw_contains:
+        - "There's an issue with the selected model (claude-haiku-4-5-20251001)"
+        - "It may not exist or you may not have access to it"
+        - '"api_error_status":404'
+      classify_failure: null
+
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 0.48
+    requests: 2
+    notes: >-
+      failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
+      OpenAI wording). claude-code passes the vendor sentence through unedited,
+      so `maximum context length` — a literal member of
+      base.CONTEXT_OVERFLOW_MARKERS — survives to the classifier and the terminal
+      category wins over everything after it. **2 requests, not 8**: a 400 is not
+      retried, which is the behaviour §7.2 wants and the opposite of the 401
+      above.
+    expect:
+      success: false
+      raw_contains:
+        - "maximum context length is 8192 tokens"
+        - "Please reduce the length of the messages"
+        - '"api_error_status":400'
+      classify_failure: "context_length_exceeded"
+
+  zero-byte-response:
+    stdout: zero-byte-response.stdout.txt
+    stderr: zero-byte-response.stderr.txt
+    exit_code: 1
+    wall_s: 4.46
+    requests: 8
+    notes: >-
+      Beyond §6.2's twelve, and it is the measurement behind the `empty` cell
+      above: failserver `--mode empty` accepts the request and closes writing
+      **zero bytes**, and claude-code still writes 853 bytes of well-formed
+      envelope. Committed as its own row rather than folded into `truncated`
+      because the CLI distinguishes the two in words — `Connection dropped
+      (ECONNRESET)` here against `Connection to the API was lost (ECONNRESET)`
+      there — and it retries this one 8 times where the truncated stream got 4.
+    expect:
+      success: false
+      raw_contains:
+        - "API Error: Connection dropped (ECONNRESET)"
+        - '"api_error_status":null'
+      classify_failure: "server_error"

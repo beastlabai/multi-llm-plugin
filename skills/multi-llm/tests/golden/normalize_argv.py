@@ -45,11 +45,13 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["normalize_argv", "PLACEHOLDER_PROMPT", "PLACEHOLDER_PATH"]
+__all__ = ["normalize_argv", "PLACEHOLDER_PROMPT", "PLACEHOLDER_PATH",
+           "PLACEHOLDER_TIMEOUT"]
 
 PLACEHOLDER_PROMPT = "<prompt>"
 PLACEHOLDER_PATH = "<path>"
 PLACEHOLDER_MODEL = "<model>"
+PLACEHOLDER_TIMEOUT = "<timeout>"
 
 #: Already collapsed by the wrapper at write time.
 _PROMPT_RE = re.compile(r"^<prompt:sha256:[0-9a-f]+:len=\d+>$")
@@ -77,6 +79,19 @@ _ROW_DERIVED = {
     "--base-url": "<base-url>",
     "--endpoint": "<base-url>",
     "-e": "<base-url>",
+    # §7 step 6: a flag whose VALUE is derived from the slot's `timeout_s=` is
+    # row-derived argv, not policy. qwen-code's `--max-wall-time` is the first
+    # such flag to reach this table — agy's `--print-timeout` never did, because
+    # agy is `lane: fake` and its coverage lives entirely in test_providers.py.
+    #
+    # Keeping the seconds verbatim would freeze ONE run's slot length into the
+    # pinned row and redden every other one, so the placeholder pins the SHAPE
+    # (flag present, one value, right position). The VALUE is pinned elsewhere,
+    # deliberately: test_providers.py's derivation table plus the raw-call-log
+    # assertion that the logged number is numeric and strictly under the row's
+    # own timeout. Without that second half the placeholder would happily
+    # normalize a wrong number to green.
+    "--max-wall-time": PLACEHOLDER_TIMEOUT,
 }
 
 #: `key=value` config overrides whose VALUE is row-derived but whose KEY is the

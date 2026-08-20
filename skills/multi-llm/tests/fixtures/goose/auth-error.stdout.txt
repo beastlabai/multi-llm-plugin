@@ -1,0 +1,38 @@
+{
+  "messages": [
+    {
+      "id": null,
+      "role": "user",
+      "created": 1787156651,
+      "content": [
+        {
+          "type": "text",
+          "text": "You are reviewing an implementation plan for completeness, correctness, and clarity.\n\n## Plan File\n/work/sample-project/plans/auth-feature.md\n\nRead this file to understand the proposed implementation. The plan should contain:\n1. Problem statement and objectives\n2. Technical approach and architecture decisions\n3. Implementation tasks with dependencies\n4. File changes and their purposes\n5. Testing strategy and acceptance criteria\n\n## Your Task\n1. Read the plan file at the path above\n2. Analyze it thoroughly for issues, gaps, and areas needing improvement\n3. Provide specific, actionable feedback\n\n## What to Look For\n\n### Premise & Approach\n- **Problem framing**: Is the stated problem the real problem, or a symptom of something deeper?\n- **Fundamental assumptions**: What assumptions does this plan rest on? Are they valid?\n- **Alternative approaches**: Is there a simpler, more effective, or fundamentally different way to achieve the same goal?\n- **Scope appropriateness**: Is this plan solving the right problem at the right level? Is it too narrow or too broad?\n- **Cost vs. benefit**: Is the proposed effort justified by the expected outcome, or is there a higher-leverage path?\n\n### Completeness\n- **Missing requirements**: Are all features fully specified?\n- **Incomplete tasks**: Do tasks have enough detail to implement?\n- **Missing dependencies**: Are task dependencies properly identified?\n- **Missing edge cases**: Are error conditions and edge cases addressed?\n- **Missing tests**: Is testing strategy adequate?\n\n### Correctness\n- **Technical feasibility**: Is the proposed approach technically sound?\n- **Architecture issues**: Are there design flaws or anti-patterns?\n- **Security concerns**: Are there potential vulnerabilities?\n- **Performance issues**: Will the approach scale appropriately?\n- **Integration issues**: Will the changes work with existing code?\n\n### Clarity\n- **Ambiguous requirements**: Are any requirements unclear or open to interpretation?\n- **Vague tasks**: Do tasks clearly specify what needs to be done?\n- **Missing context**: Is there sufficient background for implementers?\n- **Conflicting statements**: Are there contradictions in the plan?\n\n### Implementation Quality\n- **Over-engineering**: Is the solution more complex than necessary?\n- **Under-engineering**: Is the solution too simplistic for the problem?\n- **Code organization**: Is the proposed file structure sensible?\n- **Naming consistency**: Are names clear and consistent throughout?\n\n## Output Format\nReturn ONLY a valid JSON array with no additional text. Each element must have exactly these fields:\n- \"title\": string (5-10 word summary of the issue)\n- \"desc\": string (text explaining the issue and recommended fix)\n- \"importance\": \"high\" | \"medium\" | \"low\"\n  - high = critical gaps, security issues, architectural flaws, blockers\n  - medium = missing details, unclear requirements, potential issues\n  - low = minor improvements, style suggestions, nice-to-haves\n- \"reference\": string (which section of the plan this affects, e.g., \"## Requirements\" or \"### Task 3\")\n- \"type\": \"addition\" | \"modification\" | \"deletion\" | \"clarification\"\n  - addition = something is missing and should be added\n  - modification = something exists but needs to be changed\n  - deletion = something should be removed (unnecessary, harmful)\n  - clarification = something is unclear and needs better explanation\n\nExample output:\n[\n  {\n    \"title\": \"Missing rollback path for the schema change\",\n    \"desc\": \"The plan adds columns but never says how a failed deploy is undone. Add reversible migration steps and a data-preservation strategy.\",\n    \"importance\": \"high\",\n    \"reference\": \"## Database Changes\",\n    \"type\": \"addition\"\n  },\n  {\n    \"title\": \"Session lifetime is left unspecified\",\n    \"desc\": \"Task 3 introduces sessions without naming how long one lives or how it is renewed. State the lifetime and the renewal rule as configuration values.\",\n    \"importance\": \"medium\",\n    \"reference\": \"### Task 3: Session Handling\",\n    \"type\": \"clarification\"\n  },\n  {\n    \"title\": \"Fixture data for the new tests is undefined\",\n    \"desc\": \"The testing section names three suites but no seed data. Describe the fixtures each suite needs and where they live.\",\n    \"importance\": \"low\",\n    \"reference\": \"## Testing Strategy\",\n    \"type\": \"addition\"\n  }\n]\n\nIf no issues are found, return an empty array: []\n\n## Output Location\nCRITICAL: Print the JSON array to STDOUT and nothing else. Do NOT write it to a\nfile, do NOT wrap it in a markdown code block, do NOT add any explanation before\nor after it. Your entire stdout must be the raw JSON array.\n\nIf no issues are found, print an empty array: []\n"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": null,
+      "role": "assistant",
+      "created": 1787156651,
+      "content": [
+        {
+          "type": "text",
+          "text": "Ran into this error: Authentication error: Authentication failed for http://127.0.0.1:8099/s/d5cf9359396f/v1/chat/completions. Status: 401 Unauthorized. Response: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys..\n\nPlease retry if you think this is a transient or recoverable error."
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    }
+  ],
+  "metadata": {
+    "total_tokens": null,
+    "status": "completed"
+  }
+}

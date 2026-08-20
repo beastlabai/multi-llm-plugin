@@ -41,6 +41,53 @@ image: mllm-e2e:local
 
 clis:
 
+  # THE ROW WITH NO OTHER COVERAGE AT ALL, and the reason `surface_probe` exists.
+  # agy reaches no stub -- its auth resolves BEFORE the first RPC, and
+  # GEMINI_API_KEY + GOOGLE_API_KEY + GOOGLE_GEMINI_BASE_URL set together were
+  # measured producing a byte-identical auth failure with ZERO requests reaching
+  # a stub -- so it has no provider-lane row, no argv golden and no full-chain
+  # bundle, and unlike cursor-agent it has no live lane either (that needs a
+  # file-store OAuth token nobody has staged yet). This probe is everything this
+  # binary gets, and it costs nothing: offline, credential-free, uid 10001.
+  #
+  # `agy --help` prints to STDERR with stdout EMPTY and exits 0. Both the seeder
+  # and the gate concatenate the two streams, which is what makes this a real
+  # `probe: ok`; reading stdout alone would have self-exempted the row as
+  # `probe: none` -- an honest-looking false statement about a binary that
+  # documents every flag we emit.
+  #
+  # Captured 2026-08-19 against agy 1.1.15, with the row's own
+  # AGY_CLI_DISABLE_AUTO_UPDATE=true. That variable is not decoration here: with
+  # `=1` agy was measured spawning a background updater and rewriting itself
+  # mid-run, and it publishes DAILY -- so a re-seed on a later day is expected to
+  # move both `version` and `help_sha256`, and that movement is upstream cadence,
+  # not a deprecation. Read the help before moving the digest anyway.
+  - cli: agy
+    binary: agy
+    version: "1.1.15"
+    probe: ok
+    help_invocation: "agy --help"
+    help_sha256: 68066ee6bfa8fe5143d6b67d46b294303e574b5717276146007eb9afa31eb7e4
+    help_bytes: 2510
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--dangerously-skip-permissions"
+      - "--model"
+      - "--new-project"
+      - "--output-format"
+      # Derived, not hand-listed: the adapter renders a Go duration from the
+      # caller's resolved timeout (`print_timeout_value`), and the flag is how
+      # agy's own print-mode cutoff is held UNDER the parent's deadline so agy
+      # writes its `status: ERROR` envelope instead of being killed.
+      - "--print-timeout"
+      # NOT a positional prompt: `-p` is the short alias of `--print` and carries
+      # the prompt AS ITS VALUE. Every other CLI in this file takes its prompt
+      # positionally or after `-p` as a separate token, so this is exactly the
+      # spelling an upstream rename would break silently -- the argv golden
+      # compares our argv against our own table and would stay green.
+      - "-p"
+
   - cli: aider
     binary: aider
     version: "aider 0.86.2"
@@ -116,6 +163,72 @@ clis:
       - "--sandbox"
       - "--skip-git-repo-check"
 
+  # THE ONE ROW WHOSE ONLY OTHER COVERAGE IS CREDENTIALED. cursor-agent has no
+  # provider-lane row and can never have one (binary protobuf over Connect-RPC —
+  # there is nothing a stub can answer), so the argv golden and the full-chain
+  # bundle are permanently out of reach for it. This probe is not: it needs the
+  # binary and nothing else, runs `--network none` as uid 10001, and costs
+  # nothing. It is also the exact signal the `--mode ask` regression needed —
+  # `--mode` disappearing, or its `ask` value changing meaning, is what breaks an
+  # adapter that declares `supports_file_output = False` *because* of it.
+  #
+  # `--trust` and `--mode` are additionally gated at spawn time: the adapter reads
+  # this same help before it will emit them and refuses the slot (`version-too-
+  # low`) if either is absent. So this row failing and every cursor slot refusing
+  # are the same event, seen a build earlier.
+  # THE ROW THAT WAS DROPPED BY HAND, and the reason it was. copilot's npm entry
+  # point is a loader that self-extracts its native runtime into
+  # $XDG_CACHE_HOME; the image pre-warms /opt/mllm/copilot-cache and
+  # redirect.yaml's row pins the variable there, but this probe used to run with
+  # the ambient environment — so the loader landed on the noexec tmpfs $HOME and
+  # printed `Failed to load package index ... Native addon "runtime" not found`.
+  # 2.3 KB of error text, all nine options "missing".
+  #
+  # It could not self-exempt either: `probe: none` is recorded only when the help
+  # invocation produces NO output, and an error message is output. So the row
+  # that would have failed the presence assertion was removed by hand, and the
+  # one proprietary CLI in the image — the only one whose help we cannot read on
+  # a developer's laptop — was left with no upstream drift signal at all.
+  #
+  # The probe now passes the row's own `env_extra` (and nothing else), which is
+  # what makes this a real `probe: ok` row rather than an honest-looking
+  # `probe: none` that would have been a false statement.
+  - cli: copilot
+    binary: copilot
+    version: "GitHub Copilot CLI 1.0.80."
+    probe: ok
+    help_invocation: "copilot --help"
+    help_sha256: 71969bbaf2b0cb8ddb292bd8b74b004feee09f4929a59a4d83933962ef620fff
+    help_bytes: 15142
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--disable-builtin-mcps"
+      - "--log-level"
+      - "--model"
+      - "--no-ask-user"
+      - "--no-auto-update"
+      - "--no-custom-instructions"
+      - "--output-format"
+      - "--stream"
+      - "-p"
+
+  - cli: cursor-agent
+    binary: cursor-agent
+    version: "2026.08.11-e8db854"
+    probe: ok
+    help_invocation: "cursor-agent --help"
+    help_sha256: f06c0cfd979a6b076db5fb30408735eb85f8b32bdfeae8085cce9ab59fb6e502
+    help_bytes: 5474
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--mode"
+      - "--model"
+      - "--output-format"
+      - "--print"
+      - "--trust"
+
   - cli: gemini
     binary: gemini
     version: "0.25.2"
@@ -170,6 +283,48 @@ clis:
       # the accept-probe flips to rejected and the row fails — which a
       # presence-only contract could never catch, since it is already absent.
       - "--no-auto-update"
+
+  - cli: kimi
+    binary: kimi
+    version: "0.36.1"
+    probe: ok
+    help_invocation: "kimi --help"
+    help_sha256: fba090e5ffc85ed7b8763a272a0b042c88c36063b60fc42719feb6fd706a2e56
+    help_bytes: 2945
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--output-format"
+      - "-p"
+
+  - cli: qwen-code
+    binary: qwen
+    version: "0.21.13"
+    probe: ok
+    # NOT `qwen --help`: five of the options this adapter emits are HIDDEN and
+    # absent from the visible help, and qwen returns 0 for a bogus flag whenever
+    # --help is present -- which makes the `hidden_options` route vacuous (its
+    # own control catches that). An unknown argument without --help dumps the
+    # complete option list deterministically, so that is the surface probed.
+    # See the redirect.yaml row for the full reasoning.
+    help_invocation: "qwen --mllm-force-full-help"
+    help_sha256: f5a618e583a206fc8edc1781004f91cb34a9a41f0310fc491147d64477ff5fe2
+    help_bytes: 10853
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--bare"
+      - "--chat-recording"
+      - "--max-session-turns"
+      - "--max-tool-calls"
+      - "-m"
+      - "-o"
+      # NOT listed, deliberately: `--max-wall-time` is emitted only when the
+      # caller passes a timeout, and seed_cli_surface derives this list from
+      # `build_command()` with `timeout_s=None` (§1's guard -- that call renders
+      # argv byte-identical to omitting the keyword). It IS documented by the
+      # probed surface, and its presence is pinned by expected_argv.yaml's
+      # `<timeout>` placeholder plus test_providers.py's derivation table.
 
   - cli: kilocode
     binary: kilocode
@@ -231,4 +386,23 @@ clis:
     options:
       - "--model"
       - "--no-session"
+      - "-p"
+
+  # vibe. Every option this adapter emits is in the VISIBLE help (the seeder
+  # reported `missing_options: []`), so unlike qwen-code this row needs no
+  # forced-full-help invocation. Note the absence of a model option: vibe has no
+  # `--model` flag at all, and the alias travels in VIBE_ACTIVE_MODEL.
+  - cli: vibe
+    binary: vibe
+    version: "vibe 2.24.1"
+    probe: ok
+    help_invocation: "vibe --help"
+    help_sha256: 42f441b875d4146e42349f8170ec90c10501d55433c3606a5077ffb9972996ea
+    help_bytes: 4689
+    profiles: [generate]
+    options:
+      - "--agent"
+      - "--max-price"
+      - "--max-turns"
+      - "--output"
       - "-p"

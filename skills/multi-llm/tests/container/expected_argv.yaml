@@ -25,6 +25,17 @@
 # last is precisely the silent bug a "the prompt is optional" rule would wave
 # through.
 #
+# CURSOR-AGENT IS DELIBERATELY ABSENT, and adding it would break the table.
+# Every entry here is graded against the wrapper's call log from a provider-lane
+# run (`test_container_argv.py::TestEveryEntryStillDoesWork`: an entry matching
+# fewer records than it declares is reported as stale). cursor-agent is in the
+# image and on the live lane, but it has no provider-lane row and never will —
+# its backend is binary protobuf over Connect-RPC, so no stub can answer it — so
+# a cursor entry here would match zero records and fail as stale on every run.
+# Its argv is covered instead by `tests/test_cursor_argv_and_residue.py` and the
+# fake-lane roster's parser round-trip, and its upstream-facing half by
+# `cli-surface.yaml`, whose seeder takes live-lane rows for exactly this reason.
+#
 # Seeded 2026-08-14 from a real `review-plan --quick` run of all 11 rows, then
 # read by hand. The agent-write/stdin rows arrive with Phase 3's full chain,
 # which is what dispatches that transport.
@@ -104,9 +115,11 @@ entries:
     prompt: stdin
     min_records: 1
 
-  # The schema-carrying variant of the row above: build_command splices
-  # --json-schema right after --output-format json when the §5.4.1 --help gate
-  # passes (claude_code.py:550-556). The chain reaches it exactly once, for kind
+  # The schema-carrying variant of the row above: the one argv renderer
+  # (`claude_code.ClaudeCodeProvider._render_argv`, which build_command and both
+  # agent profiles go through) splices --json-schema right after
+  # --output-format json when the §5.4.1 --help gate passes. The chain reaches it
+  # exactly once, for kind
   # task_generation -> phase generate-tasks -> generated_tasks.schema.json. The
   # collapsed digest is pinned deliberately: a schema swapped for another schema
   # is the regression this row exists to catch.
@@ -142,6 +155,15 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # `--permission-mode acceptEdits` is on the GENERATE row too since 2026-08-20,
+  # and it is policy, so the value stays verbatim. `supports_file_output = True`
+  # makes the fan-out prompt end in "write your JSON output to this file: <path>",
+  # and headless `claude -p` denied the model's own Write without a grant —
+  # measured on the credentialed live lane as exit 0, `is_error: false`,
+  # `permission_denials: [{"tool_name": "Write"}]` and an answer that then died in
+  # `parse_output`. The two agent-readonly rows ABOVE deliberately carry NO
+  # permission flag: their dispatches never write (the executor captures stdout
+  # and writes `output_path` itself), so the read-only profile asks for none.
   - provider: claude-code
     profile: generate
     transport: argv
@@ -150,13 +172,14 @@ entries:
     options:
       "--model": "<model>"
       "--output-format": "json"
+      "--permission-mode": "acceptEdits"
       "-p": null
     tail: ["<prompt>"]
     prompt: argv
     min_records: 1
 
-  # The §5.4.1 per-flag capability gate: _read_help_tokens spawns `claude --help`
-  # once per process (claude_code.py:209), memoised on the resolved binary, and
+  # The §5.4.1 per-flag capability gate: `claude_code._read_help_tokens` spawns
+  # `claude --help` once per process, memoised on the resolved binary, and
   # only when a schema is attached. No other adapter probes this way.
   - provider: claude-code
     profile: probe
@@ -317,6 +340,111 @@ entries:
     prompt: argv
     min_records: 1
 
+  # §6.5 TIER 1, and the absence is the assertion. copilot's help text claims
+  # `--allow-all-tools` is "required for non-interactive mode"; the probe walked
+  # all four rungs with a seeded filesystem canary, got byte-identical output and
+  # a clean canary every time, and rule 1's ascending stop applies at rung 1. So
+  # no permission flag and no `--add-dir` appear here, and adding one later is a
+  # visible edit to this table rather than a quiet argv change.
+  #
+  # `--output-format`, `--stream`, `--log-level` are policy constants and stay
+  # VERBATIM; `--model` is row-derived and normalizes to `<model>` through the
+  # table normalize_argv.py already carries, so this row needs no table change.
+  - provider: copilot
+    profile: generate
+    transport: argv
+    binary: copilot
+    subcommands: []
+    options:
+      "--output-format": "json"
+      "--stream": "off"
+      "--log-level": "none"
+      # Bare boolean flags carry a null value, codex's `--ephemeral`/`--json`
+      # shape. Omitting them does not make the entry laxer -- `_matches`
+      # compares the options dict for EQUALITY, so a missing flag matches
+      # nothing at all.
+      "--no-custom-instructions": null
+      "--no-ask-user": null
+      "--no-auto-update": null
+      "--disable-builtin-mcps": null
+      "--model": "<model>"
+      "-p": "<prompt>"
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  # kimi carries NO model token: the slug travels in KIMI_MODEL_NAME, and
+  # `kimi -m <slug>` is a hard failure ("Model ... is not configured in
+  # config.toml"). This entry is what keeps that measured fact from being
+  # "fixed" back into argv by a later edit.
+  - provider: kimi
+    profile: generate
+    transport: argv
+    binary: kimi
+    subcommands: []
+    options:
+      "--output-format": "stream-json"
+      "-p": "<prompt>"
+    tail: []
+    prompt: argv
+    min_records: 1
+
+  # `--max-wall-time` is the ONE row-derived value this repo's argv tables carry
+  # (§7 step 6): its seconds come from the slot's `timeout_s=`, so it is pinned
+  # as the `<timeout>` placeholder rather than verbatim -- otherwise one run's
+  # slot length would freeze into this row and redden every other one. The
+  # placeholder pins the SHAPE; the VALUE is pinned by test_providers.py's
+  # derivation table plus test_container_argv.py's raw-call-log read.
+  #
+  # `--max-tool-calls 0` and `--max-session-turns 25` are module constants, so
+  # they stay VERBATIM -- reducing a policy value to a placeholder would make
+  # the assertion vacuous.
+  #
+  # The prompt is a bare trailing positional, not a `-p <prompt>` pair: `-p` is
+  # deprecated at 0.21.13.
+  - provider: qwen-code
+    profile: generate
+    transport: argv
+    binary: qwen
+    subcommands: []
+    options:
+      "--bare": null
+      "--chat-recording": "false"
+      "-o": "json"
+      "--max-tool-calls": "0"
+      "--max-session-turns": "25"
+      "--max-wall-time": "<timeout>"
+      "-m": "<model>"
+    tail:
+      - "<prompt>"
+    prompt: argv
+    min_records: 1
+
+  # vibe. Note what is ABSENT: any model token at all -- vibe has no `--model`
+  # flag, so the alias rides VIBE_ACTIVE_MODEL and nothing model-shaped ever
+  # reaches the call log. That is also why vibe needed no normalize_argv.py
+  # change: with no model token there is nothing to placeholder.
+  #
+  # `--max-price` and `--max-turns` are POLICY constants and are kept VERBATIM,
+  # the rule `--json-schema` already follows -- reducing either to a placeholder
+  # would make the assertion vacuous. `--agent plan` is §6.5's rung, and it is
+  # pinned here precisely so widening it later is a visible edit to this table
+  # rather than a quiet argv change: the BARE invocation vibe would otherwise
+  # run is `accept-edits`, whose AgentSafety is DESTRUCTIVE.
+  - provider: vibe
+    profile: generate
+    transport: argv
+    binary: vibe
+    subcommands: []
+    options:
+      "--output": "json"
+      "--max-price": "0.25"
+      "--max-turns": "4"
+      "--agent": "plan"
+      "-p": "<prompt>"
+    tail: []
+    prompt: argv
+    min_records: 1
   - provider: muse
     profile: generate
     transport: argv

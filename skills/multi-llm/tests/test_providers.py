@@ -16,19 +16,35 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers.agy import AgyProvider
 from utils.providers.aider import AiderProvider
-from utils.providers.base import LLMProvider, split_reasoning_effort
+from utils.providers.base import (
+    CATEGORY_INVALID_MODEL,
+    LLMProvider,
+    split_reasoning_effort,
+)
+from utils.retry_ladder import (
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
+)
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
+from utils.providers.copilot import CopilotProvider
 from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
 from utils.providers.goose import GooseProvider
 from utils.providers.grok import GrokProvider
 from utils.providers.kilocode import KiloCodeProvider
+from utils.providers import kimi as kimi_module
+from utils.providers.kimi import KimiProvider
 from utils.providers.muse import MuseProvider
 from utils.providers.opencode import OpenCodeProvider
 from utils.providers.pi import PiProvider
+from utils.providers import qwen_code as qwen_code_module
+from utils.providers.qwen_code import QwenCodeProvider
+from utils.providers import vibe as vibe_module
+from utils.providers.vibe import VibeProvider
 
 
 class TestSplitReasoningEffort:
@@ -208,6 +224,8 @@ This concludes the review."""
             "json",
             "--model",
             "sonnet",
+            "--permission-mode",
+            "acceptEdits",
             "Review this code",
         ]
 
@@ -247,6 +265,8 @@ This concludes the review."""
             '{"properties":{"a":{"type":"string"}},"type":"object"}',
             "--model",
             "sonnet",
+            "--permission-mode",
+            "acceptEdits",
             "Review this code",
         ]
 
@@ -270,6 +290,8 @@ This concludes the review."""
             "fable",
             "--effort",
             "max",
+            "--permission-mode",
+            "acceptEdits",
             "Review this code",
         ]
 
@@ -287,6 +309,8 @@ This concludes the review."""
                 "fable",
                 "--effort",
                 effort,
+                "--permission-mode",
+                "acceptEdits",
                 "Review this code",
             ], f"effort {effort!r} did not build the expected command"
 
@@ -302,6 +326,8 @@ This concludes the review."""
                 "json",
                 "--model",
                 model,
+                "--permission-mode",
+                "acceptEdits",
                 "Review this code",
             ], f"model {model!r} was not passed through verbatim"
 
@@ -472,7 +498,15 @@ class TestClaudeCodeRetryEnvelope:
         from utils.provider_registry import _PROVIDERS
 
         for name, provider in sorted(_PROVIDERS.items()):
-            if name == "claude-code":
+            # Written when claude-code was the ONLY adapter with a measured
+            # envelope, so it named that one exception directly. The rule it is
+            # actually enforcing is the one in its own assertion message --
+            # retry-shaped env REQUIRES a declaration -- so the exemption is the
+            # declaration, not the name. vibe is the case that forced this:
+            # `VIBE_API_TIMEOUT` is retry-shaped by construction (the declared
+            # `max_wall_s` is literally 3x it) and pinning it is what makes the
+            # envelope true, exactly as `CLAUDE_CODE_MAX_RETRIES` does.
+            if provider.internal_retries is not None:
                 continue
             try:
                 env = provider.get_env("m")
@@ -537,7 +571,11 @@ class TestInternalRetryEnvelopeDeclarations:
     tests assert the three attribute *names* rather than an isinstance.
     """
 
-    MEASURED = ("claude-code", "codex")
+    #: Adapters whose vendor envelope was measured against a fail-forever
+    #: stub. `kimi` joined on 0.36.1: 10 attempts, exponential backoff to
+    #: ~38 s, 429s retried and `Retry-After` honoured exactly — the row
+    #: §6.1.1 explicitly warned must be *confirmed*, not assumed `None`.
+    MEASURED = ("claude-code", "codex", "kimi")
 
     @pytest.fixture
     def registry(self):
@@ -545,9 +583,15 @@ class TestInternalRetryEnvelopeDeclarations:
 
         return _PROVIDERS
 
-    def test_the_sweep_really_covers_thirteen_adapters(self, registry):
-        """The done-when is 'all 13' — a shrinking sweep must fail, not pass."""
-        assert len(registry) == 13, sorted(registry)
+    def test_the_sweep_really_covers_every_registered_adapter(self, registry):
+        """The done-when is 'all of them' — a shrinking sweep must fail, not pass.
+
+        The count is spelled once, here, and the name no longer carries it: the
+        literal "thirteen" went stale the moment the roster grew, and a test
+        whose name disagrees with its assertion is worse than one with no name at
+        all. Bump the number with the registry entry that moves it.
+        """
+        assert len(registry) == 17, sorted(registry)
 
     def test_the_base_default_is_none(self):
         """An adapter that measured nothing declares nothing, by inheriting."""
@@ -573,10 +617,19 @@ class TestInternalRetryEnvelopeDeclarations:
 
     @pytest.mark.parametrize(
         "name",
-        [n for n in _envelope_sweep_names() if n not in ("claude-code", "codex")],
+        [
+            n for n in _envelope_sweep_names()
+            if n not in ("claude-code", "codex", "copilot", "kimi", "qwen-code",
+                         "vibe")
+        ],
     )
-    def test_the_other_eleven_are_unmeasured(self, registry, name):
-        """§7.5 rule 6(c): `None` is 'assume one request', never 'assume the worst'."""
+    def test_every_unmeasured_adapter_declares_none(self, registry, name):
+        """§7.5 rule 6(c): `None` is 'assume one request', never 'assume the worst'.
+
+        Named without a count for the same reason as the sweep above: the
+        unmeasured roster shrinks every time somebody runs §6.1.1's experiments,
+        and "the other eleven" was already wrong.
+        """
         assert registry[name].internal_retries is None
 
     # -- the measured rows ------------------------------------------------
@@ -811,11 +864,17 @@ class TestClaudeCodeFallbackModel:
 
     # ── the off switch ────────────────────────────────────────────────────
     def test_the_shipped_config_emits_no_flag_at_all(self, provider):
-        """Nothing configured ⇒ today's argv, byte-for-byte."""
+        """Nothing configured ⇒ today's argv, byte-for-byte.
+
+        `--permission-mode acceptEdits` is the generate path's own write grant
+        (see `claude_code._render_argv`), not a fallback artefact: it is present
+        here precisely because nothing about `--fallback-model` is configured.
+        """
         cmd = provider.build_command(self.PROMPT, "sonnet")
 
         assert cmd == [
             "claude", "-p", "--output-format", "json", "--model", "sonnet",
+            "--permission-mode", "acceptEdits",
             self.PROMPT,
         ]
 
@@ -850,6 +909,7 @@ class TestClaudeCodeFallbackModel:
 
         assert cmd == [
             "claude", "-p", "--output-format", "json", "--model", "sonnet",
+            "--permission-mode", "acceptEdits",
             "--fallback-model", "opus,haiku",
             self.PROMPT,
         ]
@@ -865,7 +925,8 @@ class TestClaudeCodeFallbackModel:
 
         assert cmd == [
             "claude", "-p", "--output-format", "json", "--model", "fable",
-            "--effort", "max", "--fallback-model", "haiku",
+            "--effort", "max", "--permission-mode", "acceptEdits",
+            "--fallback-model", "haiku",
             self.PROMPT,
         ]
 
@@ -2305,6 +2366,21 @@ class TestKiloCodeProvider:
         """Test that default_timeout is set correctly."""
         assert provider.default_timeout == 600
 
+    # -- Dual binary name (`kilocode` / `kilo`) -----------------------------
+    #
+    # Upstream ships the CLI under both spellings. This adapter knew only
+    # `kilocode`, so on a `kilo`-only machine `is_available()` was False and the
+    # provider was invisible to the fan-out — not degraded, absent. The three
+    # cases below are the whole contract: canonical present (today's argv,
+    # byte-identical), only the alias present (argv[0] moves, nothing else
+    # does), and neither present (not available).
+
+    @staticmethod
+    def _which_finding(*names):
+        """A `shutil.which` stub that resolves exactly `names`."""
+        found = set(names)
+        return lambda name: f"/usr/local/bin/{name}" if name in found else None
+
     @patch("shutil.which")
     def test_is_available_true(self, mock_which, provider):
         """Test is_available returns True when kilocode is found."""
@@ -2314,12 +2390,84 @@ class TestKiloCodeProvider:
         mock_which.assert_called_once_with("kilocode")
 
     @patch("shutil.which")
+    def test_is_available_true_for_the_kilo_spelling(self, mock_which, provider):
+        """A `kilo`-only install is available — the defect this pins."""
+        mock_which.side_effect = self._which_finding("kilo")
+
+        assert provider.is_available() is True
+        assert [c.args[0] for c in mock_which.call_args_list] == ["kilocode", "kilo"]
+
+    @patch("shutil.which")
     def test_is_available_false(self, mock_which, provider):
-        """Test is_available returns False when kilocode is not found."""
+        """is_available is False only when NEITHER spelling resolves."""
         mock_which.return_value = None
 
         assert provider.is_available() is False
-        mock_which.assert_called_once_with("kilocode")
+        assert [c.args[0] for c in mock_which.call_args_list] == ["kilocode", "kilo"]
+
+    @patch("shutil.which")
+    def test_build_command_uses_the_kilocode_spelling_when_present(self, mock_which, provider):
+        """Canonical install: argv is byte-identical to what shipped before."""
+        mock_which.side_effect = self._which_finding("kilocode")
+
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        assert cmd == [
+            "kilocode", "run", "--auto", "-m", "openrouter/z-ai/glm-5.2", "Review this code",
+        ]
+
+    @patch("shutil.which")
+    def test_build_command_prefers_kilocode_when_both_resolve(self, mock_which, provider):
+        """Both installed ⇒ `kilocode` wins, so argv does not move under the user."""
+        mock_which.side_effect = self._which_finding("kilocode", "kilo")
+
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        assert cmd[0] == "kilocode"
+
+    @patch("shutil.which")
+    def test_build_command_moves_only_argv0_for_the_kilo_spelling(self, mock_which, provider):
+        """`kilo`-only: argv[0] moves and every other element is identical.
+
+        Asserted against the canonical argv element-by-element rather than as a
+        literal, so this cannot drift from the row above.
+        """
+        mock_which.side_effect = self._which_finding("kilocode")
+        canonical = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        mock_which.side_effect = self._which_finding("kilo")
+        aliased = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        assert aliased[0] == "kilo"
+        assert aliased[1:] == canonical[1:]
+
+    @patch("shutil.which")
+    def test_build_command_variant_branch_also_resolves_the_binary(self, mock_which, provider):
+        """The `--variant` branch is the second hardcoded literal §2.3 names."""
+        mock_which.side_effect = self._which_finding("kilo")
+
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2:xhigh")
+
+        assert cmd == [
+            "kilo", "run", "--auto", "-m", "openrouter/z-ai/glm-5.2",
+            "--variant", "xhigh", "Review this code",
+        ]
+
+    @patch("shutil.which")
+    def test_build_command_falls_back_to_the_canonical_name_with_neither_installed(
+        self, mock_which, provider
+    ):
+        """Neither installed ⇒ the canonical spelling, so the argv contract holds.
+
+        `is_available()` is False here, so this argv never reaches a subprocess;
+        it is what the argv-contract tests, the housekeeping MODELS table and
+        `seed_expected_argv.py` render on a binary-free host.
+        """
+        mock_which.return_value = None
+
+        cmd = provider.build_command("Review this code", "openrouter/z-ai/glm-5.2")
+
+        assert cmd[0] == "kilocode"
 
     def test_build_command(self, provider):
         """Test command building for Kilo Code CLI."""
@@ -2645,6 +2793,1573 @@ class TestKiloCodeDefaultModelSpecs:
             "publish; `kilocode run --variant` ignores it SILENTLY:\n"
             + "\n".join(offenders)
         )
+
+
+class TestKimiProvider:
+    """Tests for the KimiProvider class (harness-expansion.md §3.2, H4·kimi).
+
+    Every assertion here is anchored to a capture in `tests/fixtures/kimi/`,
+    taken from the real binary at 0.36.1 inside the §6 probe container against
+    the committed stub — the `tests/fixtures/kilocode/` precedent.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "kimi"
+
+    @pytest.fixture
+    def provider(self):
+        return KimiProvider()
+
+    def _capture(self, stem):
+        """One captured run as (stdout, stderr)."""
+        out = self.FIXTURES / f"{stem}.stdout.txt"
+        err = self.FIXTURES / f"{stem}.stderr.txt"
+        return (
+            out.read_text(encoding="utf-8") if out.exists() else "",
+            err.read_text(encoding="utf-8") if err.exists() else "",
+        )
+
+    # -- identity + argv ---------------------------------------------------
+
+    def test_provider_name(self, provider):
+        assert provider.name == "kimi"
+
+    def test_is_available_checks_the_kimi_binary(self, provider):
+        with patch("shutil.which", return_value="/usr/bin/kimi") as which:
+            assert provider.is_available() is True
+        which.assert_called_once_with("kimi")
+
+    def test_is_available_false_when_absent(self, provider):
+        with patch("shutil.which", return_value=None):
+            assert provider.is_available() is False
+
+    def test_build_command_renders_the_measured_argv(self, provider):
+        assert provider.build_command("Review this plan", "moonshotai/kimi-k2-thinking") == [
+            "kimi", "--output-format", "stream-json", "-p", "Review this plan",
+        ]
+
+    def test_the_model_never_reaches_argv(self, provider):
+        """The measured contract: `-m <slug>` is a HARD FAILURE at 0.36.1.
+
+        `kimi -m moonshotai/kimi-k2-thinking` exits 1 with `Model "..." is not
+        configured in config.toml`, because the KIMI_MODEL_* family synthesizes
+        its model under the fixed literal id `__kimi_env_model__` and
+        KIMI_MODEL_NAME carries the upstream wire slug. This is the plan's §8
+        item 3 rule inverted, so it is pinned rather than left to a comment.
+        """
+        argv = provider.build_command("p", "moonshotai/kimi-k2-thinking")
+
+        assert "-m" not in argv
+        assert "--model" not in argv
+        assert "moonshotai/kimi-k2-thinking" not in argv
+
+    def test_the_prompt_is_last(self, provider):
+        """`prompt_argv_index = -1`, and the -p pair is what trails."""
+        argv = provider.build_command("the prompt", "moonshotai/kimi-k2-thinking")
+
+        assert provider.prompt_argv_index == -1
+        assert argv[-2:] == ["-p", "the prompt"]
+
+    def test_an_effort_suffix_is_part_of_the_model_id(self, provider):
+        """kimi DECLINES effort: KIMI_MODEL_THINKING_EFFORT is inert on the wire.
+
+        So a `:high` suffix is not stripped — it stays part of the slug and
+        travels to KIMI_MODEL_NAME verbatim, which is what makes the failure a
+        legible "model not found" rather than a silently downgraded run.
+        """
+        env = provider.get_env("moonshotai/kimi-k2-thinking:high")
+
+        assert env["KIMI_MODEL_NAME"] == "moonshotai/kimi-k2-thinking:high"
+
+    def test_the_keywords_are_inert(self, provider):
+        """§1's guard: timeout_s/schema render argv byte-identical when unset."""
+        base = provider.build_command("p", "m")
+
+        assert provider.build_command("p", "m", timeout_s=None, schema=None) == base
+        assert provider.build_command("p", "m", timeout_s=600) == base
+
+    # -- parse_output: §3.4's two-step unwrap ------------------------------
+
+    def test_success_returns_the_models_own_json_document(self, provider):
+        """Wave-1 acceptance 1: assert the UNWRAPPED data, not `success is True`.
+
+        The capture is a real review-plan-shaped run whose answer is a suggestion
+        list, so this pins the whole chain — JSONL envelope, last assistant
+        record, then `extract_json_from_text` — rather than merely that the
+        parser did not raise.
+        """
+        result = provider.parse_output(*self._capture("success"))
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list) and len(result["data"]) == 4
+        assert result["data"][0]["title"] == "No rollback path for the connection pool"
+        assert {s["severity"] for s in result["data"]} == {"high", "medium"}
+
+    def test_the_resume_hint_is_never_mistaken_for_the_answer(self, provider):
+        """The trap the plan did not know about (§3.4).
+
+        The trailing `session.resume_hint` meta record ALSO carries a `content`
+        key. A parser taking "the last record with a content field" returns
+        "To resume this session: kimi -r ..." as the model's answer on every
+        successful run, so the `role == "assistant"` filter is load-bearing.
+        """
+        stdout, stderr = self._capture("success")
+
+        assert "session.resume_hint" in stdout, "fixture no longer covers the trap"
+        result = provider.parse_output(stdout, stderr)
+
+        assert "To resume this session" not in json.dumps(result["data"])
+
+    def test_multi_assistant_takes_the_last_message(self, provider):
+        """§6.2's `multi-assistant` row: last-wins, never first-wins or concat.
+
+        The muse trap. The capture interleaves an assistant preamble, a tool
+        record and the real answer; first-wins would return the preamble and
+        concatenation would return prose glued to JSON.
+        """
+        result = provider.parse_output(*self._capture("multi-assistant"))
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list)
+        assert result["data"][0]["title"] == "No rollback path"
+        assert "Let me look at the plan first." not in json.dumps(result["data"])
+
+    def test_an_all_noise_run_is_a_failure_not_an_empty_success(self, provider):
+        """§6.2's `ephemeral-only` row.
+
+        5xx-forever emits `system.version` plus nine `turn.step.retrying` meta
+        records and no assistant record at all. Reporting that as an empty
+        success would hand reaggregation a run that never happened.
+        """
+        result = provider.parse_output(*self._capture("ephemeral-only"))
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "no assistant record" in result["error"]
+
+    def test_a_truncated_stream_fails_cleanly(self, provider):
+        """§6.2's `truncated` row: never a traceback, never a half-parsed object."""
+        result = provider.parse_output(*self._capture("truncated"))
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["raw"]
+
+    def test_an_unparseable_trailing_line_does_not_lose_the_answer(self, provider):
+        """A stream cut mid-record keeps every complete record before the cut."""
+        stdout, _ = self._capture("success")
+        result = provider.parse_output(stdout + '{"role":"assis', "")
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list)
+
+    def test_the_failure_branch_has_the_documented_shape(self, provider):
+        """`kilocode.py`'s empty-output branch is the shape §3.4 names."""
+        result = provider.parse_output("", "")
+
+        assert set(result) == {"success", "error", "raw", "data"}
+        assert result["success"] is False and result["data"] is None
+
+    # -- failure classification (§6.2) -------------------------------------
+
+    @pytest.mark.parametrize(
+        "stem,expected",
+        [
+            ("auth-error", STATUS_AUTH_FAILED),
+            ("rate-limit", STATUS_RATE_LIMITED),
+            ("context-overflow", STATUS_CONTEXT_LENGTH_EXCEEDED),
+            ("invalid-model", CATEGORY_INVALID_MODEL),
+        ],
+    )
+    def test_captured_failures_classify(self, provider, stem, expected):
+        """Each §6.2 fixture pins the classification it was captured for."""
+        stdout, stderr = self._capture(stem)
+
+        assert provider.classify_failure(stdout, stderr, exit_code=1) == expected
+
+    def test_the_invalid_model_failure_names_the_model(self, provider):
+        """§6.2: an unnamed model makes the failure unfindable."""
+        _stdout, stderr = self._capture("invalid-model")
+
+        assert "no-such-model-xyz" in stderr
+
+    def test_a_masked_error_envelope_is_a_recorded_limitation(self, provider):
+        """§6.2's `error-envelope` row — a FINDING, pinned so it cannot regress
+        into a silent assumption.
+
+        kimi MASKS a provider error delivered inside a 200 success envelope: the
+        vendor's text is replaced by a generic "empty response" message, so it
+        never reaches `auth_error_patterns`/`rate_limit_patterns`. The run still
+        fails loudly (exit 1 plus a classified line), which is what makes this
+        acceptable — but a future reader must not conclude the vendor's own error
+        text is available here, because it is not.
+        """
+        stdout, stderr = self._capture("error-envelope")
+
+        assert "empty response" in stderr
+        assert provider.classify_failure(stdout, stderr, exit_code=1) is None
+        assert provider.parse_output(stdout, stderr)["success"] is False
+
+    def test_no_exit_zero_markers_are_declared(self, provider):
+        """Measured, not omitted: across 27 probe runs the exit code was
+        authoritative in every shape (0 success, 1 failure). Declaring a marker
+        would be guessing at a failure mode this CLI does not have."""
+        assert provider.exit_zero_failure_markers == ()
+
+    # -- §2.2 rule 6: the three guard tests --------------------------------
+
+    B1_SELECTOR_SET = (
+        "KIMI_MODEL_NAME",
+        "KIMI_MODEL_API_KEY",
+        "KIMI_MODEL_BASE_URL",
+        "KIMI_MODEL_PROVIDER_TYPE",
+    )
+
+    def test_get_env_carries_the_whole_b1_selector_set_by_name(self, provider):
+        """§2.2 rule 2 — selection is total, never partial.
+
+        KIMI_MODEL_NAME is the *enable switch*: verified against the binary,
+        with no member of the family set, `kimi provider list --json` returns
+        empty and the CLI silently reverts to its config-file route. So a
+        half-set is not a degraded run, it is a run on somebody else's
+        credential.
+        """
+        env = provider.get_env("moonshotai/kimi-k2-thinking")
+
+        for key in self.B1_SELECTOR_SET:
+            assert key in env, key
+        assert env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
+        assert env["KIMI_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+    def test_the_base_url_is_emitted_even_when_the_key_is_empty(
+        self, provider, monkeypatch
+    ):
+        """§2.2 rule 3: never omit the base URL to "let the CLI decide".
+
+        With no key the run must fail as a legible OpenRouter auth error, not
+        quietly resolve to the Moonshot subscription endpoint.
+        """
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        env = provider.get_env("moonshotai/kimi-k2-thinking")
+
+        assert env["KIMI_MODEL_API_KEY"] == ""
+        assert env["KIMI_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+    def test_the_base_url_carries_the_version_segment(self, provider):
+        """Measured: kimi appends `/chat/completions` VERBATIM and inserts no
+        `/v1` of its own, so a base URL without it 404s."""
+        assert provider.get_env("m")["KIMI_MODEL_BASE_URL"].endswith("/v1")
+
+    def test_get_remove_env_strips_every_unset_family_member(self, provider):
+        """§8.2's rule verbatim, over the measured 18-name family.
+
+        A `KIMI_MODEL_TEMPERATURE` or `KIMI_MODEL_MAX_CONTEXT_SIZE` left over
+        from the user's own kimi session would silently reshape a fan-out request
+        nobody configured.
+        """
+        stripped = set(provider.get_remove_env())
+        # The adapter's REAL injected set, not the B1 selector set: the output
+        # ceiling is a KIMI_MODEL_* name that is injected without being a
+        # backend selector, and reading get_env keeps the two in step.
+        injected = set(provider.get_env("moonshotai/kimi-k2-thinking"))
+
+        for name in kimi_module._KIMI_MODEL_VARS:
+            if name in injected:
+                assert name not in stripped, f"{name} is injected, not stripped"
+            else:
+                assert name in stripped, f"unset family member not stripped: {name}"
+
+    def test_get_remove_env_strips_the_b3_names(self, provider):
+        """The Moonshot subscription route and the legacy aliases (§2.2 rule 3)."""
+        stripped = set(provider.get_remove_env())
+
+        for name in kimi_module._STRIPPED_VENDOR_VARS:
+            assert name in stripped, name
+        assert "KIMI_API_KEY" in stripped
+        assert "KIMI_LOOP_MAX_RETRIES_PER_STEP" in stripped
+
+    def test_every_catalog_entry_is_in_the_b1_namespace(self):
+        """§2.2 rule 6(c): every shipped `models:` entry is an OpenRouter slug,
+        passed verbatim to the model surface (here, KIMI_MODEL_NAME)."""
+        from utils.provider_registry import load_base_config
+
+        models = load_base_config()["providers"]["kimi"]["models"]
+
+        assert models, "kimi ships no models: it would be invisible to the picker"
+        for slug in models:
+            assert "/" in slug, f"not an OpenRouter slug: {slug}"
+            assert KimiProvider().get_env(slug)["KIMI_MODEL_NAME"] == slug
+
+    def test_the_default_model_is_models_zero(self):
+        """§8 item 3: `--init` injects models[0], so it must be the §6.1 slug
+        the §7.4 live smoke actually ran."""
+        from utils.provider_registry import load_base_config
+
+        models = load_base_config()["providers"]["kimi"]["models"]
+
+        assert models[0] == "moonshotai/kimi-k2.5"
+
+    def test_defaults_models_gains_no_uncommented_row(self):
+        """§8 item 3's rule: the shipped example line is COMMENTED.
+
+        `is_available()` is a bare `shutil.which`, so an active row would put a
+        provider the user has no binary for into the default fan-out panel and
+        into `--quick` — a dead slot in every review.
+        """
+        from utils.provider_registry import load_base_config
+
+        defaults = load_base_config()["defaults"]["models"]
+
+        assert not [m for m in defaults if str(m).startswith("kimi:")]
+
+    # -- the pinned retry knob (§6.1.1) ------------------------------------
+
+    def test_the_output_ceiling_is_pinned(self, provider):
+        """Measured against the REAL endpoint, which is the only place it shows.
+
+        kimi derives `max_tokens` from its synthesized model's context size and
+        sends 131072 on every call. Several OpenRouter upstreams cap output below
+        that and REJECT the request rather than clamping it -- the first live
+        smoke died on `400 Provider returned error`, raw body "Requested maximum
+        tokens of 131072 exceeds the maximum output tokens limit: 102400". So the
+        pin is what makes kimi answer at all on those providers, not a spend
+        preference. It is also §7.4's per-CLI output ceiling.
+        """
+        env = provider.get_env("moonshotai/kimi-k2-thinking")
+
+        assert env["KIMI_MODEL_MAX_TOKENS"] == str(kimi_module.KIMI_MODEL_MAX_TOKENS)
+        assert kimi_module.KIMI_MODEL_MAX_TOKENS < 102_400
+
+    def test_the_other_token_knobs_stay_stripped(self, provider):
+        """Three other names move the same wire field. Only the one that names it
+        is injected; the rest are stripped so a stale export cannot quietly raise
+        the ceiling back to something an upstream rejects."""
+        stripped = set(provider.get_remove_env())
+
+        for name in ("KIMI_MODEL_MAX_OUTPUT_SIZE",
+                     "KIMI_MODEL_MAX_COMPLETION_TOKENS",
+                     "KIMI_MODEL_MAX_CONTEXT_SIZE"):
+            assert name in stripped, name
+
+    def test_the_envelope_declares_the_pinned_number(self, provider):
+        """`claude_code.py`'s precedent: pin the knob, declare the PINNED number.
+
+        The bare CLI measured 10 attempts; `get_env` pins
+        KIMI_LOOP_MAX_ATTEMPTS_PER_STEP=1, so declaring 10 would budget for a
+        configuration this harness never runs.
+        """
+        envelope = provider.internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == kimi_module.KIMI_LOOP_MAX_ATTEMPTS_PER_STEP
+        assert str(envelope.max_requests) == provider.get_env("m")[
+            "KIMI_LOOP_MAX_ATTEMPTS_PER_STEP"
+        ]
+
+    def test_the_wall_clock_is_honestly_unbounded(self, provider):
+        """`max_wall_s=None` is forced twice over, not unmeasured: a stalled
+        request has no client-side timeout (no output within 420 s, and no
+        KIMI_* request-timeout knob exists) and a honoured `Retry-After` is
+        server-chosen. Rule 4 then runs no admission test, which is honest."""
+        assert provider.internal_retries.max_wall_s is None
+
+    def test_rate_limits_are_retried_internally(self, provider):
+        """Measured against a 429-forever stub. `True` is what makes §7.5 rule
+        6(b) suppress an identical harness-side re-dispatch."""
+        assert provider.internal_retries.retries_rate_limit is True
+
+
+class TestQwenCodeProvider:
+    """Tests for QwenCodeProvider (harness-expansion.md §3.3, H4·qwen).
+
+    Every assertion is anchored to a capture in `tests/fixtures/qwen-code/`,
+    taken from the real binary at 0.21.13 inside the §6 probe container — the
+    `tests/fixtures/kilocode/` precedent.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "qwen-code"
+    PROMPT = "Review this implementation plan and reply with a JSON array."
+    MODEL = "qwen/qwen3.8-max"
+
+    @pytest.fixture
+    def provider(self):
+        return QwenCodeProvider()
+
+    def _fixture(self, name):
+        return (self.FIXTURES / name).read_text()
+
+    # -- identity ---------------------------------------------------------
+
+    def test_name_is_the_harness_not_the_model_family(self, provider):
+        """§8.1: the key names the HARNESS, the binary is `qwen`."""
+        assert provider.name == "qwen-code"
+
+    def test_is_available_probes_the_binary_not_the_key(self, provider, monkeypatch):
+        monkeypatch.setattr(
+            qwen_code_module.shutil, "which", lambda n: "/usr/bin/qwen" if n == "qwen" else None
+        )
+        assert provider.is_available() is True
+        monkeypatch.setattr(qwen_code_module.shutil, "which", lambda n: None)
+        assert provider.is_available() is False
+
+    # -- argv -------------------------------------------------------------
+
+    def test_prompt_is_a_bare_trailing_positional(self, provider):
+        """`-p` is DEPRECATED at 0.21.13; the positional is the shipped form."""
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[0] == "qwen"
+        assert argv[-1] == self.PROMPT
+        assert "-p" not in argv and "--prompt" not in argv
+
+    def test_declared_prompt_index_matches_the_rendered_argv(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+        assert argv[provider.prompt_argv_index] == self.PROMPT
+
+    def test_the_shipped_tool_tier_is_on_every_invocation(self, provider):
+        """§6.5: `--max-tool-calls 0` is a rung BELOW tier 1 and always emitted."""
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[argv.index("--max-tool-calls") + 1] == "0"
+        # and none of the rungs ABOVE tier 1 ship, because tier 1 answered
+        assert "--yolo" not in argv
+        assert "--approval-mode" not in argv
+        assert "--add-dir" not in argv
+        assert "--include-directories" not in argv
+
+    def test_json_output_mode_and_no_chat_recording(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[argv.index("-o") + 1] == "json"
+        assert argv[argv.index("--chat-recording") + 1] == "false"
+        assert "--bare" in argv
+
+    def test_model_travels_on_the_m_flag(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+        assert argv[argv.index("-m") + 1] == self.MODEL
+
+    def test_an_effort_suffix_is_not_split_off(self, provider):
+        """qwen has NO effort surface, so the suffix stays part of the model id.
+
+        Measured: `-m qwen3-coder-plus:high` reached the backend verbatim. The
+        adapter declining to parse it is what this pins — a silent split would
+        send a different model than the user asked for.
+        """
+        argv = provider.build_command(self.PROMPT, f"{self.MODEL}:high")
+        assert argv[argv.index("-m") + 1] == f"{self.MODEL}:high"
+
+    # -- §1's guard: timeout_s / schema are inert when unset ---------------
+
+    def test_timeout_none_renders_no_wall_time_flag(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL, timeout_s=None)
+        assert "--max-wall-time" not in argv
+
+    def test_timeout_none_is_byte_identical_to_omitting_it(self, provider):
+        assert provider.build_command(
+            self.PROMPT, self.MODEL, timeout_s=None
+        ) == provider.build_command(self.PROMPT, self.MODEL)
+
+    def test_schema_none_is_byte_identical_to_omitting_it(self, provider):
+        assert provider.build_command(
+            self.PROMPT, self.MODEL, schema=None
+        ) == provider.build_command(self.PROMPT, self.MODEL)
+
+    # -- §3.3's wall-time table -------------------------------------------
+
+    @pytest.mark.parametrize("outer,expected", [
+        (1200, "1170"),
+        (600, "570"),
+        (300, "270"),
+        (91, "61"),
+        (90, "60"),
+    ])
+    def test_wall_time_derivation_table(self, provider, outer, expected):
+        """Bare integer seconds, outer minus the 30 s shutdown margin."""
+        argv = provider.build_command(self.PROMPT, self.MODEL, timeout_s=outer)
+        assert argv[argv.index("--max-wall-time") + 1] == expected
+
+    @pytest.mark.parametrize("outer", [1200, 600, 300, 91])
+    def test_the_inner_bound_is_strictly_under_the_outer(self, provider, outer):
+        """agy's INNER_SHUTDOWN_MARGIN_S invariant: qwen must exit first."""
+        argv = provider.build_command(self.PROMPT, self.MODEL, timeout_s=outer)
+        assert int(argv[argv.index("--max-wall-time") + 1]) < outer
+
+    def test_a_too_small_timeout_clamps_and_warns(self, provider, capsys):
+        """qwen REJECTS sub-1s values, so the clamp is a guard, not a taste."""
+        argv = provider.build_command(self.PROMPT, self.MODEL, timeout_s=40)
+
+        assert argv[argv.index("--max-wall-time") + 1] == "60"
+        assert "WARNING" in capsys.readouterr().err
+
+    # -- structured output (OQ2) ------------------------------------------
+
+    def test_schema_renders_inline_like_claude_code(self, provider):
+        from utils.providers.base import StructuredSchema
+
+        schema = StructuredSchema(document={"b": 2, "a": 1}, name="s.json")
+        argv = provider.build_command(self.PROMPT, self.MODEL, schema=schema)
+
+        value = argv[argv.index("--json-schema") + 1]
+        # sorted keys + compact separators, so one schema is one argv byte string
+        assert value == '{"a":1,"b":2}'
+
+    def test_schema_is_declared_inline_not_file(self, provider):
+        assert provider.structured_output_support is True
+        assert provider.structured_output_transport == "inline"
+
+    def test_the_schema_never_lands_next_to_the_prompt(self, provider):
+        from utils.providers.base import StructuredSchema
+
+        schema = StructuredSchema(document={"a": 1}, name="s.json")
+        argv = provider.build_command(self.PROMPT, self.MODEL, schema=schema)
+
+        assert argv[-1] == self.PROMPT
+        assert argv[-2] != "--json-schema"
+
+    # -- stdin transport (§6.4) -------------------------------------------
+
+    def test_stdin_transport_is_declared(self, provider):
+        assert provider.supports_prompt_transport("stdin") is True
+
+    def test_stdin_form_differs_by_exactly_the_prompt(self, provider):
+        argv, stdin_text = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "stdin"
+        )
+        full = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert stdin_text == self.PROMPT
+        assert argv == full[:-1]
+
+    def test_a_long_prompt_stays_under_the_windows_cap_on_stdin(self, provider):
+        """§6.4's portability test — measured off the rendered argv, so it runs
+        everywhere and needs no Windows host."""
+        import subprocess
+
+        long_prompt = "x" * 20000
+        assert len(long_prompt) > 8191
+
+        argv, stdin_text = provider.build_command_for_transport(
+            long_prompt, self.MODEL, "stdin"
+        )
+        rendered = subprocess.list2cmdline(argv)
+
+        assert stdin_text == long_prompt
+        assert len(rendered.encode("utf-16-le")) // 2 < 8191 - 256
+
+    def test_the_argv_form_of_that_prompt_would_not_fit(self, provider):
+        """The other half: this is why the stdin transport is load-bearing."""
+        import subprocess
+
+        argv = provider.build_command("x" * 20000, self.MODEL)
+        rendered = subprocess.list2cmdline(argv)
+
+        assert len(rendered.encode("utf-16-le")) // 2 > 8191
+
+    # -- parse_output: the real document ----------------------------------
+
+    def test_success_returns_the_models_document_not_the_envelope(self, provider):
+        """Wave-1 acceptance 1: assert the UNWRAPPED data."""
+        result = provider.parse_output(self._fixture("success-document.stdout.json"), "")
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list)
+        assert [s["id"] for s in result["data"]] == ["S1", "S2"]
+        assert result["data"][0]["title"] == "Bound the retry loop"
+
+    def test_structured_output_capture_unwraps_to_the_document(self, provider):
+        result = provider.parse_output(
+            self._fixture("structured-output-success.stdout.json"), ""
+        )
+
+        assert result["success"] is True
+        assert result["data"] == {"suggestions": [{"id": 1, "title": "probe"}]}
+
+    def test_a_bare_string_answer_is_not_a_document(self, provider):
+        """`success.stdout.json` answers "OK" — no JSON, so the unwrap says so
+        rather than inventing one."""
+        result = provider.parse_output(self._fixture("success.stdout.json"), "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+
+    # -- parse_output: the exit-0 defect ----------------------------------
+
+    def test_exit_zero_failure_is_classified_despite_three_green_signals(self, provider):
+        """rc=0, subtype=success, is_error=false — and it is still a failure."""
+        raw = self._fixture("exit-zero-failure.stdout.json")
+        record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
+        assert record["subtype"] == "success" and record["is_error"] is False
+
+        result = provider.parse_output(raw, "")
+
+        assert result["success"] is False
+        assert "[API Error: 500" in result["error"]
+        assert result["data"] is None
+
+    @pytest.mark.parametrize("fixture,needle", [
+        ("auth-error.stdout.json", "401"),
+        ("invalid-model.stdout.json", "404"),
+        ("context-overflow.stdout.json", "400"),
+        ("empty-stream.stdout.json", "[API Error:"),
+    ])
+    def test_every_api_error_class_is_a_failure(self, provider, fixture, needle):
+        result = provider.parse_output(self._fixture(fixture), "")
+
+        assert result["success"] is False
+        assert needle in result["error"]
+
+    def test_invalid_model_failure_names_the_model(self, provider):
+        """§6.2: an unnamed model makes a stray `:effort` suffix unfindable."""
+        result = provider.parse_output(self._fixture("invalid-model.stdout.json"), "")
+        assert "stub-model" in result["error"]
+
+    def test_concatenated_partial_text_across_retries_is_still_a_failure(self, provider):
+        """The muse trap by a different route: the marker is a SUFFIX here, so a
+        prefix test would serve `OKOKOKOKOK` as the answer."""
+        raw = self._fixture("truncated.stdout.json")
+        record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
+        assert record["result"].startswith("OK")
+        assert record["stats"]["models"]["stub-model"]["api"]["totalErrors"] == 0
+
+        result = provider.parse_output(raw, "")
+
+        assert result["success"] is False
+        assert "OKOKOKOKOK" not in str(result.get("data"))
+
+    def test_no_finish_reason_takes_the_same_path(self, provider):
+        result = provider.parse_output(self._fixture("no-finish-reason.stdout.json"), "")
+        assert result["success"] is False
+
+    def test_the_marker_is_searched_not_prefix_matched(self, provider):
+        """The marker arrives as a SUFFIX on the truncated shape, so the
+        mechanism has to search. `classify_streams` consumes these as compiled
+        regexes via `_matches_marker`, which is `.search` — asserted here
+        against the real helper rather than against a re-implementation."""
+        from utils.providers.base import _matches_marker
+
+        assert _matches_marker(
+            provider.exit_zero_failure_markers,
+            "OKOKOKOKOK[API Error: 500 internal server error]",
+        )
+        assert not _matches_marker(
+            provider.exit_zero_failure_markers, "a perfectly ordinary answer"
+        )
+
+    # -- parse_output: the error-shaped envelope --------------------------
+
+    def test_an_error_shaped_record_is_not_served_as_the_answer(self, provider):
+        """The trap the probe found against the COMMITTED parse_result_envelope:
+        an error record has no `result` key, so the shared helper's
+        `if "result" in wrapper` guard misses and it returns the record itself."""
+        from utils.providers.result_envelope import parse_result_envelope
+
+        raw = self._fixture("stdout-error.stdout.json")
+        record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
+        # what the shared helper alone would have done
+        naive = parse_result_envelope(json.dumps(record))
+        assert naive["success"] is True and naive["data"]["type"] == "result"
+
+        # what the adapter does, because it classifies FIRST
+        result = provider.parse_output(raw, "")
+        assert result["success"] is False
+        assert result["data"] is None
+
+    def test_multi_assistant_is_last_wins_by_construction(self, provider):
+        """qwen avoids the muse trap here: step 1 reads the `result` record
+        rather than scanning assistant messages."""
+        raw = self._fixture("multi-assistant.stdout.json")
+        assert len([r for r in json.loads(raw) if r["type"] == "assistant"]) >= 2
+
+        record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
+        assert record["result"] == "LAST-ASSISTANT-TEXT"
+
+    # -- parse_output: degenerate shapes ----------------------------------
+
+    def test_empty_stdout_is_a_classified_failure(self, provider):
+        """The exit-55 shape writes zero bytes — distinguishable from an empty
+        answer, and never a traceback."""
+        result = provider.parse_output(self._fixture("wall-time-exceeded.stdout.txt"), "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+
+    def test_an_array_with_no_result_record_is_a_failure(self, provider):
+        """Defensive: no run of the real binary produces this, which is why it is
+        a unit test rather than a fixture (see ephemeral-only.NOT-APPLICABLE.md)."""
+        result = provider.parse_output(
+            json.dumps([{"type": "system", "subtype": "init"}]), ""
+        )
+
+        assert result["success"] is False
+        assert "no result record" in result["error"]
+
+    def test_non_json_stdout_is_a_classified_failure(self, provider):
+        result = provider.parse_output("this is not json at all", "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+
+    def test_a_json_object_instead_of_an_array_is_a_failure(self, provider):
+        result = provider.parse_output(json.dumps({"type": "result"}), "")
+
+        assert result["success"] is False
+        assert "array" in result["error"]
+
+    # -- env (§2.2 / §8.2) ------------------------------------------------
+
+    def test_get_env_carries_the_whole_b1_selector_set_by_name(self, provider, monkeypatch):
+        """§2.2 rule 6(a): asserted BY NAME, including the base URL when the key
+        is empty — a half-set is the bug, not a degraded run."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        env = provider.get_env(self.MODEL)
+
+        assert env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
+        assert env["OPENAI_API_KEY"] == ""
+        assert env["OPENAI_MODEL"] == self.MODEL
+
+    def test_the_base_url_carries_v1(self, provider):
+        """Measured: qwen appends /chat/completions verbatim and adds no /v1."""
+        assert provider.get_env(self.MODEL)["OPENAI_BASE_URL"].endswith("/v1")
+
+    def test_the_key_comes_from_openrouter_only(self, provider, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        assert provider.get_env(self.MODEL)["OPENAI_API_KEY"] == "sk-or-test"
+
+    def test_get_env_never_mutates_os_environ(self, provider, monkeypatch):
+        """§3.3 rule 1: a process-wide write would put qwen's base URL under
+        codex's next spawn in the same fan-out."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        before = dict(os.environ)
+
+        provider.get_env(self.MODEL)
+
+        assert dict(os.environ) == before
+
+    def test_telemetry_and_updater_are_opted_out(self, provider):
+        env = provider.get_env(self.MODEL)
+        assert env["QWEN_TELEMETRY_ENABLED"] == "false"
+        assert env["QWEN_USAGE_STATISTICS_ENABLED"] == "false"
+        assert env["QWEN_CODE_SKIP_UPDATE_CHECK_ONCE"] == "1"
+
+    def test_get_remove_env_strips_every_b3_name(self, provider):
+        """§2.2 rule 6(b), asserted by name."""
+        stripped = set(provider.get_remove_env())
+
+        assert {"QWEN_API_KEY", "QWEN_BASE_URL", "QWEN_CODE_MODEL",
+                "QWEN_DEFAULT_AUTH_TYPE", "DASHSCOPE_API_KEY",
+                "DASHSCOPE_BASE_URL", "MODELSCOPE_API_KEY"} <= stripped
+
+    def test_the_legacy_openai_alias_is_stripped(self, provider):
+        """A strip is not a substitute for injecting the base URL — both."""
+        assert "OPENAI_API_BASE" in provider.get_remove_env()
+        assert "OPENAI_BASE_URL" in provider.get_env(self.MODEL)
+
+    def test_it_never_strips_a_name_it_also_sets(self, provider):
+        """A value we strip must never also be a value we branch on."""
+        assert set(provider.get_remove_env()).isdisjoint(provider.get_env(self.MODEL))
+
+    def test_unattended_retry_is_not_set(self, provider):
+        """Measured inert in both states, so setting it would advertise a knob
+        that moves nothing — and would drag §1's guard in for free."""
+        assert "QWEN_CODE_UNATTENDED_RETRY" not in provider.get_env(self.MODEL)
+
+    # -- internal retries (§6.1.1) ----------------------------------------
+
+    def test_the_envelope_is_declared_from_the_wire_not_the_self_report(self, provider):
+        """qwen's own stats said 7 requests where the stub logged 28."""
+        assert provider.internal_retries.max_requests == 28
+
+    def test_max_wall_s_is_none_because_two_paths_are_unbounded(self, provider):
+        assert provider.internal_retries.max_wall_s is None
+
+    def test_it_declares_that_it_retries_rate_limits(self, provider):
+        """Makes §7.5 rule 6(b) suppress a duplicate harness-side backoff."""
+        assert provider.internal_retries.retries_rate_limit is True
+
+    def test_configurable_by_names_only_a_knob_that_moves_a_number(self, provider):
+        assert provider.internal_retries.configurable_by == ("QWEN_CODE_API_TIMEOUT_MS",)
+
+    # -- version / usage ---------------------------------------------------
+
+    def test_version_is_a_bare_semver(self, provider):
+        """The draft lock pattern guessed a product-name prefix; there is none."""
+        assert provider.parse_version("0.21.13\n", "") == "0.21.13"
+
+    def test_usage_stays_none_until_the_live_smoke_earns_it(self, provider):
+        assert provider.usage_support == "none"
+        assert provider.parse_usage("anything", "") is None
+
+
+class TestCopilotProvider:
+    """Tests for CopilotProvider (harness-expansion.md §3.1, H4·copilot).
+
+    Every assertion is anchored to a capture in `tests/fixtures/copilot/`, taken
+    from the real binary at 1.0.80 inside the §6 probe container — the
+    `tests/fixtures/kilocode/` precedent.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "copilot"
+    PROMPT = "Review this implementation plan and reply with a JSON array."
+    MODEL = "openai/gpt-4.1-mini"
+
+    #: The document the captured answer really carries, so the success test can
+    #: assert the UNWRAPPED data rather than `success is True` alone
+    #: (Wave-1 acceptance criterion 1).
+    ANSWER = [
+        {"id": "S001", "title": "Bound the retry ladder", "severity": "high"},
+        {"id": "S002", "title": "Strip the vendor token", "severity": "medium"},
+    ]
+
+    @pytest.fixture
+    def provider(self):
+        return CopilotProvider()
+
+    def _fixture(self, name):
+        return (self.FIXTURES / name).read_text()
+
+    # -- argv -------------------------------------------------------------
+
+    def test_build_command_puts_the_prompt_pair_last(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[0] == "copilot"
+        assert argv[-2:] == ["-p", self.PROMPT]
+        assert argv[provider.prompt_argv_index] == self.PROMPT
+
+    def test_build_command_emits_no_permission_flag(self, provider):
+        """§6.5 tier 1, and the help text's own claim is what this refutes.
+
+        `--allow-all-tools` is documented as "required for non-interactive
+        mode". Measured, all four rungs produced byte-identical output with a
+        clean filesystem canary, so rule 1's ascending stop applies at rung 1 and
+        §3.1's bracketed line is struck. Widening this later must be a visible
+        test edit, which is the whole point of asserting absence.
+        """
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        for flag in (
+            "--allow-all-tools", "--allow-tool", "--deny-tool", "--add-dir",
+            "--yolo", "--allow-all", "--allow-all-paths", "--allow-all-urls",
+        ):
+            assert flag not in argv, f"{flag} is above the measured tier"
+
+    def test_build_command_carries_the_determinism_flags(self, provider):
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        for pair in (
+            ["--output-format", "json"],
+            ["--stream", "off"],
+            ["--log-level", "none"],
+            ["--model", self.MODEL],
+        ):
+            assert pair[0] in argv and argv[argv.index(pair[0]) + 1] == pair[1]
+        for flag in ("--no-custom-instructions", "--no-ask-user",
+                     "--no-auto-update", "--disable-builtin-mcps"):
+            assert flag in argv
+
+    def test_timeout_and_schema_keywords_are_inert(self, provider):
+        """§1's guard: copilot has no wall-clock flag and no schema transport."""
+        bare = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert provider.build_command(
+            self.PROMPT, self.MODEL, timeout_s=None, schema=None
+        ) == bare
+        assert provider.build_command(self.PROMPT, self.MODEL, timeout_s=600) == bare
+
+    def test_declares_no_structured_output_support(self, provider):
+        assert provider.structured_output_support is False
+
+    # -- the :effort suffix ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    )
+    def test_every_measured_effort_level_renders(self, provider, effort):
+        argv = provider.build_command(f"{self.MODEL}:{effort}", self.MODEL)
+        argv = provider.build_command(self.PROMPT, f"{self.MODEL}:{effort}")
+
+        assert argv[argv.index("--model") + 1] == self.MODEL
+        assert argv[argv.index("--effort") + 1] == effort
+        assert argv[-1] == self.PROMPT
+
+    def test_an_unknown_suffix_passes_through_as_part_of_the_model_id(self, provider):
+        argv = provider.build_command(self.PROMPT, "openai/gpt-4.1-mini:free")
+
+        assert argv[argv.index("--model") + 1] == "openai/gpt-4.1-mini:free"
+        assert "--effort" not in argv
+
+    def test_the_effort_suffix_keeps_the_prompt_last(self, provider):
+        """grok's regression, re-pinned here: the suffix must not move argv[-1]."""
+        argv = provider.build_command(self.PROMPT, f"{self.MODEL}:high")
+
+        assert argv[provider.prompt_argv_index] == self.PROMPT
+
+    # -- prompt transport (§6.4) ------------------------------------------
+
+    def test_stdin_transport_drops_the_whole_pair(self, provider):
+        """Measured: piped stdin with `-p` OMITTED carries the prompt.
+
+        `-p -` sends the literal one-character prompt `-`, and a bare `-` exits
+        1 — so dropping only `argv[-1]` would leave a dangling `-p` and change
+        what the CLI is asked to do.
+        """
+        argv, stdin_text = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "stdin"
+        )
+
+        assert stdin_text == self.PROMPT
+        assert "-p" not in argv
+        assert self.PROMPT not in argv
+        assert argv == provider.build_command(self.PROMPT, self.MODEL)[:-2]
+
+    def test_argv_transport_matches_build_command(self, provider):
+        argv, stdin_text = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "argv"
+        )
+
+        assert stdin_text is None
+        assert argv == provider.build_command(self.PROMPT, self.MODEL)
+
+    def test_a_long_prompt_stays_under_the_windows_cap_on_stdin(self, provider):
+        """§6.4's portability test — measured off the rendered argv, so it needs
+        no Windows host.
+
+        A review-plan prompt is multi-KB by construction, which is above
+        `CMDLINE_CAP_UTF16_BATCH` (8191) and would be refused before spawn on the
+        `.cmd` shim `npm install -g` leaves on Windows.
+        """
+        import subprocess
+
+        long_prompt = "x" * 20000
+        argv, stdin_text = provider.build_command_for_transport(
+            long_prompt, self.MODEL, "stdin"
+        )
+
+        assert stdin_text == long_prompt
+        rendered = subprocess.list2cmdline(argv)
+        assert len(rendered.encode("utf-16-le")) // 2 < 8191 - 256
+
+    # -- parse_output: the two-step unwrap (§3.4) -------------------------
+
+    def test_success_returns_the_models_own_document(self, provider):
+        """Wave-1 acceptance 1: assert the UNWRAPPED data, not `success` alone."""
+        result = provider.parse_output(self._fixture("success.jsonl"), "")
+
+        assert result["success"] is True
+        assert result["data"] == self.ANSWER
+
+    def test_the_streamed_shape_parses_identically(self, provider):
+        """One recipe covers both stream modes, so `--stream off` is a
+        determinism choice rather than a parsing requirement."""
+        result = provider.parse_output(self._fixture("success-streamed.jsonl"), "")
+
+        assert result["success"] is True
+        assert result["data"] == self.ANSWER
+
+    def test_the_user_message_is_never_served_as_the_answer(self, provider):
+        """THE trap §3.4's recipe walks into.
+
+        `user.message` is non-ephemeral and carries `data.content` — our own
+        prompt. Filtering on `ephemeral` alone and taking the first survivor
+        returns the prompt as the model's answer, which type-checks and is wrong.
+        """
+        raw = self._fixture("success.jsonl")
+        prompt_record = [
+            json.loads(line) for line in raw.splitlines() if line.strip()
+        ]
+        prompt_text = next(
+            r["data"]["content"] for r in prompt_record if r.get("type") == "user.message"
+        )
+
+        result = provider.parse_output(raw, "")
+
+        assert len(prompt_text) > 30000, "the fixture's prompt echo is the trap"
+        assert result["data"] == self.ANSWER
+        assert prompt_text not in json.dumps(result["data"])
+
+    def test_multi_assistant_takes_the_last_message(self, provider):
+        """last-wins, not first-wins and not concatenation — the muse trap."""
+        raw = self._fixture("multi-assistant.jsonl")
+
+        result = provider.parse_output(raw, "")
+
+        assert "FIRST ANSWER" in raw
+        assert result["success"] is True
+        assert result["data"] == self.ANSWER
+
+    # -- parse_output: the §6.2 failure set --------------------------------
+
+    def test_an_all_noise_run_is_a_failure(self, provider):
+        result = provider.parse_output(self._fixture("ephemeral-only.jsonl"), "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["raw"]
+
+    def test_a_truncated_stream_has_no_result_record(self, provider):
+        """The capture is a real kill mid-flight: it ends at `model.call_start`,
+        so a parser that assumes a terminal `result` record raises instead of
+        classifying."""
+        raw = self._fixture("truncated.jsonl")
+
+        result = provider.parse_output(raw, "")
+
+        assert '"type":"result"' not in raw
+        assert result["success"] is False
+        assert result["data"] is None
+
+    def test_the_exit_zero_failure_is_caught_structurally(self, provider):
+        """exit 0, `result.exitCode: 0`, no error record, empty answer.
+
+        There is no text for a marker to match, which is why
+        `exit_zero_failure_markers` is empty for this adapter and the detection
+        lives here instead.
+        """
+        raw = self._fixture("exit-zero-failure.jsonl")
+
+        result = provider.parse_output(raw, "")
+
+        assert '"exitCode":0' in raw
+        assert result["success"] is False
+        assert "empty assistant message" in result["error"]
+
+    def test_empty_output_is_classified_not_crashed(self, provider):
+        result = provider.parse_output("", "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+
+    def test_empty_stdout_quotes_stderr_when_there_is_any(self, provider):
+        """stderr is 0 bytes on every model-path failure, so text here is an
+        argument-parse or launch error — exactly the case worth quoting."""
+        result = provider.parse_output("", "error: unknown option '--nope'")
+
+        assert result["success"] is False
+        assert "--nope" in result["error"]
+
+    @pytest.mark.parametrize(
+        "fixture,needle",
+        [
+            ("auth-error.jsonl", "authentication"),
+            ("rate-limit.jsonl", "rate_limit"),
+            ("invalid-model.jsonl", "query"),
+            ("context-overflow.jsonl", "query"),
+        ],
+    )
+    def test_session_error_becomes_the_reported_failure(
+        self, provider, fixture, needle
+    ):
+        """`session.error` on stdout with stderr empty is §6.2's `stdout-error`
+        trap in its exact shape, and it is copilot's ONLY error channel."""
+        result = provider.parse_output(self._fixture(fixture), "")
+
+        assert result["success"] is False
+        assert needle in result["error"]
+        assert result["data"] is None
+
+    def test_the_invalid_model_failure_names_the_model(self, provider):
+        """Which is what makes a stray `:effort` suffix findable rather than an
+        unattributable 404."""
+        result = provider.parse_output(self._fixture("invalid-model.jsonl"), "")
+
+        assert "gpt-5.5" in result["error"]
+
+    # -- classification ----------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "fixture,expected",
+        [
+            ("auth-error.jsonl", "auth_failed"),
+            ("rate-limit.jsonl", "rate_limited"),
+            ("invalid-model.jsonl", "invalid_model"),
+            ("context-overflow.jsonl", "context_length_exceeded"),
+        ],
+    )
+    def test_classify_failure_reads_the_error_record(
+        self, provider, fixture, expected
+    ):
+        """The classifier reads STDOUT here, because that is where copilot's
+        errors are and stderr is empty."""
+        assert provider.classify_failure(
+            self._fixture(fixture), "", 1
+        ) == expected
+
+    def test_auth_wording_needed_its_own_pattern(self, provider):
+        """copilot says "Authentication failed with provider", which matches none
+        of the base set's ten patterns."""
+        from utils.providers.base import LLMProvider as Base
+
+        assert "authentication failed" in provider.auth_error_patterns
+        assert "authentication failed" not in Base.auth_error_patterns
+
+    def test_the_exit_zero_failure_stays_transport_shaped(self, provider):
+        """Deliberate: it reaches the ladder as `None` and takes the bounded
+        retry path, which is the right treatment for an empty answer."""
+        assert provider.classify_failure(
+            self._fixture("exit-zero-failure.jsonl"), "", 0
+        ) is None
+
+    def test_exit_zero_markers_are_empty_by_measurement(self, provider):
+        assert provider.exit_zero_failure_markers == ()
+
+    # -- the measured internal-retry envelope (§6.1.1) --------------------
+
+    def test_the_envelope_is_the_measured_one_not_the_plans_placeholders(
+        self, provider
+    ):
+        """§3.1 guessed 5 / ~30 s / codex's False. All three were wrong."""
+        envelope = provider.internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == 6
+        assert envelope.max_wall_s is None
+        assert envelope.retries_rate_limit is True
+        assert envelope.configurable_by == ()
+
+    def test_the_rate_limit_fixture_corroborates_the_request_count(self, provider):
+        """The CLI's own error text is the independent second source."""
+        raw = self._fixture("rate-limit.jsonl")
+
+        assert "retried 5 times" in raw  # 1 + 5 == max_requests
+
+    # -- env (§2.2, §8.2) --------------------------------------------------
+
+    def test_get_env_emits_the_complete_selector_set(self, provider):
+        env = provider.get_env(self.MODEL)
+
+        for name in (
+            "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_TYPE",
+            "COPILOT_PROVIDER_API_KEY", "COPILOT_OFFLINE",
+            "COPILOT_PROVIDER_MAX_PROMPT_TOKENS",
+            "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS",
+        ):
+            assert name in env, f"{name} missing from the B1 selector set"
+        assert env["COPILOT_PROVIDER_BASE_URL"].endswith("/v1")
+        assert env["COPILOT_PROVIDER_TYPE"] == "openai"
+        assert env["COPILOT_OFFLINE"] == "true"
+
+    def test_the_base_url_is_emitted_even_with_no_key(self, provider, monkeypatch):
+        """§2.2 rule 3: never omit the base URL to "let the CLI decide".
+
+        The base URL is the BYOK activation switch, so omitting it does not
+        degrade the run — it selects the GitHub seat path instead.
+        """
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        env = provider.get_env(self.MODEL)
+
+        assert env["COPILOT_PROVIDER_API_KEY"] == ""
+        assert env["COPILOT_PROVIDER_BASE_URL"].startswith("https://openrouter.ai")
+
+    def test_does_not_set_xdg_cache_home(self, provider):
+        """A per-slot value would re-extract copilot's 209 MB package cache on
+        EVERY spawn, and a hardcoded path would be wrong on a host. The image
+        owns this one."""
+        assert "XDG_CACHE_HOME" not in provider.get_env(self.MODEL)
+
+    def test_never_mutates_the_parent_environment(self, provider):
+        before = dict(os.environ)
+
+        provider.get_env(self.MODEL)
+
+        assert os.environ == before
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+            "COPILOT_ALLOW_ALL", "COPILOT_PROVIDER_BEARER_TOKEN",
+            "OTEL_EXPORTER_OTLP_ENDPOINT", "COPILOT_OTEL_ENABLED",
+            "COPILOT_MODEL",
+        ],
+    )
+    def test_get_remove_env_strips_every_measured_name(self, provider, name):
+        assert name in provider.get_remove_env()
+
+    def test_the_tier_widening_env_twin_is_stripped(self, provider):
+        """Without this, §6.5's recorded tier is unenforceable: COPILOT_ALLOW_ALL
+        promotes the run to tier 4 with no argv change at all."""
+        assert "COPILOT_ALLOW_ALL" in provider.get_remove_env()
+
+    # -- the token-limit ladder (§3.1) ------------------------------------
+
+    def test_a_catalogued_slug_gets_its_own_pair(self, provider):
+        from utils.providers.copilot import OUTPUT_RESERVE_TOKENS, token_limits_for
+
+        prompt_budget, output_budget = token_limits_for("openai/gpt-4o-mini")
+
+        assert prompt_budget == 128000 - OUTPUT_RESERVE_TOKENS
+        assert output_budget == OUTPUT_RESERVE_TOKENS
+
+    def test_an_uncatalogued_slug_falls_to_the_floor(self, provider):
+        from utils.providers.copilot import (
+            FLOOR_MAX_OUTPUT_TOKENS, FLOOR_MAX_PROMPT_TOKENS, token_limits_for,
+        )
+
+        assert token_limits_for("some/unknown-model") == (
+            FLOOR_MAX_PROMPT_TOKENS, FLOOR_MAX_OUTPUT_TOKENS,
+        )
+
+    def test_the_pair_is_resolved_for_the_model_handed_in(self, provider):
+        """Never a process-wide constant, and never a pair resolved for a
+        different slug."""
+        small = provider.get_env("openai/gpt-4o-mini")
+        large = provider.get_env("openai/gpt-4.1-mini")
+
+        assert (small["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"]
+                != large["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"])
+
+    def test_the_effort_suffix_does_not_break_the_limit_lookup(self, provider):
+        """The catalog is keyed by slug, so the suffix has to come off first."""
+        plain = provider.get_env("openai/gpt-4o-mini")
+        suffixed = provider.get_env("openai/gpt-4o-mini:high")
+
+        assert (suffixed["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"]
+                == plain["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"])
+
+    def test_every_shipped_catalog_entry_is_known_to_the_limit_table(self):
+        """A slug in `providers.yaml` with no catalog row silently takes the
+        floor, which is safe but is not what the block claims."""
+        import utils.provider_registry as reg
+        from utils.providers.copilot import _MODEL_CATALOG
+
+        config = reg.load_config()
+        for slug in config["providers"]["copilot"]["models"]:
+            assert slug in _MODEL_CATALOG, f"{slug} has no measured token pair"
+
+    # -- version + usage ---------------------------------------------------
+
+    def test_usage_stays_none_because_no_input_count_exists(self, provider):
+        """`result.usage` carries premiumRequests (0 on BYOK by construction),
+        durations and codeChanges — no prompt-token field at all, and
+        `data.outputTokens` vanishes under `--stream on`. Absent must mean "not
+        reported", never 0."""
+        assert provider.usage_support == "none"
+        assert provider.parse_usage(self._fixture("success.jsonl"), "") is None
+
+    def test_version_parsing_tolerates_the_trailing_update_line(self, provider):
+        """`copilot --version` prints "GitHub Copilot CLI 1.0.80." AND a second
+        "Run 'copilot update'…" line, so nothing may anchor to end-of-output."""
+        raw = "GitHub Copilot CLI 1.0.80.\nRun 'copilot update' to check for updates.\n"
+
+        assert provider.parse_version(raw, "") == "1.0.80"
+
+
+class TestVibeProvider:
+    """Tests for VibeProvider (harness-expansion.md §4.2, H6·vibe).
+
+    Every assertion is anchored to a capture in `tests/fixtures/vibe/`, taken
+    from the real binary at 2.24.1 inside the §6 probe container — the
+    `tests/fixtures/kilocode/` precedent.
+
+    vibe is the row where the plan was most wrong, so several tests here exist
+    specifically to pin a **corrected** contract rather than the researched one:
+    the permission ladder is inverted at the bottom (§4.2 called the bare form
+    tier 1; measured it is DESTRUCTIVE), the model surface is env rather than a
+    templated per-run file, and the `emits_finish_reason` retry §4.2 built an
+    abort criterion around does not happen at all.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "vibe"
+    PROMPT = "Review this implementation plan and reply with a JSON array."
+    MODEL = "vibe-default"
+
+    @pytest.fixture
+    def provider(self):
+        return VibeProvider()
+
+    def _fixture(self, name):
+        return (self.FIXTURES / name).read_text()
+
+    # -- identity ---------------------------------------------------------
+
+    def test_name_is_the_binary_not_the_pypi_package(self, provider):
+        """§8.1: `mistral-vibe` is a package name, never an identifier."""
+        assert provider.name == "vibe"
+
+    def test_is_available_probes_the_binary(self, provider, monkeypatch):
+        monkeypatch.setattr(
+            vibe_module.shutil, "which",
+            lambda n: "/usr/bin/vibe" if n == "vibe" else None,
+        )
+        assert provider.is_available() is True
+        monkeypatch.setattr(vibe_module.shutil, "which", lambda n: None)
+        assert provider.is_available() is False
+
+    # -- argv -------------------------------------------------------------
+
+    def test_the_prompt_is_the_last_element(self, provider):
+        """§8.3: flags first, the `-p` pair trailing, so `prompt_argv_index` is -1."""
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[0] == "vibe"
+        assert argv[-2:] == ["-p", self.PROMPT]
+        assert provider.prompt_argv_index == -1
+
+    def test_the_model_never_reaches_argv(self, provider):
+        """vibe has no `--model` flag; the alias rides VIBE_ACTIVE_MODEL."""
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert self.MODEL not in argv
+        assert "--model" not in argv
+
+    def test_the_safe_agent_is_emitted_and_the_wide_ones_are_not(self, provider):
+        """§6.5's rung, and the whole reason it is not the bare invocation.
+
+        `default_agent` is `accept-edits`, whose `AgentSafety` is DESTRUCTIVE and
+        whose write_file/edit permission is `always` — so omitting `--agent`
+        would be the second-widest rung on the ladder, not tier 1.
+        """
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[argv.index("--agent") + 1] == "plan"
+        for wide in ("--auto-approve", "--yolo", "--trust", "--dangerously-skip"):
+            assert wide not in argv
+
+    def test_the_spend_and_turn_caps_are_policy_constants(self, provider):
+        """Both are verbatim in the pinned argv table, never placeholders.
+
+        `--max-price` is the roster's only USD cap but is checked BETWEEN turns —
+        a single completion under a 0.0000001 cap ran to completion with the full
+        answer — so `--max-turns` is the bound that actually stops a runaway.
+        """
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert argv[argv.index("--max-price") + 1] == vibe_module.MAX_PRICE_USD
+        assert argv[argv.index("--max-turns") + 1] == vibe_module.MAX_TURNS
+
+    def test_timeout_none_renders_byte_identical_argv(self, provider):
+        """§1's guard: no default seconds value sneaks in.
+
+        vibe has no wall-clock FLAG at all — its inner bound is the pinned
+        `VIBE_API_TIMEOUT` — so a threaded timeout must change nothing here.
+        """
+        bare = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert provider.build_command(self.PROMPT, self.MODEL, timeout_s=None) == bare
+        assert provider.build_command(self.PROMPT, self.MODEL, timeout_s=600) == bare
+
+    def test_schema_none_renders_byte_identical_argv(self, provider):
+        bare = provider.build_command(self.PROMPT, self.MODEL)
+
+        assert provider.build_command(self.PROMPT, self.MODEL, schema=None) == bare
+
+    def test_the_effort_suffix_changes_no_argv(self, provider):
+        """Effort is a CONFIG key, so it rides env — argv must be untouched."""
+        assert provider.build_command(
+            self.PROMPT, f"{self.MODEL}:high"
+        ) == provider.build_command(self.PROMPT, self.MODEL)
+
+    # -- transport --------------------------------------------------------
+
+    def test_stdin_keeps_the_flag_and_drops_only_the_value(self, provider):
+        """vibe's stdin form is the odd one out, and the difference is fatal.
+
+        Every other stdin adapter drops the `-p <prompt>` PAIR. vibe must keep
+        `-p` and drop only its value: a bare positional prompt — or no `-p` at
+        all — launches the interactive TUI and hangs forever behind an ANSI
+        alt-screen, which burns the whole slot rather than degrading.
+        """
+        argv, stdin = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "stdin"
+        )
+
+        assert stdin == self.PROMPT
+        assert argv[-1] == "-p"
+        assert self.PROMPT not in argv
+
+    def test_the_transport_form_differs_only_by_the_prompt(self, provider):
+        """§1's guard-shaped test for a second transport."""
+        argv_form = provider.build_command(self.PROMPT, self.MODEL)
+        stdin_form, _ = provider.build_command_for_transport(
+            self.PROMPT, self.MODEL, "stdin"
+        )
+
+        assert stdin_form == argv_form[:-1]
+
+    def test_a_multi_kb_prompt_fits_the_windows_cap_on_stdin(self, provider):
+        """§6.4's long-prompt portability test — a unit test on every platform.
+
+        A review-plan prompt is multi-KB by construction, and
+        `_prompt_length_error` refuses to spawn above 8,191 UTF-16 units for the
+        `.cmd` shim `npm install -g`/`pip install` leaves on Windows. The cap is
+        measured off the rendered command line, so this needs no Windows host.
+        """
+        import subprocess as _sp
+
+        big = "x" * 20000
+        assert len(big) > 8191
+
+        argv_form = provider.build_command(big, self.MODEL)
+        stdin_form, payload = provider.build_command_for_transport(
+            big, self.MODEL, "stdin"
+        )
+
+        assert len(_sp.list2cmdline(argv_form)) > 8191
+        assert len(_sp.list2cmdline(stdin_form)) < 8191 - 256
+        assert payload == big
+
+    # -- parse_output: the §3.4 two-step unwrap ---------------------------
+
+    def test_the_success_fixture_unwraps_to_the_models_document(self, provider):
+        """Wave-1 acceptance 1: assert the unwrapped `data`, not `success` alone.
+
+        The answer must be the model's own JSON document — not vibe's transcript
+        envelope, and not the answer as a raw string. All three type-check and
+        all three break reaggregation.
+        """
+        result = provider.parse_output(self._fixture("success-json.json"), "")
+
+        assert result["success"] is True
+        assert isinstance(result["data"], list)
+        assert result["data"][0]["id"] == "S001"
+        assert len(result["data"]) == 3
+
+    def test_the_streaming_capture_carries_the_same_entries(self, provider):
+        """`--output streaming` is the same entry objects as NDJSON.
+
+        The adapter ships `json`, so this pins the *reason* rather than a second
+        code path: one parse of one document beats N line-parses when the schema
+        is identical.
+        """
+        raw = self._fixture("success-streaming.jsonl")
+        entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+        assert any(
+            e.get("role") == "assistant" and e.get("type") == "message"
+            for e in entries
+        )
+
+    def test_multi_assistant_takes_the_last_entry(self, provider):
+        """The muse trap: last-wins, never first-wins and never concatenation."""
+        result = provider.parse_output(self._fixture("multi-assistant.json"), "")
+
+        assert result["success"] is True
+        assert result["data"][0]["id"] == "S001"
+
+    def test_a_transcript_with_no_assistant_entry_is_a_failure(self, provider):
+        """An all-noise run is a failure, not an empty-string success."""
+        result = provider.parse_output(self._fixture("ephemeral-only.json"), "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "no assistant message" in result["error"]
+
+    def test_a_config_error_on_stdout_is_not_read_as_an_answer(self, provider):
+        """§6.2's `stdout-error` trap, in vibe's one measured shape.
+
+        Config-validation errors print on **stdout with stderr empty** and still
+        exit 1 — the opencode shape. The reason exists only in that text, so it
+        has to be reported rather than handed to the extractor, which would find
+        nothing and report an empty answer instead of the cause.
+        """
+        result = provider.parse_output(self._fixture("stdout-error.stdout.txt"), "")
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "Invalid configuration" in result["error"]
+
+    def test_zero_bytes_on_both_streams_is_classified(self, provider):
+        """Distinguishable from a valid empty answer — the silent-hang shape."""
+        result = provider.parse_output(
+            self._fixture("empty.stdout.txt"), self._fixture("empty.stderr.txt")
+        )
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["raw"] == ""
+
+    def test_the_failure_branch_carries_raw_and_a_null_data(self, provider):
+        """`kilocode.py`'s empty-output branch is the shape §6.2 reads."""
+        result = provider.parse_output("", "")
+
+        assert set(result) >= {"success", "error", "raw", "data"}
+        assert result["success"] is False
+        assert result["data"] is None
+
+    # -- failure classification -------------------------------------------
+
+    @pytest.mark.parametrize(
+        "fixture,expected",
+        [
+            ("auth-error", "auth_failed"),
+            ("rate-limit", "rate_limited"),
+            ("context-overflow", "context_length_exceeded"),
+        ],
+    )
+    def test_the_measured_stderr_shapes_classify(self, provider, fixture, expected):
+        """Each pins the vendor wording the declared pattern set was measured on."""
+        stderr = self._fixture(f"{fixture}.stderr.txt")
+
+        assert provider.classify_failure("", stderr, 1) == expected
+
+    def test_the_context_overflow_shape_is_terminal(self, provider):
+        """It must reach the terminal status, not the bounded-retry path.
+
+        vibe's wording puts the noun first and calls the bound a "limit"
+        ("The conversation context exceeds the model's maximum limit"), which the
+        pre-existing gateway pattern does not reach — so this is the assertion
+        behind the one shared-table marker this adapter added.
+        """
+        stderr = self._fixture("context-overflow.stderr.txt")
+
+        assert "conversation context exceeds" in stderr.lower()
+        assert provider.classify_failure("", stderr, 1) == "context_length_exceeded"
+
+    def test_the_invalid_model_failure_names_the_model(self, provider):
+        """The shape a stray `:effort` suffix produces; an unnamed model is unfindable."""
+        stderr = self._fixture("invalid-model.stderr.txt")
+
+        assert "stub-model" in stderr
+
+    def test_no_exit_zero_failure_markers_are_declared(self, provider):
+        """Empty BY MEASUREMENT: every failure mode probed exits 1.
+
+        §6.2's `exit-zero-failure` row is recorded N/A for this CLI rather than
+        left untested, and that is what this asserts.
+        """
+        assert provider.exit_zero_failure_markers == ()
+
+    # -- declarations -----------------------------------------------------
+
+    def test_the_retry_envelope_is_measured_and_pinned(self, provider):
+        """§6.1.1, including the experiment no other adapter runs.
+
+        §4.2 predicted a 200 with no `finish_reason` makes vibe retry, and built
+        abort criterion 1 on the hazard. Measured, it is one POST and a hard
+        error — so the envelope's 3 attempts come from the retryable HTTP set,
+        and `max_wall_s` is real (rather than `None`, as copilot's and
+        qwen-code's are) precisely because `Retry-After` is NOT honoured, so no
+        server-chosen sleep can extend it.
+        """
+        envelope = provider.internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == 3
+        assert envelope.retries_rate_limit is True
+        assert envelope.configurable_by == ("VIBE_API_TIMEOUT",)
+        assert envelope.max_wall_s == 3 * vibe_module.API_TIMEOUT_S + 2
+
+    def test_the_declared_bound_sits_under_the_slot_timeout(self, provider):
+        """§3.3's invariant for any inner bound."""
+        assert provider.internal_retries.max_wall_s < provider.default_timeout
+
+    def test_effort_levels_are_the_validators_own_set(self, provider):
+        """Read off the installed pydantic validator, not from documentation."""
+        assert vibe_module.REASONING_EFFORTS == frozenset(
+            {"off", "low", "medium", "high", "max"}
+        )
+
+    def test_usage_stays_none(self, provider):
+        """The transcript entries carry no token fields — §3.4's default."""
+        assert provider.usage_support == "none"
+        assert provider.parse_usage("anything", "") is None
+
+    def test_structured_output_is_not_declared(self, provider):
+        assert provider.structured_output_support is False
+
+    def test_the_verified_version_is_the_capture_version(self, provider):
+        assert provider.verified_version == "2.24.1"
+        assert provider.min_version == "2.24.1"
 
 
 class TestClineProvider:
@@ -3697,11 +5412,18 @@ class TestAiderProvider:
         assert found == [str(plan)]
 
 
-# Per-provider prompt transport table: every current provider CLI receives
-# the prompt as a single argv element (none has a documented stdin or
-# prompt-file mode used anywhere in this codebase), so all adapters declare
-# prompt_transport == "argv" and rely on llm_client's Windows argv-length
-# check. An adapter that moves to stdin/file transport must update both its
+# Per-provider prompt transport table. Every adapter declares
+# `prompt_transport == "argv"` — that is the transport the FAN-OUT path uses by
+# default, and it is what this table pins, so each adapter still renders the
+# prompt as exactly one argv element and llm_client's Windows argv-length check
+# still applies to that path.
+#
+# It is NOT a claim that no adapter can do better: claude-code, codex, opencode
+# and qwen-code each declare `supported_prompt_transports = ("argv", "stdin")`,
+# which is the separate member a *caller* may ask for. The header used to say
+# "none has a documented stdin or prompt-file mode used anywhere in this
+# codebase", which had been false for three adapters for some time.
+# An adapter that changes its fan-out default must update both its
 # prompt_transport and this table.
 TRANSPORT_CASES = [
     (AgyProvider, "argv", "Gemini 3.1 Pro (High)"),
@@ -3709,14 +5431,31 @@ TRANSPORT_CASES = [
     (ClaudeCodeProvider, "argv", "sonnet"),
     (ClineProvider, "argv", "openrouter/z-ai/glm-5.2"),
     (CodexProvider, "argv", "gpt-5.5"),
+    # copilot renders the prompt as one argv element like every row here,
+    # AND declares a stdin transport a caller may ask for: piped stdin with
+    # the `-p` PAIR omitted entirely carried a 30 KB prompt (§6.4, measured).
+    (CopilotProvider, "argv", "openai/gpt-4.1-mini"),
     (CursorAgentProvider, "argv", "auto"),
     (GeminiProvider, "argv", "gemini-2.5-pro"),
+    # kimi is argv-only by MEASUREMENT, not by default: `-p -` delivers the
+    # literal "-" rather than reading stdin, `-p @file` delivers the literal
+    # path, and `--prompt-file` does not exist (harness-expansion.md §6.4).
+    (KimiProvider, "argv", "moonshotai/kimi-k2-thinking"),
     (GooseProvider, "argv", "openrouter/z-ai/glm-5.2"),
     (GrokProvider, "argv", "grok-4"),
     (KiloCodeProvider, "argv", "openai-native/gpt-5.5"),
     (MuseProvider, "argv", "muse-spark-1.2"),
     (OpenCodeProvider, "argv", "openai/gpt-5.5"),
     (PiProvider, "argv", "anthropic/claude-opus-4-8"),
+    # qwen-code renders the prompt as one argv element like every row here,
+    # AND declares a stdin transport a caller may ask for (§6.4, measured).
+    (QwenCodeProvider, "argv", "qwen/qwen3.8-max"),
+    # vibe renders the prompt as one argv element like every row here, AND
+    # declares a stdin transport -- but its stdin form is the odd one out and the
+    # difference is load-bearing: `-p` STAYS and merely loses its value, because
+    # dropping the flag entirely launches the interactive TUI and hangs forever
+    # rather than degrading (§6.4, measured with an 8,427-byte prompt).
+    (VibeProvider, "argv", "vibe-default"),
 ]
 
 
@@ -3841,6 +5580,114 @@ class TestSubagentRunnerDeclarations:
         assert provider.version_cmd, f"{name}: no version_cmd"
         assert provider.min_version, f"{name}: no min_version"
         assert provider.verified_version, f"{name}: no verified_version"
+
+
+class TestDeclaredOutputChannel:
+    """`supports_file_output`: can this adapter write the result file at all?
+
+    Two adapters run their CLI in a read-only chat mode on purpose, and the
+    review prompts used to demand a file write from them regardless. Measured
+    2026-08-18 on `cursor-agent:gpt-5.6-sol-xhigh`, three identical runs: the
+    envelope came back `{"type":"result","subtype":"success","is_error":false,…}`
+    with `result` = "I can't write the requested file while Ask mode is active.
+    Switch to Agent mode and resend the request." — no file, no JSON, and the
+    slot died on "JSON parsing failed from both file and stdout".
+    """
+
+    #: Pinned like the `agent-write` roster is pinned, and for the mirror-image
+    #: reason: five of the six are here because of a *mode the adapter chose*, so
+    #: an adapter joining or leaving it is a deliberate change to how that CLI is
+    #: invoked, never a passing thought. Those five name the argv atom that causes
+    #: it, and `TestReadOnlyArgvMatchesTheDeclaration` in
+    #: `test_provider_housekeeping.py` checks that atom against the argv the
+    #: adapter really renders — this set is the *what*, that test is the *why*.
+    #:
+    #:   aider       `/ask <prompt>`         read-only chat mode
+    #:   copilot     no `--allow-all-tools`  write requested, then denied
+    #:   cursor-agent `--mode ask`           write refusal (measured 2026-08-18)
+    #:   qwen-code   `--max-tool-calls 0`    zero tool budget, exit 55, no stdout
+    #:   vibe        `--agent plan`          write_file/edit permission `never`
+    #:
+    #: THE SIXTH HAS NO ATOM, and that is why it went unnoticed longest:
+    #:
+    #:   gemini      (no atom — a DEFAULT)   ships no `write_file` tool at all
+    #:
+    #: Measured 2026-08-19 (harness-expansion.md §16.3): under this adapter's argv
+    #: gemini-cli advertises nine tools and none of them writes. Handed a
+    #: `write_file` call it answers `Tool "write_file" not found in registry`,
+    #: writes nothing, and **exits 0 printing the model's own "JSON written to …"
+    #: confirmation as its answer** — the one member that reports success for a
+    #: write that never happened, where the other five fail loudly. An argv guard
+    #: cannot see a default, so its adjudication lives in that same file's third
+    #: table, `NO_WRITE_TOOL_AT_ALL`, which feeds the same derived-roster
+    #: assertion.
+    CANNOT_WRITE_FILES = {"aider", "copilot", "cursor-agent", "gemini", "qwen-code",
+                          "vibe"}
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_every_adapter_declares_a_bool(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        assert isinstance(_PROVIDERS[name].supports_file_output, bool)
+
+    def test_the_read_only_roster_is_exactly_the_declared_set(self):
+        from utils.provider_registry import _PROVIDERS
+
+        declared = {
+            name
+            for name, provider in _PROVIDERS.items()
+            if not provider.supports_file_output
+        }
+        assert declared == self.CANNOT_WRITE_FILES
+
+    def test_cursor_declares_it_cannot_write_files(self):
+        from utils.provider_registry import get_provider
+
+        assert get_provider("cursor-agent").supports_file_output is False
+
+    def test_cursors_declaration_matches_the_argv_that_causes_it(self):
+        """The declaration is only true while the write refusal is in the argv.
+
+        `--mode ask` is what refuses the write, and `-f`/`--yolo` is the bypass
+        this adapter exists to stop passing (§3.1). Restoring either — "fixing"
+        the file write by handing an untrusted prompt write access again — must
+        fail here rather than quietly undo the safety decision.
+
+        §5.4.1's per-flag gate is stubbed exactly as in
+        `TestCursorAgentProvider.test_cursor_agent_build_command`, so this reads
+        the argv rather than the developer's installed cursor build.
+        """
+        from utils.provider_registry import get_provider
+
+        with patch.object(
+            cursor_agent_module,
+            "_help_flag_tokens",
+            lambda _b: frozenset({"--trust", "--mode"}),
+        ), patch.object(
+            cursor_agent_module.shutil, "which", lambda _n: "/usr/bin/cursor-agent"
+        ):
+            cmd = get_provider("cursor-agent").build_command("prompt", "auto")
+
+        assert "--mode" in cmd and cmd[cmd.index("--mode") + 1] == "ask"
+        assert "--trust" in cmd
+        assert "-f" not in cmd and "--force" not in cmd and "--yolo" not in cmd
+
+    def test_a_file_capable_adapter_is_still_the_default(self):
+        from utils.provider_registry import get_provider
+
+        assert get_provider("codex").supports_file_output is True
+        assert get_provider("claude-code").supports_file_output is True
+
+    @pytest.mark.parametrize("name", sorted(CANNOT_WRITE_FILES))
+    def test_a_read_only_adapter_is_asked_for_stdout(self, name):
+        """The declaration is what the prompt is rendered from — not a name
+        spelled out in an orchestrator."""
+        from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_output_location
+
+        block = render_output_location("/out/result.json", f"{name}:some-model")
+
+        assert block == STDOUT_OUTPUT_LOCATION
+        assert "/out/result.json" not in block
 
 
 class TestClassifyFailure:
@@ -6067,14 +7914,22 @@ PRE_L5_ARGV_MODELS = {
     "claude-code": "sonnet",
     "cline": "openrouter/z-ai/glm-5.2",
     "codex": "gpt-5.5",
+    "copilot": "openai/gpt-4.1-mini",
     "cursor-agent": "auto",
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
     "grok": "grok-4",
     "kilocode": "openai-native/gpt-5.5",
+    "kimi": "moonshotai/kimi-k2-thinking",
     "muse": "muse-spark-1.2",
     "opencode": "openai/gpt-5.5",
     "pi": "anthropic/claude-opus-4-8",
+    "qwen-code": "qwen/qwen3.8-max",
+    # vibe's entry is a SEED ALIAS, not a wire slug: it has no --model flag,
+    # so this value never reaches argv at all -- it rides VIBE_ACTIVE_MODEL.
+    # It is still the real default from providers.yaml, because the housekeeping
+    # sweep renders argv from these and a dummy would exercise nothing.
+    "vibe": "vibe-default",
 }
 
 PRE_L5_ARGV = {
@@ -6093,8 +7948,13 @@ PRE_L5_ARGV = {
         "--chat-history-file", os.devnull,
         "--input-history-file", os.devnull,
     ],
+    # §17's write grant is part of the frozen argv as of 2026-08-20: the
+    # generate prompt ends in "write your JSON output to this file: <path>"
+    # (`supports_file_output = True`), and headless `claude -p` denied the
+    # model's own Write without it. Measured on the credentialed live lane.
     "claude-code": [
         "claude", "-p", "--output-format", "json", "--model", "sonnet",
+        "--permission-mode", "acceptEdits",
         PRE_L5_ARGV_PROMPT,
     ],
     "cline": [
@@ -6105,6 +7965,16 @@ PRE_L5_ARGV = {
         "codex", "exec", "--sandbox", "workspace-write", "--json",
         "--ephemeral", "--skip-git-repo-check", "--model", "gpt-5.5",
         PRE_L5_ARGV_PROMPT,
+    ],
+    # No permission flag and no `--add-dir`: §6.5 tier 1, measured sufficient
+    # with a clean canary at all four rungs. This entry is what keeps the help
+    # text's false "--allow-all-tools is required for non-interactive mode" from
+    # being "fixed" back into the argv by a later edit.
+    "copilot": [
+        "copilot", "--output-format", "json", "--stream", "off",
+        "--log-level", "none", "--no-custom-instructions", "--no-ask-user",
+        "--no-auto-update", "--disable-builtin-mcps",
+        "--model", "openai/gpt-4.1-mini", "-p", PRE_L5_ARGV_PROMPT,
     ],
     "cursor-agent": [
         "cursor-agent", "--print", "--trust", "--mode", "ask",
@@ -6132,6 +8002,12 @@ PRE_L5_ARGV = {
         "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",
         PRE_L5_ARGV_PROMPT,
     ],
+    # No model token: kimi selects it through KIMI_MODEL_NAME, and `-m <slug>`
+    # is a hard failure ("Model ... is not configured in config.toml"). This row
+    # is what keeps that measured fact from being "fixed" back into argv.
+    "kimi": [
+        "kimi", "--output-format", "stream-json", "-p", PRE_L5_ARGV_PROMPT,
+    ],
     "muse": [
         "muse", "exec", "--json", "--disable-approval", "--model",
         "muse-spark-1.2", PRE_L5_ARGV_PROMPT,
@@ -6145,6 +8021,26 @@ PRE_L5_ARGV = {
         "pi", "--no-session", "-p", "--model", "anthropic/claude-opus-4-8",
         PRE_L5_ARGV_PROMPT,
     ],
+    # No --max-wall-time element at all: that flag is the ONLY row-derived value
+    # qwen renders, and `timeout_s=None` must emit nothing rather than a default
+    # (§1's guard, and what keeps expected_argv.yaml free of a "sometimes
+    # present" case). The prompt is a bare trailing positional -- `-p` is
+    # deprecated at 0.21.13.
+    "qwen-code": [
+        "qwen", "--bare", "--chat-recording", "false", "-o", "json",
+        "--max-tool-calls", "0", "--max-session-turns", "25",
+        "-m", "qwen/qwen3.8-max", PRE_L5_ARGV_PROMPT,
+    ],
+    # Note what is NOT here: the model. vibe has no `--model` flag, so the alias
+    # rides VIBE_ACTIVE_MODEL and the argv is model-independent -- which is also
+    # why vibe needs no normalize_argv.py entry (no model token ever reaches the
+    # call log). `--max-price` and `--max-turns` are POLICY constants and are
+    # pinned verbatim; `--agent plan` is the §6.5 rung, and the bare form it
+    # replaces is DESTRUCTIVE, not tier 1.
+    "vibe": [
+        "vibe", "--output", "json", "--max-price", "0.25",
+        "--max-turns", "4", "--agent", "plan", "-p", PRE_L5_ARGV_PROMPT,
+    ],
 }
 
 
@@ -6153,7 +8049,7 @@ class TestTimeoutKeywordIsInertWhenUnset:
 
     def test_the_table_covers_every_registered_adapter(self):
         assert set(PRE_L5_ARGV) == set(_registered_provider_names())
-        assert len(PRE_L5_ARGV) == 13
+        assert len(PRE_L5_ARGV) == 17
 
     @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
     def test_explicit_none_renders_the_pre_l5_argv(self, name):

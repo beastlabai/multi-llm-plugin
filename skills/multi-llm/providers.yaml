@@ -132,12 +132,20 @@ providers:
     # modelConfigs.customAliases in ~/.gemini/settings.json (or the project's
     # .gemini/settings.json) and list that alias name here as the model.
     # Gemini 3 models take thinkingLevel LOW/HIGH; 2.5 takes a numeric thinkingBudget.
+    # MEASURED 2026-08-19 against generativelanguage.googleapis.com/v1beta with a
+    # GEMINI_API_KEY: of the five ids previously listed here, `gemini-3-flash`,
+    # `gemini-3-pro` and `gemini-3.1-pro` are ABSENT from the catalog, and
+    # `gemini-3-flash` 404s on :generateContent. It was models[0], so a bare
+    # `gemini` spec resolved to a model the API-key path cannot serve. The two
+    # verified ids lead now; the gemini-3 line is kept, corrected to the names the
+    # catalog really publishes, and flagged as unverified on the OAuth/Code Assist
+    # path which resolves a different catalog.
     models:
-      - gemini-3-flash
-      - gemini-3-pro
-      - gemini-3.1-pro
-      - gemini-2.5-flash
-      - gemini-2.5-pro
+      - gemini-2.5-flash          # verified 200
+      - gemini-2.5-pro            # verified in catalog
+      - gemini-3-flash-preview    # verified 200 (was: gemini-3-flash, absent)
+      - gemini-3.1-pro-preview    # in catalog (was: gemini-3.1-pro, absent)
+      - gemini-flash-latest       # moving alias, in catalog
 
   grok:
     default_timeout: 1200
@@ -346,6 +354,212 @@ providers:
       - openrouter/moonshotai/kimi-k2.7-code
       - openrouter/openai/gpt-5.5
 
+  kimi:
+    default_timeout: 1200
+    max_concurrent: 2
+    # Kimi Code (Moonshot), binary `kimi`. Measured against 0.36.1 in the §6
+    # container probe of plans/harness-expansion.md.
+    #
+    # OpenRouter slugs — BYOK generic backend. A Kimi Code subscription is a
+    # DIFFERENT catalog and these entries do not transfer to it.
+    #
+    # The slug travels in `KIMI_MODEL_NAME`, never in argv: the KIMI_MODEL_*
+    # family synthesizes a model under the fixed literal id `__kimi_env_model__`,
+    # so `kimi -m <slug>` fails with `Model "<slug>" is not configured in
+    # config.toml`. The adapter emits no `-m` at all.
+    #
+    # No ":effort" suffix — a third ":"-segment is part of the model id.
+    # KIMI_MODEL_THINKING_EFFORT exists as a name but is inert on the wire at
+    # 0.36.1 (byte-identical request body with and without it).
+    #
+    # argv-only — a large prompt exceeds the Windows command-line cap and is
+    # refused before spawn. Measured: kimi reads no stdin (`-p -` delivers the
+    # literal "-"), expands no `@file`, and has no `--prompt-file`.
+    #
+    # TELEMETRY, MEASURED AND UNFIXABLE FROM HERE: at 0.36.1 kimi resolves
+    # `telemetry-logs.kimi.com` on every run **even with KIMI_DISABLE_TELEMETRY=1**,
+    # which the adapter does set. Reproduced offline three ways (opt-out set,
+    # opt-out unset, and with KIMI_DISABLE_CRON=1): two DNS queries every time,
+    # identical in all three. The value is not the problem -- "1" is in the CLI's
+    # own true-value set and its `isTelemetryDisabledByEnv` gate reads it -- the
+    # connection attempt simply is not gated. In the container the egress
+    # allowlist refuses it and nothing leaves; on YOUR machine there is no such
+    # allowlist, so the request goes out. Re-check on the next version bump.
+    # MODEL CHOICE, 2026-08-19. Kimi K3 was requested "on low reasoning"; that
+    # qualifier is NOT expressible through this adapter, so K3 was not taken.
+    # Two measured reasons, both already recorded above: there is no ":effort"
+    # suffix (a third ":"-segment is part of the model id, so `kimi-k3:low` would
+    # travel to OpenRouter verbatim as an unknown model), and
+    # KIMI_MODEL_THINKING_EFFORT is inert on the wire at 0.36.1 (byte-identical
+    # request body with and without it). OpenRouter exposes `reasoning_effort` as
+    # a request parameter, but the kimi CLI never sends one. K3 would therefore
+    # have run at default reasoning for $3.00/M in and $15.00/M out -- 5x and 6x
+    # this row's previous cost, on the token side that reasoning inflates.
+    # `kimi-k2.5` is the chosen alternative: newer than kimi-k2-thinking and
+    # CHEAPER than it too ($0.45/M in, $2.25/M out against $0.60/$2.50).
+    models:
+      - moonshotai/kimi-k2.5
+
+  qwen-code:
+    default_timeout: 1200
+    max_concurrent: 2
+    # Qwen Code, binary `qwen` (provider key `qwen-code` -- the key names the
+    # HARNESS, not the model family, the same split as claude-code/claude).
+    # Measured against 0.21.13 in the §6 container probe of
+    # plans/harness-expansion.md.
+    #
+    # OpenRouter slugs -- BYOK generic backend, via the OPENAI_BASE_URL /
+    # OPENAI_API_KEY / OPENAI_MODEL trio. A Qwen first-party plan (OAuth or
+    # DashScope) is a DIFFERENT catalog and these entries do not transfer to it.
+    #
+    # EXITS 0 ON BACKEND FAILURE -- the defect that shapes the adapter. 401, 404,
+    # 400-overflow and 500 alike all produce rc=0, `subtype: "success"`,
+    # `is_error: false`, EMPTY STDERR, and an answer of "[API Error: <upstream
+    # text>]". The adapter declares that marker as an exit-zero failure marker and
+    # classifies before it unwraps; without both, a fan-out slot would report the
+    # error string as the model's answer.
+    #
+    # No ":effort" suffix -- a third ":"-segment is part of the model id. There is
+    # no effort/thinking/reasoning option anywhere in the full help, and a stray
+    # suffix was measured passing through to the backend VERBATIM, where it
+    # becomes a "model not found" with nothing pointing at the suffix.
+    #
+    # Structured output IS supported: `--json-schema <json literal>`, the same
+    # spelling and inline transport as claude-code, measured constraining the
+    # output and failing closed on plain text.
+    #
+    # `--max-wall-time` is derived from the slot timeout and held 30 s under it.
+    # That is load-bearing rather than tidy: only qwen's 5xx retry path
+    # self-terminates -- a 429 backend was still retrying past 180 s and a stalled
+    # one retries a ~120 s client timeout indefinitely.
+    #
+    # NOISIER THAN THE OTHER PROVIDERS, MEASURED AND DELIBERATE. The adapter
+    # ships `--max-tool-calls 0`, which aborts the run BEFORE a tool executes.
+    # Against the real backend, 4 of 14 live runs (~29%) on a trivial prompt
+    # ended that way -- `FatalBudgetExceededError: tool-call budget of 0
+    # exceeded` -- because a real model sometimes chooses to call a tool where
+    # the offline stub never does. The retry ladder normally absorbs it (the
+    # abort is transport-shaped), at the cost of a second call.
+    #
+    # That 29% is the reason the flag STAYS. It is direct evidence that the model
+    # wants to call tools on ordinary prompts, so without the cap those calls
+    # would execute in YOUR checkout -- from a provider that only ever parses the
+    # output as an answer. A structured-output dispatch (`--json-schema`) is
+    # quieter: the synthetic tool is exempt from the cap.
+    models:
+      # MODEL CHOICE, 2026-08-19: the cheap member of the same family, moved off
+      # `qwen/qwen3.8-max`. $0.45/M in, $3.20/M out against max's $2.00/$6.00 --
+      # 4.4x cheaper on input. This also directly relieves the recorded live-lane
+      # failure: qwen-code took OpenRouter 402 "requested up to 64000 tokens, but
+      # can only afford 43729", which is a max_tokens-vs-balance check, and a
+      # cheaper slug raises the affordable ceiling for the same credit.
+      - qwen/qwen3.8-27b
+
+  copilot:
+    default_timeout: 1200
+    max_concurrent: 2
+    # GitHub Copilot CLI, binary `copilot`. Measured against 1.0.80 in the §6
+    # container probe of plans/harness-expansion.md.
+    #
+    # OpenRouter slugs -- BYOK generic backend, via COPILOT_PROVIDER_BASE_URL
+    # (the ACTIVATION SWITCH) + _TYPE + _API_KEY. NO GITHUB ACCOUNT IS NEEDED:
+    # the vendor's own docs say "GitHub authentication is not required" in this
+    # mode. A Copilot SEAT is a DIFFERENT catalog -- the built-in
+    # `auto`/`claude-*`/`gpt-5.x`/`gemini-3.x` model list belongs to that path
+    # and is consulted only for token limits, so none of it transfers here and
+    # none of it belongs in this list.
+    #
+    # NON-REASONING SLUGS ONLY. A model whose OpenRouter stream carries
+    # `reasoning_content` deltas breaks copilot's completions parser
+    # (copilot-cli#4196). Both entries below were chosen off OpenRouter's own
+    # `supported_parameters` (neither advertises `reasoning`/`reasoning_effort`)
+    # and both were run on the live smoke. `COPILOT_PROVIDER_WIRE_API=responses`
+    # is the proven fallback if a future slug needs it -- measured working
+    # against the committed stub -- but it is not set today.
+    #
+    # Model entries may carry an optional ":effort" suffix, split on the LAST
+    # colon.  Valid: none, minimal, low, medium, high, xhigh, max
+    # (all seven accepted at 1.0.80; which ones a given backend honours is
+    # server-side and model-dependent).
+    #
+    # TOOL TIER 1, AND THE HELP TEXT IS WRONG. `--allow-all-tools` is documented
+    # as "required for non-interactive mode"; measured, it is not. All four §6.5
+    # rungs produced byte-identical output with a clean filesystem canary, so the
+    # adapter emits NO permission flag and no `--add-dir` at all. The env twin
+    # `COPILOT_ALLOW_ALL` is stripped, because it would widen the tier with no
+    # argv change and make the recorded tier unenforceable.
+    #
+    # EXITS 0 ON ONE FAILURE SHAPE: an empty provider 200 gives exit 0,
+    # `result.exitCode: 0` and an empty assistant message with no error record.
+    # There is no text for a marker to match, so the adapter detects it
+    # structurally in parse_output instead.
+    # MODEL CHOICE, 2026-08-19: moved off the dated `openai/gpt-4.1-mini`.
+    # `openai/gpt-5.6-luna` is newer AND cheaper -- $0.20/M in, $1.20/M out
+    # against gpt-4.1-mini's $0.40/$1.60 (OpenRouter catalog, same day).
+    #
+    # ONE RISK, RECORDED RATHER THAN DISCOVERED LATER: gpt-4.1-mini was chosen
+    # partly for being a NON-REASONING slug, because a stream carrying
+    # `reasoning_content` deltas breaks copilot's completions parser
+    # (copilot-cli#4196). Luna advertises `reasoning`/`reasoning_effort` where
+    # gpt-4.1-mini advertised no reasoning parameters at all, so whether it emits
+    # those deltas unprompted is the open question. The credentialed live lane is
+    # exactly the instrument for it: a2/a3 fail loudly if the parser breaks.
+    models:
+      - openai/gpt-5.6-luna
+      - openai/gpt-4.1-mini
+      - openai/gpt-4o-mini
+
+  vibe:
+    default_timeout: 1200
+    max_concurrent: 2
+    # Mistral Vibe, binary `vibe` (PyPI package `mistral-vibe`). Measured against
+    # 2.24.1 in the §6 container probe of plans/harness-expansion.md.
+    #
+    # ENTRIES HERE ARE SEED ALIASES, NOT SLUGS -- vibe is the one adapter in this
+    # roster whose model surface is neither a flag nor a raw wire name. Each
+    # entry names a `[[models]]` alias defined in the committed seed
+    # (tests/container/home_seed/vibe/.vibe/config.toml on the container lanes,
+    # $VIBE_HOME/config.toml on a host), whose own `name` field is the OpenRouter
+    # slug that reaches the wire. The adapter carries the alias in
+    # VIBE_ACTIVE_MODEL, because vibe has NO --model flag at all.
+    #
+    # OpenRouter slugs -- BYOK generic backend, via the seed's `[[providers]]`
+    # entry (`backend = "generic"`, `api_style = "openai"`, `api_base`, and
+    # `api_key_env_var` naming OPENROUTER_API_KEY). A Mistral API key is a
+    # DIFFERENT catalog and none of this transfers to it; MISTRAL_API_KEY is
+    # stripped so a stale one cannot select the vendor backend underneath.
+    #
+    # ADDING AN ENTRY IS A TWO-FILE CHANGE. An alias listed here with no
+    # `[[models]]` entry behind it is selectable in the picker and fails at
+    # dispatch; on the container lane the alias must also equal the redirect row's
+    # `model_arg` byte-for-byte, or test_the_stub_saw_only_this_row_s_model fails.
+    #
+    # Model entries may carry an optional ":effort" suffix, split on the LAST
+    # colon.  Valid: off, low, medium, high, max
+    # (the accepted set of the `thinking` config key, read off the installed
+    # validator at 2.24.1). It rides VIBE_THINKING rather than argv -- vibe has no
+    # effort flag either -- but the suffix is still split here, because an alias
+    # with `:high` glued on selects no configured model.
+    #
+    # TOOL TIER: `--agent plan`, AND THE BARE INVOCATION IS NOT THE FLOOR.
+    # vibe's `default_agent` is `accept-edits`, whose AgentSafety is DESTRUCTIVE
+    # and whose write_file/edit permission is `always` -- so a bare `vibe -p ...`
+    # is the second-WIDEST rung, not tier 1. The adapter always emits
+    # `--agent plan` (SAFE, read-only), which completed a realistic review prompt
+    # with a clean filesystem canary, and pins VIBE_DEFAULT_AGENT to match so an
+    # argv change cannot silently fall back. Never --auto-approve/--yolo.
+    #
+    # SPEND: `--max-price 0.25` is the roster's only USD cap, but it is checked
+    # BETWEEN turns -- a single completion runs to completion regardless -- so
+    # `--max-turns 4` is the bound that actually stops a runaway.
+    # MODEL CHOICE, 2026-08-19: same move as copilot -- newer and cheaper.
+    # THIS VALUE IS BYTE-COUPLED TO TWO OTHERS: the redirect row's `model_arg`
+    # and the seed's `[[models]] alias`. vibe is the one adapter whose model
+    # surface is an indirection, so all three must be changed together.
+    models:
+      - openai/gpt-5.6-luna
+
+
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
 
@@ -488,6 +702,10 @@ defaults:
     #- "agy:Gemini 3.1 Pro (High)"
     #- pi:openrouter/z-ai/glm-5.2
     #- muse:muse-spark-1.2:xhigh
+    #- kimi:moonshotai/kimi-k2-thinking
+    #- qwen-code:qwen/qwen3.8-max
+    #- copilot:openai/gpt-4.1-mini
+    #- vibe:openai/gpt-4.1-mini
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models

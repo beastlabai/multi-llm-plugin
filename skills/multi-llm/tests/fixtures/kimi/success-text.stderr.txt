@@ -1,0 +1,2 @@
+kimi version 0.36.1
+To resume this session: kimi -r session_b2b5c4ec-feaf-47ae-a487-472fd463b57b

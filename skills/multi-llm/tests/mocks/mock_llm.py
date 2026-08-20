@@ -635,24 +635,108 @@ def get_response_content(prompt: str) -> str:
     return default_response_content(get_provider_name())
 
 
-def write_output_file(prompt: str, content: str) -> None:
-    """Write response content to output file if specified.
+#: The first line of the file block the three shipped review prompts render for
+#: every adapter declaring ``supports_file_output`` (``llm_client``'s
+#: ``FILE_OUTPUT_LOCATION``). Matching the SHIPPED instruction — rather than the
+#: ``OUTPUT_FILE:`` directive no orchestrator has ever emitted — is what makes
+#: the file channel load-bearing on this lane: before this, every fake-lane
+#: result arrived through `invoke_with_file_output`'s stdout fallback, so a
+#: provider that cannot write a file was indistinguishable from one that can and
+#: the whole primary channel was dead code suite-wide.
+FILE_INSTRUCTION_RE = re.compile(
+    r"^CRITICAL: Write your JSON output to this file: (?P<path>\S.*?)\s*$",
+    re.MULTILINE,
+)
 
-    Args:
-        prompt: The prompt text (may contain OUTPUT_FILE directive).
-        content: The response content to write.
+#: Mock identities whose real adapter declares ``supports_file_output = False``
+#: because its CLI runs in a read-only mode (cursor `--mode ask`). Kept as a
+#: literal rather than imported from `utils.providers`: this file is a stand-in
+#: for a third-party binary and must not depend on the product it fakes — the
+#: pin that keeps the two in step is
+#: `test_providers.TestDeclaredOutputChannel.CANNOT_WRITE_FILES`, and
+#: `test_fake_lane_output_channel.py` asserts this set against it.
+#:
+#: The other three declared read-only adapters (`aider` `/ask`, `qwen-code`
+#: `--max-tool-calls 0`, `vibe` `--agent plan`) have no identity here — all
+#: three are `lane: provider` CLIs whose real binary is in the container image —
+#: so this set is cursor alone today. `test_fake_lane_output_channel.py` asserts
+#: exactly that intersection, in both directions.
+#: UPDATED 2026-08-19: `gemini` joined, and it does NOT refuse in words.
+#: Measured (harness-expansion.md §14.7 gap 5): gemini-cli ships no `write_file`
+#: tool under this adapter's argv, so a write is answered
+#: `Tool "write_file" not found in registry`, nothing is written — and gemini
+#: EXITS 0 printing the model's own "JSON written to ..." confirmation as its
+#: answer. So the fake lane must not give it cursor's refusal sentence: the
+#: dangerous shape here is a run that claims the file exists. Each identity
+#: carries the text its real CLI was measured producing.
+READ_ONLY_REPLIES = {
+    "cursor-agent": (
+        "I can't write the requested file while Ask mode is active. "
+        "Switch to Agent mode and resend the request."
+    ),
+    "gemini": (
+        "JSON written to the requested output file. The review is complete "
+        "and the results have been saved."
+    ),
+}
+
+READ_ONLY_IDENTITIES = frozenset(READ_ONLY_REPLIES)
+
+#: What cursor-agent really answers when a prompt demands a file write under
+#: `--mode ask`. Measured 2026-08-18 on `cursor-agent:gpt-5.6-sol-xhigh`, three
+#: identical runs: a **successful** envelope (`"subtype": "success"`,
+#: `"is_error": false` — so `exit_zero_failure_markers` does not match it and
+#: the slot is not classified as a failure) whose entire `result` is this
+#: sentence, and no file anywhere. Reproduced on this lane so that a prompt
+#: regression demanding a file from a read-only adapter fails a test here
+#: instead of a user's review run.
+ASK_MODE_REFUSAL = (
+    "I can't write the requested file while Ask mode is active. "
+    "Switch to Agent mode and resend the request."
+)
+
+
+def shipped_file_instruction(prompt: str) -> Optional[Path]:
+    """The file the SHIPPED review prompt orders the model to write, if any.
+
+    This is the one spelling the product really renders
+    (``llm_client.FILE_OUTPUT_LOCATION``), and therefore the only one that means
+    "an adapter was asked for the file channel". The refusal gate keys on it
+    alone — `MOCK_OUTPUT_PATH` and the legacy `OUTPUT_FILE:` directive are both
+    a *test author* saying "put a file here", which is a property of the harness
+    rather than of the product's prompt, and a read-only identity must still
+    honour those (a fixture that sets one is staging a file, not modelling a
+    refusal).
     """
-    output_path = None
+    match = FILE_INSTRUCTION_RE.search(prompt)
+    return Path(match.group("path")) if match else None
 
-    # Check environment variable first
-    if os.environ.get("MOCK_OUTPUT_PATH"):
-        output_path = Path(os.environ["MOCK_OUTPUT_PATH"])
-    elif "OUTPUT_FILE:" in prompt:
-        # Extract output file path from prompt
+
+def demanded_output_path(prompt: str) -> Optional[Path]:
+    """The file this prompt orders the model to write, in either spelling."""
+    shipped = shipped_file_instruction(prompt)
+    if shipped:
+        return shipped
+
+    if "OUTPUT_FILE:" in prompt:
         for line in prompt.split("\n"):
             if "OUTPUT_FILE:" in line:
-                output_path = Path(line.split("OUTPUT_FILE:")[1].strip())
-                break
+                return Path(line.split("OUTPUT_FILE:")[1].strip())
+
+    return None
+
+
+def write_output_file(prompt: str, content: str) -> None:
+    """Write response content to output file if one was asked for.
+
+    Args:
+        prompt: The prompt text (may carry a file instruction).
+        content: The response content to write.
+    """
+    if os.environ.get("MOCK_OUTPUT_PATH"):
+        output_path = Path(os.environ["MOCK_OUTPUT_PATH"])
+    else:
+        output_path = demanded_output_path(prompt)
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -893,17 +977,39 @@ def format_agy_output(content: str) -> str:
     non-SUCCESS status as a failure carrying `error`.
 
     PROVENANCE, because C5's one non-negotiable rule is "captured from the real
-    binary, never invented". A live capture was **not** possible here and was not
-    attempted: agy's credentials live in the OS keyring (not in `$HOME`, per the
-    Phase 1 spike's `repo_corrections` in tests/container/redirect.yaml), so any
-    print-mode run would spend the developer's own Google quota. The shape below
-    is therefore the repo's existing record of real runs — `AgyProvider`'s
-    docstring and `tests/test_providers.TestAgyProvider._envelope` — with every
-    key corroborated **offline** against the installed binary itself (agy 1.1.13,
-    `agy --version`), whose Go JSON struct tags carry `ConversationID
+    binary, never invented". A live capture of a SUCCESS envelope is **not
+    possible**, and the reason is stronger than the one first written here.
+
+    This docstring used to say agy's credentials live in the OS keyring "not in
+    `$HOME`", so a print-mode run would spend the developer's own Google quota.
+    That claim is RETRACTED — `tests/container/redirect.yaml`'s agy row carries
+    the retraction — because it holds only where **D-Bus is reachable**:
+    headless, agy logs `Failed to load token from keyring, falling back to file`
+    and opens `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`, which is
+    seedable. What actually makes a success capture impossible is that **agy's
+    auth resolves before its first RPC**: re-measured 2026-08-19 with
+    `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
+    `GOOGLE_GEMINI_BASE_URL` all pointed at a live stub, the run produced a
+    byte-identical failure envelope with ZERO requests in the stub's log. No
+    environment variable selects an API-key path a stub could answer, so there is
+    no credential-free route to a successful run at any price.
+
+    The shape below is therefore the repo's existing record of real runs —
+    `AgyProvider`'s docstring and `tests/test_providers.TestAgyProvider._envelope`
+    — with every key corroborated **offline** against the installed binary itself
+    (agy 1.1.13, `agy --version`), whose Go JSON struct tags carry `ConversationID
     json:"conversation_id"`, `Status json:"status"`, `Response json:"response"`,
     `DurationSeconds json:"duration_seconds"`, `NumTurns json:"num_turns"` (which
     occurs exactly once in the whole binary) and `Usage json:"usage"`.
+
+    It is corroborated a second way now: `tests/fixtures/agy/` (captured
+    2026-08-19, agy 1.1.15, `--network none`, no credential) holds one graded row
+    and eleven written reasons, and that row is the real binary's **ERROR**
+    envelope: `conversation_id, status, response, error, duration_seconds,
+    num_turns, usage` on one line, in that order — this formatter's six keys in
+    the same order, plus the `error` a SUCCESS envelope does not carry. A failure
+    capture cannot supply a success body, but it does confirm the field set and
+    the ordering below against 1.1.15 rather than 1.1.13.
 
     The `usage` block is inert here — `AgyProvider` declares `usage: none` and
     implements no `parse_usage` — and is present only because the real envelope
@@ -1210,7 +1316,12 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
 VERSION_STRINGS = {
     "codex": "codex-cli 0.146.0",
     "opencode": "1.18.12",
-    "claude-code": "2.1.224 (Claude Code)",
+    # Moved 2.1.224 -> 2.1.232 with the adapter, 2026-08-20: the shipped
+    # claude-code fixtures were captured at 2.1.232 and the image installs it
+    # (cli-versions.lock). This entry and `ClaudeCodeProvider.verified_version`
+    # are one fact written twice, and test_subagent_executor.py::
+    # test_the_mock_version_matches_each_verified_version is what keeps them so.
+    "claude-code": "2.1.232 (Claude Code)",
     "cursor-agent": "2026.02.01-abcdef",
     "gemini": "0.9.0",
     "kilocode": "1.4.0",
@@ -1238,8 +1349,11 @@ def print_version(provider: str) -> None:
 #: Entries are added for an adapter declaring an ``auth_check`` and for NO other:
 #: an identity with a fabricated probe here would answer a subcommand its real
 #: CLI does not have. ``agy`` is the current example of the empty case — its auth
-#: is an OS-keyring Google OAuth session with no `login status`-class subcommand,
-#: so `AgyProvider.auth_check` is empty and this table stays silent about it.
+#: is a Google OAuth session (the OS keyring where D-Bus is reachable, a token
+#: file under ``$HOME/.gemini/antigravity-cli/`` where it is not) with no
+#: `login status`-class subcommand at all, so `AgyProvider.auth_check` is empty
+#: and this table stays silent about it. That empty case is not a missing part:
+#: ``test_fake_lane_roster.py``'s part 5 asserts the absence in both directions.
 AUTH_PROBE_ARGS = {
     "codex": ("login", "status"),
     "opencode": ("auth", "list"),
@@ -1680,6 +1794,17 @@ def main() -> int:
     except ScenarioRefused as exc:
         print(f"MOCK SCENARIO ERROR: {exc}", file=sys.stderr)
         return EXIT_UNMATCHED_PROMPT
+
+    # A read-only identity handed a "write this file" instruction answers the
+    # way the real CLI was measured answering it: a SUCCESSFUL envelope carrying
+    # a refusal sentence, and no file. This is the fake lane's half of the
+    # `supports_file_output` contract — the shipped prompts render the stdout
+    # block for these identities, so reaching this branch means a prompt, a
+    # template or a declaration regressed, and the row that regressed it fails
+    # here rather than 450 s into a user's review.
+    if provider in READ_ONLY_IDENTITIES and shipped_file_instruction(prompt):
+        print(format_output(provider, READ_ONLY_REPLIES[provider]))
+        return 0
 
     # Write to output file if specified
     write_output_file(prompt, content)

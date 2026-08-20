@@ -49,7 +49,12 @@ from .provider_registry import (
     set_run_anchor,
 )
 from .json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
-from .llm_client import invoke_with_provider, invoke_with_file_output
+from .llm_client import (
+    STDOUT_OUTPUT_LOCATION,
+    invoke_with_provider,
+    invoke_with_file_output,
+    render_output_location,
+)
 from .providers.base import (
     CATEGORY_CONNECTION_ERROR,
     CATEGORY_INVALID_MODEL,
@@ -680,7 +685,16 @@ async def run_single_model(
 
     # Fall back to old method if no out_dir provided
     if not out_dir:
-        prompt = prompt_template.format(**full_prompt_context, output_json_path="(stdout)")
+        # There is no output file on this path at all — the result is whatever
+        # `invoke_with_provider` parses off stdout — so the prompt asks for
+        # stdout outright, for every provider. It used to interpolate the string
+        # "(stdout)" into "Write your JSON output to this file:", which named a
+        # channel as if it were a path.
+        prompt = prompt_template.format(
+            **full_prompt_context,
+            output_json_path="(stdout)",
+            output_location=STDOUT_OUTPUT_LOCATION,
+        )
         try:
             print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
             result = await asyncio.to_thread(
@@ -764,8 +778,13 @@ async def run_single_model(
         )
         # A placeholder only until the first attempt names its real output file:
         # rule 4 can refuse this slot before any dispatch, and the result dict
-        # still owes its caller a `prompt`.
-        prompt = prompt_template.format(**full_prompt_context, output_json_path="")
+        # still owes its caller a `prompt`. The output-location block is already
+        # this provider's real one — it depends on the adapter, not on the path.
+        prompt = prompt_template.format(
+            **full_prompt_context,
+            output_json_path="",
+            output_location=render_output_location("", model_spec, anchor=plan_path),
+        )
 
         while (slice_s := ladder.next_attempt()) is not None:
             # Never a fresh copy of `effective_timeout`: `next_attempt()` returns
@@ -803,8 +822,16 @@ async def run_single_model(
             source = result.get("source", "unknown")
             output_file = result.get("output_file", "")
 
+            # The prompt this attempt really sent, reconstructed for the record:
+            # `invoke_with_file_output` renders the same two values from the same
+            # spec, so this stays the text the child saw rather than a
+            # file-flavoured approximation of it.
             prompt = prompt_template.format(
-                **full_prompt_context, output_json_path=output_file
+                **full_prompt_context,
+                output_json_path=output_file,
+                output_location=render_output_location(
+                    output_file, model_spec, anchor=plan_path
+                ),
             )
 
             if output_file:

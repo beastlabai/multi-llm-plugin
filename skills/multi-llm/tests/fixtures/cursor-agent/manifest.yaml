@@ -1,0 +1,201 @@
+# The §6.2 fixture manifest for cursor-agent. Graded by
+# tests/test_provider_fixture_rows.py, whose module docstring owns the format.
+#
+# TWO ROWS, TEN WRITTEN REASONS — and the ten are permanent, not pending. Every
+# `not_applicable` cell below quotes the same measurement from
+# `tests/container/redirect.yaml`'s own cursor-agent row, because that row is
+# where it was made and paraphrasing it would soften it.
+schema_version: 1
+provider: cursor-agent
+cli_version: "2026.08.11-e8db854"
+captured: "2026-08-19"
+method: >-
+  NOT a stub session — cursor-agent has none, and that is this manifest's whole
+  subject. `success` is HARVESTED FROM THE CREDENTIALED LIVE LANE: the bytes are
+  the `stdout` value of
+  tests/container/runs/20260819T145322Z/live-cursor-agent/live-provider.json,
+  which `live_provider.py` wrote untruncated and redacted-at-write-time (the
+  capture contains no `<redacted>` marker, so nothing in it was replaced), from
+  a real `--print --trust --mode ask --output-format json --model auto` dispatch
+  against api2.cursor.sh with the developer's own ~/.config/cursor/auth.json
+  staged into a disposable HOME. exit 0, stderr 0 bytes, 11.16 s wall.
+  `exit-zero-failure` is a ONE-FIELD SYNTHESIS of those same bytes — see its
+  `provenance:`. Nothing here came from `stub_server.py` or `failserver.py`,
+  because no request cursor-agent makes is one either of them can answer.
+notes: >-
+  The permanent reason, quoted from redirect.yaml's cursor-agent row rather
+  than restated: "The redirect itself WORKS — CURSOR_API_ENDPOINT (default
+  https://api2.cursor.sh) sent 100% of traffic to the stub and nothing reached
+  Cursor. It is unserviceable anyway: after a JSON handshake POST
+  /auth/exchange_user_api_key, every call is POST
+  /aiserver.v1.<Service>/<Method> with content-type: application/proto and
+  connect-protocol-version: 1 — binary protobuf over Connect-RPC. None of the
+  three model-API surfaces are involved, so serving it means reimplementing
+  Cursor's protobuf schema, which is not a stub. `bedrock` mode is not an
+  escape: its own self-test validates against the backend."
+  Consequence for §6.2: the ten failure shapes are producible ONLY by inducing
+  the real vendor to emit them (a 429 from Cursor's own backend, a 400 for an
+  over-long context), which costs credits per attempt and cannot be induced on
+  demand at all for most of them. A guess would be worse than the gap, so each
+  row below carries the measurement and no bytes.
+
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    wall_s: 11.16
+    notes: >-
+      The nine-key result envelope, live: `type`, `subtype`, `is_error`,
+      `duration_ms`, `duration_api_ms`, `result`, `session_id`, `request_id`,
+      `usage` — and `usage` is exactly `{inputTokens, outputTokens,
+      cacheReadTokens, cacheWriteTokens}` with NO cost field, which is what
+      `usage_support = "partial"` declares. stderr is 0 bytes and the committed
+      empty file records that. `parse_output` unwraps `result` (the string
+      `["ok"]`) and returns the array; `classify_failure` is None, the assertion
+      that catches an adapter reading its own happy path as a failure.
+    expect:
+      success: true
+      data: ["ok"]
+      raw_contains:
+        # The two strings the adapter's own tables key on. `is_error` is what
+        # `exit_zero_failure_markers` matches (here `false`); `"type":"result"`
+        # is what `parse_result_envelope` needs to find a `result` key at all.
+        - '"type":"result"'
+        - '"is_error":false'
+      classify_failure: null
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      ONE EDIT, one field, and every other byte is the harvested live envelope
+      above: `"is_error":false` -> `"is_error":true`. Nothing else was touched —
+      `"subtype":"success"` is still there, and that inconsistency is deliberate
+      rather than sloppy, because it is what makes the row prove something. The
+      shape is legitimate to synthesize because the adapter documents it as
+      MEASURED: cursor_agent.py's `exit_zero_failure_markers` comment records
+      "cursor-agent exited 0 in all six auth states measured, so for this CLI the
+      exit code carries no verdict whatsoever and only a stream field does",
+      naming `"is_error"\s*:\s*true` as that field (measured 2026-08-16). What
+      cannot be harvested is the vendor-side condition that sets it: it needs a
+      real failing dispatch against Cursor's backend, on credits, at a moment
+      the backend chooses. So the flag is flipped and labelled instead of a
+      failure being invented around it.
+    notes: >-
+      THE FINDING THIS ROW PINS, and it is why the two assertions below look
+      contradictory: `parse_output` NEVER CONSULTS `is_error`. It is
+      `parse_result_envelope`, which branches only on the presence of a `result`
+      key, so an envelope flagged as an error whose `result` still holds a
+      parseable document comes back `success: True` with that document as the
+      answer. The only thing in the adapter that sees the flag is
+      `classify_failure` via `exit_zero_failure_markers` — hence
+      `success: true` AND `classify_failure: runner_error` on the same bytes.
+      That division of labour is real, load-bearing (§7.2 step 6 consults the
+      exit-0 markers last) and would be invisible without this row.
+    expect:
+      success: true
+      data: ["ok"]
+      raw_contains: ['"is_error":true']
+      classify_failure: "runner_error"
+
+  truncated:
+    not_applicable: >-
+      Needs a server that can cut a response mid-record, and cursor-agent
+      reaches no server this repo can run. Quoting redirect.yaml's cursor-agent
+      row: after the JSON handshake "every call is POST
+      /aiserver.v1.<Service>/<Method> with content-type: application/proto and
+      connect-protocol-version: 1 — binary protobuf over Connect-RPC", so
+      `failserver.py --mode trunc` — which serves the OpenAI/Anthropic/Gemini
+      completion surfaces — is never dispatched to. Truncating the real
+      api2.cursor.sh stream is not something a client can ask for.
+
+  ephemeral-only:
+    not_applicable: >-
+      `--output-format json` emits exactly ONE object, the nine-key result
+      envelope in `success.stdout.txt`; there is no filtered-noise record class
+      in it for an all-noise run to consist of. §6.2 makes this row conditional
+      on the CLI emitting filterable noise, and this argv does not. (The
+      streaming `--output-format stream-json` mode does emit progress events,
+      but no adapter path uses it and its bytes would pin nothing this parser
+      reads.)
+
+  multi-assistant:
+    not_applicable: >-
+      The result envelope carries a single `result` string, so "two or more
+      assistant messages in one run" has no representation in the bytes
+      `parse_output` sees — there is nothing for a first-wins/last-wins rule to
+      choose between. Producing a multi-turn transcript at all would need the
+      stream-json mode plus a real tool loop on Cursor's backend, i.e. the
+      protobuf surface redirect.yaml records as unserviceable.
+
+  error-envelope:
+    not_applicable: >-
+      "A provider error object delivered on the success channel" is exactly the
+      `is_error: true` envelope, and that row is committed above as the labelled
+      one-field synthesis. Harvesting the genuine article needs the vendor to
+      fail a paid dispatch on demand over the Connect-RPC/protobuf surface
+      redirect.yaml records as unserviceable. Committing a second invented
+      envelope here would double the fabrication and pin nothing the
+      exit-zero-failure row does not already pin.
+
+  stdout-error:
+    not_applicable: >-
+      Measured, and the measurement is a NEGATIVE on the exit code rather than
+      on the channel: cursor_agent.py records "cursor-agent exited 0 in all six
+      auth states measured, so for this CLI the exit code carries no verdict
+      whatsoever" (2026-08-16). This row wants a NONZERO exit, and no measured
+      cursor-agent failure produces one. The channel half — diagnosis on stdout,
+      stderr empty — is pinned by both committed rows, each of which ships a
+      0-byte `.stderr.txt` beside its stdout to record it.
+
+  empty:
+    not_applicable: >-
+      Zero bytes on both channels was never observed in the live lane: every
+      `--output-format json` dispatch wrote the result envelope, the smallest
+      measured being 312 bytes. Manufacturing one means killing the process,
+      which is §6 step 3's `timeout(1)` zero-byte-hang artifact — a harness
+      behaviour, not the CLI's — and this repo forbids committing that shape as
+      if the CLI had produced it.
+
+  auth-error:
+    not_applicable: >-
+      A second shape IS documented as measured (2026-08-16) — a plain-text
+      `Error: Authentication required. Please run 'agent login' first, …`
+      printed instead of the envelope — but the record of it in
+      cursor_agent.py's docstring ENDS IN AN ELLIPSIS, so byte-exact bytes for
+      it exist nowhere in this tree and a fixture would be inventing the tail
+      rather than labelling one flipped field. Re-harvesting it means running
+      the live lane with a deliberately broken credential, which is a credit
+      spend this batch was scoped not to make. The classification it would pin
+      already has coverage: "authentication required" is a member of
+      `base.auth_error_patterns`.
+
+  rate-limit:
+    not_applicable: >-
+      A 429 has to come from Cursor's own backend and cannot be induced: there
+      is no stub in the path (redirect.yaml: every call after the handshake is
+      "binary protobuf over Connect-RPC ... None of the three model-API surfaces
+      are involved"), and quota exhaustion is not a state a test may drive a
+      paid account into on purpose. `failserver.py --mode 429` is unreachable
+      for the same reason `trunc` is.
+
+  invalid-model:
+    not_applicable: >-
+      cursor-agent resolves `--model` server-side over the same protobuf
+      surface, so a 404/400 naming the model would have to be produced by
+      Cursor's backend on a credentialed run. The live row that produced
+      `success` above passed `--model auto`; probing an unknown slug is a paid
+      dispatch whose failure text is vendor-controlled, and guessing that text
+      is what §6.3 forbids. No stub can answer it — see this manifest's `notes`.
+
+  context-overflow:
+    not_applicable: >-
+      The vendor's context-length error is a backend response over the
+      Connect-RPC/protobuf surface redirect.yaml records as unserviceable, and
+      inducing one means paying to send a deliberately over-long prompt to a
+      real model. `failserver.py --mode ctx` serves the OpenAI/Anthropic/Gemini
+      surfaces, none of which cursor-agent ever calls, so the free path to this
+      row does not exist at any effort.

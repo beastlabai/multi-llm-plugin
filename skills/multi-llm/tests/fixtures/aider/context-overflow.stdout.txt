@@ -1,0 +1,31 @@
+
+HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /BerriAI/litellm/main/model_prices_and_context_window.json (Caused by NameResolutionError("HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to resolve 'raw.githubusercontent.com' ([Errno -3] Temporary failure in name resolution)"))
+Aider v0.86.2
+Model: openai/stub-model with whole edit format
+Git repo: .git with 0 files
+Repo-map: using 1024 tokens, auto refresh
+
+
+Tokens: 93 sent, 0 received.
+
+
+Model openai/stub-model has hit a token limit!
+Token counts below are approximate.
+
+Input tokens: ~103 of 0 -- possibly exhausted context window!
+Output tokens: ~0 of 0 -- possibly exceeded output limit!
+Total tokens: ~103 of 0 -- possibly exhausted context window!
+
+To reduce output tokens:
+- Ask for smaller changes in each request.
+- Break your code into smaller source files.
+- Use a stronger model that can return diffs.
+
+To reduce input tokens:
+- Use /tokens to see token usage.
+- Use /drop to remove unneeded files from the chat session.
+- Use /clear to clear the chat history.
+- Break your code into smaller source files.
+
+
+https://aider.chat/docs/troubleshooting/token-limits.html

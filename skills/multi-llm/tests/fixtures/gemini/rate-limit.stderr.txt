@@ -1,0 +1,144 @@
+Attempt 1 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 2 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 3 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 4 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 5 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 6 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 7 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 8 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 9 failed with status 429. Retrying with backoff... ApiError: {"error":{"code":429,"message":"Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.","status":"RESOURCE_EXHAUSTED"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+  status: 429
+}
+Attempt 10 failed: Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.. Max attempts reached
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-770359b79ea5/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-08-42-187Z.json RetryableQuotaError: Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.
+    at classifyGoogleError (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/googleQuotaErrors.js:96:20)
+    at retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:130:37)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:553:20)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/nonInteractiveCli.js:192:34
+    at async main (file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/gemini.js:462:9) {
+  cause: {
+    code: 429,
+    message: 'Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.',
+    details: []
+  },
+  retryDelayMs: undefined
+}
+{
+  "session_id": "0826f6fc-3040-41e1-a25d-37281a0d3350",
+  "error": {
+    "type": "Error",
+    "message": "[object Object]",
+    "code": 1
+  }
+}

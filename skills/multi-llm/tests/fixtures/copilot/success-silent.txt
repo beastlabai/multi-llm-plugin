@@ -1,0 +1,10 @@
+Here are the suggestions I found:
+
+```json
+[
+  {"id": "S001", "title": "Bound the retry ladder", "severity": "high"},
+  {"id": "S002", "title": "Strip the vendor token", "severity": "medium"}
+]
+```
+
+

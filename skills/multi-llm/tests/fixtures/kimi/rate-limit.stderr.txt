@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.rate_limit: 429 rate limit exceeded
+See log: /home/e2e/.kimi-code/logs/kimi-code.log

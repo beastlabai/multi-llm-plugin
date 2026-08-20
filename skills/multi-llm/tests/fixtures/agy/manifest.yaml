@@ -1,0 +1,190 @@
+# The §6.2 fixture manifest for agy (Google's Antigravity CLI). Graded by
+# tests/test_provider_fixture_rows.py, whose module docstring owns the format.
+#
+# ONE ROW, ELEVEN WRITTEN REASONS, and the eleven all reduce to a single
+# measured fact: agy's auth resolves BEFORE its first RPC, so no dispatch of any
+# kind reaches a model surface a stub could answer. That is not a gap waiting on
+# effort — see `notes:`.
+schema_version: 1
+provider: agy
+cli_version: "1.1.15"
+captured: "2026-08-19"
+method: >-
+  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  mounted read-only at /rig, NO credential and NO server — none is needed,
+  because agy never gets far enough to make a request. argv is
+  `AgyProvider.build_command`'s output verbatim (`--new-project
+  --dangerously-skip-permissions --output-format json --print-timeout 90s
+  --model "Gemini 3.6 Flash (High)" -p "<prompt>"`), dispatched through the PATH
+  wrapper `/opt/mllm/bin/agy` so the row's `env_extra`
+  (`AGY_CLI_DISABLE_AUTO_UPDATE=true`) is applied and the config root is a fresh
+  per-invocation HOME. cwd is the tmpfs /work/sample-project. Container flags:
+  `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges
+  --read-only`, tmpfs /work/homes, /work/sample-project and /tmp. Never wrapped
+  in `timeout(1)` inside the container; the outer bound is a host-side
+  `timeout --signal=KILL 300`.
+notes: >-
+  THE ADAPTER DOCSTRING WAS RIGHT, and this row is the verification it never had.
+  agy.py's class docstring claims "On error (exit 1) the envelope carries
+  `status: ERROR`, an empty `response` and an `error` message". Measured exactly
+  that: exit **1**, and 238 bytes on stdout reading
+  `{"conversation_id":"","status":"ERROR","response":"","error":"authentication
+  failed or timed out","duration_seconds":0,"num_turns":0,"usage":{…}}`. So the
+  machine-readable failure channel is stdout, as documented.
+  WHAT THE DOCSTRING DOES NOT SAY, and what makes ten of the eleven empty cells
+  below permanent: agy ALSO writes 897 bytes to stderr (an interactive Google
+  OAuth URL, `Waiting for authentication (timeout 60s)...`, and
+  `Error: authentication timed out.`), and it blocks for the full 60 s first.
+  Every offline dispatch ends there. Re-measured here rather than quoted: the
+  SAME argv with `--model definitely-not-a-model-xyz` produced BYTE-IDENTICAL
+  stdout (md5 dc30d77eed870733053e445f556afa14), and so did a run of the real
+  binary with `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
+  `GOOGLE_GEMINI_BASE_URL` all pointed at a live `stub_server.py` on
+  127.0.0.1:8099 — whose request log recorded ZERO agy requests (the only lines
+  in it are the probe's own /__health polls). That reproduces redirect.yaml's
+  agy row independently: "it fails at the ELIGIBILITY gate on :loadCodeAssist …
+  and its AUTH RESOLVES BEFORE THE FIRST RPC — so the failure happens with zero
+  requests leaving the process."
+  Also measured, and it is why every non-print failure is stderr-only: `agy
+  --help` (rc 0), an unknown flag (rc 2), and `--print-timeout 1170` — Go's
+  `missing unit in duration` (rc 2) — each write 0 bytes to stdout and
+  everything to stderr. `agy models` (rc 1) likewise: 0 stdout, 122 stderr,
+  `Error: Please sign in to view available models.`
+
+rows:
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 60.17
+    requests: 0
+    notes: >-
+      The whole of agy's offline behaviour in one capture, and the only §6.2 row
+      this CLI can fill. `requests: 0` is a real measurement, not an absence: a
+      separate run of the same argv against a live `stub_server.py` with every
+      documented key/base-URL variable set produced byte-identical stdout and
+      left the stub's log carrying nothing but the probe's own health polls.
+      The classification comes from stderr, not stdout — `Authentication
+      required.` matches `base.auth_error_patterns`' "authentication required",
+      while the envelope's own wording ("authentication failed or timed out")
+      matches nothing in any base table. Note what that means: the useful
+      diagnosis and the classifiable string are on DIFFERENT channels, and
+      `parse_output` reads only stdout while `classify_failure` reads both.
+      The stderr bytes carry a Google OAuth consent URL whose `code_challenge`
+      and `state` are per-run PKCE nonces for a login that never completed; the
+      `client_id` is the public installed-app id compiled into the binary.
+      Nothing in them is a credential, and they are the reason a re-capture is
+      NOT byte-identical on stderr (stdout is).
+    expect:
+      success: false
+      error_contains: ["authentication failed or timed out"]
+      raw_contains:
+        - '"status":"ERROR"'
+        - '"response":""'
+        - "Authentication required. Please visit the URL to log in:"
+        - "Error: authentication timed out."
+      classify_failure: "auth_failed"
+
+  success:
+    not_applicable: >-
+      agy never reaches a model surface offline, so there is no answer to
+      capture. Measured 2026-08-19 on agy 1.1.15 in the committed image: with
+      `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
+      `GOOGLE_GEMINI_BASE_URL` all pointed at a running `stub_server.py`, the
+      run still ended in the `auth-error` envelope after 60 s with ZERO requests
+      in the stub's log. redirect.yaml's agy row states the mechanism: auth
+      resolves before the first RPC, and the eligibility gate that follows
+      (`/v1internal:loadCodeAssist`) has a Google-internal response schema. The
+      row is `lane: fake` permanently, not pending.
+
+  truncated:
+    not_applicable: >-
+      Requires a server in the path that can cut a response mid-record, and no
+      agy request ever reaches one — the eligibility/auth gate fires first, with
+      zero requests leaving the process (measured above). `failserver.py --mode
+      trunc` therefore has nothing to truncate.
+
+  ephemeral-only:
+    not_applicable: >-
+      `--output-format json` emits exactly ONE object on stdout, and there is no
+      filtered-noise record class in it — §6.2 makes this row conditional on the
+      CLI emitting filterable noise, and this argv does not. Even the failure
+      path writes the same single envelope. (`--output-format stream-json`
+      exists per `agy --help`, but no adapter path uses it, so its bytes would
+      pin nothing this parser reads.)
+
+  multi-assistant:
+    not_applicable: >-
+      The envelope carries a single `response` string, so two assistant messages
+      have no representation in the bytes `parse_output` sees; there is nothing
+      for a first-wins/last-wins rule to choose between. Producing a multi-turn
+      transcript at all needs a model surface agy cannot reach offline.
+
+  error-envelope:
+    not_applicable: >-
+      "A provider error object delivered on the SUCCESS channel inside a
+      success-shaped wrapper" needs a 200 from a provider, and agy issues no
+      request at all offline. What agy does emit — a `status: ERROR` envelope on
+      stdout — is a different shape (a declared failure, correctly reported as
+      one) and is committed as the `auth-error` row rather than duplicated here.
+
+  exit-zero-failure:
+    not_applicable: >-
+      Measured across every offline path reachable in the image: the print-mode
+      failure exits **1** (with the ERROR envelope on stdout), an unknown flag
+      and a bad `--print-timeout` duration exit **2**, and `agy models` exits
+      **1**. No agy failure was observed exiting 0, so `exit_zero_failure_markers`
+      has nothing to declare and this conditional row has no producer at 1.1.15.
+
+  stdout-error:
+    not_applicable: >-
+      Half true, and the half that fails is the channel, not the exit code. agy
+      DOES put its real diagnosis on stdout on a nonzero exit — that is exactly
+      the `auth-error` row above, exit 1 with the ERROR envelope on stdout — but
+      the row's other half is "stderr empty", and agy never leaves it empty on
+      that path: it always writes the 897-byte interactive OAuth block first.
+      The inverse shape (stdout empty, everything on stderr) is what every
+      non-print failure produces, measured on `--help`, an unknown flag,
+      `--print-timeout 1170` and `agy models`. So the trap this row names is
+      pinned by `auth-error`; the literal byte pattern has no producer.
+
+  empty:
+    not_applicable: >-
+      Unreachable while agy runs at all: the print-mode envelope is written on
+      every path that gets as far as `--print`, and it is 238 bytes. Zero bytes
+      on both channels would mean the process was killed before writing a line,
+      which is §6 step 3's `timeout(1)` zero-byte-hang artifact — a harness
+      behaviour, not agy's — and this repo forbids committing it as if the CLI
+      had produced it.
+
+  rate-limit:
+    not_applicable: >-
+      A 429 has to come from a server, and zero agy requests reach one offline
+      (measured: the stub's log held only the probe's own health polls with
+      every documented key variable set). `failserver.py --mode 429` is
+      unreachable for the same reason `trunc` is. On a credentialed laptop the
+      quota response would come from Google's own backend, which no test may
+      drive an account into on purpose.
+
+  invalid-model:
+    not_applicable: >-
+      MEASURED, not assumed, and the measurement is that the auth gate wins.
+      `--model definitely-not-a-model-xyz` through the wrapper produced stdout
+      BYTE-IDENTICAL to `auth-error.stdout.txt` (md5
+      dc30d77eed870733053e445f556afa14), exit 1, 60.15 s — the model string is
+      never validated because the run never gets past authentication. Note that
+      the tree disagrees with itself about what a credentialed agy does here:
+      the adapter docstring says an invalid `--model` is "SILENTLY ignored"
+      (fallback to the default, status SUCCESS) while providers.yaml says it is
+      "rejected outright" with an ERROR envelope listing the valid names
+      (verified 2026-07-29). Offline, neither is reachable, so this row cannot
+      settle it.
+
+  context-overflow:
+    not_applicable: >-
+      The vendor's context-length error is a server response, and agy issues no
+      request offline. `failserver.py --mode ctx` serves the
+      OpenAI/Anthropic/Gemini completion surfaces; agy calls none of them,
+      reaching only `/v1internal:loadCodeAssist` when it reaches anything at
+      all — and offline it does not even reach that, because auth resolves
+      first.

@@ -124,7 +124,27 @@ def adapter_contract() -> dict:
         row["cli"]: row
         for row in (yaml.safe_load(
             (RIG_DIR / "redirect.yaml").read_text(encoding="utf-8")) or {})["clis"]
-        if row.get("lane") == "provider"
+        # `lane: provider`, OR a live-lane row, OR a row that opts into this
+        # probe alone. The two widenings are the same argument twice: a CLI with
+        # no stub can never have an argv golden or a full-chain bundle, but its
+        # HELP SURFACE is reachable by anyone holding the binary — this probe is
+        # offline, credential-free and needs nothing else — and it is precisely
+        # the signal that would have caught `--mode ask` semantics moving under
+        # the adapter that depends on them.
+        #
+        # cursor-agent arrived through `live_lane`, which it has for its own
+        # reasons. `agy` cannot: its auth resolves before the first RPC and no
+        # environment variable selects an API-key path, so it reaches neither a
+        # stub nor (today) a real vendor. `surface_probe` is the THIRD
+        # ORTHOGONAL opt-in beside the other two, and it is a separate key
+        # rather than a lane value on purpose — `lane: fake` is a promise about
+        # mock_llm.py that `tests/test_fake_lane_roster.py` grades, every reader
+        # of `lane` is a positive-match filter, and re-labelling a row to sneak
+        # it in here would drop it out of that promise with nothing going red.
+        # redirect.yaml:1029-1035 makes the same argument for `live_lane`.
+        if (row.get("lane") == "provider"
+            or row.get("live_lane")
+            or row.get("surface_probe"))
     }
     config = load_base_config()
     prompt = derivation_prompt()
@@ -169,25 +189,58 @@ def adapter_contract() -> dict:
             "rig_options": injected,
             "subcommands": sorted(subcommands),
             "help_invocation": row.get("help_invocation", f"{name} --help"),
+            # THE ROW'S IMAGE-LAYOUT ENV, because for one CLI the help itself
+            # depends on it. copilot's npm entry point is a loader that
+            # self-extracts its native runtime into $XDG_CACHE_HOME; the image
+            # pre-warms /opt/mllm/copilot-cache and the row pins the variable
+            # there, but this probe used to run with the ambient environment, so
+            # the loader tried the tmpfs $HOME (mounted noexec), failed with
+            # "Failed to load package index ... Native addon "runtime" not
+            # found", and produced 2.3 KB of error text instead of 15 KB of help.
+            #
+            # That is why copilot had no row in cli-surface.yaml at all: the
+            # seeder could not self-exempt it either (`probe: none` needs an
+            # EMPTY output, and an error message is not empty), so a row that
+            # would have failed the presence assertion was dropped by hand and
+            # the only upstream-facing signal for the one proprietary CLI in the
+            # image quietly did not exist.
+            "env_extra": {
+                str(k): str(v) for k, v in (row.get("env_extra") or {}).items()
+            },
         }
     return out
 
 
-def run_help(binary: str, invocation: str) -> tuple[str, int]:
+def _probe_env(env_extra: dict | None) -> dict:
+    """The ambient environment plus the row's image-layout variables.
+
+    Only what the row already declares in `redirect.yaml` — this adds no policy
+    of its own. It exists because a CLI whose loader needs a pre-warmed cache
+    cannot print its own help without it, and a probe that reports that error as
+    "the contract" is measuring the harness.
+    """
+    child = dict(os.environ)
+    child.update({str(k): str(v) for k, v in (env_extra or {}).items()})
+    return child
+
+
+def run_help(binary: str, invocation: str, env_extra: dict | None = None) -> tuple[str, int]:
     """Run the recorded help invocation against the REAL binary, offline."""
     parts = invocation.split()
     argv = [str(REAL_DIR / binary), *parts[1:]]
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                                   env=_probe_env(env_extra))
     except (OSError, subprocess.SubprocessError) as exc:
         return f"<{exc}>", 127
     return (completed.stdout or "") + (completed.stderr or ""), completed.returncode
 
 
-def version_of(binary: str) -> str:
+def version_of(binary: str, env_extra: dict | None = None) -> str:
     try:
         completed = subprocess.run([str(REAL_DIR / binary), "--version"],
-                                   capture_output=True, text=True, timeout=120)
+                                   capture_output=True, text=True, timeout=120,
+                                   env=_probe_env(env_extra))
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     text = ((completed.stdout or "") + (completed.stderr or "")).strip()
@@ -203,17 +256,18 @@ def main(argv=None) -> int:
     report = {}
     for cli, entry in contract.items():
         binary = entry["binary"]
-        help_text, code = run_help(binary, entry["help_invocation"])
+        env_extra = entry.get("env_extra") or {}
+        help_text, code = run_help(binary, entry["help_invocation"], env_extra)
         if code != 0 and not help_text.strip():
             report[cli] = dict(entry, probe="none",
                                reason=f"help invocation exited {code} with no output",
-                               version=version_of(binary))
+                               version=version_of(binary, env_extra))
             continue
         missing = missing_options(entry["options"], help_text)
         report[cli] = dict(
             entry,
             probe="ok",
-            version=version_of(binary),
+            version=version_of(binary, env_extra),
             help_sha256=hashlib.sha256(help_text.encode("utf-8", "replace")).hexdigest(),
             help_bytes=len(help_text),
             missing_options=missing,

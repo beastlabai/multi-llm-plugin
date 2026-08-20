@@ -1,0 +1,19 @@
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-eb480d99f24e/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-43-805Z.json Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11550:19
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:553:20)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/nonInteractiveCli.js:192:34
+{
+  "session_id": "709dfa64-1744-4480-abe5-834dda5b9875",
+  "error": {
+    "type": "Error",
+    "message": "[object Object]",
+    "code": 1
+  }
+}

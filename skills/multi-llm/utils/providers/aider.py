@@ -103,6 +103,56 @@ class AiderProvider(LLMProvider):
     #: both of those paths drop `argv[-1]` — which aider is and does.
     prompt_argv_index = None
 
+    #: The class docstring's "stdout is the ONLY output path for this provider",
+    #: stated as data instead of prose. ``/ask`` keeps aider read-only, and in
+    #: edit mode it refuses any absolute path outside the target git repo
+    #: anyway, so the file the review prompts name can never be written. Asking
+    #: for stdout directly is what removes the pseudo-write envelope some models
+    #: answered the impossible instruction with (``{"file_path": …, "content":
+    #: "<the JSON as a string>"}``); :meth:`parse_output` still unwraps that
+    #: envelope, because a model can invent one from any prompt.
+    supports_file_output = False
+
+    version_cmd = ("aider", "--version")
+    #: 0.86.2 is where every fixture in ``tests/fixtures/aider/`` was captured —
+    #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
+    #: running inside the container, no credential — and the release
+    #: ``tests/container/cli-versions.lock`` pins. It is a pin to re-confirm
+    #: rather than a range to trust: the two things the parser reads are both
+    #: aider-internal strings upstream is free to restyle
+    #: (``reasoning_tags.REASONING_END``, which is where ``► **ANSWER**`` comes
+    #: from, and the ``Tokens:``/``Cost:`` accounting lines the answer is trimmed
+    #: of).
+    #:
+    #: **There is deliberately no ``min_version``.** A draft of this block
+    #: declared ``min_version = "0.86.2"`` on the strength of "nothing older has
+    #: been run against this parser", which is exactly the error
+    #: `harness-invocation-improvements.md` §5.4.1(a) names: a *measured-at*
+    #: version is an upper bound on the true floor, never the floor itself, so
+    #: adopting it as a floor refuses working installs to buy nothing. aider is a
+    #: **pre-existing** adapter — unlike copilot, kimi, qwen-code and vibe, which
+    #: landed together with their probes and have no older users to refuse — and
+    #: nothing measured says 0.85 fails. ``min_version`` is a hard exit-3 refusal
+    #: in ``subagent_executor._detect_version``; ``verified_version`` is a
+    #: one-line warning. The capture supports the warning and not the refusal, so
+    #: only the warning is declared. ``muse``, ``cursor-agent`` and ``agy``
+    #: already leave the floor empty for the mirror-image reason.
+    #:
+    #: (Today the refusal would not even fire: this adapter declares only the
+    #: ``generate`` profile, ``_detect_version`` runs solely inside
+    #: ``preflight_runner``, and that raises ``missing_profile`` first. That
+    #: makes a wrong floor *latent* rather than harmless — it would go live, with
+    #: no measurement behind it, on the day this adapter becomes runner-eligible.)
+    #:
+    #: ``version_cmd`` stays, because it is the only thing that can ever make
+    #: ``verified_version`` speak: with no probe the detected version is
+    #: ``unknown`` and both the floor and the warning are skipped. Confirmed
+    #: against the pinned binary 2026-08-20 (``docker run --rm --network none
+    #: --entrypoint /opt/mllm/real/aider mllm-e2e:local --version``): it prints
+    #: exactly ``aider 0.86.2`` on stdout, which the base :meth:`parse_version`
+    #: reads without an override.
+    verified_version = "0.86.2"
+
     # §7.2 — the auth override plus the exit-0 sniff, folded out of the class
     # docstring's "Gotcha" and into the classifier so the D3k ladder sees them.
     #
@@ -126,6 +176,61 @@ class AiderProvider(LLMProvider):
         re.compile(r"\blitellm\.\w*error\b"),
         re.compile(r"\blitellm\.exceptions\b"),
     )
+
+    #: litellm's model-cost-map refresh, and the one line of aider's stdout that
+    #: must never reach the failure classifier.
+    #:
+    #: MEASURED on the 2026-08-19 credentialed live row. litellm fetches
+    #: ``model_prices_and_context_window.json`` from raw.githubusercontent.com at
+    #: IMPORT time — before aider parses a flag, so ``--no-check-update`` and
+    #: ``--no-analytics`` cannot reach it — with a 5 s timeout, and on ANY
+    #: exception falls back to ``model_prices_and_context_window_backup.json``,
+    #: which ships inside the package (1.28 MB, already on disk). The refresh is
+    #: therefore best-effort by upstream's own design and its failure is not the
+    #: run's failure.
+    #:
+    #: But aider prints that failure to **stdout** (stderr stays empty) and the
+    #: text ends in ``Name or service not known``, which is a literal entry in
+    #: :data:`base.CONNECTION_ERROR_MARKERS`. So on any host that cannot reach
+    #: raw.githubusercontent.com — an air-gapped build box, a corporate proxy, a
+    #: container with an egress allowlist — a *successful* aider run was
+    #: classified ``connection_error``: the model answered, the JSON parsed, the
+    #: credit was spent, and the D3k ladder took the rung for a transport fault.
+    #: Measured exactly that way: exit 0, ``["ok"]`` parsed, $0.00028 charged,
+    #: classification ``connection_error``.
+    #:
+    #: Excised by FILENAME rather than by hostname: the file name is unique to
+    #: this fetch, while the host also serves things a real failure could mention.
+    _TOLERATED_STDOUT_LINES = (
+        re.compile(r"model_prices_and_context_window\.json"),
+    )
+
+    @classmethod
+    def _drop_tolerated_lines(cls, stream: str) -> str:
+        """Remove upstream's best-effort-fetch noise before classification."""
+        if not stream:
+            return stream
+        return "\n".join(
+            line for line in stream.splitlines()
+            if not any(p.search(line) for p in cls._TOLERATED_STDOUT_LINES)
+        )
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """As the base, minus litellm's tolerated cost-map refresh line.
+
+        The adapter supplies the data and ``classify_streams`` owns the rule
+        (§7.2), so this override changes neither — it only declines to hand the
+        rule a line upstream has already decided is non-fatal. Everything else
+        aider prints, including every genuine ``litellm.*Error``, still reaches
+        the classifier unchanged.
+        """
+        return super().classify_failure(
+            self._drop_tolerated_lines(stdout),
+            self._drop_tolerated_lines(stderr),
+            exit_code,
+        )
 
     @property
     def name(self) -> str:
@@ -309,9 +414,19 @@ class AiderProvider(LLMProvider):
         if fallback.get("success"):
             fallback["data"] = self._unwrap_file_write_envelope(fallback["data"])
             return fallback
+        # THE SNIPPET IS TAKEN AFTER THE TOLERATED LINES ARE DROPPED, and that is
+        # the difference between a usable diagnosis and 500 characters of noise.
+        # Offline, the first ~460 bytes of aider's stdout are litellm's cost-map
+        # DNS failure plus the banner, so a failed AUTH run used to report
+        # `No JSON found in aider output: HTTPSConnectionPool(host=
+        # 'raw.githubusercontent.com'...` and never reached the
+        # `litellm.AuthenticationError` further down — measured on the 2026-08-19
+        # fixture capture. `_drop_tolerated_lines` already exists for
+        # `classify_failure`; the error text needs it for the same reason.
+        diagnosis = self._drop_tolerated_lines(stdout).strip() or stdout
         return {
             "success": False,
-            "error": f"No JSON found in aider output: {stdout[:500]}",
+            "error": f"No JSON found in aider output: {diagnosis[:500]}",
             "raw": stdout,
             "data": None,
         }

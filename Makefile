@@ -54,7 +54,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
 # which make would read as a target/prerequisite separator.
 .PHONY: help e2e-preflight e2e-image e2e-image-latest e2e-container e2e-container-host \
         e2e-container-host-discovery e2e-version-delta e2e-container-latest \
-        e2e-container-latest-host e2e-lock-update e2e-verify-record e2e-clean
+        e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
+        e2e-clean
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -64,6 +65,7 @@ help:
 	@echo "  make e2e-container-host-discovery  host lane, --creds none tier: stage + list, no key, no network"
 	@echo "  make e2e-container-latest         CLIs @latest; provider lane only; credential-free by construction"
 	@echo "  make e2e-container-latest-host    CLIs @latest; host lane; guarded, opt-in, needs OPENROUTER_API_KEY"
+	@echo "  make e2e-live-provider [CLI=x]    credentialed PROVIDER lane; SPENDS CREDITS on openrouter.ai"
 	@echo "  make e2e-version-delta            print the pinned → installed versions of the @latest image"
 	@echo "  make e2e-lock-update              move the pins the @latest image proves moved, then prove it"
 	@echo "  make e2e-verify-record REC=<path> re-hash a runs/ bundle against a committed record"
@@ -88,8 +90,16 @@ e2e-image: e2e-preflight
 	  -t $(IMAGE) \
 	  .
 
+# `not live_provider` is a SPEND GUARD, not tidiness. The credentialed lane's
+# tests carry `container` + `live_provider` and deliberately NOT `live`, so
+# `-m "container and not live"` SELECTS them -- and this recipe inherits the
+# caller's environment, so a developer who happens to export OPENROUTER_API_KEY
+# would spend real credit on the gate whose whole contract is "no key, no
+# network, nothing on the host". It skipped in practice only when the key was
+# absent, which is luck rather than design. `make e2e-live-provider` stays the
+# one thing that runs that lane, and it is the one thing that sources the key.
 e2e-container: e2e-image
-	$(PYTEST) -m "container and not live"
+	$(PYTEST) -m "container and not live and not live_provider"
 
 e2e-container-host: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || { \
@@ -180,7 +190,7 @@ e2e-container-latest: e2e-image-latest
 	@$(MAKE) --no-print-directory e2e-version-delta
 	env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY \
 	  MLLM_E2E_IMAGE=$(IMAGE_LATEST) \
-	  $(PYTEST) -m "container and not live" -rs
+	  $(PYTEST) -m "container and not live and not live_provider" -rs
 
 # The one place in this design where an unpinned image is allowed near a key.
 # The guard is a target-level refusal, not a README sentence.
@@ -267,6 +277,51 @@ e2e-container-latest-host: e2e-preflight
 	  echo "      The named skip reasons are in the run above (-rs) and in $(CONTAINER_DIR)/runs/."; \
 	  exit 1; \
 	fi
+
+# --------------------------------------------------------------------------- #
+# The credentialed PROVIDER lane (harness-expansion.md §7.4) — the third lane.
+#
+# WHY IT IS NOT A TIER OF ANY EXISTING TARGET. `e2e-container` runs the provider
+# lane `--network none` against the stub: there is no openrouter.ai to reach.
+# `e2e-container-host` proves the HOST's brain is live, and its PATH wrapper does
+# the exact opposite for providers — it scrubs every vendor credential and points
+# the CLI at the stub, which is the one thing that keeps a live key out of a
+# third-party binary's environment on an open network. Neither can answer "does
+# this adapter still reach the real endpoint on the user's own key", so that
+# question gets its own target, its own marker and its own row list.
+#
+# THREE PROPERTIES HERE ARE CONTRACT, NOT RECIPE TASTE:
+#
+#   * IT IS A PREREQUISITE OF NOTHING. No other goal in this file may reach it —
+#     skills/multi-llm/tests/test_makefile_lanes.py asserts that by parsing this
+#     file, because a credit-spending target reachable from `check` or
+#     `e2e-container` is a bill nobody typed.
+#   * THE MARKER, NOT THE RECIPE, KEEPS IT OUT OF CI. The module carries
+#     `live_provider` in addition to `container`, so pyproject's
+#     `addopts = -m 'not container'` already deselects it and the CI expression
+#     does too.
+#   * IT NEVER BUILDS THE IMAGE. `e2e-image` is deliberately NOT a prerequisite:
+#     a stale image must be a visible failure, not a silent rebuild that spends
+#     credits on the wrong binary. Build it yourself, then run this.
+#
+# The key is read HOST-SIDE from ~/.config/multi-llm/e2e.env (0600, outside git)
+# and reaches the container only as `-e OPENROUTER_API_KEY` on the docker run. It
+# is never baked into the image, never written into redirect.yaml,
+# cli-versions.lock, a home_seed/ file or any committed fixture, and the run
+# record redacts it out of the CLI's own stdout before anything is written.
+#
+#   make e2e-live-provider            every landed Wave-1/2 row
+#   make e2e-live-provider CLI=copilot  one row
+e2e-live-provider:
+	set -a; . $${MULTI_LLM_E2E_ENV:-$$HOME/.config/multi-llm/e2e.env}; set +a; \
+	uv run --project skills/multi-llm -- pytest \
+	  skills/multi-llm/tests/test_container_live_provider.py \
+	  -m 'container and live_provider' $(if $(CLI),-k '[$(CLI)]',)
+# `-k '[<id>]'` selects the PARAMETRIZE id, not a bare substring, and the
+# brackets are load-bearing. A bare `-k pi` also matches the `skipif` marker
+# keyword every item on this module carries via `requires_docker()` -- the
+# substring is inside "ski-pi-f" -- so `CLI=pi` silently ran the whole ten-row
+# lane and spent ten rows' credit instead of one. Measured 2026-08-19.
 
 # --------------------------------------------------------------------------- #
 # Provenance and housekeeping.

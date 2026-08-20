@@ -128,8 +128,4 @@ Example output:
 If no issues are found, return an empty array: []
 
 ## Output Location
-CRITICAL: Write your JSON output to this file: {output_json_path}
-Do NOT print JSON to stdout. Write ONLY the JSON array to the specified file path.
-After writing, confirm by printing: "JSON written to {output_json_path}"
-
-The file must contain ONLY valid JSON - no markdown, no code blocks, no explanation. Just the raw JSON array.
+{output_location}

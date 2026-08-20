@@ -1,0 +1,4 @@
+Error: Internal error: {
+  "message": "API error (status 500 Internal Server Error): The server had an error while processing your request. Sorry about that!\n\nRequest URL: http://127.0.0.1:8099/s/6563bcae7475/v1/chat/completions\nResponse headers:\n  server: \"mllm-failserver Python/3.11.2\"\n  date: \"Wed, 19 Aug 2026 17:00:28 GMT\"\n  content-type: \"application/json\"\n  content-length: \"151\"",
+  "http_status": 500
+}

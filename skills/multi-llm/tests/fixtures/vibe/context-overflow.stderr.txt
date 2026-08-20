@@ -1,0 +1,1 @@
+Error: The conversation context exceeds the model's maximum limit. Use /rewind to undo recent actions, then /compact to summarize the conversation.

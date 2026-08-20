@@ -1,0 +1,4 @@
+Error: Internal error: {
+  "message": "API error (status 400 Bad Request): invalid_request_error: This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.\n\nRequest URL: http://127.0.0.1:8099/s/902e84ac026b/v1/chat/completions",
+  "http_status": 400
+}
