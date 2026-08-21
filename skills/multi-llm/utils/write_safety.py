@@ -1190,14 +1190,37 @@ _REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
         0,
         None,
     ),
-    # P13 — identity/PII (§5.2). The **quoted-JSON key form** rather than a
-    # generic delimiter, because bare `shell = …` and `email = …` appear in
-    # ordinary prose and source. A bare unkeyed email pattern is deliberately
-    # not shipped: it would redact commit-message prose in container_turns/.
+    # P13 — identity/PII (§5.2), in the **two shapes the probe boundary really
+    # emits**, both of them key-named. A bare unkeyed email pattern is still
+    # deliberately not shipped: it would redact commit-message prose in
+    # container_turns/.
+    #
+    # (a) The quoted-JSON key form — what `cursor-agent about|status --format
+    # json` returns. The value bound is `+`, not `{3,}`: a two-character shell
+    # (`sh`) is as much an identity field as a long one, and the old floor let
+    # it through unredacted.
     (
         "identity-json",
         re.compile(
-            r"[\"'](?:userEmail|email|terminalProgram|shell)[\"']\s*:\s*[\"']([^\"']{3,})[\"']"
+            r"[\"'](?:userEmail|email|terminalProgram|shell)[\"']\s*:\s*[\"']([^\"']+)[\"']"
+        ),
+        1,
+        None,
+    ),
+    # (b) The `Key  Value` text table a build **without** `--format` prints, and
+    # which `providers.cursor_agent._about_text_pairs` parses — reachable since
+    # `about` was wired back in as `setup_probe`, so an unmatched line here is a
+    # real identity value in a probe tail and in `CursorAbout.redacted`. Kept
+    # tight so `shell = …` and `email = …` in prose and source stay untouched:
+    # the label **starts the line**, the separator is that parser's own (`: `,
+    # two spaces, or a tab) and the value runs to end of line. The label's
+    # separator spellings are accepted because the same parser normalizes them
+    # away before it looks the key up.
+    (
+        "identity-text",
+        re.compile(
+            r"(?im)^[ \t]*(?:user[ _\-]?email|email|terminal[ _\-]?program|shell)"
+            r"(?:[ \t]*:[ \t]+|[ \t]{2,}|\t[ \t]*)(\S[^\n]*?)[ \t]*$"
         ),
         1,
         None,

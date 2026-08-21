@@ -1357,21 +1357,41 @@ def print_version(provider: str) -> None:
 AUTH_PROBE_ARGS = {
     "codex": ("login", "status"),
     "opencode": ("auth", "list"),
+    # M13 (§5.2): cursor-agent's probe is `status --format json`, not `about`.
+    # `about` round-trips the network for its `userEmail`/`subscriptionTier`, so
+    # it cannot tell offline-logged-in from logged-out; `status` reads the local
+    # token. The flag is part of the argv because the verdict is a JSON *field*
+    # — this CLI exits 0 in every auth state.
+    "cursor-agent": ("status", "--format", "json"),
 }
 
-#: What each probe prints when the CLI is logged in.
+#: What each probe prints when the CLI is logged in. cursor-agent's row is a
+#: JSON object rather than a sentence for the same reason its argv carries
+#: `--format json`: its adapter reads a field and never an exit code, so a
+#: prose "Logged in" would be answered `None` (unknown) by the real classifier.
 AUTH_OK_STRINGS = {
     "codex": "Logged in using ChatGPT",
     "opencode": "Credentials\n  anthropic  oauth",
+    "cursor-agent": '{"isAuthenticated": true, "message": "Logged in"}',
 }
 
 
 def is_auth_probe(argv: List[str]) -> bool:
-    """Whether this invocation is an adapter's `auth_check`, not a dispatch."""
+    """Whether this invocation is an adapter's `auth_check`, not a dispatch.
+
+    Both sides are reduced to their positionals before comparison, because a
+    declared probe may carry flags (`status --format json`) while this function
+    is handed a real argv where those flags sit anywhere. Reducing only the
+    argv would make such a probe unrecognisable — and an unrecognised probe is
+    parsed as a *prompt* and answered with a fixture.
+    """
     positional = tuple(arg for arg in argv if not arg.startswith("-"))
     return any(
         positional[: len(expected)] == expected
-        for expected in AUTH_PROBE_ARGS.values()
+        for expected in (
+            tuple(arg for arg in probe if not arg.startswith("-"))
+            for probe in AUTH_PROBE_ARGS.values()
+        )
     )
 
 

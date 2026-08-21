@@ -4,11 +4,22 @@ import shutil
 from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    REASONING_LADDER,
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Reasoning effort values accepted by `grok --reasoning-effort`
-# (verified live against grok 0.2.93).
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+# (verified live against grok 0.2.93) — exactly the seven canonical rungs, which
+# is why this declaration names the ladder itself rather than restating it.
+EFFORT_LADDER = ReasoningLadder(
+    provider="grok",
+    rungs=REASONING_LADDER,
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 
 class GrokProvider(LLMProvider):

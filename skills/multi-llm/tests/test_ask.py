@@ -24,12 +24,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import ask_orchestrator
 from ask_orchestrator import (
     MAX_INLINE_PLAN_BYTES,
+    MAX_PROMPT_BYTES,
     build_inline_plan,
     demote_headings,
     looks_like_ndjson,
     parse_args,
     recover_answer_text,
     render_prompt,
+    render_prompt_guarded,
     resolve_question,
     resolve_question_dir,
     write_answers_md,
@@ -79,9 +81,15 @@ def read_status(question_dir):
 def extract_output_path(prompt):
     """Extract the exact output_md_path the model is instructed to write — the
     first non-empty line after the 'exact absolute file path:' marker. Robust to
-    temp dir names that happen to contain 'answer'."""
-    after = prompt.split("exact absolute file path:", 1)[1]
-    for line in after.splitlines():
+    temp dir names that happen to contain 'answer'.
+
+    Returns None when the prompt carries no such instruction at all, which is
+    the rendering an adapter declaring ``supports_file_output = False`` gets: it
+    is asked for stdout and is never handed a path."""
+    parts = prompt.split("exact absolute file path:", 1)
+    if len(parts) < 2:
+        return None
+    for line in parts[1].splitlines():
         if line.strip():
             return line.strip()
     return None
@@ -97,6 +105,12 @@ class FakeInvoker:
       - ``content`` (str): the file content to write.
       - ``result`` (dict): the provider-result dict to return.
     Default behavior writes a file with a generic answer.
+
+    ``write_file`` on a model whose prompt carries no path (an adapter declaring
+    ``supports_file_output = False``, which is asked for stdout) returns the same
+    content on stdout instead — the channel that adapter really has. ``ask_one``
+    step 2 then persists it to the same ``answer_<model>.md``, which is why
+    ``source: "fallback"`` and not the absence of an answer is the outcome.
     """
 
     def __init__(self):
@@ -112,12 +126,16 @@ class FakeInvoker:
         self.calls.append(model_spec)
         self.prompts[model_spec] = prompt
         b = self.behaviors.get(model_spec, {"write_file": True})
+        content = b.get("content", f"Answer from {model_spec}.")
         if b.get("write_file", False):
             answer_path = extract_output_path(prompt)
             if answer_path:
                 os.makedirs(os.path.dirname(answer_path), exist_ok=True)
                 with open(answer_path, "w", encoding="utf-8") as f:
-                    f.write(b.get("content", f"Answer from {model_spec}."))
+                    f.write(content)
+            elif "result" not in b:
+                # Asked for stdout, so it answers on stdout.
+                return {"success": True, "data": content, "details": {}}
         return b.get("result", {"success": True, "data": "stdout text", "details": {}})
 
 
@@ -759,6 +777,149 @@ class TestPrompt:
         assert str(plan) in inlined  # marker points at the plan path
         # Inlined copy stays under the threshold (+ marker), avoiding E2BIG.
         assert len(inlined.encode("utf-8")) <= MAX_INLINE_PLAN_BYTES + 500
+
+
+# ---------------------------------------------------------------------------
+# 22. Output-channel variants (C10)
+# ---------------------------------------------------------------------------
+
+#: Today's ``## Output Location`` section, rendered for ``/abs/out/answer.md``.
+#: An independent transcription of the bytes ``prompts/ask.txt`` carried inline
+#: before the ``{output_location}`` field existed, so "the file rendering is
+#: byte-identical to today's" is pinned against something other than the
+#: constant under test.
+TODAYS_FILE_OUTPUT_LOCATION = """\
+## Output Location
+Write your answer as MARKDOWN (not JSON) to this exact absolute file path:
+
+/abs/out/answer.md
+
+- Write to the path exactly as given above. Do NOT reinterpret, relativize, or
+  change it. It is an absolute path; write the file there.
+- Write ONLY your markdown answer to that file (no JSON wrapper, no code-fence
+  around the whole answer).
+- ALSO print your full answer to stdout. Stdout is the fallback that is used if
+  the file write fails, so the two should contain the same answer.
+"""
+
+#: Today's read-only write bullet, same transcription rule.
+TODAYS_FILE_READONLY_BULLET = """\
+- Do NOT modify, create, or delete any file except the single answer output
+  file specified below (/abs/out/answer.md). In particular, NEVER edit the plan
+  file or any other file in the repository.
+"""
+
+
+class TestOutputChannelVariants:
+    """C10: the ask prompt asks each adapter for the channel it declares.
+
+    ``cursor-agent`` declares ``supports_file_output = False`` (it runs
+    ``--mode ask`` and can only answer a "write this file" instruction with a
+    refusal sentence); ``claude-code`` inherits the default ``True``.
+    """
+
+    def _template(self):
+        from utils.prompt_loader import load_prompt
+        return load_prompt("ask.txt")
+
+    def _render(self, provider_name):
+        return render_prompt(self._template(), "MYQUESTION", "/abs/plan.md",
+                             "PLANBODY", "/abs/out/answer.md", provider_name)
+
+    def test_file_rendering_is_byte_identical_to_todays(self):
+        out = self._render("claude-code")
+        assert TODAYS_FILE_READONLY_BULLET in out
+        assert TODAYS_FILE_OUTPUT_LOCATION in out
+        # Splitting the template into two fields left no placeholder unfilled.
+        assert "{" not in out and "}" not in out
+
+    def test_stdout_rendering_never_names_a_file_to_write(self):
+        out = self._render("cursor-agent")
+        # (a) neither the answer path ...
+        assert "/abs/out/answer.md" not in out
+        assert "answer.md" not in out
+        # ... nor any instruction to write a file.
+        assert "exact absolute file path" not in out
+        assert "Write your answer" not in out
+        assert "Print your full answer to stdout as your final message" in out
+        # The read-only bullet no longer carves out an exception for a file the
+        # section below has just said cannot be written.
+        assert "Do NOT modify, create, or delete any file." in out
+        assert "except the single answer output" not in out
+        # Every remaining mention of writing is the prohibition itself.
+        for line in out.splitlines():
+            low = line.lower()
+            if "write" in low:
+                assert "do not write" in low or "write will be refused" in low, line
+
+    def test_stdout_rendering_is_never_longer_than_the_file_one(self):
+        file_out = self._render("claude-code")
+        stdout_out = self._render("cursor-agent")
+        # (c) The truncation-budget promise as an assertion: the rendered
+        # template is render_prompt_guarded's fixed overhead, so the stdout
+        # variant must not cost the question a single byte.
+        assert len(stdout_out) <= len(file_out)
+        assert len(stdout_out.encode("utf-8")) <= len(file_out.encode("utf-8"))
+
+    def test_unknown_or_absent_provider_renders_the_file_variant(self):
+        # The posture llm_client.render_output_location already takes: a config
+        # naming an adapter this build no longer ships gets what every caller
+        # got before the field existed.
+        assert self._render(None) == self._render("claude-code")
+        assert self._render("no-such-provider") == self._render("claude-code")
+
+    def test_guarded_oversize_truncation_holds_for_both_variants(self):
+        template = self._template()
+        # "Z" appears nowhere in the template, so counting it measures exactly
+        # how many question bytes each variant's budget kept.
+        assert "Z" not in template
+        question = "Z" * (MAX_PROMPT_BYTES + 10000)
+        kept = {}
+        for provider_name in ("claude-code", "cursor-agent"):
+            rendered, truncated = render_prompt_guarded(
+                template, question, "/abs/plan.md", "PLANBODY",
+                "/abs/out/answer.md", provider_name,
+            )
+            assert truncated is True
+            assert len(rendered.encode("utf-8")) <= MAX_PROMPT_BYTES
+            assert "question truncated to fit the argv size limit" in rendered
+            assert "/abs/plan.md" in rendered  # never truncated
+            kept[provider_name] = rendered.count("Z")
+        # The file variant still names the path it must write, intact.
+        file_rendered, _ = render_prompt_guarded(
+            template, question, "/abs/plan.md", "PLANBODY",
+            "/abs/out/answer.md", "claude-code",
+        )
+        assert "/abs/out/answer.md" in file_rendered
+        # The stdout variant's smaller fixed overhead can only grow the budget.
+        assert kept["cursor-agent"] >= kept["claude-code"]
+
+    def test_read_only_adapter_still_lands_a_file_via_fallback(self, plan):
+        """Nothing downstream moves. A ``supports_file_output = False`` adapter
+        is asked for stdout, ``ask_one`` step 2 (``recover_answer_text``)
+        persists that answer to ``answer_<model>.md``, so ``source: "fallback"``
+        stays the outcome and aggregation still reads a file."""
+        inv = FakeInvoker()
+        inv.configure("cursor-agent:auto", write_file=True, content="stdout-only answer")
+        captured = {}
+        real_run = ask_orchestrator.run_models_concurrent
+
+        async def spy(*args, **kwargs):
+            results = await real_run(*args, **kwargs)
+            captured.update(results)
+            return results
+
+        with patch.object(ask_orchestrator, "run_models_concurrent", spy):
+            run_ask(["--plan-file", str(plan), "--question", "Q",
+                     "--models", "cursor-agent:auto"], inv)
+
+        # It was never handed a path, so the file can only have come from step 2.
+        assert extract_output_path(inv.prompts["cursor-agent:auto"]) is None
+        assert captured["cursor-agent:auto"]["source"] == "fallback"
+        d = qdir(plan, "Q")
+        answer = d / f"answer_{sanitize_model_name('cursor-agent:auto')}.md"
+        assert answer.read_text(encoding="utf-8") == "stdout-only answer"
+        assert "stdout-only answer" in read_answers(d)
 
 
 # ---------------------------------------------------------------------------

@@ -2,29 +2,45 @@
 
 import json
 import os
-import re
 import shutil
 import subprocess
-import sys
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
+    STRIP_VENDOR_KEYS_ALWAYS,
+    STRIP_VENDOR_KEYS_NEVER,
     USAGE_FULL,
+    VENDOR_BACKEND_KEEP,
+    VENDOR_BACKEND_STRIP,
     MAX_STRUCTURED_OUTPUT_RETRIES,
     STRUCTURED_OUTPUT_RETRY_ENV,
     InternalRetryEnvelope,
     LLMProvider,
+    ReasoningLadder,
     StructuredSchema,
+    _warn_policy_once,
+    declared_env_names,
+    git_env,
+    reset_flag_gate_cache,  # noqa: F401 - M14: re-exported for the gate's tests
     split_reasoning_effort,
+    strip_vendor_keys_policy,
+    vendor_backend_policy,
+    warn_gate_once,
 )
-from .result_envelope import parse_result_envelope
+from .result_envelope import classify_api_error_status, parse_result_envelope
 
 # Reasoning effort values accepted by `claude --effort`
-# (verified live against claude 2.1.205).
-REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+# (verified live against claude 2.1.205). Byte-identical to the CLI's own valid
+# list, which it prints when it warns about an unknown value: the top five rungs
+# of the ladder, with no `none` and no `minimal`.
+EFFORT_LADDER = ReasoningLadder(
+    provider="claude-code",
+    rungs=("low", "medium", "high", "xhigh", "max"),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 # The `agent-readonly` tool policy (D3e). Both flags are documented in
 # `claude --help` (verified against 2.1.224) and take a comma- or
@@ -112,6 +128,284 @@ PERMISSION_MODE_ACCEPT_EDITS = "acceptEdits"
 # which every `cmd[:-1]` override, `build_agent_command_for_transport` and the
 # cross-adapter `agent-write` invariant in `tests/test_providers.py` rely on.
 PROMPT_SEPARATOR = "--"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M3 / §2.1 — strip vendor API keys so subscription auth wins (the "money bug").
+#
+# Measured on the wire at claude-code 2.1.233: with a subscription token present,
+# adding `ANTHROPIC_API_KEY` swaps the request's `authorization: Bearer …` for
+# `x-api-key: …` and **drops the `anthropic-beta: oauth-2025-04-20` header
+# entirely** — the subscription is not used at all. The resolver checks the API
+# key *before* OAuth, and Anthropic's own shipped string says so: "Your
+# ANTHROPIC_API_KEY belongs to a disabled organization · Unset the environment
+# variable to use your subscription instead".
+#
+# The strip list is longer than one name. `ANTHROPIC_AUTH_TOKEN` overrides the
+# subscription the same way; `ANTHROPIC_CUSTOM_HEADERS` is a **third** `x-api-key`
+# injection path (the CLI matches header names case-insensitively, so the whole
+# variable goes, not a filtered subset); and an inherited `CLAUDE_CODE_USE_BEDROCK`
+# is worse than a billing bug — it hung for **137 s with zero requests and zero
+# output** before SIGTERM, blocking on AWS credential resolution.
+#
+# The bundle *does* group these families, and a one-time human read of its
+# minified symbols is how the enumeration below was made exhaustive rather than
+# from memory. **"Read the list from the bundle" is not a mechanism and must not
+# be implemented as one:** those identifiers are minifier output, re-assigned on
+# every release, so nothing here addresses them at run time or at build time.
+# What ships is the pinned literal list below. Nothing in the dispatch path ever
+# reads the bundle, so a CLI upgrade can never change what a run strips until a
+# human bumps these tuples.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# transcribed from claude-code 2.1.233 — evidence: plans/evidence-harness-
+#   invocation-2026-08-16/A2-claude-code-findings.md ("Surrounding vars
+#   measured", rows 3–4). Nothing at run time reads the bundle.
+_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS")
+_VENDOR_BACKEND_ENV = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
+)
+
+#: Never stripped, by name, and each for its own measured reason:
+#: `OPENAI_API_KEY` is not consulted on any claude-code path and stripping it
+#: breaks configs declaring `env_key = "OPENAI_API_KEY"`; `ANTHROPIC_BASE_URL`
+#: is a corporate gateway's only route to a model; `CLAUDE_CONFIG_DIR` is where
+#: the subscription credential lives.
+NEVER_STRIPPED = ("OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR")
+
+#: `ANTHROPIC_BASE_URL` is not merely left alone — its **presence declines the
+#: credential strips** (this is the donor's Q9, answered). When the org pays
+#: through a gateway the subscription-vs-API-key billing question does not apply
+#: either way, and stripping would produce a run that authenticates against the
+#: public API with credentials meant for the gateway. `always` still strips;
+#: that is what the escape hatch is for.
+GATEWAY_ENV = ("ANTHROPIC_BASE_URL",)
+
+#: The sanitized preflight (§2.1 rule 1). `claude auth status` **is** a real
+#: non-interactive subcommand: it emits JSON on stdout with **zero network** in
+#: ~0.3 s. Run with the full candidate strip set already removed — i.e. the env
+#: the post-strip spawn would actually get — because run with those variables
+#: still inherited it reports only *which credential currently wins* and says
+#: nothing about whether a usable subscription survives the strip.
+AUTH_STATUS_ARGV = ("auth", "status")
+AUTH_PROBE_TIMEOUT_S = 5.0
+
+#: The `authMethod` values that mean "a subscription won". Gating on
+#: `apiKeySource` instead is the trap §2.1 calls out and supersedes: it names the
+#: current winner and cannot separate *subscription overridden by env* (the money
+#: bug — strip is correct) from *API-key-only* (strip yields "Not logged in" in
+#: 0.35 s), because both report the same `apiKeySource`.
+#:
+#: **Two spellings, and the second one is a correction measured here.** §2.1 was
+#: written against `authMethod: "oauth_token"` at 2.1.233. Re-measured at
+#: **2.1.237** (four zero-network `claude auth status` runs, no paid tokens),
+#: that is *not* what a subscription reports:
+#:
+#: | env | loggedIn | authMethod | apiKeySource | subscriptionType |
+#: |---|---|---|---|---|
+#: | sanitized (nothing set) | true | `claude.ai` | *absent* | `max` |
+#: | `ANTHROPIC_API_KEY` set | true | `claude.ai` | `ANTHROPIC_API_KEY` | `null` |
+#: | `ANTHROPIC_AUTH_TOKEN` set | true | `oauth_token` | *absent* | *absent* |
+#: | `ANTHROPIC_BASE_URL` set | true | `claude.ai` | *absent* | `max` |
+#:
+#: So at 2.1.237 `oauth_token` is the **env-token** spelling and `claude.ai` is
+#: the subscription one — the donor's reading was almost certainly taken in row
+#: 3's state. `claude.ai` is added because without it the gate never fires on a
+#: current CLI (it fails open, so it is a silent no-op rather than a breakage);
+#: `oauth_token` is kept because dropping it would silently disable the strip on
+#: the version §2.1 measured. The sanitized probe removes
+#: :data:`_CREDENTIAL_ENV` before it runs, so row 3 cannot be produced by the
+#: probe itself — which is exactly what makes accepting both spellings safe, and
+#: exactly why the probe must be sanitized rather than merely run.
+#:
+#: Rows 1 and 2 are also the ambiguity §2.1's "Normative gate" describes,
+#: reproduced on the wire: adding the key makes `apiKeySource` appear and
+#: `subscriptionType` go `null`, while `loggedIn` stays `true` — so an
+#: *unsanitized* `loggedIn: true` describes an API-key run.
+OAUTH_AUTH_METHODS = frozenset({"claude.ai", "oauth_token"})
+
+#: Positive corroboration, checked only when the CLI emits it. At 2.1.237 a real
+#: subscription reports `subscriptionType: "max"`; the API-key row reports
+#: `null` (already declined on `apiKeySource`) and the env-token row omits the
+#: key entirely. Absent ⇒ no constraint, so a version that never emits it is
+#: judged on the table alone rather than declined for a field it does not have.
+SUBSCRIPTION_TYPE_KEY = "subscriptionType"
+
+STRIP_VERDICT_STRIP = "strip"
+STRIP_VERDICT_DECLINE = "decline"
+
+#: Memoised for the **process lifetime, no TTL**, keyed on the resolved binary
+#: path + `CLAUDE_CONFIG_DIR` + the candidate strip set — the strip set belongs
+#: in the key because the verdict is only meaningful for the env it was
+#: sanitized against. Nothing invalidates it mid-process: a credential that
+#: changes under a running orchestrator keeps the run's first verdict, which is
+#: precisely what makes the two lanes agree for the whole run.
+_VERDICT_CACHE: Dict[Tuple[str, ...], Tuple[str, str]] = {}
+#: Counts probe **spawns**, so the "one probe per process, never per slot" rule
+#: is observable rather than asserted. Read by tests only.
+_PROBE_SPAWNS = 0
+
+
+def reset_subscription_verdict_cache() -> None:
+    """Forget the memoised verdict and the spawn counter (tests only)."""
+    global _PROBE_SPAWNS
+    _VERDICT_CACHE.clear()
+    _PROBE_SPAWNS = 0
+
+
+def probe_spawn_count() -> int:
+    """How many times the sanitized preflight has actually spawned."""
+    return _PROBE_SPAWNS
+
+
+def _decode_auth_status(stdout: str) -> Optional[Dict[str, Any]]:
+    """The probe's JSON object, or ``None`` when it cannot be read.
+
+    Undecodable output is not a verdict — it takes the decision table's last
+    row (decline) like every other unknown.
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return None
+    try:
+        decoded = json.loads(text)
+    except (ValueError, TypeError):
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            decoded = json.loads(text[start : end + 1])
+        except (ValueError, TypeError):
+            return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _subscription_verdict(
+    candidates: Sequence[str],
+    *,
+    base_env: Optional[Mapping[str, str]] = None,
+) -> Tuple[str, str]:
+    """``(verdict, reason)`` from the sanitized preflight — §2.1's decision table.
+
+    | sanitized `claude auth status` (env already stripped) | strip? |
+    |---|---|
+    | exit 0, `loggedIn:true`, `authMethod:oauth_token`, no `apiKeySource` | **strip** |
+    | exit 0, `loggedIn:false` — the env key was the only credential | decline |
+    | exit 0, `loggedIn:true`, `apiKeySource` still present | decline |
+    | exit 0, `loggedIn:true`, `authMethod` not an OAuth method | decline |
+    | `ANTHROPIC_BASE_URL` present | decline |
+    | non-zero exit, undecodable JSON, missing binary, probe timeout | decline |
+
+    **Every failure declines — the gate fails *open*.** Failing closed on a probe
+    hiccup would break every claude-code slot for API-key-only users, a strictly
+    worse trade than an occasional per-token bill. On a decline the API-key path
+    is preserved byte-for-byte.
+
+    Scope, stated so it cannot be read wider: this is **claude-code's alone and
+    gates claude-code's three credential names only**. It does not gate
+    `CLAUDE_CODE_USE_*` (those follow `vendor_backend` and read configuration,
+    not the probe) and it does not gate codex, which has no zero-network verdict
+    at all — a codex-only run must never spawn `claude auth status`.
+    """
+    global _PROBE_SPAWNS
+    source = dict(os.environ if base_env is None else base_env)
+    for name in GATEWAY_ENV:
+        if source.get(name):
+            return (
+                STRIP_VERDICT_DECLINE,
+                f"{name} is set — the org pays through the gateway either way",
+            )
+    binary = shutil.which("claude")
+    if binary is None:
+        return STRIP_VERDICT_DECLINE, "the claude binary is not on PATH"
+
+    strip_set = tuple(sorted(candidates))
+    key = (binary, source.get("CLAUDE_CONFIG_DIR", ""), *strip_set)
+    cached = _VERDICT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    # Sanitized: the candidate strip set is already gone, plus the nested-session
+    # marker (a probe run from inside a Claude Code session would otherwise be
+    # refused by the same guard a dispatch is), plus §2.2's global git env so it
+    # cannot prompt and cannot hang on a credential helper.
+    env = {k: v for k, v in source.items() if k not in set(strip_set) | {"CLAUDECODE"}}
+    env.update(git_env(PROFILE_GENERATE))
+    _PROBE_SPAWNS += 1
+    try:
+        completed = subprocess.run(
+            [binary, *AUTH_STATUS_ARGV],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=AUTH_PROBE_TIMEOUT_S,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        verdict = (STRIP_VERDICT_DECLINE, "the auth-status probe timed out")
+    except (OSError, ValueError) as exc:
+        verdict = (STRIP_VERDICT_DECLINE, f"the auth-status probe failed: {exc}")
+    else:
+        verdict = _verdict_from_probe(completed.returncode, completed.stdout)
+    _VERDICT_CACHE[key] = verdict
+    return verdict
+
+
+def _verdict_from_probe(returncode: int, stdout: str) -> Tuple[str, str]:
+    """The decision table applied to one probe result (no I/O)."""
+    if returncode != 0:
+        return STRIP_VERDICT_DECLINE, f"auth status exited {returncode}"
+    payload = _decode_auth_status(stdout)
+    if payload is None:
+        return STRIP_VERDICT_DECLINE, "auth status printed no decodable JSON"
+    if payload.get("loggedIn") is not True:
+        return (
+            STRIP_VERDICT_DECLINE,
+            "no credential survives the strip (API-key-only login)",
+        )
+    if payload.get("apiKeySource"):
+        return (
+            STRIP_VERDICT_DECLINE,
+            f"a key still reaches the CLI from {payload['apiKeySource']!r}, "
+            f"which stripping the environment cannot remove",
+        )
+    method = payload.get("authMethod")
+    if method not in OAUTH_AUTH_METHODS:
+        return STRIP_VERDICT_DECLINE, f"authMethod is {method!r}, not a subscription"
+    if SUBSCRIPTION_TYPE_KEY in payload and not payload[SUBSCRIPTION_TYPE_KEY]:
+        return (
+            STRIP_VERDICT_DECLINE,
+            f"{SUBSCRIPTION_TYPE_KEY} is {payload[SUBSCRIPTION_TYPE_KEY]!r} — no "
+            f"subscription behind the login",
+        )
+    return STRIP_VERDICT_STRIP, "a subscription survives the strip"
+
+
+def _stripped_vendor_backends(
+    present: Sequence[str], policy: str, declared: Collection[str]
+) -> List[str]:
+    """The `CLAUDE_CODE_USE_*` half of the strip — §2.1's second table.
+
+    | origin | action |
+    |---|---|
+    | in the ambient env, no backend in `providers.claude-code.env` | **strip** |
+    | named in `providers.claude-code.env`, or `vendor_backend: keep` | never |
+    | `vendor_backend: strip` | strip regardless of declaration |
+
+    A declared backend is the user's configured auth path; stripping it
+    unconditionally trades a 137 s hang for "the user's only route to a model is
+    gone". Its hang risk is bounded by the per-slot timeout and the §8
+    process-group kill, and that is the user's own choice.
+    """
+    if policy == VENDOR_BACKEND_KEEP:
+        return []
+    if policy == VENDOR_BACKEND_STRIP:
+        return list(present)
+    return [name for name in present if name not in set(declared)]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §7.3 — the retry budget is delegated to the vendor CLI, in ITS OWN env names.
@@ -202,73 +496,12 @@ FALLBACK_MODEL_VERIFIED_AT = "2.1.233"
 JSON_SCHEMA_FLAG = "--json-schema"
 JSON_SCHEMA_VERIFIED_AT = "2.1.227"
 
-#: One help read per CLI per process, memoised on the RESOLVED binary path, so a
-#: four-model × ten-phase run performs at most one help spawn (§5.4.1).
-_HELP_TOKENS: Dict[str, frozenset] = {}
-#: One WARN per declined capability per process, not one per dispatch.
-_GATE_WARNED: Set[Tuple[str, str]] = set()
-
-_FLAG_TOKEN_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
-
-
-def reset_flag_gate_cache() -> None:
-    """Forget the memoised help read (tests; never called on a run path)."""
-    _HELP_TOKENS.clear()
-    _GATE_WARNED.clear()
-
-
-def _read_help_tokens(binary: str, remove_env: Sequence[str] = ()) -> frozenset:
-    """The set of long options this binary's own help documents (§5.4.1).
-
-    Containment matches §2.1's probe: ``stdin=DEVNULL``, captured output, a 5 s
-    timeout, zero network, and the same env composition a real dispatch uses
-    (the adapter's ``get_remove_env`` is applied, so a probe run from inside a
-    Claude Code session is not refused by the nested-session guard).
-
-    ``TERM=dumb`` and a wide ``COLUMNS`` are load-bearing: §3.6's own history is
-    a *truncated* help rendering that hid what the flag required, and a token
-    sniff must not inherit that failure mode. Both streams are read and
-    concatenated (§5.4) because some CLIs banner to stderr.
-
-    Failure posture — decline the *flag*, keep the *run*. A timeout, a non-zero
-    exit, empty help or an unreadable stream all resolve to an empty set, i.e.
-    "unsupported", which drops an optional flag rather than emitting one the
-    binary may reject.
-    """
-    cached = _HELP_TOKENS.get(binary)
-    if cached is not None:
-        return cached
-
-    env = {key: value for key, value in os.environ.items() if key not in remove_env}
-    env["TERM"] = "dumb"
-    env["COLUMNS"] = "1000"
-    env["NO_COLOR"] = "1"
-    tokens: frozenset = frozenset()
-    try:
-        completed = subprocess.run(
-            [binary, "--help"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            env=env,
-        )
-        if completed.returncode == 0:
-            text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
-            tokens = frozenset(_FLAG_TOKEN_RE.findall(text))
-    except (OSError, subprocess.SubprocessError, ValueError):
-        tokens = frozenset()
-    _HELP_TOKENS[binary] = tokens
-    return tokens
-
-
-def _warn_once(key: Tuple[str, str], message: str) -> None:
-    if key in _GATE_WARNED:
-        return
-    _GATE_WARNED.add(key)
-    print(message, file=sys.stderr)
+# The help read, its per-process cache, the flag-token regex and the warn-once
+# set that used to live here are **gone** — M14 (§5.4) absorbed them into the one
+# shared gate in `base.py`. What is left below is what is genuinely this
+# adapter's: which flags it gates, and what the one WARN says about the
+# capability a declined flag costs. `base.reset_flag_gate_cache` is the reset,
+# for the whole gate rather than for one adapter's copy of it.
 
 
 def _base_name(model: str) -> str:
@@ -386,20 +619,28 @@ class ClaudeCodeProvider(LLMProvider):
     request counts are 4 per API call × 2 calls at the pinned
     ``CLAUDE_CODE_MAX_RETRIES=3``.
 
-    **Three classification results this parser produces are wrong**, and the
-    fixtures pin them rather than hiding them: a 401 answers ``server_error``
-    (the CLI's ``Failed to authenticate. API Error: 401 …`` matches none of
-    :data:`base.LLMProvider.auth_error_patterns`, while the ``api error`` word-boundary pattern in
-    ``SERVER_ERROR_MARKERS`` matches the universal prefix); a 404 answers
-    ``None`` (the CLI replaces the vendor sentence with *"There's an issue with
-    the selected model (X). It may not exist…"*, which no
-    ``INVALID_MODEL_MARKERS`` entry matches); and both connection-shaped failures
-    answer ``server_error`` for the same ``API Error:`` reason. Separately,
-    :meth:`parse_output` reads only ``result`` and ignores the envelope's own
-    ``is_error`` / ``terminal_reason`` / ``api_error_status`` verdicts, and two
-    JSON documents in one ``result`` are resolved **first**-wins by
-    ``extract_json_from_text``. Each is a one-line fix that would edit both this
-    class and that manifest, which is why they are recorded and not applied here.
+    **The envelope's own verdict is read, and that is what fixed three of the
+    four classification defects this set was captured to record.**
+    :meth:`parse_output` no longer serves the ``result`` of an envelope the CLI
+    flagged: ``is_error`` and a non-``completed`` ``terminal_reason`` are
+    enforced by :func:`result_envelope.parse_result_envelope`, whose value table
+    is measured off these eleven captures. :meth:`classify_failure` reads
+    ``api_error_status`` as a rung ahead of the text ladder, so a 401 answers
+    ``auth_failed`` (its own :attr:`auth_error_patterns` entry answers the same
+    from the text) and a 404 answers ``invalid_model`` where the ladder had no
+    route at all — the CLI replaces the vendor sentence with *"There's an issue
+    with the selected model (X). It may not exist…"*, which no
+    ``INVALID_MODEL_MARKERS`` entry matches at any ladder order. Two JSON
+    documents in one ``result`` are resolved **last**-wins by
+    ``extract_json_from_text``.
+
+    **What is still imprecise, and is pinned rather than hidden:** both
+    connection-shaped failures (``truncated``, ``zero-byte-response``) answer
+    ``server_error``. Their ``api_error_status`` is ``null`` — no HTTP response
+    ever arrived — so the status rung defers, and the text falls to
+    ``\\bapi error\\b`` in ``SERVER_ERROR_MARKERS`` via this CLI's universal
+    ``API Error:`` prefix. Both categories are retryable, so the verdict costs
+    nothing here; the manifest rows say so.
     """
 
     # `claude -p` reads the prompt from stdin when no prompt argument is given,
@@ -427,10 +668,20 @@ class ClaudeCodeProvider(LLMProvider):
     # (D3c) and a login notice is still caught reactively by auth_error_patterns.
     login_cmd = "claude login"
     version_cmd = ("claude", "--version")
-    #: The declared floor stays 2.0.0 — §5.4.1(a): a measured-at version is an
-    #: upper bound on the true floor, never the floor itself, and raising it
-    #: would disable installs that work.
+    #: M14/§5.4 — the floor names the FEATURE it protects: 2.0.0 is where
+    #: ``claude -p --output-format json`` settled into the ``result`` envelope
+    #: this adapter's :meth:`parse_output` and :meth:`parse_usage` read. It stays
+    #: 2.0.0 — §5.4.1(a): a measured-at version is an upper bound on the true
+    #: floor, never the floor itself, and raising it to the build
+    #: ``--fallback-model`` or ``--json-schema`` happened to be probed on would
+    #: disable installs that work. Those two are gated per flag instead
+    #: (:meth:`~.base.LLMProvider.supports_flag`), which is the whole reason
+    #: §5.4.1(b) exists.
     min_version = "2.0.0"
+    #: No ceiling. ``max_version_exclusive`` would be a *refusal*, and no claude
+    #: release has been measured to break this parser; ``verified_version`` below
+    #: carries the "newer than the capture" warning, which is what an unmeasured
+    #: future build honestly deserves.
     #: 2.1.232 is where every fixture under ``tests/fixtures/claude-code/`` was
     #: captured (``manifest.yaml``'s ``cli_version``), and it is what the image
     #: really installs — ``tests/container/cli-versions.lock`` pins it and
@@ -448,6 +699,24 @@ class ClaudeCodeProvider(LLMProvider):
     #: itself, so it is the pair that has to stay coherent, not a third
     #: expectation.
     verified_version = "2.1.232"
+
+    #: §7.2 — the base auth set, EXTENDED by this CLI's own measured 401 gloss
+    #: (C3). ``tests/fixtures/claude-code/auth-error.stdout.txt`` is failserver
+    #: `--mode 401` captured at 2.1.232, and the sentence claude-code prints is
+    #: ``Failed to authenticate. API Error: 401 Incorrect API key provided: …``.
+    #: Not one of :data:`base.LLMProvider.auth_error_patterns`' ten entries
+    #: matches it, while ``\bapi error\b`` in ``SERVER_ERROR_MARKERS`` matches
+    #: the universal ``API Error:`` prefix — so a 401 classified ``server_error``
+    #: and was retried **eight times** against a condition no retry can fix.
+    #:
+    #: The added phrase is claude-code's **own** wording, not the upstream
+    #: provider's: everything after ``API Error:`` is whatever server answered,
+    #: while ``Failed to authenticate.`` is what this CLI writes in front of any
+    #: of them. Measured against every capture in ``tests/fixtures/claude-code/``
+    #: — it occurs in `auth-error` and nowhere else, so no success row moves.
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "failed to authenticate",
+    )
 
     @property
     def name(self) -> str:
@@ -510,28 +779,20 @@ class ClaudeCodeProvider(LLMProvider):
             return []
         return [str(entry).strip() for entry in configured]
 
-    def supports_flag(self, flag: str) -> bool:
-        """§5.4.1's per-flag capability gate, in its *optional-flag* form.
-
-        Shipped inside this task rather than taken from §11.2's shared version
-        machinery, because §3.6 is in the severable live-defect set and may not
-        depend on it (M14 later generalizes the one-offs and deletes this).
-
-        Unsupported *or undecidable* ⇒ ``False``: on an older CLI the flag is
-        ``unknown option`` and a dead slot, so the gate declines toward the
-        status quo. The token is matched as a whole word — ``--fallback-model``
-        is a prefix of ``--fallback-model-chain``, and a substring probe would
-        answer yes for a flag that does not exist.
-        """
-        binary = shutil.which("claude")
-        if not binary:
-            return False
-        return flag in _read_help_tokens(binary, self.get_remove_env())
+    # `supports_flag` is **not** overridden here any more. It was L7's one-off —
+    # shipped inside that task because §3.6 is in the severable live-defect set
+    # and may not depend on §11.2 — and M14 absorbed it into
+    # `LLMProvider.supports_flag`, which answers both flags below from one
+    # memoised help read of the binary `version_cmd` names. The optional-flag
+    # posture it holds is unchanged: unsupported *or undecidable* ⇒ False, whole
+    # word only, because `--fallback-model` is a prefix of
+    # `--fallback-model-chain` and a substring probe would confirm a flag that
+    # does not exist.
 
     def _fallback_flag_supported(self) -> bool:
         supported = self.supports_flag(FALLBACK_MODEL_FLAG)
         if not supported:
-            _warn_once(
+            warn_gate_once(
                 ("claude", FALLBACK_MODEL_FLAG),
                 f"[WARN] claude-code: {FALLBACK_MODEL_FLAG} is not documented by "
                 f"the installed CLI's own help (verified at "
@@ -553,7 +814,7 @@ class ClaudeCodeProvider(LLMProvider):
         """
         supported = self.supports_flag(JSON_SCHEMA_FLAG)
         if not supported:
-            _warn_once(
+            warn_gate_once(
                 ("claude", JSON_SCHEMA_FLAG),
                 f"[WARN] claude-code: {JSON_SCHEMA_FLAG} is not documented by "
                 f"the installed CLI's own help (verified at "
@@ -1067,15 +1328,143 @@ class ClaudeCodeProvider(LLMProvider):
         env[STRUCTURED_OUTPUT_RETRY_ENV] = str(MAX_STRUCTURED_OUTPUT_RETRIES)
         return env
 
-    def get_remove_env(self) -> List[str]:
-        """Strip CLAUDECODE env var to bypass nested-session guard.
+    def get_remove_env(
+        self,
+        anchor: Optional[str] = None,
+        base_env: Optional[Mapping[str, str]] = None,
+    ) -> List[str]:
+        """`CLAUDECODE`, plus M3's two independently gated vendor-key strips.
 
-        When this provider is invoked from within a Claude Code session,
-        the parent process sets CLAUDECODE=1. The child `claude -p` process
-        detects this and refuses to start. We strip it so the headless
-        subprocess can run without hitting that guard.
+        **`CLAUDECODE` is in every outcome, including `strip_vendor_keys:
+        never`.** When this provider is invoked from within a Claude Code
+        session the parent sets `CLAUDECODE=1`, the child `claude -p` detects it
+        and refuses to start, so that strip is not a policy — it is what makes
+        the dispatch work at all.
+
+        The two vendor gates on top of it are independent of each other (§2.1):
+
+        * the **credential** names (:data:`_CREDENTIAL_ENV`) follow
+          `providers.claude-code.strip_vendor_keys` — `auto` (default) consults
+          the sanitized `claude auth status` preflight and its decision table,
+          `always` strips regardless, `never` declines regardless;
+        * the **vendor-backend** names (:data:`_VENDOR_BACKEND_ENV`) follow
+          `providers.claude-code.vendor_backend` and the *declaration* table, not
+          the probe.
+
+        Only names **present in the ambient environment** are returned. Removing
+        a name that is not there is a no-op on both lanes, so this changes no
+        behaviour — but it keeps the list an honest statement of what this
+        dispatch is actually taking away, and it means the probe never spawns for
+        a run that has no vendor credential to decide about.
+
+        This is called by :func:`base.build_child_env`, the one builder both
+        lanes go through, so Lane A and Lane B consume the same verdict and a
+        decline re-admits the same names on both — and it is called with **that
+        dispatch's** context. Both parameters are load-bearing here, which is why
+        this override declares them:
+
+        * ``anchor`` is what the two policy reads resolve against. Without it a
+          dispatch anchored on one project evaluates
+          `providers.claude-code.strip_vendor_keys` / `vendor_backend` against
+          the process-wide run anchor or the CWD — a different
+          `.multi-llm/providers.yaml`, and therefore a credential decision the
+          requested project never made.
+        * ``base_env`` is the environment the child will actually inherit, so
+          "present" means present *there*. It also scopes the probe: the
+          sanitized preflight is run against the same env, so its verdict is
+          about the credential this dispatch would really hand over.
+
+        ``None`` for either keeps the process defaults (the run anchor's config,
+        ``os.environ``), which is what a context-free call means.
         """
-        return ["CLAUDECODE"]
+        names: List[str] = ["CLAUDECODE"]
+        source: Mapping[str, str] = os.environ if base_env is None else base_env
+
+        backend_present = [n for n in _VENDOR_BACKEND_ENV if n in source]
+        if backend_present:
+            names.extend(
+                _stripped_vendor_backends(
+                    backend_present,
+                    vendor_backend_policy(self.name, anchor),
+                    declared_env_names(self.name, _VENDOR_BACKEND_ENV, anchor),
+                )
+            )
+
+        credentials = [n for n in _CREDENTIAL_ENV if n in source]
+        if not credentials:
+            # Nothing to decide, so nothing is probed. A run with no vendor
+            # credential in its environment spawns no `claude auth status` at
+            # all — the tighter half of "never at import, never per slot".
+            return names
+
+        policy = strip_vendor_keys_policy(self.name, anchor)
+        if policy == STRIP_VENDOR_KEYS_ALWAYS:
+            names.extend(credentials)
+            return names
+        if policy == STRIP_VENDOR_KEYS_NEVER:
+            self._warn_credential_decline(
+                credentials, "providers.claude-code.strip_vendor_keys is 'never'"
+            )
+            return names
+
+        verdict, reason = _subscription_verdict(_CREDENTIAL_ENV, base_env=base_env)
+        if verdict == STRIP_VERDICT_STRIP:
+            names.extend(credentials)
+            return names
+        self._warn_credential_decline(credentials, reason)
+        return names
+
+    def _warn_credential_decline(self, present: Sequence[str], reason: str) -> None:
+        """One line per process naming the billing consequence of a decline.
+
+        The gate fails **open** — the API-key path is preserved byte-for-byte —
+        and this is the only trace that says so, so it names the variable, the
+        reason and the cost. Emitted once per distinct reason per process, and
+        only when a vendor credential is really present: with none set there is
+        no billing consequence to warn about.
+        """
+        _warn_policy_once(
+            f"claude-code:strip-declined:{reason}",
+            f"multi-llm: keeping {', '.join(present)} for claude-code "
+            f"({reason}). This run may be billed per token instead of using a "
+            f"subscription; set providers.claude-code.strip_vendor_keys: always "
+            f"to strip it anyway.",
+        )
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """The envelope's ``api_error_status``, then the shared text ladder.
+
+        A rung **ahead of** the ladder rather than a replacement for it, and the
+        narrowing shape is aider's (``aider.py``'s ``classify_failure``): the
+        adapter supplies what only it can read and ``classify_streams`` keeps
+        the rule. The map is
+        :func:`result_envelope.category_for_api_error_status`, one copy for the
+        two adapters that emit this envelope, and its table is measured off the
+        rows in ``tests/fixtures/claude-code/manifest.yaml``.
+
+        **Absent, ``null``, or a status the map declines to name (400) delegates
+        to ``super()``**, which is every route the ladder had before: the
+        launch-failure tuple, context overflow, this adapter's own widened auth
+        set, rate limits, and the marker tables. A run that never launched
+        prints no envelope at all, so this rung cannot mask the exit-127 verdict
+        or a spawn failure — it fires only where the CLI itself answered.
+
+        What it buys is independence from wording. The ladder reads sentences a
+        vendor may reword at any release; ``api_error_status`` is the same
+        integer the HTTP response carried. On the committed rows the two routes
+        agree wherever both speak (pinned by
+        ``tests/test_result_envelope_verdicts.py``), and on ``invalid-model``
+        the status is the *only* route: claude-code replaces the vendor's
+        ``The model `X` does not exist`` with its own *"There's an issue with the
+        selected model (X). It may not exist…"*, which no
+        ``INVALID_MODEL_MARKERS`` entry matches at any ladder order.
+        """
+        category = classify_api_error_status(stdout)
+        if category is not None:
+            return category
+        return super().classify_failure(stdout, stderr, exit_code)
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse Claude Code output and extract structured data.
@@ -1085,6 +1474,12 @@ class ClaudeCodeProvider(LLMProvider):
 
         This method unwraps that format and attempts to parse the inner result
         as JSON, with fallback strategies for various response formats.
+
+        **It reads the envelope's verdict too**, in the one shared place: an
+        envelope carrying ``is_error: true`` or a non-``completed``
+        ``terminal_reason`` is refused by :func:`parse_result_envelope` with the
+        CLI's own sentence as the error, rather than having its ``result``
+        served as the answer. See that function for the measured value table.
 
         Args:
             stdout: The standard output from Claude Code CLI.

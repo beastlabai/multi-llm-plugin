@@ -41,6 +41,7 @@ from utils.stream_bootstrap import bootstrap_streams
 from utils.cli_common import EXIT_NEEDS_HUMAN, build_parent_parser
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
+from utils.provider_registry import set_run_anchor
 from utils import unattended as unattended_mod
 from utils.unattended import (
     HUMAN_TASK_STRATEGIES,
@@ -762,6 +763,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: Plan file not found: {args.plan_file}")
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
+
+    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # and before any provider read that decides routing.
+    set_run_anchor(str(plan_path))
 
     # Resolve the default --output now that the plan argument is known (the
     # default depends on the git root and the plan stem, so it cannot be a

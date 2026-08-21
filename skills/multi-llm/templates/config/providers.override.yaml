@@ -120,6 +120,8 @@
 #       - fable
 #       - haiku
 #     fallback_models: {}
+#     strip_vendor_keys: auto
+#     vendor_backend: auto
 
 #   cursor-agent:
 #     default_timeout: 1200
@@ -160,6 +162,8 @@
 
 #   opencode:
 #     default_timeout: 1200
+#     max_version_exclusive: 
+#     hermetic: on
 #     models:
 #       - opencode/big-pickle
 #       - opencode/sonnet

@@ -1,0 +1,355 @@
+# The §6.2 fixture manifest for vibe. Graded by tests/test_provider_fixture_rows.py,
+# which owns the format (its module docstring is the spec).
+#
+# As with copilot, the BYTES here are older than this file: they were captured
+# by the 2026-08-18 §6 probe and consumed only by the hand-written
+# `TestVibeProvider` in tests/test_providers.py, so vibe sat in that module's
+# `MANIFEST_PENDING` table and nothing pinned its CLASSIFICATION. That is how a
+# successful vibe run came to classify **`rate_limited`** without any test
+# seeing it: the `--output json` transcript opens with a `role: "user"` entry
+# holding our prompt verbatim, and the plan under review says "Unify auth
+# errors, rate limits, context overflow and exit-zero failures behind one
+# class" (plans/harness-residual-work.md C1). The rows below are the same
+# captures, now graded by the rig.
+schema_version: 1
+provider: vibe
+cli_version: "2.24.1"
+captured: "2026-08-18"
+method: >-
+  §6 step 5, vibe 2.24.1, `--network none`, against the committed
+  `stub_server.py` or a probe-local fail-forever server, with no credential.
+  argv is `VibeProvider.build_command`'s output — `--agent plan` (upstream's
+  read-only profile), `--output json`, `--max-price`, `-p <prompt>` — and the
+  prompt is the product's own review prompt, which is what the `success` row
+  below exists to measure. The full probe transcript is
+  plans/harness-expansion/probe-out/vibe/RESULTS.md; its §6.2 fixture inventory
+  is the source for which file pins which row, and its `cases/*/exit_code.txt`
+  files are the source for the exit codes.
+  ONE CAVEAT, the same one copilot's manifest carries: the probe committed these
+  captures without per-row `*.meta.json`, so each `exit_code` below is
+  RESULTS.md's measured class rule — **exit 1 on every failure mode measured**
+  (401, 404, 400 context, 429, 500, stall, truncated stream, error envelope and
+  bad config), exit 0 on an answering run — rather than a number read back off
+  that row's own run. Nothing any row asserts turns on the value: only exit
+  **127** changes `classify_streams`' answer.
+notes: >-
+  Three facts hold across every row. (1) vibe's error channel is **stderr** with
+  exit 1, which is why most rows here name a stderr file and no stdout at all —
+  and it is the exact inverse of copilot, whose whole diagnosis rides stdout.
+  (2) The ONE exception is a *config validation* error, which prints on
+  **stdout** with stderr empty and still exits 1 (`stdout-error` below) — the
+  opencode trap, and why `parse_output` handles unparseable stdout as a failure
+  carrying that text rather than handing it to the extractor. (3) The stdout
+  transcript echoes our prompt in a `role: "user"` entry whose `content[].text`
+  is the same field the answer uses; `_last_assistant_text` already filtered it
+  by role, and since 2026-08-20 `VibeProvider.vendor_text` does the same for the
+  classifier.
+
+rows:
+  success:
+    stdout: success-json.json
+    exit_code: 0
+    notes: >-
+      THE ROW THIS MANIFEST WAS WRITTEN FOR. `--output json` returns a JSON array
+      of transcript entries; the last `role: "assistant"`, `type: "message"`
+      entry's fenced block unwraps to the document below. `classify_failure` on
+      these bytes answered **`rate_limited`**, entirely from the echoed
+      `role: "user"` entry — the plan under review discusses rate limits — and
+      `rate_limited` is one of the two classes
+      `subagent_executor._classify_failed_run` forwards to the retry ladder, so
+      on a *failed* run the echo decides the slot's fate. The `null` below is
+      `VibeProvider.vendor_text`; the bytes still carry the whole prompt, so a
+      regression fails here.
+    expect:
+      success: true
+      data:
+        - id: "S001"
+          severity: "high"
+          title: "argv-only transport"
+          detail: "A multi-KB prompt exceeds the Windows command-line cap."
+        - id: "S002"
+          severity: "medium"
+          title: "unmeasured retry envelope"
+          detail: "The retry budget is declared from documentation rather than measurement."
+        - id: "S003"
+          severity: "low"
+          title: "tier not recorded"
+          detail: "The permission tier ships without a probe transcript."
+      raw_contains:
+        - '"role": "user"'
+        - '"role": "assistant"'
+      classify_failure: null
+
+  truncated:
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    notes: >-
+      A cut stream. vibe writes nothing at all to stdout and reports `Model
+      stream from stubprov (stub-model) ended without a finish reason.` on
+      stderr, exit 1, with no traceback. Two things follow. `parse_output` takes
+      the empty-stdout branch and QUOTES the stderr sentence rather than
+      restating the symptom — which is the whole reason that branch reads stderr
+      — and the classification is `None`, because "ended without a finish
+      reason" matches no member of `base.CONNECTION_ERROR_MARKERS`. Recorded,
+      not fixed: the run falls to the executor's bounded transport retry.
+    expect:
+      success: false
+      error_contains: ["ended without a finish reason"]
+      classify_failure: null
+
+  ephemeral-only:
+    stdout: ephemeral-only.json
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      Synthesized from the real capture: a well-formed transcript array with the
+      assistant entry removed, so nothing `_last_assistant_text` can select
+      remains. Necessary because the stub always answers and drives no tool
+      calls, so an all-noise transcript cannot be produced end to end. The
+      surviving entries — including the echoed `role: "user"` one — are the real
+      capture's.
+    notes: >-
+      An all-noise run is a **failure**, not an empty-string success. Note that
+      this row also carried the echoed prompt, so its classification moved from
+      `rate_limited` to `null` with the C1 fix — a *failed* run whose only reason
+      to be called rate-limited was our own plan text is precisely the live
+      hazard, and this is the row that pins it.
+    expect:
+      success: false
+      error_contains: ["no assistant message in vibe's transcript"]
+      raw_contains: ['"role": "user"']
+      classify_failure: null
+
+  multi-assistant:
+    stdout: multi-assistant.json
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      Synthesized from the real capture by inserting a SECOND assistant entry
+      ahead of the real one, reading `Preliminary thought: I should look at the
+      plan first.` A second assistant turn requires a tool loop the committed
+      stub deliberately never drives (the copilot `multi-assistant.jsonl`
+      precedent). The rule it pins is real and this repo has paid for it: muse's
+      silent concatenation.
+    notes: >-
+      LAST-wins, not first-wins and not concatenation. A first-wins parser
+      returns the preliminary sentence and a concatenating one returns neither.
+      This capture carries the echoed user entry too, so it is the second vibe
+      row whose classification moved from `rate_limited` to `null`.
+    expect:
+      success: true
+      data:
+        - id: "S001"
+          severity: "high"
+          title: "argv-only transport"
+          detail: "A multi-KB prompt exceeds the Windows command-line cap."
+        - id: "S002"
+          severity: "medium"
+          title: "unmeasured retry envelope"
+          detail: "The retry budget is declared from documentation rather than measurement."
+        - id: "S003"
+          severity: "low"
+          title: "tier not recorded"
+          detail: "The permission tier ships without a probe transcript."
+      raw_contains: ["Preliminary thought: I should look at the plan first."]
+      classify_failure: null
+
+  error-envelope:
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    notes: >-
+      HTTP 200 whose body is a provider error object. vibe does NOT serve it as
+      the answer — stdout is empty and the run exits 1 — but it does not forward
+      the vendor's text either: what reaches stderr is vibe's own generic
+      `Model stream from stubprov (stub-model) ended without a finish reason.`,
+      byte-identical to the `truncated` and `incomplete-stream` rows. So the
+      right half is pinned (the error never becomes an answer) and the cost is
+      pinned with it: three distinct upstream conditions are indistinguishable
+      here, and all three classify `None`.
+    expect:
+      success: false
+      error_contains: ["ended without a finish reason"]
+      classify_failure: null
+
+  exit-zero-failure:
+    not_applicable: >-
+      No producer at vibe 2.24.1: every failure mode the rig could drive exits
+      **1** — 401, 404, 400 context-length, 429, 500, a stalled request, a cut
+      stream, a 200 carrying a provider error object and an invalid config
+      (nine modes, RESULTS.md §1's "Exit-0 failures? **No.**" row). That is also
+      why `VibeProvider` declares no `exit_zero_failure_markers`: the exit code
+      is authoritative for this adapter, so there is nothing for the ladder's
+      last step to consult.
+
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    exit_code: 1
+    notes: >-
+      §6.2's `stdout-error` row exactly, and for vibe it is a real and separate
+      condition rather than a restatement of the others: a *config validation*
+      error prints on **stdout** with stderr empty and still exits 1. This is the
+      opencode trap, and it is why `parse_output` reports unparseable stdout as a
+      failure CARRYING that text — handing these bytes to the extractor would
+      find nothing and report an empty answer instead of the reason, which is the
+      one place the reason exists. The classification is `None`: a rejected
+      `thinking` level is not a transport condition and matches no table.
+    expect:
+      success: false
+      error_contains:
+        - "vibe produced non-JSON output on stdout"
+        - "Invalid configuration"
+      classify_failure: null
+
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: 1
+    notes: >-
+      Zero bytes on **both** channels, committed as two empty files rather than
+      omitted, because "the CLI wrote nothing anywhere" is a different fact from
+      "the CLI wrote nothing on this one channel" and only committed bytes
+      distinguish them. `parse_output` names the cause rather than restating the
+      symptom, and falls back to the no-stderr wording because there is no stderr
+      text to quote. The classifier answers `None` on an empty haystack by
+      construction.
+    expect:
+      success: false
+      error_contains: ["Empty output from vibe"]
+      classify_failure: null
+
+  auth-error:
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    notes: >-
+      A real 401. vibe forwards the vendor sentence verbatim — `Invalid API key.
+      Please check your API key and try again.` — inside its own `API error from
+      stubprov (model: stub-model):` gloss, and `invalid api key` is a member of
+      `base.auth_error_patterns`, so the credential failure lands on rung 1 where
+      it belongs. Nothing adapter-specific is needed for it.
+    expect:
+      success: false
+      error_contains: ["Invalid API key"]
+      raw_contains: ["Please check your API key and try again."]
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    notes: >-
+      A real 429, reported as `Rate limits exceeded. Please wait a moment before
+      trying again.` — vibe's own wording, not the vendor's, and it matches
+      because `rate limit` is matched through `stream_pattern` rather than as a
+      bare substring, so the plural survives.
+    expect:
+      success: false
+      error_contains: ["Rate limits exceeded"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    notes: >-
+      A real 404, and the ideal shape wasted. vibe keeps the whole upstream
+      record — status line, endpoint, `provider_message: The model `stub-model`
+      does not exist`, and a `body_excerpt` carrying `"code":
+      "model_not_found"` — so it NAMES the model, which is what makes a stray
+      `:effort` suffix findable. It still classifies **`server_error`**, a
+      retryable transport category, because vibe prefixes the whole thing with
+      `API error from stubprov`, `\bapi error\b` is a member of
+      `base.SERVER_ERROR_MARKERS`, and `classify_streams` consulted that table
+      BEFORE `INVALID_MODEL_MARKERS`. Both tables match these bytes; the order
+      decided. This row was captured as the **fourth** instance of the
+      ladder-order defect — §16.4 named only claude-code, grok and muse — and
+      **C2 has now swapped that pair**, so the cell reads `invalid_model`. It is
+      one of the three that moved; claude-code's own invalid-model row matches
+      neither table and is C5's `api_error_status` map to fix, not C2's.
+    expect:
+      success: false
+      error_contains: ["The model `stub-model` does not exist"]
+      raw_contains:
+        - "status: 404 Not Found"
+        - "model_not_found"
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    notes: >-
+      A real 400. vibe substitutes its own sentence — `The conversation context
+      exceeds the model's maximum limit. Use /rewind to undo recent actions,
+      then /compact to summarize the conversation.` — rather than forwarding the
+      upstream text, and it classifies correctly because `conversation context
+      exceeds` was added to `base.CONTEXT_OVERFLOW_MARKERS` for exactly this
+      wording. Worth holding beside goose's context row, where the same upstream
+      400 is swallowed into a compaction report that matches nothing and burns
+      the whole retry budget on the one condition §7.2 calls terminal.
+    expect:
+      success: false
+      error_contains: ["The conversation context exceeds the model's maximum limit."]
+      classify_failure: "context_length_exceeded"
+
+  # ----- beyond §6.2's twelve, graded the same way -------------------------- #
+
+  server-error:
+    stderr: server-error.stderr.txt
+    exit_code: 1
+    notes: >-
+      A 500 served three times, kept as the retry-exhausted shape. Same envelope
+      as `invalid-model` down to the field names — which is what makes that row's
+      misclassification a pure ordering fact rather than a wording one: here
+      `server_error` is the correct answer and the same `API error` prefix
+      produces it.
+    expect:
+      success: false
+      error_contains: ["500 Internal Server Error"]
+      raw_contains: ["provider_message: upstream boom"]
+      classify_failure: "server_error"
+
+  incomplete-stream:
+    stderr: incomplete-stream.stderr.txt
+    exit_code: 1
+    notes: >-
+      A third capture of the `ended without a finish reason` sentence, from a
+      stream that stopped between records rather than mid-record. Committed
+      because it is the evidence for the claim the `error-envelope` row makes:
+      vibe collapses three distinct upstream conditions onto one message, so no
+      classifier reading stderr can tell them apart, and all three answer `None`.
+    expect:
+      success: false
+      error_contains: ["ended without a finish reason"]
+      classify_failure: null
+
+  success-streaming:
+    stdout: success-streaming.jsonl
+    exit_code: 0
+    notes: >-
+      `--output streaming`: the SAME entry objects as NDJSON, one per line. The
+      shipped adapter renders `--output json`, so through `parse_output` these
+      bytes are a failure — correctly, since the array parse is the documented
+      contract and a line-per-entry stream is not what this argv asks for. The
+      row is here for the other half: `VibeProvider.vendor_text` handles this
+      shape too, dropping `role: "user"` LINES, so the reduction is not
+      accidentally coupled to the array form. The classification is `None`
+      before and after, because this capture's echoed prompt is a two-word test
+      prompt rather than a plan.
+    expect:
+      success: false
+      error_contains: ["vibe produced non-JSON output on stdout"]
+      raw_contains:
+        - '"role": "user"'
+        - '"role": "assistant"'
+      classify_failure: null
+
+  success-text:
+    stdout: success-text.txt
+    exit_code: 0
+    notes: >-
+      `--output text`: three bytes, `OK\n`, and no envelope at all — no role, no
+      entry type, no way to tell an answer from an error. Committed as the record
+      of why `--output json` is what ships, and graded as the failure it is
+      through the shipped adapter rather than left as an untested cell.
+    expect:
+      success: false
+      error_contains: ["vibe produced non-JSON output on stdout"]
+      raw_contains: ["OK"]
+      classify_failure: null

@@ -1230,6 +1230,23 @@ def inner_userns(posture):
     `unshare -Un true`. Cheap (~1 s, no network, no credential) and it is what
     keeps :data:`NEEDS_INNER_USERNS` a MEASUREMENT rather than a belief — the day
     a daemon or a posture permits CLONE_NEWUSER the row runs again by itself.
+
+    THE EXACT POSTURE THAT MAKES IT ANSWER TRUE, written down so nobody
+    re-derives it (B3): adding `--security-opt seccomp=unconfined` to this
+    lane's posture flips this probe, **with `--cap-drop ALL` still applied** —
+    measured in the same image on 2026-08-20. So the blocker is precisely
+    Docker's default seccomp profile denying CLONE_NEWUSER to a container
+    without CAP_SYS_ADMIN, and nothing about the kernel, the image, the
+    capability set or the adapter.
+
+    Recording the escape is NOT a recommendation to take it. Unconfining
+    seccomp for one row would trade the containment this rig exists to hold for
+    a single CLI's tool-calling half, and :data:`NEEDS_INNER_USERNS` refuses
+    that trade in writing. The note exists so a future reader who *does* have a
+    reason to change the posture — a different daemon, a rootless setup, a
+    machine where unprivileged user namespaces are already normal — knows which
+    single flag is the one that matters and does not go looking through the
+    capability set for it.
     """
     import subprocess
 

@@ -77,12 +77,22 @@ manifest.
    bounded-retry budget on the one condition §7.2 declares terminal. The one-line
    fix is a marker for aider's own wording (`exhausted context window`, or
    `hit a token limit`), the way vibe's `conversation context exceeds` was added.
-2. **Every 5xx and every truncated stream reports as `rate_limited`.** aider's
-   gloss for a server error is *"The API provider's servers are down or
-   overloaded"*, and `overloaded` is a member of `base.rate_limit_patterns`,
-   consulted before the server and connection tables. Both categories are
-   retryable, so the ladder still behaves; the `Reason:` line a user acts on is
-   wrong.
+2. **Every 5xx and every truncated stream reported as `rate_limited`.**
+   **FIXED (C7).** aider's gloss for a server error is *"The API provider's
+   servers are down or overloaded"*, and `overloaded` is a member of
+   `base.rate_limit_patterns`, consulted before the server and connection
+   tables. `AiderProvider._ADAPTER_GLOSS_LINES` now excises that one
+   runner-written line before classification, so the fix is narrowed to where
+   the gloss is *written* rather than weakening a table every adapter shares —
+   a vendor that really says `overloaded` (Anthropic's 529) still classifies
+   `rate_limited`, and `base.py` is byte-identical. `truncated` is now
+   `connection_error` and `exit-zero-failure` `runner_error`; both rows pin it.
+   One residual, recorded not fixed: `exit-zero-failure` lands on
+   `runner_error` rather than the more specific `server_error`, because
+   `base.SERVER_ERROR_MARKERS` spells `internal server error` with separators
+   while litellm prints `InternalServerError` and the run carries no bare
+   `500`. Both map to the same rung, so only the `Reason:` line differs;
+   closing it is an edit to a shared table and out of C7's scope.
 3. **The parser's error message is 500 characters of unrelated noise.**
    `parse_output` snippets `stdout[:500]`, and offline the first ~460 of those
    are litellm's cost-map DNS failure plus the banner — so the operator-facing

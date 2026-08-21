@@ -7,13 +7,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Reasoning effort values passed to aider's --reasoning-effort, which is an
 # unvalidated pass-through (verified on aider 0.86.2): for openrouter/ models
 # aider always accepts it and sends OpenRouter's reasoning.effort param;
 # other models warn-and-ignore.
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+#
+# The ladder minus `max`: aider forwards whatever it is given, so the whitelist
+# is the harness's own gate rather than the CLI's, and it stops where the
+# measurement stopped.
+EFFORT_LADDER = ReasoningLadder(
+    provider="aider",
+    rungs=("none", "minimal", "low", "medium", "high", "xhigh"),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 # aider prints the model's reply after this marker (with --no-pretty).
 # Reasoning models emit an optional "► **THINKING**" block first, which may
@@ -215,20 +228,112 @@ class AiderProvider(LLMProvider):
             if not any(p.search(line) for p in cls._TOLERATED_STDOUT_LINES)
         )
 
+    #: aider's own **gloss** on a failure — the one line of a failed capture the
+    #: RUNNER wrote about the vendor rather than the vendor writing about itself
+    #: (C7). It is a fixed sentence rather than upstream text: byte-identical
+    #: in the 500-forever and the truncated-stream captures, printed under
+    #: litellm's own error line and repeated once per retry attempt.
+    #:
+    #: MEASURED on the committed 0.86.2 captures. ``overloaded`` is a member of
+    #: :data:`base.LLMProvider.rate_limit_patterns`, where it carries Anthropic's
+    #: genuine 529, and the rate table is consulted before the timeout,
+    #: connection and server tables. So every 5xx and every truncated stream
+    #: aider reported classified ``rate_limited``:
+    #:
+    #:   ``truncated``          rate_limited -> connection_error
+    #:   ``exit-zero-failure``  rate_limited -> runner_error
+    #:
+    #: and no other row in ``tests/fixtures/aider/`` moves — ``rate-limit``
+    #: (litellm's own ``RateLimitError`` plus *"has rate limited you"*) still
+    #: answers ``rate_limited``, ``auth-error`` still ``auth_failed``.
+    #:
+    #: **Why the excision is here and not in the shared pattern.** Dropping
+    #: ``overloaded`` from :data:`base` would weaken a real signal for every
+    #: adapter, which is why §16.4 declined this and why the decline was kept.
+    #: C1's rule is what makes the narrow fix legal: the classifier is to read
+    #: the text the *vendor* wrote, so a gloss the runner invented is narrowed
+    #: where it is written rather than by weakening a table every adapter
+    #: inherits.
+    #: The vendor's own word survives the excision, which is the whole point:
+    #: an Anthropic 529 seen through aider keeps litellm's rendered body
+    #: (``{"type":"overloaded_error","message":"Overloaded"}``) on the line
+    #: above, and still classifies ``rate_limited`` — measured on that capture.
+    #:
+    #: **Why exactly this one sentence and not aider's gloss family.** Measured:
+    #: excising every ``The API provider …`` line instead turns the ``auth-error``
+    #: row from ``auth_failed`` into ``runner_error``, because *"not able to
+    #: authenticate"* — this class's own declared auth pattern, above — IS the
+    #: 401 gloss and is the only auth wording in that capture. aider's gloss is
+    #: load-bearing where the vendor's text is silent and misleading only here,
+    #: so the excision names the sentence rather than the shape.
+    #:
+    #: **The rung moves with the label, and that is the correction, not a side
+    #: effect.** ``rate_limited`` is rung 3 — backoff with jitter, at most three,
+    #: and it does not consume ``driver.subagent_retries`` (D3i: a 429 is not a
+    #: transport failure). §7.1.b's ``_LADDER_STATUS_BY_CATEGORY`` puts
+    #: ``connection_error`` and ``server_error`` on rung 4, "which is what makes
+    #: a connection error or a 5xx spend ``driver.subagent_retries`` exactly
+    #: once". Both rows stay retryable either way; what disappears is §7.6(b)
+    #: rule 6b's doubled wait — an executor-level backoff on a slot where aider
+    #: had already spent 78 s and 27 HTTP attempts retrying on its own.
+    #:
+    #: **Residual, recorded rather than fixed here.** ``exit-zero-failure``
+    #: lands on ``runner_error`` and not on the more specific ``server_error``,
+    #: because :data:`base.SERVER_ERROR_MARKERS` spells the phrase with
+    #: separators (``internal server error``) while litellm prints the class name
+    #: ``InternalServerError``, and the run carries no bare ``500``. Lane A maps
+    #: both to rung 4, so only the ``Reason:`` line differs — and it is right
+    #: either way, where today it sends the reader to check a quota during a
+    #: server outage. Closing that gap is an edit to a shared table, which is
+    #: outside C7's scope by construction.
+    _ADAPTER_GLOSS_LINES = (
+        re.compile(r"The API provider's servers are down or overloaded"),
+    )
+
+    @classmethod
+    def _drop_adapter_gloss(cls, stream: str) -> str:
+        """Remove aider's own gloss, keeping every word the vendor wrote.
+
+        Degrades to its input rather than to ``""``: an empty haystack
+        classifies as ``None`` (:func:`base.classify_streams`), so an excision
+        that consumed a whole capture would launder a failure into a
+        transport-shaped retry — the same rule :meth:`base.LLMProvider.
+        vendor_text` states for the hook this narrowing sits beside.
+        """
+        if not stream:
+            return stream
+        narrowed = "\n".join(
+            line for line in stream.splitlines()
+            if not any(p.search(line) for p in cls._ADAPTER_GLOSS_LINES)
+        )
+        return narrowed if narrowed.strip() else stream
+
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0
     ) -> Optional[str]:
-        """As the base, minus litellm's tolerated cost-map refresh line.
+        """As the base, minus two lines aider wrote about something else.
 
         The adapter supplies the data and ``classify_streams`` owns the rule
         (§7.2), so this override changes neither — it only declines to hand the
-        rule a line upstream has already decided is non-fatal. Everything else
-        aider prints, including every genuine ``litellm.*Error``, still reaches
-        the classifier unchanged.
+        rule two lines that are not evidence about this run. Both reductions are
+        removal-only and both degrade to their input, so the order they compose
+        in does not matter:
+
+        * litellm's tolerated cost-map refresh line, which upstream has already
+          decided is non-fatal (:data:`_TOLERATED_STDOUT_LINES`);
+        * aider's own gloss for a server error or a cut stream, which is the
+          runner's guess about the vendor rather than the vendor's report of
+          itself (:data:`_ADAPTER_GLOSS_LINES`, C7).
+
+        Everything else aider prints, including every genuine ``litellm.*Error``
+        and every word the provider itself sent, still reaches the classifier
+        unchanged. Both streams are reduced for symmetry with the base contract's
+        haystack; measured, aider writes 0 bytes to stderr on all eleven
+        captured outcomes, so today only stdout carries either line.
         """
         return super().classify_failure(
-            self._drop_tolerated_lines(stdout),
-            self._drop_tolerated_lines(stderr),
+            self._drop_adapter_gloss(self._drop_tolerated_lines(stdout)),
+            self._drop_adapter_gloss(self._drop_tolerated_lines(stderr)),
             exit_code,
         )
 

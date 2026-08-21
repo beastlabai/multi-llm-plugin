@@ -29,7 +29,7 @@ they do.
 | Fixture | Provenance | What it pins |
 | --- | --- | --- |
 | `success` | **harvested from the live lane**, not from a stub | the nine-key result envelope as Cursor really wrote it: `type`, `subtype`, `is_error`, `duration_ms`, `duration_api_ms`, `result`, `session_id`, `request_id`, `usage` — and `usage` with **no cost field**, which is what `usage_support = "partial"` declares. `parse_output` unwraps `result` to `["ok"]`; `classify_failure` is `None` |
-| `exit-zero-failure` | **synthesized**, one field | `exit_zero_failure_markers` firing on `"is_error": true` — and, unintentionally but importantly, that `parse_output` **ignores** the flag |
+| `exit-zero-failure` | **synthesized**, one field | `exit_zero_failure_markers` firing on `"is_error": true` — and, unintentionally but importantly, that `parse_output` **ignored** the flag. It no longer does, and the row now grades the fix from both sides: `expect.success: false` with the flag named in the error, `classify_failure: runner_error` unchanged |
 
 ## Where `success` came from, exactly
 
@@ -66,18 +66,29 @@ failure around it.
 
 The row then measured something nobody had asserted:
 
-> **`parse_output` never consults `is_error`.** It is
-> `parse_result_envelope`, which branches only on the presence of a `result`
+> **`parse_output` never consulted `is_error`.** It is
+> `parse_result_envelope`, which branched only on the presence of a `result`
 > key — so an envelope flagged as an error whose `result` still holds a
-> parseable document comes back `success: True` with that document served as the
-> answer. The only part of the adapter that sees the flag is `classify_failure`.
+> parseable document came back `success: True` with that document served as the
+> answer. The only part of the adapter that saw the flag was `classify_failure`.
 
-Hence the two assertions on those bytes look contradictory and are both correct:
-`expect.success: true` **and** `classify_failure: runner_error`. That division of
-labour is real and load-bearing — §7.2 step 6 consults the exit-0 markers last,
-after the parser — and it was invisible before this row existed. It is recorded,
-not fixed: the fixture pins today's behaviour, so any change to it is a visible
-edit to both the adapter and this manifest.
+Hence the two assertions on those bytes looked contradictory and were both
+correct: `expect.success: true` **and** `classify_failure: runner_error`. **That
+is now fixed and the row grades the fix**: `parse_result_envelope` refuses an
+envelope its own verdict flags, naming the field in the error, so the row reads
+`expect.success: false` with an `error_contains` of `is_error: true` and no
+`data` cell — there is no answer to hand back.
+
+The division of labour survives the fix and is still what the row pins.
+`classify_failure` is unchanged at `runner_error`, reached the same way: §7.2
+step 6 consults the exit-0 markers last, and on a CLI whose exit code carries no
+verdict at all they are the only thing that says *why*. The `api_error_status`
+rung both envelope adapters gained does **not** fire here — the nine-key
+envelope has no such field, and no `terminal_reason` either — so
+`classify_failure` delegates to `super()` on both committed rows. That
+delegation is now itself pinned (`tests/test_result_envelope_verdicts.py`),
+because a status rung that swallowed the text ladder would take this CLI's only
+failure signal with it.
 
 ## The row that is *almost* capturable, and why it is not here
 

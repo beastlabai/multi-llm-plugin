@@ -34,7 +34,7 @@ Four facts govern every row:
 | --- | --- |
 | `success` | the pretty-printed `{"session_id", "response", "stats"}` envelope, unwrapped by `parse_output`. The test asserts the unwrapped `data` **is** the suggestion-list document. `stats` records `totalCalls: 0` and `totalLinesAdded: 0` — answered on stdout, wrote nothing |
 | `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success: `"response": ""` inside 802 bytes of `stats` the parser discards, exit 0, stderr empty. `totalRequests: 4` — gemini retried the empty answer four times and still called it a success |
-| `multi-assistant` | **first**-wins, and the first document is the decoy (`FIRST ANSWER (must NOT be selected)`) |
+| `multi-assistant` | **last**-wins, and the last document is the answer; the first is the decoy (`FIRST ANSWER (must NOT be selected)`), still in the bytes so the row tests selection — see defect 4 |
 | `truncated` | a **real** cut mid-record on the *gemini* surface: the whole answer is ONE 291-byte SSE frame and the cut lands inside it, so `@google/genai` reports `Incomplete JSON segment at the end`. **One request** — a cut stream is not retried |
 | `error-envelope` | a provider error object on a **200**, which gemini never sees as an error at all: it asked for `text/event-stream`, got one JSON object, and failed at the SSE framing layer with the same `Incomplete JSON segment` as `truncated`. The provider's text is lost, not mis-served |
 | `exit-zero-failure` | the one gemini failure that **exits 0 while reporting success** — a `write_file` tool call that the registry rejects, after which the model's confirmation sentence is printed as the answer. See defect 1 |
@@ -120,26 +120,46 @@ aider's committed `truncated.stdout.txt` grading unchanged.
 
 ## What this set found
 
-Five measured defects, recorded rather than silently fixed.
+Five measured defects, recorded rather than silently fixed. Defect 4 has since
+been fixed in the shared extractor, and its entry records what changed.
 
 1. **`supports_file_output = True` is wrong** — the whole of the section above.
    The adapter asks gemini to write a file with a tool gemini does not register,
    and the run reports success.
-2. **`parse_output` ignores stderr, where 100 % of gemini's diagnosis lives.**
-   Nine failure captures, nine times `JSON parse error: Expecting value: line 1
-   column 1 (char 0)` as the operator-facing error. The vendor's 401/429/404/400
-   text is in the bytes and never reaches the user. `classify_failure` *does* read
-   both streams, which is why four of the nine still land on a category — the
-   parser is the half that is blind.
-3. **A 401 classifies as `None`.** Google's status word is `UNAUTHENTICATED`
-   (not `unauthorized`) and the vendor sentence is *Incorrect API key provided*
-   (not `invalid api key`), so nothing in `base.auth_error_patterns` matches and
-   a logged-out gemini burns the whole bounded-retry budget. Two added patterns
-   fix it, the way aider's pair was added.
-4. **`multi-assistant` selects the FIRST document, and it is the decoy** —
-   `extract_json_from_text(prefer_arrays=True)` returns the first array it finds.
-   The same defect claude-code has, from the same helper; aider is the only one of
-   the three with a documented last-wins rule.
+2. **`parse_output` ignored stderr, where 100 % of gemini's diagnosis lives.**
+   **FIXED (C4).** Nine failure captures used to yield nine copies of
+   `JSON parse error: Expecting value: line 1 column 1 (char 0)` as the
+   operator-facing error, with the vendor's 401/429/404/400 text sitting in the
+   bytes and never reaching the user. `GeminiProvider.describe_failure` now
+   reads stderr through a three-tier precedence — the last `ApiError` blob's
+   `error.message`/`error.code` (4 rows), else the prose sentence following the
+   `Full report available at:` path (4 rows), else the first stderr line with
+   the stack stripped (1 row: `exit-zero-failure`, the only capture with bytes
+   on both channels) — and `parse_output`'s error branch names the same text.
+   The Node stack and the per-run `/tmp/mllm-inv/` path are dropped and the
+   result is capped to one line, so a 15 KB stderr cannot become the error
+   string. `error.message` is never reported: at 0.25.2 it is the literal
+   `[object Object]`. `classify_failure` already read both streams, which is
+   why four of the nine landed on a category even before this — the parser was
+   the half that was blind.
+3. **A 401 classified as `None`.** **FIXED (C3).** Google's status word is
+   `UNAUTHENTICATED` (not `unauthorized`) and the vendor sentence is *Incorrect
+   API key provided* (not `invalid api key`), so nothing in
+   `base.auth_error_patterns` matched and a logged-out gemini burned the whole
+   bounded-retry budget. Two patterns were added to
+   `GeminiProvider.auth_error_patterns`, the way aider's pair was — and swept
+   against all 231 committed capture files across 16 providers to confirm they
+   match nothing else, including every echoing adapter's success capture.
+4. **`multi-assistant` selected the FIRST document, and it was the decoy —
+   FIXED** — `extract_json_from_text(prefer_arrays=True)` returned the first
+   array it found. gemini has no message boundary to hang a per-adapter rule on
+   (every turn is concatenated into one `response` string), which is why the fix
+   is one rule in the shared helper: **the last document wins, at every level**,
+   with shape preference consulted before position and a contained candidate
+   never outranking the one that contains it. That is aider's documented
+   last-wins rule generalised from the envelope to the text inside it, so
+   claude-code, grok and gemini now select the answer instead of the decoy. The
+   row moved with the fix and still carries the decoy in `raw_contains`.
 5. **A 5xx classifies as `None`.** gemini surfaces *"The server had an error
    while processing your request"*, which matches no `SERVER_ERROR_MARKERS` entry
    (the phrase `server error` never appears, and the `5\d{2}` pattern wants the

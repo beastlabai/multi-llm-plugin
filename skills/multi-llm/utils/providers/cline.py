@@ -5,12 +5,25 @@ import shutil
 from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Thinking levels accepted by `cline --thinking` (verified on cline 3.0.39).
 # Hard-validated by the CLI — invalid values exit 1. Unlike -m, --thinking
 # does not mutate ~/.cline.
-REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh"})
+#
+# The ladder without `minimal` and without `max`. Because cline hard-errors
+# rather than warning, this set has to match the CLI exactly: a rung it does not
+# have is not a degraded run, it is exit 1 before the model is ever reached.
+EFFORT_LADDER = ReasoningLadder(
+    provider="cline",
+    rungs=("none", "low", "medium", "high", "xhigh"),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 
 class ClineProvider(LLMProvider):
@@ -90,8 +103,23 @@ class ClineProvider(LLMProvider):
     # The message is the upstream provider's rejection and carries no auth word
     # at all, so without this entry a logged-out cline classified as *nothing*
     # and burned the transport retry budget on a condition no retry can fix.
+    # Measured again on cline 3.0.55, 2026-08-19 — the §6 step-5 probe,
+    # failserver `--mode 401` (`tests/fixtures/cline/auth-error.*`) — and it is
+    # a SECOND wording, not the same one: cline exits **1**, makes exactly one
+    # request (no retry), and passes the upstream sentence through verbatim into
+    # `run_result.text`, the `agent_event` error and the stderr copy:
+    #   Incorrect API key provided: sk-stub***. You can find your API key at …
+    # cline glosses nothing, so the phrase to match is the provider's. It
+    # matched neither `invalid api key` (a different word order, and
+    # `stream_pattern` keeps a left word boundary rather than matching
+    # substrings) nor `user not found`, so a 401 fell all the way through to
+    # `exit_zero_failure_markers` and answered `runner_error` — a RETRYABLE
+    # rung, spent on a credential. Checked against every capture in
+    # `tests/fixtures/cline/`: the phrase occurs in `auth-error` alone, so no
+    # success row's cell moves (C3).
     auth_error_patterns = LLMProvider.auth_error_patterns + (
         "user not found",
+        "incorrect api key",
     )
     # No rate-limit override: cline's 429 text is the upstream provider's,
     # already covered by the base set, and nothing cline-specific was measured.

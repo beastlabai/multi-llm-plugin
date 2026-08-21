@@ -307,10 +307,21 @@ _DETACH = {
         "redirecting stdout and stderr to the phase dir's `orchestrator-run.log`. "
         "Never pass `--detach` on this host."
     ),
+    # R4 (2026-08-21): the previous wording ended "the foreground stays legal
+    # for short calls", and codex-apply-executor read that as permission to skip
+    # `--detach` entirely — measured as a miss on three consecutive host-lane
+    # runs (20260820T093838Z, 20260821T020823Z, 20260821T024227Z), each time
+    # leaving no `.status.json` run block for the row to grade. The permission
+    # was accurate and is kept, but it is no longer the clause the reader ends
+    # on: `--detach` is now stated as the default for every fan-out mode, and
+    # the foreground exception is narrowed to the calls it was always meant for.
     "python": (
-        "**Run detached** — pass `--detach` (which implies `--yes`) and poll "
-        "`status <plan> --view run`; the foreground stays legal for short calls. "
-        "Never combine `--detach` with a host background mechanism — pick one."
+        "**Run detached** — pass `--detach` (which implies `--yes`) on every "
+        "fan-out mode, then poll `status <plan> --view run`. Do this even when "
+        "you expect the run to be quick: a fan-out started in the foreground "
+        "cannot be handed back to once your turn ends. Only a single-model, "
+        "non-fan-out call may stay in the foreground. Never combine `--detach` "
+        "with a host background mechanism — pick one."
     ),
     "required": (
         "**Run detached** — pass `--detach` (which implies `--yes`) on every "

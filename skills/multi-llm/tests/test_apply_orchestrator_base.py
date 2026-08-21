@@ -2608,9 +2608,16 @@ class TestStateTransitionParity:
     # Orchestrator config matrices matching the three concrete subclasses
     # ------------------------------------------------------------------
 
+    #: ``confirmation_phase_name`` is carried here because it is not cosmetic:
+    #: the ``--mark-completed`` early exit persists
+    #: ``confirmation_phase_name or phase_name``, so it is the word that lands in
+    #: ``phases_completed``. Only apply-code-fixes sets it (its ``phase_name`` is
+    #: the phase *directory* word ``apply-fixes``); the other two leave it empty,
+    #: so the fallback keeps their word byte-for-byte.
     ORCHESTRATOR_CONFIGS = {
         "apply-suggestions": {
             "phase_name": "apply-suggestions",
+            "confirmation_phase_name": "",
             "review_subdir": "review-plan",
             "item_noun": "suggestion",
             "supports_revalidation": True,
@@ -2619,14 +2626,20 @@ class TestStateTransitionParity:
         },
         "apply-fixes": {
             "phase_name": "apply-fixes",
+            "confirmation_phase_name": "apply-code-fixes",
             "review_subdir": "code-review",
             "item_noun": "fix",
             "supports_revalidation": True,
             "supports_skip_flag": False,
+            # Stays False: this phase's `run()` only EMITS batches. Completion is
+            # the host's post-loop `--mark-completed` (or, under
+            # `--exec-subagents`, the executor's `_finalize`) — never the emit
+            # path. See `test_apply_code_fixes_does_not_mark_phase_completed`.
             "marks_phase_completed": False,
         },
         "apply-task-suggestions": {
             "phase_name": "apply-task-suggestions",
+            "confirmation_phase_name": "",
             "review_subdir": "review-tasks",
             "item_noun": "task suggestion",
             "supports_revalidation": False,
@@ -2636,11 +2649,21 @@ class TestStateTransitionParity:
     }
 
     @staticmethod
+    def _completion_word(config):
+        """The word a config records in ``phases_completed``.
+
+        The base's ``confirmation_phase_name or phase_name`` fallback, restated
+        here so the assertions below read the contract rather than a literal.
+        """
+        return config["confirmation_phase_name"] or config["phase_name"]
+
+    @staticmethod
     def _make_orchestrator_class(config, groups=None, validation=None):
         """Create a mock orchestrator class with the given config and data."""
         _groups = list(groups) if groups else []
         _validation = list(validation) if validation else []
         _phase = config["phase_name"]
+        _confirm_phase = config["confirmation_phase_name"]
         _review = config["review_subdir"]
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
@@ -2649,6 +2672,7 @@ class TestStateTransitionParity:
 
         class ConfiguredOrch(MockApplyOrchestrator):
             phase_name = _phase
+            confirmation_phase_name = _confirm_phase
             review_subdir = _review
             item_noun = _noun
             supports_revalidation = _reval
@@ -3051,7 +3075,22 @@ class TestStateTransitionParity:
         )
 
     def test_apply_code_fixes_does_not_mark_phase_completed(self, tmp_path):
-        """apply-fixes (marks_phase_completed=False) does NOT mark phase completed."""
+        """apply-fixes (marks_phase_completed=False) does NOT mark phase completed.
+
+        **This silence is the contract, not a bug — do not "fix" it by flipping
+        `marks_phase_completed` to True.** `run()` on this phase applies nothing:
+        it emits batch JSON and returns, and the bytes are written afterwards by
+        the host following `instructions/apply-code-fixes.md`. The base's
+        completion write sits on that *emit* path, so a True here would record the
+        phase complete before a single batch had been executed or verified — a
+        claim about work handed out, not about work done.
+
+        Completion is recorded elsewhere, and only once every batch has verified:
+        by the host's post-loop `apply-code-fixes … --mark-completed` on the
+        native path (see `TestApplyCodeFixesCompletionContract`), or by
+        `WriteBatchScheduler._finalize` under `--exec-subagents`. Both write
+        `apply-code-fixes`; neither is this method.
+        """
         config = self.ORCHESTRATOR_CONFIGS["apply-fixes"]
         plan_path = self._setup_plan_for_config(tmp_path, config)
         groups = self._sample_groups()
@@ -3574,6 +3613,69 @@ class TestStateTransitionParity:
         assert orch2.state.get_processed_items(config["phase_name"]) == {}
         assert orch2.state.get_processing_progress(config["phase_name"]) is None
 
+    # ------------------------------------------------------------------
+    # The --mark-completed early exit and the word it persists
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "config_name", ["apply-suggestions", "apply-fixes", "apply-task-suggestions"]
+    )
+    def test_mark_completed_persists_the_confirmation_phase_word(
+        self, tmp_path, config_name
+    ):
+        """`--mark-completed` writes ``confirmation_phase_name or phase_name``.
+
+        For the two configs that leave ``confirmation_phase_name`` empty the
+        fallback must yield their existing word byte-for-byte; for apply-fixes it
+        must yield ``apply-code-fixes`` — the canonical phase word — and never the
+        phase-directory word ``apply-fixes``.
+        """
+        config = self.ORCHESTRATOR_CONFIGS[config_name]
+        plan_path = self._setup_plan_for_config(tmp_path, config)
+
+        OrchClass = self._make_orchestrator_class(config)
+        args = _make_args(plan_file=str(plan_path), mark_completed=True)
+        with pytest.raises(SystemExit) as exc_info:
+            OrchClass(args).run()
+        assert exc_info.value.code == 0
+
+        from utils.state_manager import StateManager
+
+        completed = StateManager(plan_path).state.get("phases_completed", {})
+        expected = self._completion_word(config)
+        assert expected in completed, (
+            f"{config_name}: --mark-completed should persist {expected!r}, "
+            f"got {sorted(completed)}"
+        )
+        # Nothing else may be recorded by this early exit — in particular
+        # apply-fixes must not also (or instead) write its directory word.
+        assert sorted(completed) == [expected], (
+            f"{config_name}: --mark-completed persisted extra phase words: "
+            f"{sorted(completed)}"
+        )
+
+    def test_mark_completed_on_apply_fixes_is_not_the_directory_word(self, tmp_path):
+        """The apply-fixes case stated as a literal, not derived from the config.
+
+        `phase_name` (``apply-fixes``) is the phase *directory*; the completion
+        record is the mode word (``apply-code-fixes``). A regression that
+        "reconciles" the two spellings shows up here even if the fixture moved
+        with it.
+        """
+        config = self.ORCHESTRATOR_CONFIGS["apply-fixes"]
+        plan_path = self._setup_plan_for_config(tmp_path, config)
+
+        OrchClass = self._make_orchestrator_class(config)
+        args = _make_args(plan_file=str(plan_path), mark_completed=True)
+        with pytest.raises(SystemExit):
+            OrchClass(args).run()
+
+        from utils.state_manager import StateManager
+
+        state = StateManager(plan_path)
+        assert state.is_phase_completed("apply-code-fixes")
+        assert not state.is_phase_completed("apply-fixes")
+
 
 # ======================================================================
 # Test: Exit code and interactive prompt parity across migrated orchestrators
@@ -3623,6 +3725,32 @@ class TestExitCodeAndPromptParity:
     P-4: --no-confirm suppresses the no-selection confirmation
     P-5: Other bulk flags suppress the confirmation
     """
+
+    @pytest.fixture(autouse=True)
+    def _three_plans_in_one_interpreter(self, monkeypatch):
+        """Let one test drive three orchestrators over three plan files.
+
+        Parity is asserted by running the three configurations back to back in
+        a single interpreter, each against its own plan in its own tmp dir. A
+        real process runs one plan, so ``_setup``'s §9.3.a/b anchor pin — which
+        is set-once and raises when re-pointed at a *different* path — would
+        fail the second orchestrator in every one of those loops. Clearing the
+        anchor per pin, the same reset ``tests/conftest.py`` performs between
+        tests, keeps these tests on what they are about (exit codes and prompt
+        text). The pin itself, its position relative to ``_setup``'s early
+        exits, and the set-once invariant are owned by
+        ``tests/test_run_anchor_pinning.py`` and ``test_provider_registry.py``.
+        """
+        import utils.apply_orchestrator_base as base
+        import utils.provider_registry as registry
+
+        real_set_run_anchor = registry.set_run_anchor
+
+        def _repin(path):
+            registry._RUN_ANCHOR = None
+            real_set_run_anchor(path)
+
+        monkeypatch.setattr(base, "set_run_anchor", _repin)
 
     # ------------------------------------------------------------------
     # Orchestrator configuration matrix (same as TestStateTransitionParity)
@@ -5018,3 +5146,333 @@ class TestBuildHumanReviewConfigClaudeDecide:
         config = self._config(formatted, claude_decide=True)
         assert config["decision_mode"] == "claude_auto_decide"
         assert config["claude_decide_item_ids"] == ["h1"]
+
+
+# ======================================================================
+# Test: the apply-code-fixes completion contract (R1)
+# ======================================================================
+
+
+class TestApplyCodeFixesCompletionContract:
+    """Who records ``apply-code-fixes`` completed, and when.
+
+    ``ApplyCodeFixesOrchestrator.run()`` applies nothing: it emits batch JSON and
+    returns, and the bytes are written afterwards by the host following
+    ``instructions/apply-code-fixes.md``. So the *emit* path must never record
+    completion (``marks_phase_completed = False``, and see
+    ``TestStateTransitionParity.test_apply_code_fixes_does_not_mark_phase_completed``
+    for why that must stay). The record instead comes from the post-loop
+    ``apply-code-fixes --plan-file … --mark-completed`` command that closes that
+    instruction — a command a host whose loop stopped early never reaches.
+
+    The four host outcomes the instruction admits are replayed below. Only the
+    first records the phase; the other three must leave it open.
+    """
+
+    #: The phase DIRECTORY word — what the orchestrator's `phase_name` is, what
+    #: `{plan}/apply-fixes/` is named, and what the instruction's
+    #: `util prior-changes append --phase` carries. Never the completion word.
+    PHASE_DIR_WORD = "apply-fixes"
+
+    #: The canonical PHASE word — the mode name, the `PHASE_PREREQUISITES` key,
+    #: and what both completion paths must write.
+    COMPLETION_WORD = "apply-code-fixes"
+
+    # ------------------------------------------------------------------
+    # Fixtures
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _seed(tmp_path):
+        """Write a plan plus the code-review inputs the real orchestrator loads."""
+        tmp_path = Path(tmp_path)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        plan_path = tmp_path / "auth-feature.md"
+        plan_path.write_text("# Auth feature\n", encoding="utf-8")
+
+        review_dir = tmp_path / "auth-feature" / "code-review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        groups = [
+            {
+                "theme": "Null check",
+                "file": "src/api.ts",
+                "suggestions": [
+                    {
+                        "title": "Add null check",
+                        "desc": "Guard user.profile before dereferencing it.",
+                        "importance": "HIGH",
+                        "file": "src/api.ts",
+                        "line_start": 42,
+                        "line_end": 50,
+                        "type": "bug",
+                    }
+                ],
+            },
+            {
+                "theme": "RLS policy",
+                "file": "src/db.sql",
+                "suggestions": [
+                    {
+                        "title": "Add RLS policy",
+                        "desc": "The table ships with RLS off.",
+                        "importance": "HIGH",
+                        "file": "src/db.sql",
+                        "line_start": 1,
+                        "line_end": 3,
+                        "type": "security",
+                    }
+                ],
+            },
+        ]
+        (review_dir / "grouped.json").write_text(
+            json.dumps(groups), encoding="utf-8"
+        )
+        (review_dir / "validation.json").write_text(
+            json.dumps(
+                [
+                    {"group_index": 0, "status": "valid", "verdict": "valid"},
+                    {"group_index": 1, "status": "valid", "verdict": "valid"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (review_dir / "report.md").write_text("# Code Review\n", encoding="utf-8")
+        return plan_path
+
+    @staticmethod
+    def _orchestrator_class():
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        return ApplyCodeFixesOrchestrator
+
+    @staticmethod
+    def _phases_completed(plan_path):
+        from utils.state_manager import StateManager
+
+        return sorted(StateManager(plan_path).state.get("phases_completed", {}))
+
+    def _emit(self, plan_path, capsys=None):
+        """Run the real orchestrator's emit path; return its batch document."""
+        OrchClass = self._orchestrator_class()
+        args = OrchClass.parse_args(["--plan-file", str(plan_path), "--yes"])
+        exit_code = OrchClass(args).run()
+        assert exit_code == 0
+        if capsys is not None:
+            capsys.readouterr()
+        document = (
+            Path(plan_path).parent
+            / Path(plan_path).stem
+            / self.PHASE_DIR_WORD
+            / "orchestrator_output.json"
+        )
+        assert document.is_file(), "the emit path must write its batch document"
+        payload = json.loads(document.read_text(encoding="utf-8"))
+        # The emit path itself never claims the phase: nothing has been applied
+        # yet at this point.
+        assert self._phases_completed(plan_path) == []
+        return payload
+
+    def _post_loop_mark_completed(self, plan_path, capsys=None):
+        """§10: the finalization command the host runs after the batch loop."""
+        OrchClass = self._orchestrator_class()
+        args = OrchClass.parse_args(
+            ["--plan-file", str(plan_path), "--mark-completed"]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            OrchClass(args).run()
+        assert exc_info.value.code == 0
+        if capsys is not None:
+            capsys.readouterr()
+
+    def _replay_host(self, plan_path, payload, outcome):
+        """Replay §5's batch loop for one of the four outcomes it admits.
+
+        Returns the per-batch statuses the host recorded, so the outcomes are
+        distinguishable by more than the assertion that follows them.
+        """
+        from utils.state_manager import StateManager
+
+        state = StateManager(plan_path)
+        batches = payload["batches"]
+        assert len(batches) >= 2, (
+            "the fixture needs >= 2 batches for 'stopped partway' to differ "
+            f"from 'stopped at the start' (got {len(batches)})"
+        )
+
+        recorded = []
+        for index, batch in enumerate(batches, start=1):
+            key = batch["file_key"]
+            if outcome == "clean-failure" and index == 1:
+                # §5.5 "Failure (clean)": the subagent failed and no file was
+                # modified. The host reports it and abandons the loop.
+                state.mark_item_processed(self.PHASE_DIR_WORD, key, "failed")
+                recorded.append("failed")
+                break
+            if outcome == "partial-application" and index == 2:
+                # §5.5 "Partial application": stop the loop and surface it for
+                # human review. Explicitly NOT a completion.
+                state.mark_item_processed(self.PHASE_DIR_WORD, key, "partial")
+                recorded.append("partial")
+                break
+            if outcome == "interrupted-loop" and index == 2:
+                # The host dies mid-batch: no further bookkeeping is written and
+                # §10 is never reached.
+                recorded.append("interrupted")
+                break
+            state.mark_item_processed(self.PHASE_DIR_WORD, key, "applied")
+            recorded.append("applied")
+        state.save()
+
+        if outcome == "full-success":
+            self._post_loop_mark_completed(plan_path)
+        return recorded
+
+    # ------------------------------------------------------------------
+    # The four host outcomes
+    # ------------------------------------------------------------------
+
+    def test_full_success_records_the_phase(self, tmp_path, capsys):
+        """Every batch applied, then §10 run -> `apply-code-fixes` completed."""
+        plan_path = self._seed(tmp_path)
+        payload = self._emit(plan_path, capsys)
+
+        recorded = self._replay_host(plan_path, payload, "full-success")
+        assert recorded == ["applied"] * len(payload["batches"])
+        capsys.readouterr()
+
+        assert self._phases_completed(plan_path) == [self.COMPLETION_WORD]
+
+    def test_clean_failure_leaves_the_phase_incomplete(self, tmp_path, capsys):
+        """A clean failure aborts the loop, so §10 is never reached."""
+        plan_path = self._seed(tmp_path)
+        payload = self._emit(plan_path, capsys)
+
+        recorded = self._replay_host(plan_path, payload, "clean-failure")
+        assert recorded == ["failed"]
+
+        assert self._phases_completed(plan_path) == [], (
+            "a clean failure must leave the phase open for a resume"
+        )
+
+    def test_partial_application_leaves_the_phase_incomplete(self, tmp_path, capsys):
+        """A partial application stops the loop for human review; no completion."""
+        plan_path = self._seed(tmp_path)
+        payload = self._emit(plan_path, capsys)
+
+        recorded = self._replay_host(plan_path, payload, "partial-application")
+        assert recorded == ["applied", "partial"]
+
+        assert self._phases_completed(plan_path) == [], (
+            "a half-applied phase must never record itself completed"
+        )
+
+    def test_interrupted_loop_leaves_the_phase_incomplete(self, tmp_path, capsys):
+        """The host dies before §10; nothing records the phase on its behalf."""
+        plan_path = self._seed(tmp_path)
+        payload = self._emit(plan_path, capsys)
+
+        recorded = self._replay_host(plan_path, payload, "interrupted-loop")
+        assert recorded == ["applied", "interrupted"]
+
+        assert self._phases_completed(plan_path) == [], (
+            "an interrupted loop must leave the phase open"
+        )
+
+    # ------------------------------------------------------------------
+    # The word, and the drift guard between the two completion paths
+    # ------------------------------------------------------------------
+
+    def test_mark_completed_persists_the_mode_word_not_the_directory_word(
+        self, tmp_path, capsys
+    ):
+        """`--mark-completed` on THIS orchestrator writes `apply-code-fixes`.
+
+        Asserted directly against the persisted state, not inferred from the
+        class attributes: the class runs under `phase_name = "apply-fixes"`, and
+        persisting that word would be a third inconsistent spelling rather than a
+        closed gap.
+        """
+        from utils.state_manager import StateManager
+
+        plan_path = self._seed(tmp_path)
+        self._post_loop_mark_completed(plan_path, capsys)
+
+        state = StateManager(plan_path)
+        assert state.is_phase_completed("apply-code-fixes")
+        assert not state.is_phase_completed("apply-fixes")
+        assert self._phases_completed(plan_path) == ["apply-code-fixes"]
+
+    def test_the_parser_exposes_mark_completed(self):
+        """The flag has to exist for the instruction's §10 command to parse."""
+        OrchClass = self._orchestrator_class()
+        args = OrchClass.parse_args(["--plan-file", "t.md", "--mark-completed"])
+        assert args.mark_completed is True
+        assert OrchClass.parse_args(["--plan-file", "t.md"]).mark_completed is False
+
+    def test_native_and_executor_record_the_same_phase_word(self, tmp_path, capsys):
+        """The two completion paths write ONE word, so they cannot drift apart.
+
+        Native: the host's post-loop `--mark-completed`, which persists
+        `confirmation_phase_name or phase_name`. Executor: `--exec-subagents`
+        builds a `WriteBatchScheduler` without an explicit `phase`, so
+        `_finalize` writes `PHASE_BY_WRITE_KIND[write_kind]`. Both are exercised
+        here against real state files and the resulting `phases_completed` keys
+        are compared.
+        """
+        from utils.state_manager import StateManager
+        from utils.write_batch_scheduler import SchedulerResult, WriteBatchScheduler
+
+        OrchClass = self._orchestrator_class()
+
+        # --- native: the post-loop command -----------------------------
+        native_plan = self._seed(tmp_path / "native")
+        self._post_loop_mark_completed(native_plan, capsys)
+        native_words = self._phases_completed(native_plan)
+
+        # --- executor: WriteBatchScheduler._finalize -------------------
+        executor_plan = self._seed(tmp_path / "executor")
+        executor_out = executor_plan.parent / executor_plan.stem
+        scheduler = WriteBatchScheduler(
+            tasks=[],
+            phase_dir=str(executor_out / self.PHASE_DIR_WORD),
+            kind=OrchClass.write_kind,
+            output_dir=str(executor_out),
+            state=StateManager(executor_plan),
+            plan_file=str(executor_plan),
+            anchor=str(executor_plan),
+            resume=True,
+            dry_run=True,
+        )
+        scheduler._finalize(SchedulerResult())
+        executor_words = self._phases_completed(executor_plan)
+        capsys.readouterr()
+
+        assert native_words == executor_words == [self.COMPLETION_WORD], (
+            f"native wrote {native_words}, executor wrote {executor_words}"
+        )
+        # And that word is the one the prerequisite table is keyed on, which is
+        # what the host-lane grader reads out of state.json.
+        import check_workflow_prerequisites
+
+        assert self.COMPLETION_WORD in check_workflow_prerequisites.PHASE_PREREQUISITES
+
+    def test_the_instruction_issues_the_post_loop_command(self):
+        """The defect R1 closes: the instruction must NAME the command.
+
+        Two Python edits (the parser flag and the word the early exit persists)
+        are inert unless `instructions/apply-code-fixes.md` actually tells the
+        host to run it — that missing line is what left `phases_completed` empty
+        on a run whose batches all landed.
+        """
+        text = (
+            Path(__file__).parent.parent / "instructions" / "apply-code-fixes.md"
+        ).read_text(encoding="utf-8")
+        assert "--mark-completed" in text, (
+            "instructions/apply-code-fixes.md must issue the post-loop "
+            "finalization command"
+        )
+        assert "apply-code-fixes --plan-file \"$PLAN_PATH\" --mark-completed" in text
+        # The split the fix must NOT reconcile away: prior-changes still goes to
+        # the phase DIRECTORY word.
+        assert '--phase "apply-fixes"' in text
+        assert '--phase "apply-code-fixes"' in text

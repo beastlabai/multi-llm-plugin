@@ -51,7 +51,12 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
     from .json_extractor import extract_json_from_text
-    from .llm_client import _CMD_UNSAFE_CHARS, _resolve_executable, expand_env_home
+    from .llm_client import (
+        _CMD_UNSAFE_CHARS,
+        _resolve_executable,
+        expand_env_home,
+        provider_dispatch_context,
+    )
     from .provider_registry import (
         get_max_concurrent_subagents,
         get_provider,
@@ -67,7 +72,10 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
         StructuredOutputUnavailable,
+        availability_from_failure,
+        build_child_env,
         matches_any,
+        version_verdict,
     )
     from .retry_ladder import (  # noqa: F401 - re-exported, see below
         BACKOFF_STATUSES,
@@ -111,6 +119,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         _CMD_UNSAFE_CHARS,
         _resolve_executable,
         expand_env_home,
+        provider_dispatch_context,
     )
     from utils.provider_registry import (
         get_max_concurrent_subagents,
@@ -127,7 +136,10 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
         StructuredOutputUnavailable,
+        availability_from_failure,
+        build_child_env,
         matches_any,
+        version_verdict,
     )
     from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
         BACKOFF_STATUSES,
@@ -318,6 +330,16 @@ PROFILE_BY_KIND = {
 #: schema resolve, no flag, and an argv byte-identical to the pre-M7 lane. The
 #: write kinds are absent for §4.2.1's own reason — their product is a file
 #: diff, and ``PHASE_SCHEMA_FILE`` puts every apply/implement phase at ``None``.
+#:
+#: **W1 disposition: DEFER — repository owner, 2026-08-20.** Emptying this table
+#: to ``{}`` remains the one-line switch that returns the lane to dormant, and
+#: it stays a switch rather than becoming the setting: Lane A's own callers are
+#: not wired because its six shipped documents are array-rooted and claude-code
+#: cannot natively carry an array-rooted schema. Object-rooting those six files
+#: is a contract change for every consumer of them, so the decision is the
+#: repository owner's and it has not been made.
+#: **Re-check trigger:** claude-code accepts an array-rooted ``--json-schema``.
+#: **Re-read date:** 2027-02-20. See ``plans/harness-residual-work.md`` §3, W1.
 SCHEMA_PHASE_BY_KIND = {
     "task_generation": "generate-tasks",
     "consolidation": "consolidation",
@@ -755,6 +777,11 @@ _REASON_EXPLANATION = {
     "binary_absent": (
         "the adapter is implemented but its CLI is not on PATH"
     ),
+    "unresolvable_model": (
+        "the model token cannot be expressed in this CLI's own addressing "
+        "scheme, so no catalog, no release and no server could resolve it — a "
+        "structural refusal, never a catalog lookup"
+    ),
     "not_authenticated": (
         "the CLI is installed but not logged in — installed is not authenticated, "
         "and no retry can fix a missing credential"
@@ -822,10 +849,35 @@ NESTED_PROBE_PROMPT = (
 NESTED_PROBE_TIMEOUT_S = 120.0
 
 
+def _availability_detail(spec: str) -> str:
+    """The typed availability sentence for ``spec``'s adapter, or ``""`` (M10, §5.1).
+
+    Reads the adapter's declared data only — no probe is run and no child is
+    spawned — so it is safe on a refusal path that has already decided nothing
+    will be dispatched. Any failure to resolve the adapter is silence, because a
+    diagnostic may never be the reason a refusal cannot be printed.
+    """
+    try:
+        provider_name, _, _ = str(spec or "").partition(":")
+        provider = get_provider(provider_name.strip())
+        if provider is None:
+            return ""
+        return provider.describe_availability().detail
+    except Exception:  # noqa: BLE001 - a diagnostic may never break a refusal
+        return ""
+
+
 def _render_runner_rejection(
     *, key: str, spec: str, reason_code: str, profile: str, detail: str = ""
 ) -> RunnerRejected:
     """The single rejection formatter (D3). Exit 3."""
+    if reason_code == "binary_absent" and not detail:
+        # M10 (§5.1). The refusal itself stays a **bool** decision — the caller
+        # gated on `is_available()` and this formatter does not second-guess it.
+        # What gains the typed state is the *text*, here, in the one place every
+        # rejection is rendered, so a `binary_absent` message finally names which
+        # binary and why instead of leaving the reader with a reason code.
+        detail = _availability_detail(spec)
     candidates = eligible_runners(profile)
     if candidates:
         advice = (
@@ -943,7 +995,33 @@ def preflight_runner(
         raise _render_runner_rejection(
             key=key, spec=spec, reason_code="binary_absent", profile=profile,
         )
-    if not is_model_valid(spec, anchor=anchor):
+    # R3 — a *structural* refusal, which is a different predicate from the
+    # catalog warning below and must be kept different. The adapter is asked
+    # whether its own addressing scheme can express this model token at all;
+    # only an adapter that can answer that question declares the hook (opencode
+    # resolves `provider/model` and a bare token yields an empty model half), and
+    # the answer never comes from a catalog. A catalog that is empty, stale or
+    # unreadable can therefore only ever downgrade the *warning* below to
+    # silence — it can never produce an exit.
+    describe_unresolvable = getattr(provider, "describe_unresolvable_model", None)
+    if callable(describe_unresolvable):
+        try:
+            unresolvable = describe_unresolvable(model)
+        except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
+            unresolvable = None
+        if unresolvable:
+            raise _render_runner_rejection(
+                key=key, spec=spec, reason_code="unresolvable_model",
+                profile=profile, detail=str(unresolvable),
+            )
+    # A catalog problem downgrades to "no warning", never to an exit (R3): the
+    # catalog is advisory here, and a read that fails says nothing about whether
+    # the runner can serve this model.
+    try:
+        catalogued = is_model_valid(spec, anchor=anchor)
+    except Exception:  # noqa: BLE001 - an advisory read may not end a run
+        catalogued = True
+    if not catalogued:
         print(
             f"multi-llm warning: {key} names model {model!r}, which is not in "
             f"{provider_name}'s configured catalog — dispatching anyway.",
@@ -1008,12 +1086,11 @@ def reset_nested_exec_cache() -> None:
     _NESTED_CACHE.clear()
 
 
-def _version_tuple(text: str) -> Tuple[int, ...]:
-    parts = []
-    for chunk in (text or "").split("."):
-        match = re.match(r"^(\d+)", chunk)
-        parts.append(int(match.group(1)) if match else 0)
-    return tuple(parts) or (0,)
+# The version comparison this module used to own (`_version_tuple`) is gone:
+# M14 (§5.4) merged it with the twin in `providers/base.py` so the preflight's
+# refusal and `describe_availability`'s label are computed from one rule. The
+# floor, the ceiling and the above-verified warning now all come back from
+# `version_verdict`, which is imported above.
 
 
 def _run_probe(argv: Sequence[str]) -> Optional["subprocess.CompletedProcess"]:
@@ -1041,7 +1118,16 @@ def _run_probe(argv: Sequence[str]) -> Optional["subprocess.CompletedProcess"]:
 def _detect_version(
     provider_name: str, *, key: str, spec: str, profile: str
 ) -> str:
-    """Run ``version_cmd`` once per provider and enforce ``min_version`` (D3m)."""
+    """Run ``version_cmd`` once per provider and apply the shared gate (D3m).
+
+    The probe is this module's; the **verdict is not**. Both bounds — the
+    ``min_version`` floor and M14's ``max_version_exclusive`` ceiling — plus the
+    advisory above-``verified_version`` warning come back from
+    ``providers.base.version_verdict``, which is the same rule
+    ``describe_availability`` labels a runner with (§5.4). Reading the streams
+    **concatenated** is :meth:`parse_version`'s job, and it is why a CLI that
+    banners its version to stderr is read at all.
+    """
     if provider_name in _VERSION_CACHE:
         return _VERSION_CACHE[provider_name]
 
@@ -1055,8 +1141,6 @@ def _detect_version(
             if parsed:
                 version = parsed
 
-    minimum = getattr(provider, "min_version", "") or ""
-    verified = getattr(provider, "verified_version", "") or ""
     if version == "unknown":
         if argv:
             print(
@@ -1066,23 +1150,20 @@ def _detect_version(
                 f"blocker, but a stream-shape failure will not name a build.",
                 file=sys.stderr,
             )
-    elif minimum and _version_tuple(version) < _version_tuple(minimum):
-        raise _render_runner_rejection(
-            key=key, spec=spec, reason_code="missing_capability", profile=profile,
-            detail=(
-                f"{provider_name} {version} is older than the minimum this "
-                f"release parses ({minimum}); its event stream shape is not the "
-                f"one the adapter was written against. Upgrade "
-                f"{provider_name} to >= {minimum}."
-            ),
-        )
-    elif verified and _version_tuple(version) > _version_tuple(verified):
-        print(
-            f"multi-llm warning: {provider_name} {version} is newer than the "
-            f"release the shipped parser fixtures were captured from "
-            f"({verified}); stream parsing is best-effort above that.",
-            file=sys.stderr,
-        )
+    else:
+        verdict = version_verdict(provider, version, name=provider_name)
+        if verdict.refuses:
+            # A build outside the declared range is a refusal before any child,
+            # not a degraded run: the adapter's parser was written against a
+            # stream shape this build does not produce.
+            raise _render_runner_rejection(
+                key=key, spec=spec, reason_code="missing_capability",
+                profile=profile, detail=verdict.detail,
+            )
+        if verdict.detail:
+            # Above `verified_version` — a warning, never a block: blocking on
+            # new releases would rot faster than the CLIs do.
+            print(f"multi-llm warning: {verdict.detail}", file=sys.stderr)
 
     _VERSION_CACHE[provider_name] = version
     return version
@@ -1119,9 +1200,13 @@ def _detect_auth(
             verdict = None
     if verdict is False:
         login = getattr(provider, "login_cmd", "") or f"{argv[0]} login"
-        tail = _tail(
+        # The probe's own envelope, redacted at this boundary: cursor-agent's
+        # `status --format json` carries `userEmail`/`terminalProgram`/`shell`
+        # (M13), and this message is printed straight to a terminal and a log —
+        # it reaches neither of §4.5.3's redacting write sinks.
+        tail = _redact_probe_tail(
             (completed.stderr or completed.stdout) if completed else "", 500
-        ).strip()
+        )
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: not_authenticated) — "
             f"{_REASON_EXPLANATION['not_authenticated']}. "
@@ -1135,6 +1220,51 @@ def _detect_auth(
     state = "ok" if verdict else "unknown"
     _AUTH_CACHE[provider_name] = state
     return state
+
+
+def probe_setup_metadata(provider_name: str) -> Dict[str, str]:
+    """Run an adapter's declared ``setup_probe`` and read it as metadata (M13, §5.2).
+
+    The status path's counterpart to :func:`_detect_auth`, and deliberately not
+    part of :func:`preflight_runner`: what this returns decides **nothing** — no
+    refusal, no retry, no availability state — so a dispatch preflight would be
+    paying a subprocess per phase for a sentence only a human reads. It is
+    spawned from ``install-host --check`` row 5, which already runs the version
+    and auth probes and is invoked by hand.
+
+    It is not an auth probe and cannot become one. cursor-agent's ``about`` — the
+    only declared readout today — returns the same two nulls for a logged-in CLI
+    with the endpoint unreachable as for a logged-out one, which is why M13
+    demoted it; the verdict comes from ``auth_check`` and only from there.
+
+    Nothing here blocks or raises: an adapter that declares no readout, a probe
+    that will not run, a reader that fails all report ``{}``, which renders as a
+    status row with one less fact on it.
+
+    Returns:
+        ``label -> value`` exactly as the adapter's
+        :meth:`~utils.providers.base.LLMProvider.read_setup_probe` reported it,
+        minus any blank value. Every pair is rendered into a status row, so the
+        adapter owes it the same care a refusal message is owed (§4.5.1).
+    """
+    provider = get_provider(provider_name)
+    argv = list(getattr(provider, "setup_probe", ()) or ())
+    if provider is None or not argv:
+        return {}
+    completed = _run_probe(argv)
+    if completed is None:
+        return {}
+    try:
+        facts = provider.read_setup_probe(
+            completed.stdout, completed.stderr, completed.returncode
+        )
+    except Exception:  # noqa: BLE001 - a readout never breaks the status path
+        return {}
+    return {
+        str(label): str(value).strip()
+        for label, value in (facts or {}).items()
+        if str(value).strip()
+    }
 
 
 def _host_nested_exec() -> Optional[Tuple[str, Dict[str, str], str]]:
@@ -1330,7 +1460,8 @@ def _probe_nested_exec(
             f"Refusing to dispatch: {key} is {spec!r} (reason: "
             f"nested_exec_credentials) — "
             f"{_REASON_EXPLANATION['nested_exec_credentials']}. "
-            f"Probe tail: {_tail(capture.stderr or capture.stdout, 500).strip()!r}. "
+            f"Probe tail: "
+            f"{_redact_probe_tail(capture.stderr or capture.stdout, 500)!r}. "
             f"{trailer}"
             f"Fix: run `{login}` from outside this host, or allow the runner to "
             f"read its credential store from inside it. Nothing was dispatched.",
@@ -1344,7 +1475,8 @@ def _probe_nested_exec(
             f"Refusing to dispatch: {key} is {spec!r} (reason: "
             f"nested_exec_network) — "
             f"{_REASON_EXPLANATION['nested_exec_network']}. "
-            f"Probe tail: {_tail(capture.stderr or capture.stdout, 500).strip()!r}. "
+            f"Probe tail: "
+            f"{_redact_probe_tail(capture.stderr or capture.stdout, 500)!r}. "
             f"{trailer}"
             f"Fix: allow this host's sandbox to reach the provider API (a domain "
             f"allow-list entry, a proxy setting), or run the phase without "
@@ -1699,6 +1831,13 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
             reason = None
         if reason:
             error = f"{error}: {reason}"
+        # M10 (§5.1) — the **status**-consumer half of this site, on the same
+        # rule as `llm_client`'s twin and through the same shared helper, so a
+        # login notice reads the same on both lanes. Diagnostics only: the rung
+        # is still `STATUS_RUNNER_ERROR`, decided above and not by this line.
+        unavailable = availability_from_failure(provider, stdout, stderr)
+        if unavailable is not None:
+            error = f"{error} [{unavailable.value}]"
         raise ResultRejected(str(error), STATUS_RUNNER_ERROR)
 
     data = parsed.get("data")
@@ -1847,6 +1986,41 @@ def _redact(text: str) -> str:
     return redact_text(text)
 
 
+def _redact_probe_tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
+    """A captured stream, redacted then tailed, for quoting into a refusal.
+
+    Also the wrapper for a tail that leaves this module with no redacting sink
+    behind it to name — ``dispatch_task``'s ``after_result`` payload, whose
+    consumer is a caller's callback.
+
+    The refusal-message counterpart to
+    ``providers.cursor_agent.redact_probe_output``, and the same §4.5 boundary as
+    :func:`_redact` — not a second mechanism, a wrapper that fixes the two things
+    a refusal needs on top of it.
+
+    **Diagnostic value is the point.** A refusal quotes a probe so the reader can
+    see *why* the runner was refused, so this redacts identity- and
+    credential-shaped **values** and nothing else: cursor-agent's ``status
+    --format json`` is a nine-key object, three of whose keys are §4.5.1 P13
+    identity fields, and the other six — plus every key name — survive, so two
+    runs stay diffable. Dropping the whole tail would trade one regression for
+    another.
+
+    Redaction runs **before** ``_tail`` for the reason :func:`_redact` states: the
+    tail keeps the *last* bytes, so a cut landing inside a keyword leaves a value
+    no later pass can match.
+
+    **Fail safe.** A redactor that cannot be imported, or that raises, must never
+    fall back to the raw stream — the fallback drops the text exactly the way
+    M13's probe boundary does.
+    """
+    try:
+        redacted = _redact(text or "")
+    except Exception:  # noqa: BLE001 - a diagnostic never leaks on failure
+        return "<redacted:probe-output>"
+    return _tail(redacted, limit).strip()
+
+
 def _redact_json(value: Any) -> Any:
     """``value`` with every string in it redacted, structure preserved.
 
@@ -1948,6 +2122,7 @@ def _spawn(
     timeout: float,
     cwd: Optional[str],
     schema: Optional[Any] = None,
+    anchor: Optional[str] = None,
 ) -> _Capture:
     """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
 
@@ -1983,11 +2158,12 @@ def _spawn(
             return _spawn_child(
                 provider=provider, model=model, prompt=prompt, profile=profile,
                 transport=transport, timeout=timeout, cwd=cwd,
-                schema=materialized,
+                schema=materialized, anchor=anchor,
             )
     return _spawn_child(
         provider=provider, model=model, prompt=prompt, profile=profile,
         transport=transport, timeout=timeout, cwd=cwd, schema=schema,
+        anchor=anchor,
     )
 
 
@@ -2001,6 +2177,7 @@ def _spawn_child(
     timeout: float,
     cwd: Optional[str],
     schema: Optional[Any] = None,
+    anchor: Optional[str] = None,
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -2010,11 +2187,57 @@ def _spawn_child(
     ``get_env``/``get_remove_env`` pair — the same single site the fan-out path and
     the detached child use, so there is never a second hand-rolled env filter.
 
+    ``anchor`` is the dispatch's plan anchor, threaded from the batch exactly as
+    Lane A threads it into ``resolve_env``/``build_child_env`` — it is what makes
+    config discovery resolve against the **plan's** git root rather than the
+    process CWD's. Dropping it here is not cosmetic: an ``env_allowlist``,
+    ``git_env`` or hermetic setting written into a plan-anchored
+    ``.multi-llm/providers.yaml`` would govern Lane A slots and silently skip Lane
+    B dispatches whenever the two roots differ, which is the one divergence
+    M3/M17 (A6) exist to close.
+
     ``schema`` is §4.2.2's optional keyword, already materialized by
     :func:`_spawn` when this adapter's transport is a file. An adapter that
     declares no ``structured_output_support`` ignores it and renders the same
     argv either way; one that cannot carry it raises before any argv exists.
+
+    M4/§2.3: the adapter's run-scoped dispatch context wraps argv *and* env,
+    because an adapter that contains its own config layering renders a flag and
+    an env redirect that only mean anything together (opencode's ``--pure`` and
+    its ``XDG_CONFIG_HOME``). The ``with`` is the ``finally`` half of that
+    lifecycle — it is left on a clean return, on a per-slot timeout, on
+    ``KeyboardInterrupt`` and on the §8 process-group teardown alike.
     """
+    with provider_dispatch_context(
+        provider, model, profile, anchor=anchor
+    ) as dispatch:
+        if dispatch.refusal:
+            # Nothing has been spawned and nothing has been claimed. The refusal
+            # rides the same `launch_error` channel a failed `Popen` uses, so it
+            # lands on the ladder's spawn rung rather than inventing a state.
+            refused = _Capture()
+            refused.launch_error = dispatch.refusal
+            return refused
+        return _spawn_in_context(
+            provider=provider, model=model, prompt=prompt, profile=profile,
+            transport=transport, timeout=timeout, cwd=cwd, schema=schema,
+            anchor=anchor,
+        )
+
+
+def _spawn_in_context(
+    *,
+    provider: Any,
+    model: str,
+    prompt: str,
+    profile: str,
+    transport: str,
+    timeout: float,
+    cwd: Optional[str],
+    schema: Optional[Any] = None,
+    anchor: Optional[str] = None,
+) -> _Capture:
+    """:func:`_spawn_child`'s body, inside the adapter's dispatch context."""
     capture = _Capture()
     argv, stdin_text = provider.build_agent_command_for_transport(
         prompt, model, profile, transport, schema=schema
@@ -2034,25 +2257,28 @@ def _spawn_child(
     # keeps whatever helper the user configured, because it is the profile that
     # legitimately reaches private remotes. Passing a constant here would erase
     # that distinction.
-    provider_env = expand_env_home(provider.resolve_env(model, profile))
+    # `cwd` is passed for the same reason it is passed to `Popen` below: this
+    # dispatch runs in an explicit directory, and an adapter whose delta carries
+    # a workspace-scoped side effect (cursor's trust-marker guard) must scope it
+    # to *that* directory rather than to the orchestrator's.
+    provider_env = expand_env_home(
+        provider.resolve_env(model, profile, anchor=anchor, cwd=cwd)
+    )
     host_guards, passthrough = _host_env_guards()
-    # The union, not the adapter's list alone (D3c): the adapter guards against
-    # its own nesting marker, the host entry declares what *this* host injects
-    # into every child. A name the host sanctions for the runner (`passthrough`,
-    # e.g. an API key it owns) is re-admitted last, because over-stripping turns a
-    # working runner into an auth failure — which is the outcome the guards exist
-    # to avoid, not a safe default.
-    remove_env = [
-        name
-        for name in dict.fromkeys([*(provider.get_remove_env() or ()), *host_guards])
-        if name not in passthrough
-    ]
-    if provider_env or remove_env:
-        env = {**os.environ, **provider_env}
-        for key in remove_env:
-            env.pop(key, None)
-    else:
-        env = None
+    # M3/M17 (A6): the union of the adapter's list and the host's guards, minus
+    # the host's `passthrough`, is computed inside `build_child_env` — the one
+    # builder Lane A goes through too. Before it existed the two lanes composed
+    # the child env differently, which is what let `passthrough` cancel §2.1's
+    # credential strip on this lane alone. The host entry still declares what
+    # *this* host injects into every child; what it may no longer do is sanction
+    # a vendor credential back into a runner the adapter just stripped it from.
+    env = build_child_env(
+        provider,
+        provider_env=provider_env,
+        host_guards=host_guards,
+        host_passthrough=passthrough,
+        anchor=anchor,
+    )
 
     start = time.time()
     # `Popen`, not `subprocess.run`: the timeout has to kill the child *with its
@@ -2431,6 +2657,7 @@ def dispatch_task(
                 timeout=attempt_budget,
                 cwd=cwd,
                 schema=schema,
+                anchor=anchor,
             )
         except (
             StructuredOutputUnavailable, structured_output.SchemaConfigError
@@ -2487,7 +2714,16 @@ def dispatch_task(
                             "prompt": prompt,
                             "result": data,
                             "exit_code": capture.exit_code,
-                            "stderr_tail": _tail(capture.stderr, 2000),
+                            # Not an `outcome` field: this one leaves the module
+                            # through the caller's callback, so no sink here can
+                            # promise it is redacted on the way out. The only
+                            # shipped `after_result` ignores the key, which made
+                            # a bare tail safe by accident of its consumer — and
+                            # would have kept the AST guard green while a future
+                            # callback logged its context raw. Redacted at the
+                            # source instead, fail-safe: a raising redactor
+                            # yields a placeholder, never the stream.
+                            "stderr_tail": _redact_probe_tail(capture.stderr, 2000),
                             "usage": usage,
                             "duration_seconds": outcome.duration_seconds,
                             "outcome": outcome,
@@ -3501,6 +3737,58 @@ def simulate_native_invoker(
 # D3l — --dry-run-subagents for the read half
 # ---------------------------------------------------------------------------
 
+def _preview_argv(
+    provider: Any,
+    *,
+    prompt: str,
+    model: str,
+    profile: str,
+    schema: Optional[Any],
+    anchor: Optional[str] = None,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """The argv a dispatch WOULD render, built the way a dispatch builds it.
+
+    A preview whose argv differs from the real argv is worth less than its own
+    output implies, so this is deliberately :func:`_spawn` / :func:`_spawn_child`
+    minus the ``Popen``: the same two context managers, in the same order, around
+    the same adapter call.
+
+    * **The dispatch context first** (M4/§2.3). An adapter that contains its own
+      config layering renders a flag and an env redirect that only mean anything
+      together — opencode's ``--pure`` pairs with its ``XDG_CONFIG_HOME``
+      redirect and neither is emitted outside an active context — so rendering
+      here without entering it would preview an argv no dispatch ever runs. The
+      ``with`` is also the ``finally`` half of that lifecycle: the context is
+      refcounted and its shared temp directory is removed when the last user
+      leaves, so a preview cleans up exactly as a dispatch does. A refusal comes
+      back as a *reason*, not an argv — the same refusal the real spawn would
+      have taken on its spawn rung, minus the child.
+    * **The sidecar second** (§4.2.1), for the adapters whose structured-output
+      transport is a file: codex refuses a schema whose file is unreadable
+      *before* it returns any argv, so a preview that passed the unmaterialized
+      schema would report "would not dispatch" for a task that dispatches fine.
+      The directory is removed on the way out, here as there.
+
+    ``schema=None`` — every kind with no schema phase, and every adapter that
+    declined the flag — renders exactly what this preview rendered before.
+    """
+    with provider_dispatch_context(
+        provider, model, profile, anchor=anchor
+    ) as dispatch:
+        if dispatch.refusal:
+            return None, dispatch.refusal
+        if schema is not None and getattr(
+            provider, "structured_output_transport", "inline"
+        ) == "file":
+            with structured_output.schema_sidecar(schema) as materialized:
+                return provider.build_agent_command(
+                    prompt, model, profile, schema=materialized
+                ), None
+        return provider.build_agent_command(
+            prompt, model, profile, schema=schema
+        ), None
+
+
 def dry_run_report(
     task_file: str,
     *,
@@ -3602,11 +3890,45 @@ def dry_run_report(
             entry["reason"] = reason
             entries.append(entry)
             continue
+        # §4.2.2's pre-dispatch read, resolved from the KIND exactly as
+        # `dispatch_task` resolves it (`schema_phase_for_kind` +
+        # `schema_for_dispatch`) — never hard-coded here, or the preview would
+        # be right for one schema-bearing kind and wrong for the other. `warn`
+        # is off: the per-(provider, phase) WARN belongs to a dispatch that is
+        # really taking the fallback, and a preview that emitted it would both
+        # duplicate the line and consume the once-per-process budget the real
+        # run needs.
+        schema = None
+        schema_phase = schema_phase_for_kind(str(task.get("kind", kind)))
+        # `provider is not None` for the same reason the budget check above
+        # carries it: a runner with no built-in adapter is normally refused by
+        # `preflight_runner` before here, and a preflight may not raise on the
+        # path where it was not.
+        if schema_phase and provider is not None:
+            try:
+                schema, _marker = structured_output.schema_for_dispatch(
+                    provider, schema_phase, warn=False
+                )
+            except structured_output.SchemaConfigError as exc:
+                # Rung 7 in a dispatch, "would not dispatch" here: no run can
+                # produce a schema file that is not there.
+                entry["would_dispatch"] = False
+                entry["reason"] = f"structured output: {exc}"
+                entries.append(entry)
+                continue
         try:
-            argv = provider.build_agent_command(prompt, model, entry["profile"])
+            argv, refusal = _preview_argv(
+                provider, prompt=prompt, model=model, profile=entry["profile"],
+                schema=schema, anchor=anchor,
+            )
         except Exception as exc:  # noqa: BLE001 - a preflight must not raise
             entry["would_dispatch"] = False
             entry["reason"] = str(exc)
+            entries.append(entry)
+            continue
+        if refusal is not None or argv is None:
+            entry["would_dispatch"] = False
+            entry["reason"] = refusal or "the adapter rendered no command"
             entries.append(entry)
             continue
         entry["argv"] = redact_argv(argv, prompt)

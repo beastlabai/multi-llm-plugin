@@ -147,8 +147,29 @@ import tempfile
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import InternalRetryEnvelope, LLMProvider, StructuredSchema
+from .base import (
+    InternalRetryEnvelope,
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+)
 from .result_envelope import parse_result_envelope
+
+#: M12 (§6.1): qwen-code's position on the ladder is *declined*, carrying the
+#: module docstring's measurement. There is no ``--effort``, thinking-level or
+#: reasoning option anywhere in the full (hidden) help, and ``/effort`` is
+#: interactive-only. The decline is written down rather than left implicit
+#: because the failure is silent: ``-m qwen3-coder-plus:high`` was measured going
+#: to the backend **verbatim**, suffix included, where it becomes a "model not
+#: found" with nothing pointing at the suffix.
+EFFORT_LADDER = ReasoningLadder(
+    provider="qwen-code",
+    declined=(
+        "no --effort, thinking-level or reasoning option exists in the full "
+        "(hidden) help and /effort is interactive-only; a `:effort` suffix would "
+        "reach the backend verbatim as part of the model id"
+    ),
+)
 
 #: Seconds by which qwen's own wall-clock cutoff is held UNDER the parent's
 #: ``subprocess.run(timeout=…)`` deadline — agy's ``INNER_SHUTDOWN_MARGIN_S``

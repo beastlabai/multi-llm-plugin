@@ -93,14 +93,19 @@ CANONICAL_ROWS = (
 #: this table cannot be used to park a provider that has no fixtures at all.
 #: Migrating one of these to a manifest is a strict improvement and deletes its
 #: row here.
+#:
+#: ``copilot`` and ``vibe`` left this table on 2026-08-20, and what forced them
+#: out is worth recording: a hand-written consumer graded their PARSING and
+#: nothing graded their classification, so both shipped a *successful* run that
+#: `classify_failure` read as ``rate_limited`` — from our own echoed prompt —
+#: with no test in the repo able to see it. Their manifests now pin that cell.
+#: The remaining rows are the same exposure until each is migrated.
 MANIFEST_PENDING = {
     "codex": "TestCodexParseRealCaptures",
-    "copilot": "TestCopilotProvider",
     "kilocode": "TestKiloCodeDefaultModelSpecs",
     "kimi": "TestKimiProvider",
     "opencode": "TestOpenCodeRealSchema",
     "qwen-code": "TestQwenCodeProvider",
-    "vibe": "TestVibeProvider",
 }
 
 #: Group B — no fixture set exists at all (plans/harness-full-coverage.md

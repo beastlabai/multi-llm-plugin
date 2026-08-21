@@ -43,7 +43,7 @@ Five facts govern every row:
 | --- | --- |
 | `success` | the `{"text", "stopReason", "sessionId", "requestId"}` envelope, unwrapped by `parse_output`. The test asserts the unwrapped `data` **is** the suggestion-list document, and the committed server log beside it shows all three requests |
 | `ephemeral-only` | an empty assistant message is **not** accepted: 15 retries over 335 s, then `empty response from model (no_visible_content)`. The right verdict reached through the wrong channel, since `parse_output` then reports that verdict as an answer |
-| `multi-assistant` | **first**-wins, and the first document is the decoy (`FIRST ANSWER (must NOT be selected)`) |
+| `multi-assistant` | **last**-wins, and the last document is the answer; the first is the decoy (`FIRST ANSWER (must NOT be selected)`), still in the bytes so the row tests selection — see defect 4 |
 | `truncated` | a **real** cut mid-record on the *chat* surface (second SSE frame, the one carrying the text) → 15 retries / 335 s → `no_visible_content`. **Byte-identical** to `ephemeral-only` and `error-envelope` (md5 `07923ec7…`) |
 | `error-envelope` | a provider error object on a **200**: grok finds no assistant content, retries 15 times and reduces it to the same `no_visible_content`. The provider's text is lost, not mis-served |
 | `stdout-error` | 5xx-forever: a nonzero exit whose diagnosis is on **stdout**, parsed as valid JSON and returned as the answer — §6 step 3's opencode trap, in its worse form. (Deviation recorded: stderr is not empty, it duplicates the message) |
@@ -82,7 +82,8 @@ started distinguishing them should show up as a diff on the row that changed.
 
 ## What this set found
 
-Four measured defects, recorded here rather than silently fixed.
+Four measured defects, recorded here rather than silently fixed. Defect 4 has
+since been fixed in the shared extractor, and its entry records what changed.
 
 1. **Every failed grok run parses as a success, with the error envelope as the
    answer.** `parse_output` handles `{"text": …}` and then ends with a bare
@@ -114,10 +115,16 @@ Four measured defects, recorded here rather than silently fixed.
    all. `context-overflow` escapes the same fate only because the context table
    is consulted *before* the server table. Same root cause as claude-code's
    `API Error:` prefix, in a second CLI.
-4. **`multi-assistant` selects the FIRST document, and it is the decoy** —
-   `extract_json_from_text(prefer_arrays=True)` returns the first array it finds.
-   The third CLI in this batch with the same behaviour; aider is the only adapter
-   with a documented last-wins rule.
+4. **`multi-assistant` selected the FIRST document, and it was the decoy —
+   FIXED** — `extract_json_from_text(prefer_arrays=True)` returned the first
+   array it found. grok concatenates every turn into one `text`, so there was no
+   boundary for a per-adapter rule and the fix had to be one rule in the shared
+   helper: **the last document wins, at every level**, with shape preference
+   consulted before position and a contained candidate never outranking the one
+   that contains it. It is aider's documented last-wins rule generalised from
+   the envelope to the text inside it, and it now covers all three CLIs in this
+   batch. The row moved with the fix and still carries the decoy in
+   `raw_contains`.
 
 ## Reproducing
 

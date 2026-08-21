@@ -163,8 +163,11 @@ class TestAllowedToolsGlobSyntax:
 #: ``test_claude_skill_dir_is_only_in_the_shim``.
 PLACEHOLDER_MANIFEST = {
     # 28 ${CLAUDE_SKILL_DIR} -> 28 {SKILL_DIR}: the same commands, now naming the
-    # single entry point behind the invariant prefix.
-    "instructions/apply-code-fixes.md": (0, 28),
+    # single entry point behind the invariant prefix. 28 -> 30: R1 added the
+    # post-loop `apply-code-fixes --mark-completed` finalization command (§10),
+    # the native counterpart of the executor's `_finalize` — one more command, so
+    # one more instance of the invariant two-token prefix.
+    "instructions/apply-code-fixes.md": (0, 30),
     "instructions/apply-suggestions.md": (0, 28),
     "instructions/apply-task-suggestions.md": (0, 26),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the

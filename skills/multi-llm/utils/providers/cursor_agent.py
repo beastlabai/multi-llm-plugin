@@ -7,20 +7,39 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from .base import (
     PROFILE_GENERATE,
     USAGE_PARTIAL,
+    VERSION_TOO_LOW as _VERSION_TOO_LOW,
     LLMProvider,
+    ReasoningLadder,
     StructuredSchema,
-    git_env,
+    matches_any,
+    reset_flag_gate_cache,  # noqa: F401 - M14: the one gate's reset, re-exported
 )
-from .result_envelope import parse_result_envelope
+from .result_envelope import classify_api_error_status, parse_result_envelope
+
+#: M12 (§6.1): cursor has no rung on the ladder because it has no separate
+#: effort *axis* to put one on. Its model list is fully pre-parameterized —
+#: effort, thinking and fast are baked into one atomic slug
+#: (``gpt-5.5-extra-high``, ``claude-opus-5-thinking-high-fast``) — so the
+#: effort a run uses is chosen by picking a model name, and a ``:effort`` suffix
+#: would only corrupt that name. Declaring no ``REASONING_EFFORTS`` is what keeps
+#: every cursor slug intact through :func:`~.base.split_reasoning_effort`.
+EFFORT_LADDER = ReasoningLadder(
+    provider="cursor-agent",
+    declined=(
+        "effort is baked into cursor's own model slugs (gpt-5.5-extra-high, "
+        "claude-opus-5-thinking-high-fast), so it is selected by model name and "
+        "a `:effort` suffix would only corrupt the slug"
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # §5.4.1 — the per-flag capability gate, in its **load-bearing** form
@@ -41,25 +60,32 @@ from .result_envelope import parse_result_envelope
 #: launch, and the only other way to satisfy the trust gate is ``-f``/``--yolo``,
 #: which is the write bypass this adapter exists to stop passing. When the gate
 #: cannot confirm both tokens the slot is refused before spawn.
+#:
+#: **M15/§3.5 pins the absence of the token these replaced.** ``-f``/``--force``/
+#: ``--yolo`` is in the ``--yolo``-class negative set that
+#: ``tests/test_read_only_modes.py`` scans for over *every* adapter's
+#: ``build_command``/``get_env``, and cursor-agent declares no
+#: ``bypass_exception`` in ``providers.yaml``'s ``read_only_modes:`` table — so
+#: the flag cannot return without that guard going red, wherever in this file it
+#: is reintroduced. ``--mode ask`` is this adapter's row in that table, one of
+#: its three probed positives; ``--trust`` is deliberately **not** part of the
+#: recorded mechanism, because it satisfies a launch gate and grants nothing.
 CURSOR_REQUIRED_FLAGS: Tuple[str, ...] = ("--trust", "--mode")
 
-#: §5.1's state name for a CLI too old for a flag the dispatch needs. cursor
-#: declares ``version_cmd = ()`` / ``min_version = ""`` (nothing is version-gated
-#: at all), so the *help text* stands in for the version read — see
-#: :func:`_help_flag_tokens`. M14 later absorbs this one-off into the shared
-#: floor/ceiling machinery.
-VERSION_TOO_LOW = "version-too-low"
-
-#: How long the one help read may take. §2.1's probe containment.
-_HELP_TIMEOUT_S = 5
-
-#: A whole-word long-option token. ``--model`` must never be read as ``--mode``,
-#: which a bare substring test would do — and confirming the wrong flag is
-#: exactly the failure this gate exists to prevent.
-_FLAG_TOKEN_RE = re.compile(r"(?<![\w-])(--[A-Za-z0-9][A-Za-z0-9-]*)(?![\w-])")
-
-_FLAG_CACHE: Dict[str, FrozenSet[str]] = {}
-_FLAG_CACHE_LOCK = threading.Lock()
+#: §5.1's state name for a CLI too old for a flag the dispatch needs — the
+#: availability vocabulary's own word, imported rather than re-typed (M14), so
+#: this refusal, the executor's preflight refusal and a report all say it the
+#: same way.
+#:
+#: **What is version-gated here and what is not.** cursor declares
+#: ``version_cmd`` (M14 measured ``cursor-agent --version`` → exit 0,
+#: ``2026.08.11-e8db854`` on stdout), so its build is *read* like every other
+#: adapter's. What it still declares no ``min_version`` for is the pair below:
+#: no floor has been measured for ``--trust``/``--mode``, and a floor invented
+#: from the one build they were probed on would disable installs that work
+#: (§5.4.1(a)). So the *help text* remains the gate for these two flags, and the
+#: version read remains what names the build in a report.
+VERSION_TOO_LOW = _VERSION_TOO_LOW
 
 
 class CursorFlagsUnconfirmed(RuntimeError):
@@ -86,84 +112,13 @@ class CursorFlagsUnconfirmed(RuntimeError):
         )
 
 
-def _probe_help_tokens(binary: str) -> FrozenSet[str]:
-    """Every long-option token cursor-agent's own ``--help`` lists.
-
-    Containment matches §2.1's probe: ``stdin=DEVNULL``, captured streams, a 5 s
-    timeout and no network. The env comes from the same shared builder both
-    spawn lanes use (:func:`base.git_env` under the ``generate`` profile) so Lane
-    A and Lane B can never disagree about which flags a run emits, plus
-    ``TERM=dumb``/``COLUMNS``/``NO_COLOR`` — a *truncated* help rendering hiding
-    what a flag required is a failure mode this repo has already been bitten by
-    once (§3.6), and a token sniff must not inherit it.
-
-    Both streams are read **concatenated** (§5.4): some CLIs banner to stderr.
-
-    Failure posture: a timeout, a non-zero exit, an unreadable stream or an empty
-    help all resolve to "unsupported" — the empty set. For an *optional* flag
-    that means omit-and-warn; for cursor's two it means the caller refuses the
-    slot, because there is no safe argv to fall back to.
-    """
-    env = dict(os.environ)
-    env.update(git_env(PROFILE_GENERATE))
-    env.update({"TERM": "dumb", "COLUMNS": "1000", "NO_COLOR": "1"})
-    try:
-        result = subprocess.run(
-            [binary, "--help"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_HELP_TIMEOUT_S,
-            stdin=subprocess.DEVNULL,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return frozenset()
-    if result.returncode != 0:
-        return frozenset()
-    help_text = f"{result.stdout or ''}\n{result.stderr or ''}"
-    if not help_text.strip():
-        return frozenset()
-    return frozenset(_FLAG_TOKEN_RE.findall(help_text))
-
-
-def _help_flag_tokens(binary: str) -> FrozenSet[str]:
-    """:func:`_probe_help_tokens`, memoised on the resolved binary path.
-
-    One help spawn per CLI per process, not one per flag: a four-model ×
-    ten-phase run performs exactly one.
-    """
-    with _FLAG_CACHE_LOCK:
-        cached = _FLAG_CACHE.get(binary)
-    if cached is not None:
-        return cached
-    tokens = _probe_help_tokens(binary)
-    with _FLAG_CACHE_LOCK:
-        _FLAG_CACHE.setdefault(binary, tokens)
-        return _FLAG_CACHE[binary]
-
-
-def reset_flag_cache() -> None:
-    """Forget the memoised help read (tests only)."""
-    with _FLAG_CACHE_LOCK:
-        _FLAG_CACHE.clear()
-
-
-def _gateable_binary() -> Optional[str]:
-    """The cursor-agent the gate would read, or ``None`` when there is none.
-
-    ``shutil.which`` already tests for an executable, so the second half is a
-    no-op in production and a guard against a resolver that points somewhere
-    unrunnable: a path that cannot be spawned cannot reject a flag either, and
-    turning "not installed" into "version-too-low" would only lose information.
-    """
-    binary = shutil.which("cursor-agent")
-    if binary is None:
-        return None
-    if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
-        return None
-    return binary
+# The help probe, its memo cache and the runnable-binary resolution that used to
+# live here are **gone** — M14 (§5.4.1) absorbed all three into the one shared
+# gate in `base.py`, where `LLMProvider.missing_flags` is this refusal's
+# load-bearing form and `supports_flag` is the optional-flag one. Nothing about
+# the posture moved: whole-word tokens, one help spawn per CLI per process, both
+# streams read concatenated, and an unresolvable-or-unspawnable binary reporting
+# nothing missing, because an absent CLI is `is_available()`'s refusal to make.
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +875,242 @@ def reset_profile_state() -> None:
         _PROFILE_ATEXIT_REGISTERED = False
 
 
+# ---------------------------------------------------------------------------
+# M13 (§5.2, §5.3) — two probes, not one, and only one of them is about auth
+# ---------------------------------------------------------------------------
+#
+# The donor plans proposed `cursor-agent about --format json` as a single call
+# doing four jobs. Measured 2026-08-16 it does two of them:
+#
+# * **auth is `status --format json`.** It reads *local* token state
+#   (`{"isAuthenticated":true,…}` vs `{"status":"unauthenticated",…}`), which is
+#   the only thing that separates **offline-logged-in** from **logged-out**.
+# * **`about` is demoted to a version / plan-tier readout.** Its `userEmail` and
+#   `subscriptionTier` round-trip the network, so a logged-in HOME pointed at an
+#   unreachable endpoint returns `userEmail:null, subscriptionTier:null` —
+#   *byte-identical* to a logged-out scratch HOME, in all six states at exit 0.
+#   Keying auth on `userEmail == null` reports a flight-mode laptop as logged
+#   out. `about` is therefore never consulted for a verdict here, and
+#   :class:`CursorAbout` has no field that could carry one.
+# * **No default-model readback.** `about`'s `model` is a *display label*
+#   ("GPT-5.6 Sol 272K Extra High"), not a `--model` slug, and it reflects the
+#   **last-used** model — this skill's own fan-out mutates it. It must not be
+#   read back as configuration, so it does not survive the boundary either.
+# * **Verdicts come from JSON fields, never exit codes.** cursor-agent exited 0
+#   in all six auth states measured (§5.3/§7.2), which is why
+#   :meth:`CursorAgentProvider.classify_auth_probe` overrides the base rule that
+#   reads a clean exit as authenticated.
+
+#: The auth probe (§5.2). Declared as ``auth_check`` below, so the shared D3c
+#: preflight runs it — this adapter spawns nothing of its own.
+CURSOR_STATUS_ARGS: Tuple[str, ...] = ("cursor-agent", "status", "--format", "json")
+
+#: The version / plan-tier readout, and nothing else (§5.2).
+CURSOR_ABOUT_ARGS: Tuple[str, ...] = ("cursor-agent", "about", "--format", "json")
+
+#: The **nine** keys `about --format json` really returns (measured 2026-08-16;
+#: the donor plans said five). Written down because three of them are P13
+#: identity fields and the count is what a redaction test asserts against.
+CURSOR_ABOUT_KEYS: Tuple[str, ...] = (
+    "cliVersion",
+    "model",
+    "subscriptionTier",
+    "osPlatform",
+    "osArch",
+    "userEmail",
+    "terminalProgram",
+    "shell",
+    "lastRequestId",
+)
+
+#: The three of those nine that are §4.5.1 P13 identity fields. They are
+#: redacted at the **probe boundary** — before the envelope reaches a log, a
+#: report or an artifact — rather than at each rendering site, because a
+#: boundary is one place to get right and a rendering site is many.
+CURSOR_ABOUT_IDENTITY_KEYS: FrozenSet[str] = frozenset(
+    {"userEmail", "terminalProgram", "shell"}
+)
+
+#: Whatever the CLI calls being logged in / out in ``status``'s ``status``
+#: field. ``isAuthenticated`` is the measured shape and is read first; these are
+#: the spellings a sibling build might use for the same fact.
+_STATUS_AUTHENTICATED: FrozenSet[str] = frozenset(
+    {"authenticated", "logged_in", "logged-in", "loggedin", "ok"}
+)
+_STATUS_UNAUTHENTICATED: FrozenSet[str] = frozenset(
+    {"unauthenticated", "logged_out", "logged-out", "loggedout",
+     "not_logged_in", "not-logged-in"}
+)
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    """``text`` without SGR/CSI sequences — the text fallback's precondition."""
+    return _ANSI_ESCAPE.sub("", text or "")
+
+
+def _probe_object(text: str) -> Optional[Dict[str, Any]]:
+    """The first JSON **object** in ``text``, or ``None``.
+
+    ``None`` is half of §5.2's feature-sniff: errors from this CLI land on
+    stderr with empty stdout and a non-zero exit (``error: unknown option
+    '--format'``), and ``unexpected argument`` never occurs — it is
+    commander.js, not clap — so the sniff is *exit ≠ 0 plus a decode failure*,
+    never a match on vendor wording.
+    """
+    body = _strip_ansi(text)
+    start = body.find("{")
+    if start < 0:
+        return None
+    try:
+        data, _end = json.JSONDecoder().raw_decode(body[start:])
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def redact_probe_output(text: str) -> str:
+    """§4.5's redaction, applied at the probe boundary (§5.2).
+
+    Imported late for the same reason ``subagent_executor._redact`` does it: the
+    redaction module must never become an import-time dependency of an adapter.
+    A redactor that cannot be imported must not silently return the raw
+    envelope, so the fallback drops the text rather than leaking it.
+    """
+    if not text:
+        return ""
+    try:
+        try:
+            from ..write_safety import redact_text
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.write_safety import redact_text  # type: ignore
+    except Exception:  # pragma: no cover - a diagnostic never leaks on failure
+        return "<redacted:probe-output>"
+    return redact_text(text)
+
+
+def status_auth_verdict(
+    stdout: str, stderr: str, exit_code: int = 0
+) -> Optional[bool]:
+    """Read ``status --format json`` as authenticated / not / unknown.
+
+    **The state this exists to separate is offline-logged-in from logged-out**,
+    which `about` cannot do and an exit code cannot do either:
+
+    * ``{"isAuthenticated":true,…,"message":"Logged in (unable to fetch user
+      details)"}`` — logged in, network unreachable → ``True``;
+    * ``{"status":"unauthenticated",…,"message":"Not logged in"}`` — logged out
+      → ``False``.
+
+    Both exit **0**, and both carry a null-ish user detail, so only the local
+    token field tells them apart.
+
+    ``None`` where no verdict field is present: an older build without the
+    subcommand, a ``--format`` this CLI does not know, a decode failure. Silence
+    is never read as a verdict in either direction — the fail-open posture
+    M10's ``UNKNOWN`` exists for.
+    """
+    for stream in (stdout, stderr):
+        data = _probe_object(stream)
+        if data is None:
+            continue
+        flag = data.get("isAuthenticated")
+        if isinstance(flag, bool):
+            return flag
+        state = str(data.get("status") or "").strip().lower()
+        if state in _STATUS_AUTHENTICATED:
+            return True
+        if state in _STATUS_UNAUTHENTICATED:
+            return False
+    return None
+
+
+@dataclass(frozen=True)
+class CursorAbout:
+    """What `about --format json` is allowed to tell this skill (§5.2).
+
+    Four fields, and the *absence* of two others is the point:
+
+    * **no auth field** — `about` cannot tell offline-logged-in from logged-out,
+      so nothing here may be read as a login verdict;
+    * **no model field** — `about`'s ``model`` is a last-used display label, not
+      a ``--model`` slug, so reading it back as configuration would hand a
+      fan-out a name no ``--model`` accepts.
+
+    :attr:`redacted` is the envelope as it is safe to log: the three P13
+    identity keys are already replaced, at this boundary, once.
+    """
+
+    #: ``cliVersion``, as the CLI printed it (``2026.08.11-e8db854``).
+    version: str = ""
+    #: ``subscriptionTier`` — **online only**; empty offline, which is a network
+    #: fact and not an auth fact.
+    plan_tier: str = ""
+    #: Whether a JSON object was actually decoded (the feature-sniff's answer).
+    parsed_json: bool = False
+    #: The probe's own output, redacted. Never the raw envelope.
+    redacted: str = ""
+
+
+def _about_text_pairs(text: str) -> Dict[str, str]:
+    """The ANSI-stripped ``Key  Value`` fallback shape, as a mapping.
+
+    §5.2's fallback for a build whose ``--format`` flag is not recognised. The
+    labels are normalized (case and separators dropped) because this shape is
+    **unmeasured** — it is what the CLI prints without ``--format``, and keying
+    it on an exact label this repo has never captured would be a guess dressed
+    as a parser.
+    """
+    pairs: Dict[str, str] = {}
+    for line in _strip_ansi(text).splitlines():
+        parts = re.split(r"\s{2,}|\t|:\s", line.strip(), maxsplit=1)
+        if len(parts) != 2:
+            continue
+        key = re.sub(r"[^a-z0-9]", "", parts[0].lower())
+        value = parts[1].strip()
+        if key and value:
+            pairs.setdefault(key, value)
+    return pairs
+
+
+def read_about(stdout: str, stderr: str, exit_code: int = 0) -> CursorAbout:
+    """The two jobs `about` really does, with the identity fields left behind.
+
+    Version ✅ and plan tier ✅ (online). Auth ❌ and default-model readback ❌ —
+    see :class:`CursorAbout` for why neither has a field to land in.
+    """
+    data = _probe_object(stdout) or _probe_object(stderr)
+    redacted = redact_probe_output(f"{stdout or ''}{stderr or ''}")
+    if data is not None:
+        version = data.get("cliVersion")
+        tier = data.get("subscriptionTier")
+        return CursorAbout(
+            version=str(version).strip() if isinstance(version, str) else "",
+            plan_tier=str(tier).strip() if isinstance(tier, str) else "",
+            parsed_json=True,
+            redacted=redacted,
+        )
+
+    # Feature-sniff (§5.2): a decode failure alone is not enough — a build that
+    # answers `--format json` and happens to print nothing is not a build that
+    # lacks the flag. The text fallback is read only when the run also failed.
+    if exit_code == 0:
+        return CursorAbout(redacted=redacted)
+    pairs = _about_text_pairs(f"{stdout or ''}\n{stderr or ''}")
+    return CursorAbout(
+        version=pairs.get("cliversion") or pairs.get("version") or "",
+        plan_tier=(
+            pairs.get("subscriptiontier")
+            or pairs.get("subscription")
+            or pairs.get("plan")
+            or ""
+        ),
+        parsed_json=False,
+        redacted=redacted,
+    )
+
+
 class CursorAgentProvider(LLMProvider):
     """Provider for cursor-agent CLI tool.
 
@@ -969,8 +1160,10 @@ class CursorAgentProvider(LLMProvider):
     #:   ("authentication required"); it is the ``is_error`` envelope that
     #:   nothing else would have caught.
     #:
-    #: Reading the auth *state* off ``status --format json`` is M13's job; this
-    #: is only about a dispatch that produced no usable result.
+    #: Reading the auth *state* off ``status --format json`` is a different job
+    #: and now a separate one — :attr:`auth_check` declares that probe and
+    #: :meth:`classify_auth_probe` reads it (M13). This attribute is only about
+    #: a dispatch that produced no usable result.
     exit_zero_failure_markers = (
         re.compile(r'"is_error"\s*:\s*true'),
     )
@@ -985,15 +1178,78 @@ class CursorAgentProvider(LLMProvider):
     #: There is therefore no free re-capture, which is exactly why the version
     #: this parser was last confirmed against is worth writing down.
     #:
-    #: ``min_version`` stays empty ON PURPOSE and independently of that: this
-    #: adapter declares ``version_cmd = ()`` because nothing here is
-    #: version-gated by a number — the gate is the *help text*, read by
-    #: :func:`_probe_help_tokens` and enforced through
-    #: :class:`CursorFlagsUnconfirmed` (see :data:`VERSION_TOO_LOW`). A floor
-    #: declared here would be compared against nothing, since
-    #: ``_detect_version`` only enforces one when a ``version_cmd`` probe
-    #: actually read a version.
+    #: **M14 opened the version read that M13 deliberately did not.** Measured
+    #: 2026-08-21: ``cursor-agent --version`` exits 0 and prints
+    #: ``2026.08.11-e8db854`` on **stdout**, so the build below is now *read*
+    #: rather than only written down, and the shared gate resolves this
+    #: adapter's binary from a declaration (``version_cmd[0]``) instead of a
+    #: literal spelled a second time inside the gate. It is emphatically **not**
+    #: wired to ``about``: the version comes from the CLI's own ``--version``,
+    #: which is the boundary M13's demotion drew and this keeps.
+    #:
+    #: ``min_version`` stays empty ON PURPOSE, and independently: no floor has
+    #: been *measured* for anything this adapter needs. The two flags that are
+    #: load-bearing (:data:`CURSOR_REQUIRED_FLAGS`) are gated on the *help text*
+    #: through :class:`CursorFlagsUnconfirmed`, because a floor invented from the
+    #: single build they were probed on would disable installs that work
+    #: (§5.4.1(a)). ``max_version_exclusive`` is empty for the same reason: no
+    #: cursor build has been measured to break this parser, and a guessed
+    #: ceiling refuses runs nobody showed to be broken.
+    version_cmd = ("cursor-agent", "--version")
     verified_version = "2026.08.11-e8db854"
+
+    #: M13 (§5.2) — the real auth probe, at last. It is a *local* token read:
+    #: it reports `isAuthenticated` with the network down, which is exactly the
+    #: state `about` cannot distinguish from a logged-out HOME. Declaring it
+    #: here is the whole wiring — the shared D3c preflight runs it once per
+    #: distinct runner per run and hands the verdict to
+    #: :meth:`~.base.LLMProvider.describe_availability`, so this adapter spawns
+    #: nothing itself and the probe cannot fan out from inside a picker loop.
+    #:
+    #: Until this row existed cursor-agent could only ever report ``UNKNOWN``:
+    #: M10's rule is that ``READY`` requires a **positive** verdict and is never
+    #: inferred from silence, and an adapter declaring no probe is silence.
+    auth_check: Tuple[str, ...] = CURSOR_STATUS_ARGS
+
+    #: What fixes a ``False`` verdict, named verbatim in the exit-3 refusal.
+    #: Mirrors ``runners.cursor-agent.login_cmd`` in ``hosts/capabilities.yaml``.
+    login_cmd = "cursor-agent login"
+
+    #: M13 (§5.3) — printed, never run (no auto-install).
+    install_hint = "curl https://cursor.com/install -fsS | bash"
+
+    #: M13 (§5.2) — the version / plan-tier readout, declared so something
+    #: actually runs it. ``about`` was demoted out of the auth path and left
+    #: with exactly one job this repo has a use for: the **plan tier**, which no
+    #: other probe reports. Declaring it here is the whole wiring — the spawn
+    #: belongs to the human-invoked status path
+    #: (:func:`utils.subagent_executor.probe_setup_metadata`, reached from
+    #: ``install-host --check`` row 5), so this adapter still spawns nothing and
+    #: no dispatch preflight pays for it.
+    #:
+    #: It is **not** the auth probe and cannot become one: :attr:`auth_check`
+    #: names ``status`` (the local token read), and the tier below goes nowhere
+    #: near a verdict — offline it is simply absent, which is a network fact.
+    setup_probe: Tuple[str, ...] = CURSOR_ABOUT_ARGS
+
+    #: M13 (§5.3) — the credential is a *file on disk*, but not one the per-run
+    #: ``CURSOR_CONFIG_DIR``/``CURSOR_DATA_DIR`` redirect
+    #: (:func:`isolate_profile_env`) can move. Measured on 2026.08.11 and
+    #: recorded in ``providers.yaml``: ``auth.json`` follows a third rule that
+    #: consults *neither* variable — ``$XDG_CONFIG_HOME/cursor/auth.json`` on
+    #: Linux, ``~/.cursor`` on macOS, ``%APPDATA%\Cursor`` on Windows. So the
+    #: redirect is a concurrency/residue mitigation only: a run pointed at a
+    #: scratch profile keeps whatever credential the user already has, and
+    #: anyone troubleshooting auth belongs at the path above, not in the
+    #: redirected profile dir.
+    auth_hint = (
+        "cursor-agent keeps its credential in auth.json, not in an "
+        "environment variable: $XDG_CONFIG_HOME/cursor/auth.json on Linux, "
+        "~/.cursor on macOS, %APPDATA%\\Cursor on Windows. The per-run "
+        "CURSOR_CONFIG_DIR/CURSOR_DATA_DIR profile redirect does not move it, "
+        "so it never changes login state; `cursor-agent status --format json` "
+        "reads that local token without touching the network."
+    )
 
     @property
     def name(self) -> str:
@@ -1031,6 +1287,15 @@ class CursorAgentProvider(LLMProvider):
         their own profile, or the directory could not be created — is the
         snapshot/restore guard armed as the fallback.
 
+        **The fallback is armed with the dispatch's own ``cwd``.** A marker is
+        only cleaned up when its ``workspacePath`` names a workspace this process
+        ran in (:meth:`CursorResidueSnapshot._marker_is_ours`), so arming without
+        one would record the *orchestrator's* directory while the child runs
+        somewhere else — Lane B spawns with an explicit ``cwd`` — and the durable
+        ``.workspace-trusted`` marker the run really wrote would be left behind
+        as if it were the user's. ``None`` (Lane A's usual case) still means
+        ``os.getcwd()``, which is exactly the directory such a child inherits.
+
         The keyword-only options the base declares are forwarded untouched
         rather than re-listed: this override adds a side effect and decides
         nothing about the env itself, so naming them here would only create a
@@ -1039,7 +1304,7 @@ class CursorAgentProvider(LLMProvider):
         env = super().resolve_env(model, profile, **options)
         redirect = isolate_profile_env(anchor=options.get("anchor"))
         if redirect is None:
-            arm_side_effect_guard()
+            arm_side_effect_guard(workspace=options.get("cwd"))
             return env
         env.update(redirect)
         return env
@@ -1081,19 +1346,18 @@ class CursorAgentProvider(LLMProvider):
                 does not list both gated tokens — the slot is refused as
                 ``version-too-low`` rather than degraded.
         """
-        # The gate (§5.4.1). Its precondition is that there is a binary to gate:
-        # a *missing* (or unexecutable) cursor-agent is not the gate's refusal to
-        # make. `is_available()` already reports that, `llm_client` checks it
-        # before building anything, `detach._spec_binary` asks this method for
-        # the binary name precisely so it can say "cursor-agent is not
-        # installed", and nothing that cannot be spawned can reject a flag.
-        # Refusing here would replace a precise message with silence.
-        binary = _gateable_binary()
-        if binary is not None:
-            confirmed = _help_flag_tokens(binary)
-            missing = tuple(flag for flag in CURSOR_REQUIRED_FLAGS if flag not in confirmed)
-            if missing:
-                raise CursorFlagsUnconfirmed(missing, binary)
+        # The gate (§5.4.1), through the shared machinery (M14). Its precondition
+        # is that there is a binary to gate: a *missing* (or unexecutable)
+        # cursor-agent is not the gate's refusal to make. `is_available()`
+        # already reports that, `llm_client` checks it before building anything,
+        # `detach._spec_binary` asks this method for the binary name precisely so
+        # it can say "cursor-agent is not installed", and nothing that cannot be
+        # spawned can reject a flag. Refusing here would replace a precise
+        # message with silence — which is why `missing_flags` answers "nothing
+        # missing" when the binary does not resolve, rather than "everything".
+        missing = self.missing_flags(CURSOR_REQUIRED_FLAGS)
+        if missing:
+            raise CursorFlagsUnconfirmed(missing, self.gate_binary(runnable=True) or "")
 
         return [
             "cursor-agent",
@@ -1148,6 +1412,101 @@ class CursorAgentProvider(LLMProvider):
             out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
         return out or None
 
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """The envelope's ``api_error_status``, then the shared text ladder.
+
+        The same rung claude-code declares, over the same nine-key envelope and
+        the same shared map (:func:`result_envelope.classify_api_error_status`);
+        the narrowing shape is aider's ``classify_failure``.
+
+        **On every committed cursor-agent capture this delegates.** Neither
+        ``success`` nor ``exit-zero-failure`` carries an ``api_error_status``
+        field at all — the live envelope has nine keys and that is not one of
+        them — so both rows go to ``super()`` and reach
+        :attr:`exit_zero_failure_markers` exactly as before. That is the point
+        of pinning them: a status rung that swallowed the text ladder on an
+        adapter which never emits the field would take this CLI's only failure
+        signal with it. The map's coverage comes entirely from claude-code's
+        rows, and this override exists so the field is not silently dropped if
+        Cursor starts printing it.
+        """
+        category = classify_api_error_status(stdout)
+        if category is not None:
+            return category
+        return super().classify_failure(stdout, stderr, exit_code)
+
+    def classify_auth_probe(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[bool]:
+        """The verdict is a JSON field or nothing — never the exit code (M13).
+
+        The base rule reads a clean exit with no login notice as ``True``. For
+        this CLI that rule manufactures a verdict: cursor-agent exited **0 in
+        all six auth states measured** (§5.3/§7.2), so a clean exit says nothing
+        whatsoever about credentials, and the offline-logged-in and logged-out
+        envelopes are separated only by :func:`status_auth_verdict`'s local
+        token field.
+
+        Order, and it is load-bearing:
+
+        1. the ``status --format json`` field — the whole point of the probe;
+        2. failing that, the shared ``auth_error_patterns`` over the text,
+           which is what catches a plain ``Error: Authentication required…``
+           printed by a build with no ``--format`` flag;
+        3. otherwise ``None``. Never ``True`` from silence — an unrecognised
+           shape means the probe could not tell, and M10 renders that as
+           ``UNKNOWN`` rather than as a runner that is ready.
+
+        Nothing from ``stdout``/``stderr`` is returned or stored: the caller
+        gets a tri-state, so the nine-key envelope's identity fields have no
+        path out of this method. Where the *text* is needed, it crosses
+        :func:`redact_probe_output` first.
+        """
+        verdict = status_auth_verdict(stdout, stderr, exit_code)
+        if verdict is not None:
+            return verdict
+        haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+        if matches_any(self.auth_error_patterns, haystack):
+            return False
+        return None
+
+    def read_setup_probe(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Dict[str, str]:
+        """The one fact `about` is kept for: the plan tier (M13, §5.2).
+
+        :func:`read_about` already does the reading — the version, the tier, the
+        feature-sniff and the probe-boundary redaction — and this is the
+        production caller that was missing: without it the readout was parsed by
+        nothing and the status row had no way to say which plan a run is
+        spending.
+
+        **Only the tier crosses.** ``about``'s ``cliVersion`` is deliberately
+        dropped: the version the status row prints comes from this adapter's own
+        ``version_cmd`` (``cursor-agent --version``, M14), and reporting a second
+        copy from a second probe would give one fact two owners that can
+        disagree — the same rule :meth:`describe_setup` follows by deriving its
+        rows instead of re-declaring them. The remaining seven keys never had a
+        path out of :class:`CursorAbout` at all, and the three identity fields
+        among them were already replaced at the probe boundary.
+
+        **An absent tier is silence, never a verdict.** ``subscriptionTier``
+        round-trips the network, so it is empty offline, empty on a build without
+        ``--format``, and empty when the probe could not run. Each of those is a
+        row with one less fact on it — never a claim about login state, which is
+        exactly the conflation `about`'s demotion exists to prevent.
+
+        The value is length-bounded and reduced to a printable character set
+        before it is returned: it is CLI output bound for a terminal and a log,
+        and a status row is not the place to discover what a surprising envelope
+        prints.
+        """
+        tier = read_about(stdout, stderr, exit_code).plan_tier
+        tier = re.sub(r"[^A-Za-z0-9 ._+-]", "", tier).strip()[:32].strip()
+        return {"plan-tier": tier} if tier else {}
+
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse cursor-agent output and extract structured data.
 
@@ -1157,18 +1516,19 @@ class CursorAgentProvider(LLMProvider):
         This method unwraps that format and attempts to parse the inner result
         as JSON, with fallback strategies for various response formats.
 
-        **It does not read ``is_error``**, and that is measured rather than
-        assumed: ``tests/fixtures/cursor-agent/``'s ``exit-zero-failure`` row is
-        the harvested live envelope with that one field flipped to ``true``, and
-        this method still returns ``{"success": True, "data": ["ok"]}`` for it,
-        because :func:`parse_result_envelope` branches only on the presence of a
-        ``result`` key. The flag is seen exclusively by
-        :meth:`classify_failure`, through :attr:`exit_zero_failure_markers`. So
-        an envelope cursor flagged as an error whose ``result`` still holds a
-        parseable document is served as the answer by the parser and reported as
-        ``runner_error`` by the classifier — §7.2 step 6's ordering makes that
-        survivable, but the division of labour is real and both halves have to
-        stay in place for it to be.
+        **It reads ``is_error``**, and the row that used to record it not doing
+        so is what pins the fix: ``tests/fixtures/cursor-agent/``'s
+        ``exit-zero-failure`` row is the harvested live envelope with that one
+        field flipped to ``true``, and this method used to return
+        ``{"success": True, "data": ["ok"]}`` for it, because
+        :func:`parse_result_envelope` branched only on the presence of a
+        ``result`` key. It now refuses that envelope with the flag named in the
+        error (C5) — so an envelope cursor flagged as an error is a failure on
+        **both** sides of the division of labour: the parser refuses to serve
+        the document, and :meth:`classify_failure` still answers
+        ``runner_error`` through :attr:`exit_zero_failure_markers`, which stays
+        the only thing that says *why* on a CLI whose exit code carries no
+        verdict.
 
         Args:
             stdout: The standard output from cursor-agent.

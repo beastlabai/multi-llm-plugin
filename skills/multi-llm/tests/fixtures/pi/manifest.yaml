@@ -33,10 +33,16 @@ notes: >-
   **pi writes ZERO bytes to stdout on every failure.** The diagnosis is on
   stderr, prefixed with the HTTP status and carrying the vendor's JSON error
   object verbatim, and the exit code is 1 — exactly what `PiProvider`'s docstring
-  claims, now measured rather than asserted. The consequence for the parser is
-  blunt: `parse_output` never sees anything but an empty string on a failed run,
-  so its answer is `Empty output` on all nine failure rows and every distinction
-  between them lives in `classify_failure`, which reads stderr. The second fact
+  claims, now measured rather than asserted. The consequence for the parser used
+  to be blunt: `parse_output` never sees anything but an empty string on a failed
+  run, so its answer was `Empty output` on all nine failure rows and every
+  distinction between them lived in `classify_failure`, which reads stderr.
+  **C4 fixed that half.** `parse_output` now names the stderr text in its error
+  branch and `describe_failure` returns the same one-line summary to both lanes,
+  so the seven rows that HAVE stderr each carry the vendor's own words below —
+  four behind pi's `NNN: ` prefix as a JSON error object, three as a bare
+  sentence. No `classify_failure` cell moved with it: `describe_failure` is
+  diagnostics, never classification. The second fact
   is the one that costs: on a **400 context-length** pi writes nothing to EITHER
   channel and exits **0** (`context-overflow`), which is byte-identical to a run
   whose model legitimately answered with the empty string (`empty`) — so at pi
@@ -74,9 +80,11 @@ rows:
       five words on stderr, `Stream ended without finish_reason`, with stdout
       empty. Neither the status line nor the partial frame is written anywhere,
       so the classifier has five words to work with and recognises none of them.
+      Since C4 the PARSER has those five words too — tier 2's non-JSON branch,
+      reported verbatim because the sentence is already the whole diagnosis.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains: ["Empty output", "Stream ended without finish_reason"]
       raw_contains: ["Stream ended without finish_reason"]
       # Nothing matches: not the connection table (pi never says "connection"),
       # not the timeout table, not the server table. Transport-shaped, so the
@@ -118,10 +126,14 @@ rows:
       reads the 200 as a stream that stopped early, retries four times over
       14.6 s and prints the same five words as the truncated row — so an error
       served on the success channel is indistinguishable from a cut connection,
-      and the provider's own sentence reaches no pattern table at all.
+      and the provider's own sentence reaches no pattern table at all. C4 does
+      not change that: the two rows stay indistinguishable in the error as well,
+      because pi genuinely never writes the provider's text anywhere. What it
+      changes is that the five words now reach the operator instead of `Empty
+      output`.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains: ["Empty output", "Stream ended without finish_reason"]
       raw_contains: ["Stream ended without finish_reason"]
       classify_failure: null
 
@@ -140,6 +152,11 @@ rows:
       the executor, from a model that answered with the empty string. Committed
       as its own capture rather than as a note, because a row this shape is the
       reason §6.2 asks for it.
+      **C4's rung 5, and this row keeps `Empty output` unembellished**:
+      `describe_failure` returns `None` because there is nothing on either
+      channel to summarize. That is the measurement — pi wrote no diagnosis —
+      and not a gap in the hook. Nothing is invented from an exit code, which
+      here is 0 anyway.
     expect:
       success: false
       error_contains: ["Empty output"]
@@ -173,6 +190,10 @@ rows:
       because `classify_streams` short-circuits on an empty haystack. The row
       pins that `parse_output` at least calls it a failure rather than an
       empty-string success.
+      **C4's rung 5**: `describe_failure` returns `None` and the error stays
+      `Empty output`, unembellished. With zero bytes on both channels there is
+      nothing to summarize, and inventing a reason from the exit code is exactly
+      what the rung forbids. The measurement, not a gap.
     expect:
       success: false
       error_contains: ["Empty output"]
@@ -191,9 +212,15 @@ rows:
       `"code":"invalid_api_key"` rather than the English sentence: OpenAI's
       "Incorrect API key provided: …" matches none of base.auth_error_patterns'
       ten entries. Worth knowing before anyone reformats that JSON out.
+      C4's tier 2 in one row: the `401: ` prefix is stripped to reach the JSON,
+      the object's `message` and `code` are reported, and the **401 is put back**
+      because the prefix is the only place the status survives.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains:
+        - "Empty output"
+        - "401: Incorrect API key provided"
+        - "(invalid_api_key)"
       raw_contains:
         - "401: "
         - '"code":"invalid_api_key"'
@@ -211,10 +238,10 @@ rows:
       condition — so an executor-level re-dispatch of a rate-limited pi slot
       doubles a wait the CLI already served (§7.6(b)'s rule 6b). The upstream
       text survives, so the classification is reached from the vendor's own
-      words.
+      words — and since C4 so is the parser's error (tier 2).
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains: ["Empty output", "429: Rate limit reached for stub-model"]
       raw_contains: ["Rate limit reached for stub-model"]
       classify_failure: "rate_limited"
 
@@ -228,10 +255,14 @@ rows:
       failserver `--mode 404`. One request, terminal, 0.5 s. The failure NAMES
       the model — `stub-model`, the id half of the `stub/stub-model` spec, since
       pi resolves the provider segment against models.json before dispatch — and
-      an unnamed model is what makes a stray `:effort` suffix unfindable.
+      an unnamed model is what makes a stray `:effort` suffix unfindable — and
+      since C4 the name reaches the operator's error, not just the classifier.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains:
+        - "Empty output"
+        - "404: The model `stub-model` does not exist"
+        - "(model_not_found)"
       raw_contains:
         - "The model `stub-model` does not exist or you do not have access to it."
         - '"code":"model_not_found"'
@@ -253,6 +284,11 @@ rows:
       spends its whole bounded-retry budget on it. This is the same capture shape
       as `empty` and `exit-zero-failure`; each row records a different thing the
       absence of bytes costs.
+      **C4's rung 5, and the one that costs most**: this is C11's recorded
+      non-fix, so `describe_failure` returns `None` and the error stays `Empty
+      output`. C4 could only have "improved" this row by inventing a reason from
+      the exit code, which is precisely what the rung forbids. Recorded as the
+      measurement rather than as a gap.
     expect:
       success: false
       error_contains: ["Empty output"]
@@ -272,10 +308,10 @@ rows:
       only failure mode where it does — and says `Connection error.`, which is
       the one failure text in this set that lands on a shared marker table
       (base.CONNECTION_ERROR_MARKERS) rather than on the vendor's own JSON. Four
-      requests over 14.6 s.
+      requests over 14.6 s. C4 tier 2's non-JSON branch: two words, verbatim.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains: ["Empty output", "Connection error."]
       raw_contains: ["Connection error."]
       classify_failure: "connection_error"
 
@@ -292,10 +328,15 @@ rows:
       error while processing your request") matches no member of
       base.SERVER_ERROR_MARKERS, whose entries all want the literal "server
       error", "internal server error" or "api error", and the bare `500: ` prefix
-      pi adds is not a status-code pattern either.
+      pi adds is not a status-code pattern either. That cell is unchanged by C4
+      — still `null` — while the operator now gets the sentence: C4 makes the
+      diagnosis visible without touching a pattern table. Note the vendor JSON's
+      `code` is `null` here, so tier 2 reports the status and message alone.
     expect:
       success: false
-      error_contains: ["Empty output"]
+      error_contains:
+        - "Empty output"
+        - "500: The server had an error while processing your request"
       raw_contains:
         - "500: "
         - "The server had an error while processing your request. Sorry about that!"

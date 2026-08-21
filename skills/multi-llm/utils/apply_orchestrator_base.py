@@ -54,6 +54,7 @@ from .filtering import (
 )
 from .importance import get_highest_importance
 from .output_handler import derive_prefix, find_output_dir, get_phase_dir
+from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
     CURRENT_FORMAT_VERSION,
@@ -651,10 +652,32 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
             sys.exit(0)
 
-        # Handle --mark-completed (for task_suggestions)
+        # Handle --mark-completed: the host's POST-LOOP finalization command, the
+        # native counterpart of `WriteBatchScheduler._finalize`. It is the only
+        # place the native path records completion — the emit path deliberately
+        # does not (see `marks_phase_completed`) — so a host whose batch loop
+        # stopped early simply never reaches it and the phase stays incomplete.
+        #
+        # The word persisted is `confirmation_phase_name or phase_name`, the same
+        # fallback already used for the confirmation-needed output and for
+        # `maybe_detach`'s mode. It matters for exactly one class:
+        # apply-code-fixes runs under `phase_name = "apply-fixes"` (its phase
+        # DIR, which `full_workflow_orchestrator.WRITE_PHASE_DIRS` and the
+        # instruction's `prior_changes append --phase apply-fixes` both depend
+        # on) while its canonical completion word is
+        # `confirmation_phase_name = "apply-code-fixes"` — what
+        # `check_workflow_prerequisites.PHASE_PREREQUISITES` is keyed on and what
+        # the executor path writes via `PHASE_BY_WRITE_KIND`. Persisting
+        # `phase_name` here would record a third spelling nothing reads.
+        # `apply-suggestions` and `apply-task-suggestions` leave
+        # `confirmation_phase_name` unset, so the fallback yields their existing
+        # word byte-for-byte. The stdout `message` below stays on `phase_name`:
+        # it names the orchestrator the host invoked, not the state key.
         if getattr(self.args, "mark_completed", False):
             state = StateManager(Path(self.plan_path))
-            state.mark_phase_completed(self.phase_name)
+            state.mark_phase_completed(
+                self.confirmation_phase_name or self.phase_name
+            )
             state.save()
             print(
                 json.dumps(
@@ -680,6 +703,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"Phase _setup, step 3: Plan file not found: {self.plan_path}",
                 exit_code=1,
             )
+
+        # §9.3.a/b: the anchor capture point — absolute, before anything can
+        # chdir and before any provider read that decides routing. One line
+        # here covers all three apply modes. It sits *below* the `--skip` and
+        # `--mark-completed` early exits on purpose: those record a phase word
+        # and stop, starting no run for an anchor to belong to.
+        set_run_anchor(self.plan_path)
 
         # Step 4: Derive prefix + output dir
         self.prefix = derive_prefix(self.plan_path)

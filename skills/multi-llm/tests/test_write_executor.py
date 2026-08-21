@@ -41,7 +41,12 @@ from utils import provider_registry as registry  # noqa: E402
 from utils import restore_batch  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_safety  # noqa: E402
+from utils.providers import opencode as oc  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_WRITE  # noqa: E402
+from utils.providers.claude_code import (  # noqa: E402
+    JSON_SCHEMA_FLAG,
+    reset_flag_gate_cache,
+)
 from utils.subagent_tasks import (  # noqa: E402
     PRIOR_CHANGES_TOKEN,
     WRITE_KINDS,
@@ -68,6 +73,80 @@ WRITE_RUNNERS = [
     ("opencode", "opencode:opencode/big-pickle"),
     ("claude", "claude-code:sonnet"),
 ]
+
+#: W2 — the rows ``--dry-run-subagents``' renderer and ``dispatch_task``'s
+#: renderer must agree on, each with the flag whose absence from BOTH would make
+#: the comparison vacuous.
+#:
+#: **Both** ``SCHEMA_PHASE_BY_KIND`` kinds on claude-code, never one: a preview
+#: that hard-codes a schema instead of resolving the phase from the kind passes
+#: one row and fails the other, and hard-coding is exactly the shape this must
+#: not permit. The opencode row is M4's half of the same defect — ``--pure`` and
+#: the ``XDG_CONFIG_HOME`` redirect are emitted only inside the dispatch context,
+#: deliberately and together, so a preview rendered outside one shows an argv no
+#: opencode run ever uses.
+RENDERER_ROWS = [
+    ("task_generation", "claude-code:sonnet", JSON_SCHEMA_FLAG),
+    ("consolidation", "claude-code:sonnet", JSON_SCHEMA_FLAG),
+    ("validation", "opencode:opencode/big-pickle", oc.PURE_FLAG),
+]
+
+#: ``(task_id, output_name)`` per kind in :data:`RENDERER_ROWS`.
+_RENDERER_TASK_NAMES = {
+    "task_generation": ("task-generation", "task_generation_result.json"),
+    "consolidation": ("consolidation-batch-0", "consolidation_batch_0.json"),
+    "validation": ("validation-batch-0", "validation_batch_0.json"),
+}
+
+
+def _option_flags(argv):
+    """The option tokens in ``argv``, in order.
+
+    The bare ``--`` is excluded on purpose: it is the prompt separator (§9.8),
+    so it travels with the trailing positional and the preview renders the argv
+    transport while a claude-code dispatch renders the stdin one. W2 is about
+    the *flag set*, and the transport is not what it changes.
+    """
+    return [
+        token for token in argv
+        if isinstance(token, str) and token.startswith("--") and token != "--"
+    ]
+
+
+def _hermetic_dirs():
+    """opencode's run-scoped config homes currently on disk, by name."""
+    import tempfile
+
+    root = Path(tempfile.gettempdir())
+    return {str(p) for p in root.glob(f"{oc.HERMETIC_DIR_PREFIX}*")}
+
+
+class _RecordingPopen:
+    """A child that records its argv and answers nothing.
+
+    The dispatch half of the W2 comparison needs the argv ``_spawn_in_context``
+    really built — inside the adapter's dispatch context and with the schema the
+    kind resolved — and needs no output at all, because the flags are the
+    subject and the outcome is not. ``pid = -1`` so the timeout path's
+    process-group signal can never reach a real process.
+    """
+
+    calls = []
+
+    def __init__(self, args, **kwargs):
+        self.args = list(args)
+        self.kwargs = kwargs
+        self.pid = -1
+        self.returncode = None
+        self.stdin = self.stdout = self.stderr = None
+        type(self).calls.append(list(args))
+
+    def communicate(self, input=None, timeout=None):
+        self.returncode = 0
+        return ("", "")
+
+    def kill(self):  # pragma: no cover - only the teardown fallback calls this
+        self.returncode = -9
 
 
 # ---------------------------------------------------------------------------
@@ -1509,3 +1588,111 @@ class TestReadDryRun:
         entry = json.loads(Path(report_path).read_text())["tasks"][0]
         assert entry["would_dispatch"] is False
         assert "executor_role: human" in entry["reason"]
+
+    # -- W2: the preview and the dispatch are one renderer, not two --------
+
+    def _renderer_task(self, env, kind: str):
+        """One task of ``kind``, shaped the way its own phase materializes it."""
+        from utils.subagent_tasks import make_task
+
+        task_id, output_name = _RENDERER_TASK_NAMES[kind]
+        extra, context_mode = {}, "inline"
+        if kind in ("validation", "consolidation"):
+            extra = {"batch_index": 0, "group_indices": [0],
+                     "group_ids": ["aaaa000000000000"], "groups_count": 1}
+        if kind == "consolidation":
+            extra["section_key"] = "s"
+        if kind == "task_generation":
+            # The one read kind whose context is the repository (D3e).
+            context_mode, extra = "workspace-read", {"repo_root": str(env.root)}
+        return make_task(
+            kind=kind,
+            task_id=task_id,
+            prompt="Do the thing and print ONE JSON object and nothing else.",
+            output_name=output_name,
+            inputs=build_inputs(grouped_file=str(env.phase_dir / "grouped.json")),
+            phase_dir=str(env.phase_dir),
+            context_mode=context_mode,
+            extra=extra,
+        )
+
+    @pytest.mark.parametrize("kind,runner,required_flag", RENDERER_ROWS,
+                             ids=[f"{k}-{r.split(':')[0]}" for k, r, _f in RENDERER_ROWS])
+    def test_the_preview_renders_the_flags_the_dispatch_renders(
+        self, env, monkeypatch, kind, runner, required_flag
+    ):
+        """``--dry-run-subagents``' argv is the argv the real dispatch builds.
+
+        Compared, not pinned twice: the preview's flags come out of
+        ``dry_run_report``'s own report file and the dispatch's out of the argv a
+        really-dispatched task handed ``Popen``, so this cannot pass on a preview
+        that hard-codes what a dispatch happens to render today. ``required_flag``
+        is what stops it passing *vacuously* — both renderers dropping the same
+        flag is agreement, and it is not the agreement this asserts.
+
+        The rows are the whole reason this is parametrized. Both
+        ``SCHEMA_PHASE_BY_KIND`` kinds on claude-code, because one alone would
+        pass on a preview that hard-codes a schema instead of resolving the phase
+        from the kind; and opencode, whose hermetic ``--pure`` renders only
+        inside the M4 dispatch context — so a preview that renders outside it
+        shows argv no run of that adapter ever uses.
+        """
+        from utils.subagent_tasks import make_task_file, write_task_file
+
+        env.use(runner)
+        reset_flag_gate_cache()
+        # `--pure` renders only when `opencode run --help` documents it; the mock
+        # CLI's help does not, so pin the sniff rather than the adapter's rule.
+        monkeypatch.setattr(oc, "_read_help_tokens",
+                            lambda binary: frozenset({oc.PURE_FLAG}))
+        # Deterministic: `_user_defines_provider` reads the *inherited* config
+        # home, and a developer's own opencode config would decide the refusal.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(env.tmp_path / "xdg-config"))
+        oc.sweep_config_home()
+        oc.reset_hermetic_state()
+        hermetic_before = _hermetic_dirs()
+        task = self._renderer_task(env, kind)
+
+        # (1) the preview renderer, through its own report file.
+        document = make_task_file(kind=kind, tasks=[task], inputs=task["inputs"])
+        task_path = env.phase_dir / f"{kind}_tasks.json"
+        write_task_file(str(task_path), document)
+        report_path = executor.dry_run_report(
+            str(task_path), phase_dir=str(env.phase_dir), phase="preview",
+            cwd=str(env.root),
+        )
+        entry = json.loads(Path(report_path).read_text())["tasks"][0]
+        assert entry["would_dispatch"] is True, entry.get("reason")
+        preview = _option_flags(entry["argv"])
+
+        # A dry run renders commands and starts no child, so the shared hermetic
+        # config home it claimed must be released the way a dispatch releases it.
+        assert _hermetic_dirs() == hermetic_before
+
+        # (2) the dispatch renderer, through the argv a real dispatch spawned.
+        _RecordingPopen.calls = []
+        monkeypatch.setattr(executor.subprocess, "Popen", _RecordingPopen)
+        # 1800s is not a token budget: §7.5 rule 4 starts no attempt that cannot
+        # hold one worst-case run of the adapter's DECLARED envelope, and
+        # claude-code declares 1200s, so a small budget here would record
+        # `budget_exhausted` with nothing spawned and no argv to compare.
+        # Nothing sleeps — the canned child returns immediately.
+        outcome = executor.dispatch_task(
+            task, phase_dir=str(env.phase_dir), runner=runner, retries=0,
+            timeout=1800, cwd=str(env.root), sleep=lambda _seconds: None,
+        )
+        assert _RecordingPopen.calls, (
+            f"nothing was spawned: {outcome.status} — {outcome.reason}"
+        )
+        dispatched = _option_flags(_RecordingPopen.calls[-1])
+
+        assert required_flag in dispatched, (
+            f"the {runner} dispatch stopped rendering {required_flag}, so this "
+            f"comparison would pass on two renderers that both drop it"
+        )
+        assert preview == dispatched, (
+            f"--dry-run-subagents previews {preview} for a {kind} task on "
+            f"{runner}, but the dispatch renders {dispatched}"
+        )
+        oc.sweep_config_home()
+        oc.reset_hermetic_state()

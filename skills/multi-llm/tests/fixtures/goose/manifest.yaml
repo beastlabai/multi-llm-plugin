@@ -347,10 +347,16 @@ rows:
       envelope, so `classify_failure` reads OUR prompt as well as goose's answer.
       `prompts/plan_review.txt`'s example block says "doesn't address timeout
       scenarios", `\btime[ _-]?out\b` is a member of base.TIMEOUT_MARKERS, and
-      the verdict on a run that SUCCEEDED is therefore `timeout`. The row asserts
-      both halves: `success: true` from the parser, `classify_failure: "timeout"`
-      from the classifier, on one set of bytes. Fixing it flips this cell to
-      null, which is the visible edit that would prove the fix.
+      the verdict on a run that SUCCEEDED was therefore `timeout`. The row
+      asserts both halves on one set of bytes: `success: true` from the parser,
+      and the classifier's verdict. FIXED 2026-08-20 by `GooseProvider.
+      vendor_text`, which drops `messages[]` entries whose role is "user" before
+      `classify_streams` sees them — so `classify_failure` now reads goose's
+      answer and not our prompt, and this cell reads null. It is the one cell of
+      the fourteen in this manifest that moved; `success: true` did not, because
+      the run always did succeed. The bytes are unchanged and still carry the
+      product's own prompt, so a regression that puts the echo back in the
+      haystack fails here.
     expect:
       success: true
       data:
@@ -359,4 +365,4 @@ rows:
       raw_contains:
         - "address timeout scenarios"
         - '"role": "assistant"'
-      classify_failure: "timeout"
+      classify_failure: null

@@ -25,6 +25,7 @@ Three rules this file exists to hold:
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import json
 import os
@@ -34,6 +35,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -227,6 +229,33 @@ class RowResult:
             if before.get(name) != after.get(name):
                 delta[name] = (before.get(name), after.get(name))
         return delta
+
+
+def stray_paths(names: Iterable[str], declared: Iterable[str]) -> list[str]:
+    """Which of `names` no pattern in `declared` admits — sorted, never their bytes.
+
+    Lifted verbatim out of
+    `test_container_host_lane.test_no_write_landed_outside_the_declared_paths`;
+    the behaviour is that test's, unchanged. It lives here because that test is
+    `live`-marked beneath a module-level container gate, so it answers only inside
+    a credentialed Docker run — and nobody widening a row's `paths:` glob in a PR
+    will spend a host-lane run to find out they widened it too far. The offline
+    both-directions pin is `tests/test_stray_write_paths.py`, which needs neither
+    credential nor daemon.
+
+    THE MATCHER IS `fnmatch`, AND ITS `*` CROSSES `/`. So `src/**` and `src/*` are
+    the SAME predicate, and a declaration is judged by what it still refuses
+    (`tests/conftest.py`, `tests/fixtures/data.json`, `tests/unit/deep/test_x.py`)
+    rather than by how many stars it spells. Added-vs-modified is deliberately not
+    part of the predicate: `census_delta` carries `(before_sha, after_sha)` and
+    could express it, but a model that puts its new cases into a file that already
+    exists has done the same legitimate work. Inside-vs-outside the declared trees
+    is the distinction; added-vs-modified is not.
+    """
+    declared = list(declared)
+    return sorted(name for name in names
+                  if not any(fnmatch.fnmatch(name, pattern)
+                             for pattern in declared))
 
 
 def _read_jsonl(path: Path, torn: list[str] | None = None) -> list[dict]:
@@ -1084,7 +1113,17 @@ def row_record(row: Row, result: RowResult, outcome: str | None = None,
         # meaningless. Only on a row that really took a credential path: a
         # discovery-only row made no model call, and a pin recorded beside one
         # reads as a model that ran.
-        pin = ((load_host_matrix().get(row.host) or {}).get("model") or {}).get("slug")
+        # THE ROW'S OWN PIN WINS over the host's, because since 2026-08-21 one
+        # row carries one (`claude-code-apply-native`, see the matrix). Reading
+        # only the host pin here would record the slug the row did NOT drive,
+        # against a cost figure ~60x the host pin's — the exact class of quiet
+        # lie a cost table exists to avoid.
+        host_entry = load_host_matrix().get(row.host) or {}
+        pin = ((host_entry.get("model") or {}).get("slug"))
+        for matrix_row in host_entry.get("rows") or []:
+            if matrix_row.get("id") == row.row_id:
+                pin = ((matrix_row.get("model") or {}).get("slug")) or pin
+                break
         if pin and entry["credential_mode"] in ("openrouter", "fallback"):
             entry["model"] = str(pin)
     version = cli_version(row.host or row.cli, image)

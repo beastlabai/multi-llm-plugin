@@ -80,11 +80,16 @@ run.output.delta   "[{"id": "S001", "title": "Bound the retry ladder", …}]"
 run.terminal.completed  text = the two glued together, with NO separator
 ```
 
-Feeding that terminal `text` to `extract_json_from_text` returns the **draft**
-(verified: `id: DRAFT`). Taking the deltas after the last `tool.result` returns
-the answer. `muse.py`'s tail-after-last-`tool.result` rule is the only thing
-between those two outcomes, and this row is the only test in the repo that would
-notice it being removed.
+Feeding that terminal `text` to `extract_json_from_text` now returns the
+**answer** (verified: `id: S001`), because the extractor takes the last document
+at every level; it used to return the draft. Taking the deltas after the last
+`tool.result` returns the answer too, so the two routes agree **on this
+capture** and the tail rule is no longer what separates them here. The rule
+still ships, and what it pins is narrower: a `tool.result` boundary is
+authoritative rather than inferred from document order — text from an earlier
+turn is never the answer, even when it is the last thing before the boundary and
+even when it is the only thing that parses. This row is still the only capture
+in the repo that exercises that boundary at all.
 
 ## Three cuts, three behaviours — and the ceiling underneath them
 
@@ -99,7 +104,7 @@ starting at 1873.
 | Row | Cut lands in | Attempts | Wall | Outcome |
 | --- | --- | --- | --- | --- |
 | `truncated` | `response.created` (60 B, the default) | 4 × 10 | **984 s** | terminal, no text, the 12-minute-ceiling diagnosis — and `classify_failure` is `None` |
-| `truncated-json-answer` | `response.output_item.done` (2100 B) | 10 | 70 s | terminal, and the salvaged text served as a **success** |
+| `truncated-json-answer` | `response.output_item.done` (2100 B) | 10 | 70 s | terminal, and the salvaged text used to be served as a **success** — refused since C8 (defect 4 below) |
 | `truncated-after-deltas` | `response.completed` (2000 B) | 1 | 5.1 s | terminal, partial text recovered and correctly refused |
 
 The canonical row's own words are the most useful thing in this directory:
@@ -131,8 +136,10 @@ is why it is not a fourth file.
 ## What this set found
 
 Five measured defects, recorded here rather than silently fixed — the fixtures
-pin today's behaviour, so each fix is a visible edit to both the adapter and this
-manifest. The fourth is the serious one.
+pinned the behaviour, so each fix was a visible edit to both the adapter and this
+manifest. The fourth is the serious one. **Four have since landed** and each
+entry below says which and how the same bytes now read; the fifth is still open
+and still pinned.
 
 1. **A rejected muse credential classifies as nothing.** `MuseProvider`
    deliberately adds `api error 401` and `api error 403` to
@@ -140,18 +147,27 @@ manifest. The fourth is the serious one.
    vendor text completely — the strings `401`, `API error` and `Incorrect API key
    provided` appear *nowhere* in the 17 KB capture — and writes its own gloss,
    *"your API key from META_API_KEY was rejected — update or unset it"*. That
-   matches none of the twelve patterns, so `classify_failure` returns `None`, the
-   failure is transport-shaped, and the executor spends its whole bounded retry
-   budget on a condition §7.2 makes terminal. The one-line fix is a marker for
-   muse's own wording (`was rejected`, or `api key from`), the way vibe's
-   `conversation context exceeds` was added.
+   matched none of the twelve patterns, so `classify_failure` returned `None`,
+   the failure was transport-shaped, and the executor spent its whole bounded
+   retry budget on a condition §7.2 makes terminal. **Fixed (C3), from these
+   bytes and no new ones**: `auth_error_patterns` gained `api key from` and
+   `update or unset it` — two independent anchors on that one sentence, so a
+   reworded half is still caught by the other — and the `auth-error` row's cell
+   now reads `auth_failed`. `was rejected` on its own was deliberately not
+   added: `vendor_text` drops muse's prompt-echoing payloads but keeps every
+   `run.output.delta`, so a pattern a model's own prose can write would fail
+   whole batches. Neither phrase occurs in any other row of this set.
 2. **Every muse vendor error outranks `invalid_model`.** muse prefixes what it
    does pass through with `API error <status>:`, and `\bapi error\b` is a member
    of `base.SERVER_ERROR_MARKERS`, which `classify_streams` consults **before**
    `INVALID_MODEL_MARKERS`. So the 404 — which is otherwise the best failure
-   shape in the set, keeping the vendor sentence and *naming the model* — lands
+   shape in the set, keeping the vendor sentence and *naming the model* — landed
    on `server_error`, a retryable rung, when the fix is a config edit. The 402
-   and 429 rungs are unaffected, because rate limits are checked first.
+   and 429 rungs are unaffected, because rate limits are checked first. **Fixed
+   (C2) in the base ladder rather than here**: `INVALID_MODEL_MARKERS` is now
+   consulted before `SERVER_ERROR_MARKERS` — a model-named 404 is strictly more
+   specific than "api error" — and the `invalid-model` row's cell reads
+   `invalid_model`.
 3. **A 5xx or a 429 costs four minutes before the harness sees a byte.** Ten
    internal provider attempts, 30 POSTs, 248 s, measured identically for both.
    muse narrates its own ladder, so the envelope is readable straight out of the
@@ -161,21 +177,40 @@ manifest. The fourth is the serious one.
    at 60 s**, ten attempts, 243 s of sleeping. That is muse's `internal_retries`
    envelope and it means `retries_rate_limit` is true for this CLI:
    re-dispatching a rate-limited muse slot at the executor level doubles a wait
-   that already ran for four minutes (§7.6(b) rule 6b).
-4. **A failed run's salvaged fragment is served as the answer whenever it
-   happens to parse.** `truncated-json-answer.stdout.txt` is a run that exited
+   that already ran for four minutes (§7.6(b) rule 6b). **Declared (C12)**:
+   `InternalRetryEnvelope(max_requests=40, max_wall_s=736.0,
+   retries_rate_limit=True)` — 40 because the canonical `truncated` row's own
+   sentence is *"4 failed attempts (40 provider requests)"*, and 736 s because
+   that is muse's own 12-minute ceiling, overshot to 12m16s. Read the budget
+   consequence the right way round: declaring `retries_rate_limit` **removes**
+   the harness's own rate-limit backoff for muse (rule 6(b),
+   `STOP_VENDOR_ALREADY_RETRIED`). It is a smaller retry budget, not a larger
+   one — the multiplication is what the rule exists to stop.
+4. **A failed run's salvaged fragment was served as the answer whenever it
+   happened to parse.** `truncated-json-answer.stdout.txt` is a run that exited
    **1** after ten attempts, with `run.terminal.failed` reading *"model failed
    after 10 attempts: stream ended before terminal event"* — and `parse_output`
-   returns `success: True` with the array. One guard causes it: the first branch
-   fails a non-completed run only `and not full`, so with any text present the
-   function falls through to `_direct_json(tail)` and returns before the
-   terminal state is consulted again. Blast radius, checked in both callers
+   returned `success: True` with the array. One guard caused it: the first branch
+   failed a non-completed run only `and not full`, so with any text present the
+   function fell through to `_direct_json(tail)` and returned before the
+   terminal state was consulted again. Blast radius, checked in both callers
    rather than assumed: **Lane A is safe by accident** — `llm_client`
    short-circuits on `returncode != 0` and never calls `parse_output` — but the
-   **subagent executor is not**, because it documents *"exit code is evidence,
+   **subagent executor was not**, because it documents *"exit code is evidence,
    never the verdict"* and accepts a schema-valid result from a non-zero exit
-   with only an annotation. The fix is one clause: fail when the terminal is not
-   `completed`, whatever text was salvaged.
+   with only an annotation. **Fixed (C8), in the adapter and nowhere else**: the
+   `and not full` conjunct is gone, so terminal state comes before salvaged text
+   *in one direction only* — a recorded non-`completed` terminal fails the run
+   whatever parsed, while a **missing** terminal record still parses, because
+   the absence of a verdict is not a verdict. The row's `success` cell now reads
+   `false` with muse's own reason in `error_contains`; `raw` stays the whole
+   stream, so Lane B lands it on rung 5 (`unparseable_result`) rather than rung
+   4. `utils/subagent_executor.py` is byte-identical: giving *it* the exit-code
+   check `llm_client` has by accident was rejected, not deferred — that would
+   change how every adapter's exit code is read to fix one adapter, and the
+   evidence condemning this run is the terminal record only this adapter parses.
+   `tests/test_muse_terminal_state.py` drives both directions through the
+   executor's own parse path.
 5. **A sixteen-minute transport failure classifies as nothing.** The default
    truncation ends with `transport_eof_before_terminal_event` and an explicit
    *"check network connectivity (VPN/proxy) and retry"* — and

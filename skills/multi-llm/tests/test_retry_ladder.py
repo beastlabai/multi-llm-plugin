@@ -145,6 +145,64 @@ class TestBudgetExhaustedRefusesToSpawn:
         assert ladder.stop_reason == STOP_BUDGET
         assert ladder.spawns == 0, "rule 4 is a pre-dispatch admission test"
 
+    def test_muses_real_736_s_envelope_refuses_a_slot_that_cannot_hold_it(self):
+        """Rule 4 re-run against the **shipped** envelope, not the synthetic one.
+
+        ``_envelope`` above is structural on purpose — the ladder must stay free
+        of provider imports — but that makes it the wrong witness for one
+        question: does the number an adapter really declares compose with this
+        rule? muse's does. It declares ``max_wall_s = 736.0``, its own
+        12-minute wall-clock ceiling measured at 12m16s over four rounds of a
+        ten-attempt provider ladder (``tests/fixtures/muse/``'s ``truncated``
+        row, 40 provider requests), and that is larger than the 600 s slot
+        muse's own ``default_timeout`` hands out. So the admission test refuses
+        before anything is spawned, rather than a child being killed part-way
+        through a twelve-minute chain the harness cannot see.
+        """
+        from utils.providers.muse import MuseProvider
+
+        envelope = MuseProvider().internal_retries
+        assert envelope is not None and envelope.max_wall_s == 736.0
+
+        clock = Clock()
+        ladder = _ladder(clock, timeout=600.0, retries=1, envelope=envelope)
+
+        assert ladder.next_attempt() is None
+        assert ladder.stop_reason == STOP_BUDGET
+        assert ladder.spawns == 0, "rule 4 is a pre-dispatch admission test"
+
+    def test_muses_real_envelope_still_admits_a_slot_that_can_hold_it(self):
+        """The other direction, so 736 is a bound and not a blanket refusal."""
+        from utils.providers.muse import MuseProvider
+
+        clock = Clock()
+        ladder = _ladder(
+            clock,
+            timeout=900.0,
+            retries=1,
+            envelope=MuseProvider().internal_retries,
+        )
+
+        assert ladder.next_attempt() == pytest.approx(900.0)
+        assert ladder.spawns == 1
+
+    def test_gooses_real_envelope_declares_no_wall_and_restricts_nothing(self):
+        """goose's ~7 s is transport against a stub, so it declares ``None``.
+
+        Rule 6(c) then performs no admission test at all — the honest posture
+        the dataclass documents, because inventing a bound from a localhost
+        round trip "would refuse attempts that had budget for themselves".
+        """
+        from utils.providers.goose import GooseProvider
+
+        envelope = GooseProvider().internal_retries
+        assert envelope is not None and envelope.max_wall_s is None
+
+        clock = Clock()
+        ladder = _ladder(clock, timeout=10.0, retries=1, envelope=envelope)
+
+        assert ladder.next_attempt() == pytest.approx(10.0)
+
     def test_it_stops_before_a_LATER_attempt_that_would_not_fit(self):
         clock = Clock()
         ladder = _ladder(
@@ -199,6 +257,57 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         assert "4" in action.reason
         assert ladder.next_attempt() is None
         assert ladder.spawns == 1, "≤ 3 backoffs would have made this 4 requests → 20"
+
+    @pytest.mark.parametrize(
+        "provider_module,provider_class,max_requests",
+        [
+            ("utils.providers.muse", "MuseProvider", 40),
+            ("utils.providers.gemini", "GeminiProvider", 10),
+            ("utils.providers.goose", "GooseProvider", 8),
+        ],
+    )
+    def test_the_real_declared_envelopes_get_no_second_dispatch(
+        self, provider_module, provider_class, max_requests
+    ):
+        """Rule 6(b) re-run against the **shipped** envelopes (C12).
+
+        All three CLIs were measured retrying a fail-forever 429 themselves —
+        muse ten provider attempts over 248 s (`tests/fixtures/muse/`'s
+        ``rate-limit`` row, the 5xx row's envelope to two decimals), gemini ten
+        requests over 243 s (``tests/fixtures/gemini/``'s ``rate-limit`` row:
+        nine ``Attempt N failed with status 429`` lines and a tenth that gives
+        up), goose four attempts at the real turn inside 8 requests / 7.2 s
+        (``tests/fixtures/goose/``'s ``rate-limit`` row). Declaring that removes
+        the harness's own rate-limit backoff for them: a **smaller** retry
+        budget, not a larger one. Before the declaration a rate-limited slot got
+        up to ``MAX_RATE_LIMIT_BACKOFFS`` further identical dispatches of a
+        chain the CLI had already run — goose's 8 requests turned into 32,
+        gemini's four-minute chain and muse's twelve-minute one re-dispatched
+        until the slot's deadline ran out — which is exactly the multiplication
+        this rule exists to prevent.
+        """
+        import importlib
+
+        envelope = getattr(
+            importlib.import_module(provider_module), provider_class
+        )().internal_retries
+        assert envelope is not None
+        assert envelope.retries_rate_limit is True
+        assert envelope.max_requests == max_requests
+
+        clock = Clock()
+        ladder = _ladder(clock, timeout=1800.0, retries=1, envelope=envelope)
+
+        assert ladder.next_attempt() is not None
+        action = ladder.record(STATUS_RATE_LIMITED)
+
+        assert action.retry is False
+        assert action.delay == 0.0
+        assert ladder.stop_reason == STOP_VENDOR_ALREADY_RETRIED
+        # The reason names the declared envelope, per §7.5 rule 6(b).
+        assert str(max_requests) in action.reason
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1, "one dispatch, and no identical re-dispatch"
 
     def test_an_adapter_that_does_NOT_retry_429s_keeps_the_harness_backoff(self):
         """codex: one request, then ``exceeded retry limit`` — so ≤ 3 applies."""

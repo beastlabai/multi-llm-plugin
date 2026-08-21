@@ -74,6 +74,7 @@ from utils.cli_common import (
 from utils.git_utils import get_project_root
 from utils.output_handler import archive_file, get_output_paths, get_phase_dir
 from utils.plan_updater import TASKS_FILE_REFERENCE_PATTERN
+from utils.provider_registry import set_run_anchor
 from utils.stream_bootstrap import bootstrap_streams
 from utils.subagent_prompts import build_task_generation_prompt
 from utils.subagent_tasks import (
@@ -522,6 +523,11 @@ def run_generate_tasks(
         print(f"ERROR: Plan file not found: {args.plan_file}", file=sys.stderr)
         print(f"       Resolved path: {plan_path}", file=sys.stderr)
         return EXIT_ERROR
+
+    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # and before any provider read that decides routing. Ahead of `_run_gate`,
+    # which is the first thing on this path that can read config.
+    set_run_anchor(str(plan_path))
 
     # Nothing is produced before the gate: no phase dir, no task file, no state
     # mutation (D6a).

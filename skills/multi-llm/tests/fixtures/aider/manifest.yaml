@@ -72,15 +72,28 @@ rows:
       (0.2 s → 32 s, three HTTP attempts per aider attempt = 27 requests) and
       gives up at 78 s, still exiting 0. **Byte-identical** to the zero-byte
       response (failserver `--mode empty`), which is why that shape is not a
-      second committed file — see README.
+      second committed file — see README. This row and `exit-zero-failure` are
+      the two C7 pins: both captures still carry aider's "down or overloaded"
+      gloss (asserted below), and both classify on litellm's words instead of
+      on it.
     expect:
       success: false
       error_contains: ["No JSON found in aider output"]
-      raw_contains: ["litellm.InternalServerError", "Connection error."]
-      # NOT connection_error: aider's own gloss for a 5xx is "The API provider's
-      # servers are down or overloaded", and `overloaded` is a member of
-      # base.rate_limit_patterns, which is consulted before the connection table.
-      classify_failure: "rate_limited"
+      raw_contains:
+        - "litellm.InternalServerError"
+        - "Connection error."
+        # The gloss is still IN the bytes — the C7 fix is an excision at
+        # classification time, not an edited capture. Drop this needle and the
+        # row stops testing the excision at all.
+        - "The API provider's servers are down or overloaded."
+      # `connection_error` since C7, `rate_limited` before it: `overloaded`, in
+      # aider's own gloss for a 5xx, is a base.rate_limit_patterns member and the
+      # rate table is consulted before the connection table.
+      # `AiderProvider._ADAPTER_GLOSS_LINES` excises that one runner-written line
+      # before the rule runs, leaving litellm's own "Connection error." to
+      # answer. Removing the excision puts this cell straight back on
+      # rate_limited, which is what makes the row a pin rather than a record.
+      classify_failure: "connection_error"
 
   ephemeral-only:
     stdout: ephemeral-only.stdout.txt
@@ -155,17 +168,27 @@ rows:
       failserver `--mode 500`, fail-forever. Exit **0** on a run that produced no
       answer at all — the shape §6.2 names — and the whole §6.1.1 envelope in one
       capture: 27 HTTP requests (9 aider attempts × litellm's own 3), exponential
-      backoff 0.2 → 32 s, 78.8 s wall. It classifies `rate_limited` rather than
-      `server_error` or `runner_error`, and that ordering is deliberate: aider's
-      gloss for a 5xx contains `overloaded`, a base rate-limit pattern, and the
-      auth/rate step precedes both the server table and the exit-0 markers.
+      backoff 0.2 → 32 s, 78.8 s wall. It classified `rate_limited` until C7 —
+      aider's gloss for a 5xx contains `overloaded`, a base rate-limit pattern,
+      and the auth/rate step precedes both the server table and the exit-0
+      markers. `AiderProvider._ADAPTER_GLOSS_LINES` now excises that one gloss
+      line before the rule runs, so the verdict is `runner_error`: the exit-0
+      marker `litellm.*Error`, consulted last. **Not** `server_error`, measured
+      and recorded rather than assumed — base.SERVER_ERROR_MARKERS spells the
+      phrase with separators (`internal server error`) while litellm prints the
+      class name `InternalServerError`, and this run carries no bare `500`.
+      Lane A puts `server_error` and `runner_error` on the same rung 4, so the
+      residual is the `Reason:` line's specificity, not the ladder.
     expect:
       success: false
       raw_contains:
         - "litellm.InternalServerError"
         - "The server had an error while processing your request."
         - "Retrying in 32.0 seconds..."
-      classify_failure: "rate_limited"
+        # Still in the bytes, as in `truncated`: C7 excises the gloss at
+        # classification time and never touches a capture.
+        - "The API provider's servers are down or overloaded."
+      classify_failure: "runner_error"
 
   stdout-error:
     not_applicable: >-

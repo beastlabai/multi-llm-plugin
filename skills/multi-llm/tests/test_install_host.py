@@ -553,6 +553,34 @@ class TestCheckAssertions:
         assert "auth=ok" in row.detail and "version=1.2.3" in row.detail
         assert "nested_exec=" in row.detail
 
+    def test_row_five_prints_the_adapters_own_metadata_readout(
+        self, skill, env, project, monkeypatch
+    ):
+        """M13 (§5.2): the readout is demoted out of the auth path, not deleted.
+
+        cursor-agent's `about --format json` reports a plan tier no other probe
+        reports, and `--check` is the surface that shows it. It is *context*:
+        it never changes the row's verdict, which is what the second half
+        asserts by flipping the readout on and off over the same facts.
+        """
+        monkeypatch.setattr(hi, "find_uv", lambda: "/usr/bin/uv")
+        monkeypatch.setattr(hi, "runner_available", lambda provider: True)
+        facts = {"auth": "ok", "version": "1.2.3", "problem": ""}
+        monkeypatch.setattr(hi, "probe_runner", lambda spec, **kw: dict(facts))
+        without = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
+
+        monkeypatch.setattr(
+            hi, "probe_runner",
+            lambda spec, **kw: dict(facts, metadata="plan-tier=pro"),
+        )
+        row = check(self.HOST, skill, env, project).row(hi.ROW_ENVIRONMENT)
+
+        assert row.ok is without.ok is True, row.detail
+        assert "plan-tier=pro" in row.detail
+        assert "plan-tier" not in without.detail
+        # The verdict is the same sentence either way; only the facts grew.
+        assert "auth=ok" in row.detail and "state=" in row.detail
+
     def test_the_runner_probe_reuses_the_init_detection(self):
         """One detector, not two: `--init` and `--check` ask the same question."""
         import init_config

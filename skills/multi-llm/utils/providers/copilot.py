@@ -94,6 +94,7 @@ slot.
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -102,8 +103,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    REASONING_LADDER,
     InternalRetryEnvelope,
     LLMProvider,
+    ReasoningLadder,
     StructuredSchema,
     split_reasoning_effort,
 )
@@ -111,10 +114,14 @@ from .base import (
 #: Levels accepted by ``copilot --effort`` at 1.0.80, measured one at a time.
 #: All seven are accepted by the CLI; which of them a given backend honours is
 #: server-side and model-dependent, which is why this is a parse-time whitelist
-#: rather than a promise about behaviour.
-REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+#: rather than a promise about behaviour — and why the declaration is the whole
+#: ladder with no local spelling and no per-model cap: the CLI narrows nothing
+#: locally, so there is nothing measured for this adapter to narrow either.
+EFFORT_LADDER = ReasoningLadder(
+    provider="copilot",
+    rungs=REASONING_LADDER,
 )
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 #: §3.1's token-limit ladder, rung 3 — the conservative floor.
 #:
@@ -214,23 +221,61 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
     "GH_HOST",
 )
 
+#: The opening of a ``user.message`` record, matched against a line ``json.loads``
+#: REJECTED — i.e. a record the stream was cut inside of. Anchored at the line
+#: start and requiring the key/value pair to be complete, so it names the echoed
+#: record and nothing else; both spellings the committed captures carry
+#: (``{"type":"user.message",`` and ``{"type": "user.message",``) match. Used by
+#: :meth:`CopilotProvider.vendor_text` only, and only to REMOVE a line.
+_CUT_USER_MESSAGE = re.compile(r'^\{\s*"type"\s*:\s*"user\.message"\s*[,}]')
+
 
 def token_limits_for(model: str) -> Tuple[int, int]:
-    """§3.1's ladder for one model: catalog, else the conservative floor.
+    """The pair for one model: the committed catalog, else the floor. Full stop.
 
     Returns ``(max_prompt_tokens, max_output_tokens)`` **for the model handed
     in**, never a process-wide constant and never a pair resolved for a
-    different slug.
+    different slug. Two inputs decide it and there is no third: the per-slug
+    entry in :data:`_MODEL_CATALOG` if the slug is in it, and
+    :data:`FLOOR_MAX_PROMPT_TOKENS` / :data:`FLOOR_MAX_OUTPUT_TOKENS` if it is
+    not. **There is no config override, and this is not a gap left for later**
+    (C9).
 
-    Rung 1 of §3.1's ladder — per-provider override keys in ``providers.yaml`` —
-    is deliberately **not** implemented, and the reason is a property of the
-    config loader rather than a shortcut. §8 item 3 fixes a provider block at
-    exactly ``default_timeout`` / ``max_concurrent`` / ``models``, and
-    ``provider_registry`` **merges an undeclared key and then ignores it**, so a
-    ``max_prompt_tokens:`` entry would read as a supported setting and be a
-    silent no-op — the same footgun §5.1 refuses for a provider-level ``env:``
-    block. A real override is a typed config feature with its own schema and
-    tests, not a line in this table.
+    §3.1's draft opened with a rung above these two — ``max_prompt_tokens:`` /
+    ``max_output_tokens:`` keys in the copilot block of ``providers.yaml``. The
+    affordance is **removed** rather than deferred, because a documented key
+    that silently does nothing is worse than no key at all: §8 item 3 fixes a
+    provider block at exactly ``default_timeout`` / ``max_concurrent`` /
+    ``models``, and ``provider_registry`` **merges an undeclared key and then
+    ignores it**, so such an entry would read as a supported setting and be a
+    no-op — the footgun §5.1 refuses for a provider-level ``env:`` block. The
+    removal costs nothing a user can reach: the key appears in no
+    ``providers.yaml``, in no schema and in no instruction text, so there is
+    nothing shipped to break, and an override key would be the only member of a
+    provider block that is none of the three above.
+
+    **The alternative, recorded as rejected rather than held open**, so the next
+    reader finds a decision instead of a gap. Implementing it means a typed
+    schema entry, a validation error for a bad value, a merge order defined
+    against this catalog, per-provider-versus-per-model semantics, and a test
+    asserting a configured pair reaches ``COPILOT_PROVIDER_MAX_PROMPT_TOKENS``
+    and ``COPILOT_PROVIDER_MAX_OUTPUT_TOKENS`` in :meth:`CopilotProvider.get_env`'s
+    output. That is a typed config feature, and copilot is the only adapter in
+    the registry that declares a token budget at all — so it would ship with
+    exactly one user, which is what the decision refuses.
+
+    **One condition reopens it and nothing else: a second adapter in the
+    registry declaring a token budget.** A user typing the key is *not* that
+    condition — the answer to a typo is to make an unknown provider-block key a
+    config error naming the three that exist, the way ``driver:`` and
+    ``git_env:`` already reject one, and that is a compatibility change with its
+    own decision to make, not a ride-along on this one. It is deliberately not
+    built here.
+
+    ``tests/test_providers.py::TestCopilotHasNoConfigurableTokenLimits`` pins the
+    absence: the same pair comes back for a model with and without a
+    ``providers.yaml`` block carrying those keys, so the key cannot be re-added
+    half-way.
     """
     known = _MODEL_CATALOG.get(model)
     if known is None:
@@ -514,6 +559,76 @@ class CopilotProvider(LLMProvider):
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         # Drop the trailing `-p <prompt>` PAIR, not just the prompt.
         return cmd[:-2], prompt
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The NDJSON stream minus the ``user.message`` record that echoes us.
+
+        Measured on the committed captures: ``success.jsonl`` is 65 KB, of which
+        **30 412 bytes are our own prompt**, carried in a non-ephemeral
+        ``user.message`` record's ``data.content``. ``classify_failure`` read all
+        of it, so a green copilot run classified ``rate_limited`` — the plan
+        under review says "rate-limit patterns … declared per adapter" — and
+        ``rate_limited`` is one of the two classes
+        ``subagent_executor._classify_failed_run`` forwards to the retry ladder.
+        Nothing pinned that until this defect was written up: copilot shipped
+        with no manifest.
+
+        The reduction is a line filter, so it removes and never rewrites: a
+        record whose ``type`` is ``user.message`` is dropped, every other line is
+        passed through byte-identically, including any non-JSON noise.
+        ``session.error`` — the only channel copilot reports a failure on, and
+        the one carrying the vendor's 401/429/404/context-length wording — is on
+        the other side of the filter, as is every ``assistant.message``.
+
+        **The cut-record case, which a whole-line parse cannot see.** A stream
+        killed mid-flight ends in a partial line, and the echo is one record of
+        61 751 bytes — by far the largest in the stream, so a random cut lands
+        *inside* it more often than anywhere else. ``json.loads`` rejects that
+        fragment, and passing it through would put the prompt bytes back in the
+        haystack on exactly the failed-run path this hook exists for. So an
+        unparseable line is dropped too, but **only** when it opens as this one
+        record does — :data:`_CUT_USER_MESSAGE`, anchored at the line start and
+        matching ``{"type": "user.message"`` in both the compact and the spaced
+        spelling the committed captures use. Nothing else about a rejected line
+        is inspected: a fragment of any other record, and any line that merely
+        mentions the string later on, is still passed through, and a cut so
+        early that the opener itself is incomplete carries no prompt bytes to
+        expose. The rule is still removal-only, and a fragment is never parsed
+        as evidence, so the degrade-to-input contract holds.
+        ``truncated-mid-echo.jsonl`` is the committed capture of this shape;
+        ``truncated.jsonl`` cuts at a record boundary and is unaffected.
+
+        ``parse_output`` already applied the same type filter for the same
+        reason (a ``user.message`` carries our prompt in the same
+        ``data.content`` field an ``assistant.message`` uses); this is that rule
+        reaching the classifier, which never had it.
+        """
+        try:
+            if not stdout or "user.message" not in stdout:
+                return stdout, stderr
+            kept: List[str] = []
+            dropped = False
+            for line in stdout.split("\n"):
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        record = json.loads(stripped)
+                    except ValueError:
+                        # A cut record. Drop it only if its opener names the
+                        # echo; anything else a parse rejected is passed on.
+                        if _CUT_USER_MESSAGE.match(stripped):
+                            dropped = True
+                            continue
+                        record = None
+                    if isinstance(record, dict) and record.get("type") == "user.message":
+                        dropped = True
+                        continue
+                kept.append(line)
+            if not dropped:
+                return stdout, stderr
+            return "\n".join(kept), stderr
+        except (AttributeError, TypeError, ValueError):
+            return stdout, stderr
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """§3.4's two-step unwrap, keyed on record **type** rather than ephemerality.

@@ -92,12 +92,22 @@ Three measured defects, recorded here rather than silently fixed.
    member of `base.SERVER_ERROR_MARKERS` either (the bare `500: ` prefix pi adds
    is not a status-code pattern). Three of pi's five retryable failures are
    therefore transport-shaped to the ladder.
-3. **`parse_output` ignores stderr entirely.** Every failure row here returns the
-   same two words — `Empty output` — while the vendor's full JSON error object
-   sits unused on the other stream. The operator-facing message for a 401, a 429
-   and a 404 is identical and says nothing. `PiProvider.parse_output` takes
-   `stderr` as a parameter and never reads it; folding the first line of stderr
-   into the error string is a small, visible fix.
+3. **`parse_output` ignored stderr entirely.** **FIXED (C4).** Every failure row
+   used to return the same two words — `Empty output` — while the vendor's full
+   JSON error object sat unused on the other stream, making the operator-facing
+   message for a 401, a 429 and a 404 identical and uninformative.
+   `PiProvider.describe_failure` now strips the bare `NNN: ` HTTP-status prefix,
+   parses the remainder as the vendor's JSON object and reports its `message`
+   with its `code` and the stripped status (4 rows: `auth-error`,
+   `invalid-model`, `rate-limit`, `server-error`); where the remainder is not
+   JSON it reports the stderr text verbatim, which is already the whole
+   diagnosis (3 rows: `error-envelope`, `truncated`, `zero-body`).
+   `parse_output`'s error branch names the same text. **The three rows with
+   nothing on either channel keep `Empty output` and return `None` from
+   `describe_failure`** — `context-overflow` (pi's silent 400, recorded as an
+   unfixable measurement in C11), plus `empty` and `exit-zero-failure`, both
+   byte-identical to it. That is the measurement, not a gap: nothing is
+   invented from an exit code.
 
 ## Reproducing
 

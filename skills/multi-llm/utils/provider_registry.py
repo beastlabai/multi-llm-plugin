@@ -158,9 +158,24 @@ def set_run_anchor(path: Union[str, Path]) -> None:
        means something multi-llm does not model is driving it, and failing
        loudly beats interleaving two configs. Re-setting to the *same* path is a
        no-op (``full``'s per-phase pre-flight does exactly that).
+
+    **Normalization is this function's job, not the call sites'.** The six
+    pre-flights hand over what they already had — one ``os.path.realpath``, one
+    ``Path(...).resolve()``, one ``os.path.abspath``, and three more that pass
+    whichever of those their own path resolution produced. Invariant 2 compares
+    *strings*, so under a symlinked plan directory ``abspath`` and ``realpath``
+    are two different anchors for one file, and a ``full`` run pinned the link
+    spelling at phase 1 and re-pointed it to the real one at phase 5 — raising
+    mid-run. Resolving here makes "the same path" mean the same file, which is
+    what invariant 2 already means to say; two of the three original pinners
+    realpath'd already, so this is the majority behaviour rather than a fourth
+    spelling. **The one behaviour consequence:** :func:`_anchor_start_dir`
+    starts git and config discovery from the anchor's directory, so a plan
+    reached through a symlink now discovers from the real directory — the
+    directory ``ask`` and ``code-review`` already anchored at.
     """
     global _RUN_ANCHOR, _config, _config_key
-    resolved = os.path.abspath(str(path))
+    resolved = os.path.realpath(str(path))
     if _RUN_ANCHOR == resolved:
         return
     if _RUN_ANCHOR is not None:
@@ -1084,6 +1099,12 @@ def host_default_runner(
     provider = get_provider(provider_name)
     if provider is None:
         return None
+    # M10 (§5.1) — a **bool** consumer, deliberately left alone. Tier resolution
+    # picks a runner spec; it renders no sentence to a human, so the typed
+    # `describe_availability()` report has nothing to add here. A logged-out or
+    # too-old CLI must still resolve — it is refused (or not) at preflight,
+    # carrying the CLI's own message, never by silently disappearing from a
+    # picker (D3c: installed is not authenticated).
     try:
         if not provider.is_available():
             return None

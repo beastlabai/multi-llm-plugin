@@ -209,18 +209,29 @@ rows:
     notes: >-
       failserver `--mode 401`. **One** request — no retry, terminal — and the
       upstream wording survives verbatim into both `run_result.text` and the
-      stderr copy. It still classifies `runner_error` rather than `auth_failed`:
-      OpenAI's own 401 sentence ("Incorrect API key provided: …") matches none of
-      `base.auth_error_patterns`' ten entries and none of cline's added
-      `user not found`, so the run falls all the way through to the exit-0
-      marker. Recorded, not fixed — see the README.
+      stderr copy. As captured it classified `runner_error` rather than
+      `auth_failed`: OpenAI's own 401 sentence ("Incorrect API key provided: …")
+      matched none of `base.auth_error_patterns`' ten entries and none of cline's
+      added `user not found`, so the run fell all the way through to the exit-0
+      marker and a credential failure sat on a RETRYABLE rung.
+      **C3 fixed it from this row's own bytes**: `incorrect api key` is now a
+      cline `auth_error_patterns` entry, and auth is consulted before the
+      marker (§7.2 step 4 vs step 6), so the cell below reads `auth_failed`.
+      This is cline's SECOND measured auth wording, not a restatement of the
+      first — `user not found` came from 3.0.39 with an invalid
+      OPENROUTER_API_KEY, where cline exited **0** and the message named no auth
+      word at all. cline glosses neither: both are the upstream provider's
+      sentence passed through, which is why the pattern set needs one entry per
+      upstream rather than one per CLI. Checked against every capture in this
+      directory — the phrase occurs here and nowhere else, so no other cell
+      moves.
     expect:
       success: false
       error_contains: ["Incorrect API key provided"]
       raw_contains:
         - "Incorrect API key provided: sk-stub***"
         - '"finishReason":"error"'
-      classify_failure: "runner_error"
+      classify_failure: "auth_failed"
 
   rate-limit:
     stdout: rate-limit.stdout.txt

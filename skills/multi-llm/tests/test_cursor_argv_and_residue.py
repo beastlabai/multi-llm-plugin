@@ -5,12 +5,17 @@ Three separate contracts live here, all of them cursor-only:
 1. **The argv.** ``cursor-agent --print --trust --mode ask --output-format json
    --model <m> <prompt>`` — ``-f`` (``--force``/``--yolo``, "Run Everything") is
    gone, and the two flags that replace it are inseparable (atomic group **A5**).
-2. **The gate.** cursor declares ``version_cmd = ()`` / ``min_version = ""``, so
-   nothing about it is version-gated. Both tokens are therefore confirmed against
-   the binary's own ``--help`` before every dispatch, and an unconfirmed token
-   refuses the slot as ``version-too-low`` naming the flags — never a degraded
-   argv, because the only degradation available *is* the write bypass this
-   change removes.
+2. **The gate**, which since M14 is the *shared* one in
+   ``utils/providers/base.py`` rather than a copy in the adapter. cursor declares
+   ``version_cmd = ("cursor-agent", "--version")`` (M14's measurement) but no
+   ``min_version``: no floor has been measured for these two flags, so the
+   binary's own ``--help`` is what confirms them, once per process, before every
+   dispatch. An unconfirmed token refuses the slot as ``version-too-low`` naming
+   the flags — never a degraded argv, because the only degradation available
+   *is* the write bypass this change removes. The tests below therefore patch
+   ``base.read_help_tokens``, the one implementation, and the load-bearing
+   posture they assert (unconfirmed ⇒ refuse; no runnable binary ⇒ no refusal)
+   now lives in ``LLMProvider.missing_flags``.
 3. **The residue.** ``--trust`` writes a durable marker and ``--model`` rewrites
    the user's default model, both in the user's own profile. Neither is ours to
    keep, so both are snapshotted before the spawn and restored after.
@@ -53,6 +58,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.providers import base as base_module
 from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.base import PROFILE_GENERATE
 from utils.providers.cursor_agent import (
@@ -93,10 +99,10 @@ def provider():
 @pytest.fixture(autouse=True)
 def _clean_module_state():
     """No cached help read and no armed guard leaks between tests."""
-    cursor_agent_module.reset_flag_cache()
+    base_module.reset_flag_gate_cache()
     cursor_agent_module.reset_side_effect_guard()
     yield
-    cursor_agent_module.reset_flag_cache()
+    base_module.reset_flag_gate_cache()
     cursor_agent_module.reset_side_effect_guard()
 
 
@@ -104,7 +110,7 @@ def _clean_module_state():
 def confirmed(monkeypatch):
     """Both tokens confirmed, with no binary and no spawn."""
     monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-    monkeypatch.setattr(cursor_agent_module, "_help_flag_tokens", lambda _b: CONFIRMED)
+    monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: CONFIRMED)
 
 
 def _write_help_binary(
@@ -174,7 +180,8 @@ class TestFlagGate:
     def test_missing_mode_refuses_the_slot(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
         monkeypatch.setattr(
-            cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset({"--print", "--trust"})
+            base_module, "read_help_tokens",
+            lambda _b, **_kw: frozenset({"--print", "--trust"}),
         )
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
             provider.build_command("p", "m")
@@ -186,7 +193,8 @@ class TestFlagGate:
     def test_missing_trust_refuses_the_slot(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
         monkeypatch.setattr(
-            cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset({"--print", "--mode"})
+            base_module, "read_help_tokens",
+            lambda _b, **_kw: frozenset({"--print", "--mode"}),
         )
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
             provider.build_command("p", "m")
@@ -194,7 +202,7 @@ class TestFlagGate:
 
     def test_undecidable_help_refuses_rather_than_degrading(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-        monkeypatch.setattr(cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset())
+        monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: frozenset())
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
             provider.build_command("p", "m")
         assert set(excinfo.value.missing) == set(CURSOR_REQUIRED_FLAGS)
@@ -202,7 +210,7 @@ class TestFlagGate:
     def test_a_refusal_never_emits_a_partial_argv(self, provider, monkeypatch):
         """The refusal must not be reachable *around*: no argv comes back at all."""
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-        monkeypatch.setattr(cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset({"--trust"}))
+        monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust"}))
         try:
             cmd = provider.build_command("p", "m")
         except CursorFlagsUnconfirmed:
@@ -211,7 +219,7 @@ class TestFlagGate:
 
     def test_help_is_read_from_the_real_binary(self, tmp_path):
         binary = _write_help_binary(tmp_path / "cursor-agent", REAL_HELP_EXCERPT)
-        tokens = cursor_agent_module._help_flag_tokens(str(binary))
+        tokens = base_module.read_help_tokens(str(binary))
         assert "--trust" in tokens
         assert "--mode" in tokens
         assert "--output-format" in tokens
@@ -219,26 +227,26 @@ class TestFlagGate:
     def test_model_does_not_confirm_mode(self, tmp_path):
         """``--model`` must not be read as ``--mode``: whole-word tokens only."""
         binary = _write_help_binary(tmp_path / "cursor-agent", "  --model <model>  Model to use\n")
-        tokens = cursor_agent_module._help_flag_tokens(str(binary))
+        tokens = base_module.read_help_tokens(str(binary))
         assert "--model" in tokens
         assert "--mode" not in tokens
 
     def test_nonzero_help_exit_is_unsupported(self, tmp_path):
         binary = _write_help_binary(tmp_path / "cursor-agent", REAL_HELP_EXCERPT, exit_code=1)
-        assert cursor_agent_module._help_flag_tokens(str(binary)) == frozenset()
+        assert base_module.read_help_tokens(str(binary)) == frozenset()
 
     def test_empty_help_is_unsupported(self, tmp_path):
         binary = _write_help_binary(tmp_path / "cursor-agent", "")
-        assert cursor_agent_module._help_flag_tokens(str(binary)) == frozenset()
+        assert base_module.read_help_tokens(str(binary)) == frozenset()
 
     def test_missing_binary_is_unsupported(self, tmp_path):
-        assert cursor_agent_module._help_flag_tokens(str(tmp_path / "nope")) == frozenset()
+        assert base_module.read_help_tokens(str(tmp_path / "nope")) == frozenset()
 
     def test_one_help_spawn_per_binary_per_process(self, tmp_path):
         counter = tmp_path / "spawns"
         binary = _write_help_binary(tmp_path / "cursor-agent", REAL_HELP_EXCERPT, counter=counter)
         for _ in range(4):
-            assert "--trust" in cursor_agent_module._help_flag_tokens(str(binary))
+            assert "--trust" in base_module.read_help_tokens(str(binary))
         assert counter.read_text().strip() == "1"
 
     def test_absent_cli_renders_argv_without_a_probe(self, provider, monkeypatch):
@@ -250,9 +258,9 @@ class TestFlagGate:
         """
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: None)
         monkeypatch.setattr(
-            cursor_agent_module,
-            "_help_flag_tokens",
-            lambda _b: pytest.fail("no help probe may run without a binary"),
+            base_module,
+            "read_help_tokens",
+            lambda _b, **_kw: pytest.fail("no help probe may run without a binary"),
         )
         assert provider.build_command("the prompt", "gpt-5") == EXPECTED_ARGV
 
@@ -261,9 +269,9 @@ class TestFlagGate:
         ghost = tmp_path / "cursor-agent"  # never created
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: str(ghost))
         monkeypatch.setattr(
-            cursor_agent_module,
-            "_help_flag_tokens",
-            lambda _b: pytest.fail("no help probe may run without a runnable binary"),
+            base_module,
+            "read_help_tokens",
+            lambda _b, **_kw: pytest.fail("no help probe may run without a runnable binary"),
         )
         assert provider.build_command("the prompt", "gpt-5") == EXPECTED_ARGV
 
