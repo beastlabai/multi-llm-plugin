@@ -72,6 +72,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
 6. **Run Verification**: Execute `pnpm typecheck` after all fixes
 7. **Generate Report**: Create `{prefix}_applied_fixes.md` with results
 8. **Update Plan**: Add "Code Fixes Applied" section to plan file
+9. **Mark Phase Completed**: Record `apply-code-fixes` in `state.json` — **only** when every batch was applied and verified. See step 10.
 
 ## Output Files
 
@@ -463,6 +464,23 @@ See: [Applied Fixes Report](./my-feature/my-feature_applied_fixes.md)
 <!-- CODE_FIXES_APPLIED_END -->
 ```
 
+### 10. Mark Phase Completed
+
+**Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.5, and step 7's verification run. Then mark the apply-code-fixes phase as completed in state.json:
+
+```bash
+uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --mark-completed
+```
+
+**Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.5), or an interrupted run. The phase must stay *incomplete* in those cases, because that record is what tells a later `--resume`, `--full` run or grader that the fixes were actually applied. A stopped loop simply never reaches this step; there is nothing else to do to leave the phase open.
+
+Two notes on the word this writes:
+
+- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that steps 5.1 and 5.7 pass to `util prior-changes`. Both spellings are deliberate; do not "unify" them.
+- It is the same word `--exec-subagents` records when its executor finalizes, so the native loop and the Python executor cannot drift apart. Under `--exec-subagents` the executor has already done this and there is no separate command to run.
+
+This ensures subsequent phases (and `check_workflow_prerequisites`) recognize that the code fixes have been applied.
+
 **Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
 
 ---
@@ -576,7 +594,8 @@ For needs-human-decision items:
 4. Runs verification: pnpm typecheck && pnpm lint:fix
 5. Generates summary report
 6. Updates plan file with results
-7. Reports completion with file paths
+7. Marks the phase completed (every batch was applied and verified)
+8. Reports completion with file paths
 ```
 
 ---

@@ -8,11 +8,35 @@
 # what bounds the run, and how its output is read.
 #
 # Same provenance key as hosts/capabilities.yaml — verified / documented / unknown —
-# plus one this rig needs that that file does not: **unmeasured**, meaning "this
-# cell requires a credential that was not available when the spike ran". That is a
-# different claim from `unknown` (nobody has looked) and from `documented` (the
-# vendor says so), and conflating them is how a lane goes green having covered
-# nothing.
+# plus two this rig needs that that file does not: **measured-red** and
+# **unmeasured**. Conflating any of them is how a lane goes green having covered
+# nothing, so each is defined here and each cell below is written to one of them.
+#
+#   verified     — a named run exercised this cell and AGREED with it. Carries the
+#                  bundle id in a comment, the way
+#                  `credential_provenance: verified  # measured 2026-08-14, live
+#                  row` already does.
+#
+#   measured-red — a named run exercised this cell and CONTRADICTED it. Carries
+#                  the bundle id AND the task that owns the correction. The cell
+#                  has evidence; it has ADVERSE evidence. **A failed assertion is
+#                  a measurement**, and this word exists so such a cell stops
+#                  reading like one nobody has looked at — which is the single
+#                  failure mode a per-cell provenance field exists to prevent.
+#
+#   unmeasured   — nothing has ever exercised this cell. NARROWED 2026-08-20 from
+#                  the credential-only wording it shipped with ("this cell
+#                  requires a credential that was not available when the spike
+#                  ran"), which was a statement about 2026-08-14's credential and
+#                  was afterwards made to carry two further claims it does not
+#                  mean. It now means: no credential was available, **or** the
+#                  row's host turn never started. A cell keeping this word NAMES
+#                  which of the two, and names the task that would clear it.
+#
+#   documented   — the vendor says so. unknown — nobody has looked.
+#
+# `measured-red` is not a synonym for `unknown` and never a place to park a red
+# row: it is the one word that says the run happened and the cell lost.
 #
 # ---------------------------------------------------------------------------
 # WHAT WAS MEASURED ON 2026-08-14, AND WHAT WAS NOT
@@ -45,10 +69,16 @@
 #     settings.json for Bash while still honouring it for the Skill tool; the
 #     same list passed as `--allowedTools` works.
 #
-# STILL NOT MEASURED:
+# STILL NOT MEASURED — as of 2026-08-14. SUPERSEDED by `runs/20260820T093838Z`,
+# which executed all thirteen rows; each row's own `provenance:` cell now carries
+# that bundle id and one of verified / measured-red / unmeasured, and those cells
+# are the address for this question, not this list:
 #   * every row with a subagent batch (review-plan, and the three apply rows)
-#   * the negative auth rows
+#     — all executed on that run
+#   * the negative auth rows — codex's executed; opencode's pre-command leg exited
+#     3 and its host turn never started (R3)
 #   * `applied` bytes through a real host (the claude-code native write row)
+#     — measured: three census entries, two of them under `src/**`
 #
 # ---------------------------------------------------------------------------
 # WHY FIVE ROWS CARRIED NO `args` — AND WHY ADDING ONE WOULD NOT HAVE HELPED
@@ -88,9 +118,12 @@
 #     NAMES. `apply-suggestions` declares exactly one file, the plan
 #     (write_phase_bridge.py: "The plan file is THE artifact"), and the grader's
 #     census delta drops everything under `plans/` as the workflow's own output.
-#     `bytes_must_change: true` with `paths: ["src/**"]` is therefore
-#     unsatisfiable for this mode however the row is prompted: src/** moves
-#     under `implement` / `apply-code-fixes`, not here.
+#     `bytes_must_change: true` with `paths: ["src/**"]` — AS THE ROW DECLARED
+#     `paths` THEN; it now declares `["src/**", "tests/test_*.py"]`, see the
+#     2026-08-20 update at the end of this header — is therefore unsatisfiable
+#     for this mode however the row is prompted: src/** moves under `implement` /
+#     `apply-code-fixes`, not here. The finding is unaffected by the widening:
+#     `apply-suggestions` writes neither tree.
 #
 # (1) and (2) are rig gaps and belong in the harness — a per-row pre-command leg
 # that can seed the prerequisite phase through the SAME host turn or ahead of
@@ -171,9 +204,21 @@
 #       satisfiable under `apply-suggestions`, whose only declared artifact is
 #       the plan file. `claude-code-apply-native` therefore now dispatches
 #       `apply-code-fixes`, the write phase whose declared files ARE source
-#       files, and its byte assertion is carried across UNCHANGED, character for
-#       character. The full derivation — and why (b) and (c) were rejected — is
+#       files. The full derivation — and why (b) and (c) were rejected — is
 #       written into that row's own note.
+#
+#       `bytes_must_change: true` IS carried across unchanged. `paths` IS NOT,
+#       and an earlier revision of this block claiming "its byte assertion is
+#       carried across UNCHANGED, character for character" was wrong about the
+#       second half. `runs/20260820T093838Z` ran the retargeted row and measured a
+#       three-entry census diff — `M src/security.py`, `M src/auth.py`,
+#       `A tests/test_security.py` — so `paths` is now
+#       `["src/**", "tests/test_*.py"]`. THE CAUSE, in one line: the fifth issue
+#       in `code_review/container_issues.json` names `src/security.py` in its
+#       `file` field but asks for a NEW TEST MODULE, whose filename the model
+#       chooses; the widening is that shape and deliberately not that run's
+#       filename. The row's note carries the derivation and the two rejected
+#       alternatives (pinning the exact path; an "additions only" qualifier).
 # ---------------------------------------------------------------------------
 
 version: 1
@@ -335,7 +380,31 @@ hosts:
     # $0.0113 for 26 turns against 295 s and $0.0204 for 12.
     # 40 clears the observed tail by half again rather than by one turn. The
     # real ceiling on a runaway row is `wall_clock_s` below, not this.
-    turn_bound: {kind: max-turns, value: 40}
+    #
+    # RAISED 40 -> 60 on 2026-08-21, same rule as the 25 -> 40 raise above and
+    # the same shape of evidence: a row that hit the cap with its work DONE.
+    # `claude-code-apply-native` reached `num_turns: 41` against --max-turns 40
+    # in run 20260821T034820Z and exited 1 (`is_error: true, stop_reason:
+    # tool_use`) — having already run all three write batches (batch-index 1, 2
+    # and 3, each with its `prior-changes append` and `metrics record`),
+    # `util metrics finish --phase apply-code-fixes`, the verification step, and
+    # `util metrics report`. It stopped ONE command short of the finalization.
+    #
+    # What grew is not the model's improvisation but the instruction: R1
+    # (plans/harness-residual-work.md §1) added a required post-loop
+    # `apply-code-fixes --plan-file <plan> --mark-completed` step to
+    # instructions/apply-code-fixes.md, because the phase never recorded its own
+    # completion without it. That is one more mandatory dispatcher turn on the
+    # longest row in the matrix, and 40 was calibrated before it existed. This
+    # is therefore the 2026-08-15 case exactly: the bound, not the row, is what
+    # was wrong.
+    #
+    # 60 is chosen the way 40 was — clear the observed tail (41) by half again,
+    # not by one turn — so a row that legitimately needs a retry still has room
+    # and the bound does not become a licence. `wall_clock_s` below remains the
+    # real ceiling on a runaway row: this run used 768 s of its 900 s bound, so
+    # raising turns cannot let one run unboundedly.
+    turn_bound: {kind: max-turns, value: 60}
     # ADAPTER CHANGES OF 2026-08-16 (§7.3/L6, §3.6/L7, §9.8/L8) — this cell is
     # UNCHANGED, and that is a finding, not an omission. Provenance: derived,
     # 2026-08-16, from the adapters' own builders read offline (no container run).
@@ -410,6 +479,12 @@ hosts:
       delta is a spend figure on this lane.
     # The plan's original documented wiring is unchanged by the measurement
     # above; it was right. Only the cost-envelope caveat is new.
+    #
+    # THE HOST-WIDE PIN. Two of this host's three rows drive it; the third,
+    # `claude-code-apply-native`, overrides it with a `model:` block of its own
+    # (added 2026-08-21, after four failures that were the model rather than the
+    # shim — the derivation is beside that row). `entrypoint.pinned_model`
+    # resolves MLLM_HOST_MODEL > the row block > this one.
     model:
       slug: "~deepseek/deepseek-v4-flash-latest"
       arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
@@ -615,8 +690,12 @@ hosts:
       - id: claude-code-apply-native
         # RETARGETED 2026-08-20 from `apply-suggestions` to `apply-code-fixes`.
         # This is D3's answer; the derivation and the two rejected alternatives
-        # are in `note` below. Nothing else about the row moved: the byte
-        # assertion it exists for is carried across character for character.
+        # are in `note` below. `bytes_must_change: true` — the assertion the row
+        # exists for — is carried across character for character. `paths` is NOT:
+        # `runs/20260820T093838Z` ran the retargeted row and measured one
+        # `tests/` path in the census diff, so it widened to
+        # `["src/**", "tests/test_*.py"]`. An earlier revision of this comment
+        # said "nothing else about the row moved"; that run corrected it.
         args: '--apply-code-fixes "plans/auth-feature.md" --yes'
         command: "apply-code-fixes plans/auth-feature.md --yes"
         # THE PRE-COMMAND LEG (header finding (1), landed 2026-08-19). Ordered
@@ -636,8 +715,11 @@ hosts:
         # gives `apply-code-fixes` exactly ONE prerequisite, `code-review`, and
         # gives `code-review` none at all. (`implement`, the other phase that
         # writes `src/**`, needs `apply-suggestions` AND `generate-tasks`, i.e. a
-        # three-command leg, and its task fixture also declares
-        # `tests/test_security.py` — so it would have forced `paths` open too.)
+        # three-command leg. THE ONE-COMMAND LEG IS THE ENTIRE ARGUMENT: an
+        # earlier revision added "and its task fixture also declares
+        # `tests/test_security.py` — so it would have forced `paths` open too",
+        # which `runs/20260820T093838Z` disproved. This phase forces `paths` open
+        # too — see the row note — so that was never a reason to prefer it.)
         # `review-code` is also what this workspace was built for:
         # `seed_workspace.py` labels the committed tree "what `review-code` diffs
         # against" and writes the uncommitted diff the fixtures were captured on.
@@ -656,18 +738,162 @@ hosts:
         # (`wall_clock_s + 500`, test_container_host_lane.py) and that budget now
         # has to cover the pre-command leg as well as the host turn.
         wall_clock_s: 900
+        # -------------------------------------------------------------------
+        # THE ONLY PER-ROW MODEL PIN IN THIS MATRIX — ADDED 2026-08-21.
+        #
+        # It overrides the host block's `model:` for THIS ROW AND NO OTHER.
+        # Mechanism: `entrypoint.pinned_model(entry, row)` resolves
+        # MLLM_HOST_MODEL > this block > the host block, and writes which of the
+        # three it took into the row's `credential-census.json`
+        # (`model_override: host_matrix.yaml row pin on 'claude-code-apply-native'`).
+        # The row pin does NOT outrank the env variable: that one is the escape
+        # hatch a red row is debugged with, and a checked-in pin must not be able
+        # to trap an operator inside it. `harness.row_record` reads the row pin
+        # too, so C10's cost table records the slug that really ran.
+        #
+        # WHY A ROW PIN AND NOT `MLLM_HOST_MODEL`: the env variable is one run
+        # and leaves no diff. A row that has failed four times has to be
+        # re-runnable byte-for-byte by someone who was not here, and "we typed a
+        # variable that afternoon" is not that. WHY NOT RE-PIN THE HOST: the
+        # 2026-08-14 operator choice of deepseek v4 flash on every host, FOR
+        # COST, is deliberate and stands for the other twelve rows; this is the
+        # one row measured to need otherwise.
+        #
+        # FOUR MEASURED ATTEMPTS ON THE HOST PIN, all on
+        # `~deepseek/deepseek-v4-flash-latest`, argv byte-identical apart from
+        # `--max-turns`. NONE reached R1's post-loop
+        # `apply-code-fixes --plan-file <plan> --mark-completed`, which is the
+        # command `test_the_phase_recorded_itself_completed` exists to grade —
+        # checked in every bundle's `receipts/claude-code-apply-native/`, and
+        # absent from all four:
+        #
+        #   runs/20260821T020823Z  exit 0, 17 turns, 208.8 s, $0.015981.
+        #     6 receipts; stops after `util prior-changes read`, i.e. before the
+        #     first write batch. Its final `result` is the EMPTY STRING: the
+        #     host did not fail, it stopped talking mid-loop.
+        #   runs/20260821T024227Z  exit 0, 7 turns, 127.8 s, $0.002462.
+        #     2 receipts (`install-host --check`, `util instructions
+        #     apply-code-fixes`) and then, verbatim as the whole final result:
+        #     `</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>` — CHARACTER
+        #     FOR CHARACTER the string recorded against
+        #     `claude-code-review-plan`'s first attempt above.
+        #   runs/20260821T034820Z  exit 1, `error_max_turns`, num_turns 41
+        #     against --max-turns 40, 768.0 s, $0.059489. 20 receipts: all three
+        #     write batches with their `prior-changes append` and `metrics
+        #     record`, `util metrics finish`, the verification step and `util
+        #     metrics report` — and not the finalization. THIS is the run that
+        #     raised `turn_bound` 40 -> 60 in the host block above, and that
+        #     raise stands: the bound was calibrated before R1 added a mandatory
+        #     turn.
+        #   runs/20260821T054104Z  exit 0, 14 turns, 70.6 s, $0.009345.
+        #     6 receipts, nothing applied, final `result` the EMPTY STRING
+        #     again — it stopped 46 turns short of any cap, so no bound was
+        #     involved.
+        #     AND ITS ARGV SAYS `--max-turns 40`, checked in `host-run.json`,
+        #     although the 40 -> 60 raise was already in the working tree. THE
+        #     MATRIX IS BAKED INTO THE IMAGE (`Dockerfile`: `COPY
+        #     tests/container/*.yaml /opt/mllm/rig/`), so an edit to this file
+        #     reaches a row only after `make e2e-image`. A matrix edit tested
+        #     without a rebuild grades the PREVIOUS declaration and reports it
+        #     under the new one. `runs/20260821T082250Z` is the first run whose
+        #     argv actually reads `--max-turns 60`.
+        #
+        # THE DIAGNOSIS IS THE ONE THIS FILE ALREADY WROTE DOWN, TWICE. The host
+        # block's `model.why` (2) says it in advance — "On `claude-code` this is
+        # a NON-ANTHROPIC model … Tool-calling fidelity is exactly what the host
+        # lane grades, so a failure on that row may be the model rather than our
+        # shim. The verified Anthropic fallback is `anthropic/claude-haiku-4.5`"
+        # — and `claude-code-review-plan`'s `attempts:` block already TOOK that
+        # retry, on this host, for this literal DSML markup. Attempt 2 above is
+        # that failure reproduced on this row; attempts 1 and 4 are the same
+        # deficit in its quieter form (an agent that stops mid-loop and emits
+        # nothing). The shim, the instruction and the dispatcher are exonerated
+        # by attempt 3, which drove all three batches and the verification step
+        # through this exact shim and stopped only at a turn cap.
+        #
+        # THE COST, STATED RATHER THAN BURIED, AND THE PREDICTION WAS LOW.
+        # Measured on this row at the host pin: $0.0025-$0.0595 per attempt
+        # (four samples above; ~$0.022 mean). This block first predicted "~$0.24
+        # and plausibly more", extrapolating from `claude-code-review-plan`'s
+        # $0.2392 haiku attempt on a smaller batch shape. THE FIRST RUN ON THIS
+        # PIN SPENT $0.586302 (key-usage delta, `runs/20260821T082250Z`) — 2.4x
+        # the prediction, and ~27x this row's own mean at the host pin. Budget
+        # ~$0.60 per run of this row, not $0.24; the number stands as measured
+        # rather than as estimated, and a second sample should replace this
+        # single one when B2 takes it.
+        # That is what the matrix's only applied-byte assertion through a real
+        # host now costs to grade. A row that cannot exercise the thing it
+        # exists to test costs more than $0.60.
+        #
+        # MEASURED, `runs/20260821T082250Z`, FIRST PASS THIS ROW HAS EVER HAD.
+        # Host exit 0, `subtype: success`, num_turns 28 against --max-turns 60,
+        # 249.33 s host wall of a 900 s bound, 254.84 s row wall, 3 stub
+        # requests, 0 unmatched prompts. WHAT THAT SAYS ABOUT THE 40 -> 60
+        # RAISE: it did not rescue this run — 28 would have cleared the old
+        # bound of 40 as well, because this model reached the finalization in 16
+        # receipts where the host pin's best attempt needed 20 and had not got
+        # there. The raise remains right for the reason attempt 3 gave; it is
+        # simply not what turned this row green. SIXTEEN receipts, and
+        # the sixteenth is the one four previous attempts never reached:
+        # `multi_llm.py apply-code-fixes --plan-file plans/auth-feature.md
+        # --mark-completed`, exit 0. `artifacts/auth-feature/state.json` then
+        # records `phases_completed["apply-code-fixes"]:
+        # 2026-08-21T08:26:58.202534` — R1's assertion, satisfied by an artifact
+        # rather than by a claim. The source-filtered census delta is exactly
+        # three entries — `src/auth.py`, `src/security.py`,
+        # `tests/test_security.py` — i.e. inside `paths` with nothing stray, so
+        # R2's widening is confirmed on a second, independent run.
+        model:
+          slug: "anthropic/claude-haiku-4.5"
+          # `arg` mirrors the host block's cell and is documentation on the same
+          # terms: the argv is rendered by substituting `<model>` in the host's
+          # `invoke_argv`, never read from here.
+          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          provenance: verified     # runs/20260821T082250Z — the row passed on it
+          resolved_on: "2026-08-21"
+          scope: row
+          why: >
+            Four measured-red attempts on the host pin (bundle ids, turn counts,
+            wall times and key-usage deltas in the comment above), none of which
+            ran R1's `--mark-completed` finalization, against a fallback this
+            file had already named and already used once for the same DSML
+            tool-call leak on `claude-code-review-plan`. Verified working
+            through the Anthropic skin on 2026-08-14 ($1/M in), and now verified
+            ON THIS ROW: `runs/20260821T082250Z` drove it at this slug, ran the
+            finalization at receipt 16 and recorded the phase completed — the
+            first pass in five attempts, at $0.586302. What is NOT claimed by
+            this word: that the row is now reliable. One agreeing run is one
+            sample of a model's behaviour, and the four reds above are what
+            variance on this row looks like at the other pin.
         expect:
           run: none
           exit: 0
           phases: [apply-code-fixes]
           receipts_min: 2
           write_outcome: applied
-          # UNCHANGED, and deliberately so: this pair is the row's whole reason
-          # to exist and the retarget above exists to make it satisfiable, not
-          # the other way round.
+          # `bytes_must_change` is UNCHANGED and deliberately so: this cell is
+          # the row's whole reason to exist and the retarget above exists to make
+          # it satisfiable, not the other way round.
           bytes_must_change: true
-          paths: ["src/**"]
-        provenance: unmeasured
+          # `paths` WIDENED 2026-08-20 from `["src/**"]`, from the measurement in
+          # `runs/20260820T093838Z` rather than from a prediction — see the note
+          # below for the derivation and for why the run's own filename was NOT
+          # written in here. The matcher is `fnmatch`, whose `*` crosses `/`, so
+          # `src/**` is `src/*`; `tests/test_*.py` is therefore the SHAPE of the
+          # test module the fifth code-review issue asks for, and it still refuses
+          # `tests/conftest.py`, `tests/fixtures/**`, `tests/unit/deep/test_x.py`,
+          # `README.md` and everything outside the two trees.
+          paths: ["src/**", "tests/test_*.py"]
+        # STILL `measured-red`, AND DELIBERATELY SO — the word is B2's to change,
+        # not this row's. `runs/20260821T082250Z` re-measured the row ALONE
+        # (`-k claude-code-apply-native`) after R1's per-row model pin below and
+        # R2's `paths` widening above, and both named assertions passed on it:
+        # `test_the_phase_recorded_itself_completed` against the `--mark-completed`
+        # receipt, and `test_no_write_landed_outside_the_declared_paths` against a
+        # three-entry census delta. §5's B2 is a THIRTEEN-ROW lane run, so a
+        # single-row pass is evidence toward it and not the run that closes it;
+        # this field flips when that bundle exists.
+        provenance: measured-red   # runs/20260820T093838Z; R1 and R2 corrected on runs/20260821T082250Z (single-row), B2 owns the promotion
         note: >
           The ONE row on either lane where an `applied` batch is a pass rather than
           a rig bug, and this plan's only applied-byte coverage through a real
@@ -681,13 +907,54 @@ hosts:
           the grader's `_source_delta` then drops with everything else under
           `plans/` as workflow output. Two phases write `src/**`
           (`write_phase_bridge.py:117-171`): `implement` and `apply-code-fixes`.
-          `apply-code-fixes` is the one chosen, for three measured reasons: its
-          only prerequisite is `code-review`, so the leg stays ONE command; every
-          issue in `code_review/container_issues.json` names `src/security.py` or
-          `src/auth.py`, so `paths: ["src/**"]` needs no widening at all; and the
-          batcher partitions by `file_key`, so each batch's declared file set IS a
-          `src/**` path. `implement` would have cost a three-command leg and a
-          `tests/**` entry in `paths`.
+          `apply-code-fixes` is the one chosen, and the reason that survived
+          measurement is the ONE-COMMAND LEG: its only prerequisite is
+          `code-review`, where `implement` needs `apply-suggestions` AND
+          `generate-tasks`, i.e. three commands. That is the whole remaining
+          argument for it.
+          THE SECOND REASON THIS NOTE USED TO GIVE WAS WRONG, and is corrected
+          here rather than dropped. It read "every issue in
+          `code_review/container_issues.json` names `src/security.py` or
+          `src/auth.py`, so `paths: ["src/**"]` needs no widening at all".
+          `runs/20260820T093838Z` disproved it: the census diff for this row is
+          exactly three entries — `M src/security.py`, `M src/auth.py`,
+          `A tests/test_security.py` — so the row was ONE FILE wide of its
+          declaration and `test_no_write_landed_outside_the_declared_paths` failed
+          on it. The premise is where it went wrong: the fifth issue (emitted
+          `index: 3`, `validation_status: valid`, so never filtered out) names
+          `src/security.py` in its `file` field, but what it ASKS FOR is a new
+          file somewhere else — "src/security.py ships with no tests … Add a test
+          module for the rate limiter before the diff lands". The batcher
+          partitions by `file_key`, so the batch is keyed `src/security.py` and
+          its prompt opens "Fix the following 3 related issues in
+          `src/security.py`"; nothing in the fixture, the batch or the instruction
+          states a target filename. A `tests/` path is therefore expected OUTPUT
+          of that issue, not a stray write.
+          WHY THE WIDENING IS A SHAPE AND NOT THAT RUN'S FILENAME. The filename is
+          chosen by the model on one turn: `tests/test_rate_limiter.py`, a split
+          across two files, or appending to the seeded `tests/test_auth.py` —
+          which the fixture's own description points at and which
+          `seed_workspace.py:158` really does create — are equally faithful
+          readings of the same instruction, and the variance is downstream of a
+          workspace and a scenario that are ALREADY frozen. Pinning
+          `tests/test_security.py` would write one live model turn into the rig as
+          an expectation and turn today's red row into a flaky one, so
+          `tests/test_*.py` is declared instead: satisfied by every filename that
+          instruction can reasonably produce, and still refusing
+          `tests/conftest.py`, `tests/fixtures/anything.json`,
+          `tests/unit/deep/test_x.py`, `README.md` and `pyproject.toml`. That
+          inside-vs-outside discrimination is what this row defends. Deliberately
+          NO "additions only" qualifier: `census_delta` returns
+          `(before_sha, after_sha)` per name and could express it, but a model
+          that puts its cases into the existing `tests/test_auth.py` has done the
+          same legitimate work — added-vs-modified is not the distinction here.
+          The predicate is `harness.stray_paths`, pinned offline in both
+          directions by `tests/test_stray_write_paths.py`, because the live
+          assertion is `live`-marked beneath a container gate and cannot be the
+          only reader of this list.
+          `implement` would still have cost a three-command leg. It would NOT have
+          been the phase that "forced `paths` open" — this phase forces it open
+          too, as measured above.
           THE TWO ALTERNATIVES, AND WHY THEY LOSE. (b) "keep the mode, point
           `paths` at `plans/**` and relax `_source_delta`" fails twice over: the
           filter is SHARED with the two executor rows, which assert `not delta`,
@@ -713,8 +980,17 @@ hosts:
           row on its ABSENCE (a report appearing means the agent typed the flag
           its shim forbids) and on the SHA census, which is the byte-level verdict
           this row was always for.
-          UNMEASURED. Nothing about this row has ever run: not the leg, not the
-          retarget, not one byte of `apply-code-fixes` through a real host.
+          MEASURED-RED on `runs/20260820T093838Z`, which is a different state from
+          the `UNMEASURED. Nothing about this row has ever run` this note used to
+          end on — all three of the things that sentence named DID run. The leg
+          ran, the retarget ran, and `apply-code-fixes` moved real bytes through a
+          real host: three census entries, 1 turn, 3 stub requests, $0.072531,
+          376.03 s. Two assertions then contradicted the row and each has an
+          owner: `test_the_phase_recorded_itself_completed` (**R1** — the receipt
+          shows the retargeted `review-code` command exited 0, so the cause is not
+          the command) and `test_no_write_landed_outside_the_declared_paths`
+          (**R2** — the `paths` widening above). A failed assertion is a
+          measurement; B2's re-run is what promotes this cell to `verified`.
 
   # ===========================================================================
   codex:
@@ -991,7 +1267,7 @@ hosts:
         # is the one written for the eight-phase chain, and it is what the
         # provider lane's `container_full_chain` row already drives.
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
-        provenance: unmeasured
+        provenance: verified   # runs/20260820T093838Z — row executed and passed
         note: >
           THE CHEAPEST PATH TO 8-OF-8 PHASES THROUGH A REAL HOST, and the reason
           it is one row rather than six: `full` runs the whole workflow inside a
@@ -1008,29 +1284,33 @@ hosts:
           flags this host does NOT bake — so `--quick` is typed and `--yes`,
           `--exec-subagents`, `--host codex` and `--detach` are not (the first
           three are baked by the shim, the fourth is added by its own step 5).
-          UNMEASURED, and that is the honest state: nothing about this row has
-          run. It is written against three things that HAVE been measured — the
+          VERIFIED on `runs/20260820T093838Z`: this row executed and passed, and
+          that run is the measurement this note used to be waiting for. It was
+          written against three things that had already been measured — the
           provider lane's eight-phase chain under this exact scenario, the
           `codex-review-plan` row's detach-poll-terminal shape, and `run_mode`'s
-          in-process dispatch — and the first run of it is the measurement.
+          in-process dispatch — and all three held.
           ONE THING IT WILL NOT GRADE: the chain's write phases really do move
           bytes under `src/**` (`implement`), and this row declares no
           `write_outcome`, so `TestTheWriteRowsAreGradedOnBytes` skips it by
           name. That is deliberate — the applied-byte question belongs to the
           apply rows, which declare an outcome to grade — and it is recorded here
           so a later reader does not mistake the skip for an oversight.
-          TWO BOUNDS TO WATCH ON THE FIRST RUN, named here rather than discovered
-          from a red row. (a) `wall_clock_s: 900` is the same bound a ONE-phase
+          TWO BOUNDS THAT WERE NAMED AHEAD OF THE FIRST RUN, and what that run
+          then measured. (a) `wall_clock_s: 900` is the same bound a ONE-phase
           review-plan row carries, and that row measured 219 s (codex) / 304 s
-          (opencode) of host wall clock. Eight phases inside one detached worker
-          is not eight times that — the host's own turns are the poll loop, not
-          the work — but 900 s has never been measured against this shape, and a
-          `timed_out` host with complete receipts is reported as "dispatched,
-          host did not terminate" rather than as a failure to run. (b) the lane
-          cap: `MLLM_E2E_MATRIX_TIMEOUT_S` defaults to 3600 s and the
-          credentialed tier already measures ~21 min, so the two `--full` rows
-          are the ones most likely to push a later row into `never_started`.
-          Raise it deliberately for the run that first measures these.
+          (opencode) of host wall clock. The prediction was that eight phases
+          inside one detached worker is not eight times that — the host's own
+          turns are the poll loop, not the work — and `runs/20260820T093838Z`
+          bears it out: **287.87 s**, well inside 900 s, with `opencode-full` at
+          52.22 s. The bound stays where it is. A `timed_out` host with complete
+          receipts is still reported as "dispatched, host did not terminate"
+          rather than as a failure to run. (b) the lane cap:
+          `MLLM_E2E_MATRIX_TIMEOUT_S` defaults to 3600 s and the credentialed
+          tier already measures ~21 min, so the two `--full` rows were the ones
+          most likely to push a later row into `never_started`. That run took
+          33 min for all 13 rows and no row was `never_started`; raise the cap
+          deliberately, not pre-emptively.
       - id: codex-apply-executor
         # WIRED 2026-08-20, per the header's derivation rule: the mode word as a
         # `--` flag, the same quoted positional, and only the flags this host
@@ -1054,7 +1334,7 @@ hosts:
           phases: [apply-suggestions]
           write_outcome: clean-failure
           bytes_must_change: false
-        provenance: unmeasured
+        provenance: measured-red   # runs/20260820T093838Z; R4 owns the correction
         note: >
           C4 option (b), chosen deliberately: a real executor CLI pointed at a
           tool-call-free stub can only ever produce a clean failure, so the row
@@ -1064,8 +1344,18 @@ hosts:
           `args` WIRED 2026-08-20. Header finding (1) — one host process against a
           workspace with no review-plan output, `apply-suggestions` exiting 1
           before it reaches a batch — is answered by the `pre_commands` leg above,
-          and this row's first run is the leg's first execution as well as its
-          own. UNMEASURED: neither cell has run in a container.
+          and `runs/20260820T093838Z` was that leg's first execution as well as
+          this row's.
+          MEASURED-RED on that run, and the adverse half is named rather than
+          rounded off: the row executed — leg included — and failed
+          `test_the_declared_run_state_was_reached`. `expect.run: done` found no
+          `.status.json` run block because THE AGENT DID NOT DETACH. That is
+          model-following, not a code defect — the same class as opencode's
+          `--detach` miss in `harness-expansion.md` §14.6, on a different host —
+          and **R4** owns it, including the recurrence count. Everything else the
+          row asserts held: exit 0, `phases: [apply-suggestions]`, the
+          clean-failure outcome and `bytes_must_change: false`, over 6 turns and
+          14 stub requests in 373.81 s.
       - id: codex-auth-negative
         # WIRED 2026-08-20, and it is the SAME string the executor row types —
         # which is the point: the two rows differ only in `remove_seed`, so a
@@ -1102,8 +1392,8 @@ hosts:
           `args` WIRED 2026-08-20, and the string is deliberately identical to
           `codex-apply-executor`'s. Header findings (1) and (2) are both answered
           above — `pre_commands` supplies the review-plan output, and
-          `remove_seed` is now really removed — and this row's first run is the
-          first execution of either.
+          `remove_seed` is now really removed — and `runs/20260820T093838Z` was
+          the first execution of either.
           "WHO DECIDES THE FOREGROUND FORM" IS ANSWERED, AND THE ANSWER IS "NOT
           THE OPERATOR". `command` omits --detach because the auth gate this row
           trips is `write_batch_scheduler`'s per-dispatch `preflight_runner`,
@@ -1120,7 +1410,12 @@ hosts:
           exported run log (this host's own `result_source` cell already named it
           as where the verdict comes from). If the agent runs it foreground
           instead, both halves are on the host's stdout and the same assertions
-          hold. UNMEASURED either way.
+          hold. MEASURED on `runs/20260820T093838Z`, and either way was legible:
+          the row executed and PASSED — 1 turn, 4 stub requests, 103.66 s. (This
+          row carries no row-level `provenance:` cell; the sentence that used to
+          end here read "UNMEASURED either way", and that run is what replaced
+          it. Its opencode counterpart is the row that did NOT reach its host —
+          see `opencode-auth-negative` and R3.)
 
   # ===========================================================================
   opencode:
@@ -1346,7 +1641,7 @@ hosts:
           receipts_min: 2
         wall_clock_s: 900
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
-        provenance: unmeasured
+        provenance: verified   # runs/20260820T093838Z — row executed and passed
         note: >
           The second host on the same row shape, and it is not redundant with
           `codex-full`: the two hosts follow the shim differently and this matrix
@@ -1360,7 +1655,10 @@ hosts:
           worth having a second copy of.
           `args` is the OPERATOR form: this host takes it VERBATIM after `--`
           (`prompt_template: null`), so the string is what an end user types.
-          UNMEASURED. Nothing about this row has run.
+          VERIFIED on `runs/20260820T093838Z`: this row executed and passed. The
+          shim-following risk it was written to catch did NOT recur — eight
+          phases, `run: done`, exit 0, in 52.22 s of host wall clock against a
+          900 s bound (codex-full took 287.87 s for the same shape).
       - id: opencode-apply-executor
         # WIRED 2026-08-20. Byte-identical to codex-apply-executor's, and that is
         # correct rather than lazy: the two hosts bake the same three flags
@@ -1383,18 +1681,24 @@ hosts:
           phases: [apply-suggestions]
           write_outcome: clean-failure
           bytes_must_change: false
-        provenance: unmeasured
+        provenance: verified   # runs/20260820T093838Z — row executed and passed
         note: >
           `args` WIRED 2026-08-20, exactly as codex-apply-executor is: the
-          `pre_commands` leg above answers header finding (1), and this row's
-          first run is that leg's first execution.
-          THE RISK THIS ROW CARRIES THAT CODEX'S DOES NOT is already measured on
-          this host: `opencode-review-plan` completed its workflow while
-          IMPROVISING the invocation — it dropped every baked flag and omitted
-          `--detach` on a host where `detach: required`. `expect.run: done`
-          therefore fails here for a shim-following reason rather than a workflow
-          one, and that is the correct verdict, not a bound to loosen.
-          UNMEASURED.
+          `pre_commands` leg above answers header finding (1), and
+          `runs/20260820T093838Z` was that leg's first execution.
+          THE RISK THIS ROW CARRIES THAT CODEX'S DOES NOT had already been
+          measured on this host: `opencode-review-plan` completed its workflow
+          while IMPROVISING the invocation — it dropped every baked flag and
+          omitted `--detach` on a host where `detach: required`. `expect.run:
+          done` would fail here for that shim-following reason rather than a
+          workflow one, and that would be the correct verdict, not a bound to
+          loosen.
+          VERIFIED on that run: it did not recur. The row executed and PASSED —
+          `run: done`, exit 0, `phases: [apply-suggestions]`, the clean-failure
+          outcome and no bytes moved — over 6 turns and 14 stub requests in
+          82.23 s. Note the contrast worth keeping: `codex-apply-executor`, the
+          byte-identical row on the other host, is the one that failed the detach
+          assertion on this same run (R4).
       - id: opencode-auth-negative
         # WIRED 2026-08-20, the same string as the three rows above it.
         args: '--apply-suggestions "plans/auth-feature.md"'
@@ -1413,18 +1717,45 @@ hosts:
           # recorded so the difference from codex is asserted rather than assumed.
           exit: unknown
           reason: "probe passes while logged out; failure surfaces at dispatch"
+          # THE ONE CELL IN THIS FILE THAT STILL READS `unmeasured` AFTER
+          # `runs/20260820T093838Z`, and the reason is NOT the one the word used
+          # to imply. The row had its credential; what never happened is the
+          # HOST TURN. The pre-command leg exited 3 — the executor runner was
+          # `opencode:stub-model`, an unqualified slug opencode parses as provider
+          # `stub-model` with an empty model half
+          # (`ProviderModelNotFoundError: Model not found: stub-model/.`, opencode
+          # 1.18.18) — so the row stopped before `apply-suggestions` was ever
+          # dispatched and ZERO opencode calls reached the stub (`stub.jsonl`
+          # holds one `/__health` and one `POST /v1/responses` from the codex
+          # fan-out). **R3** clears this cell: it provider-qualifies the negative
+          # runner and adds the structural refusal underneath it. Nothing about
+          # the expectation itself moves here — `exit: unknown` and this
+          # provenance are read as a PAIR by
+          # `test_an_unmeasured_expectation_is_recorded_never_asserted` and
+          # `test_the_refusal_was_named_and_fast`, and copied verbatim into
+          # `negative-auth-observed.json`; a later run that promotes one must move
+          # the other in the same edit, along with that test class's docstring and
+          # the `test_the_refusal_was_named_and_fast` skip message.
           provenance: unmeasured
           # DELIBERATELY NO `stub_requests` CELL. codex's gate closes before the
           # first model call and can name a number; this one opens, so calls
           # reaching the stub are the documented behaviour rather than a failure —
           # `test_no_request_reached_the_stub` skips by name on the absence.
         note: >
-          `args` WIRED 2026-08-20. Header findings (1) and (2) are answered above
-          and this row's first run is the first execution of either.
+          `args` WIRED 2026-08-20. Header findings (1) and (2) are answered above.
+          On `runs/20260820T093838Z` the leg RAN and exited 3; `remove_seed` is
+          ordered after it, so the credential removal — cell (2) — did not
+          execute on THIS row (its codex counterpart's did).
           This row's own assertion is the weakest of the five and it is still the
-          one worth wiring FIRST, precisely because those two cells are unrun:
+          one worth wiring FIRST, precisely because those cells were unrun:
           `exit: unknown` means the grader only files evidence, so the row cannot
           fail for the model's behaviour, and what it records — that this gate
           OPENS where codex's closes — is a product finding nobody has observed
           yet. The evidence lands in `negative-auth-observed.json`.
-          UNMEASURED.
+          STILL UNMEASURED AFTER `runs/20260820T093838Z`, and it is the only cell
+          in this file that is. Not for want of a credential — the row had one —
+          but because the PRE-COMMAND LEG EXITED 3 and the host turn never
+          started, so `negative-auth-observed.json` was never filed. R3 diagnoses
+          it (an unqualified `opencode:stub-model` runner slug, built in
+          `test_container_host_lane.py`'s `harness.Row(...)` constructor, not
+          declared here) and clears it.

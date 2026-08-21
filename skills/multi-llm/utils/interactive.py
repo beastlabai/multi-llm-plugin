@@ -19,6 +19,30 @@ from .provider_registry import load_config
 from .unattended import NeedsHuman, row
 
 
+def _availability_reason(provider_name: str) -> str:
+    """Why ``provider_name`` is not usable, as a sentence, or ``""`` (M10, §5.1).
+
+    The status half of this module's three ``is_available()`` sites. The filters
+    themselves stay **bool** — they decide which model specs survive, and a
+    yes/no is the whole question they ask — but the warnings they print could
+    only ever say "is not available", never *why*. This is where the typed
+    report supplies the why.
+
+    Silence on anything it cannot resolve: an unknown provider name (which the
+    same warning already covers) or an adapter whose detection raises. A
+    diagnostic may not become the reason a model list cannot be filtered.
+    """
+    try:
+        from .provider_registry import get_provider
+
+        provider = get_provider(provider_name)
+        if provider is None:
+            return ""
+        return provider.describe_availability().detail
+    except Exception:  # noqa: BLE001 - a diagnostic never breaks selection
+        return ""
+
+
 class _Unavailable:
     """Sentinel: a picker backend (gum/fzf) could not be used at all.
 
@@ -273,7 +297,11 @@ def select_models_two_step(anchor: Optional[str] = None) -> List[str]:
     provider_choices = []
     provider_name_map = {}
     for name, cfg in providers.items():
-        # Check if provider is available
+        # Check if provider is available.
+        # M10 (§5.1) — a **bool** consumer, deliberately unchanged: this builds a
+        # picker list, and the typed report has nothing to add to a row that is
+        # either shown or not. The warnings further down are where the state
+        # earns its keep.
         provider = get_provider(name)
         if provider is None or not provider.is_available():
             continue
@@ -448,9 +476,13 @@ def resolve_models(
                 unavailable_providers.add(provider_name)
 
         for provider_name in unavailable_providers:
+            # M10 (§5.1) — the filter above stays a bool; this warning gains the
+            # typed state's sentence, which is the half it could never say.
+            why = _availability_reason(provider_name)
             print(
                 f"Warning: Provider '{provider_name}' is not available, "
-                "skipping its models from quick_models.",
+                "skipping its models from quick_models."
+                + (f" ({why})" if why else ""),
                 file=sys.stderr,
             )
 
@@ -482,9 +514,12 @@ def resolve_models(
 
         # Warn about unavailable providers
         for provider_name in unavailable_providers:
+            # M10 (§5.1) — same split as the quick_models warning above.
+            why = _availability_reason(provider_name)
             print(
                 f"Warning: Provider '{provider_name}' is not available, "
-                "skipping its models from defaults.",
+                "skipping its models from defaults."
+                + (f" ({why})" if why else ""),
                 file=sys.stderr,
             )
 

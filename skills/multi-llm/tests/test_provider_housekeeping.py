@@ -29,10 +29,12 @@ Three hand-maintained invariants that had all silently drifted (§9.1, §9.2,
   the adapter really renders.
 """
 import re
+import sys
 from unittest import mock
 
 import pytest
 
+import utils.providers.base as base_module
 import utils.providers.cursor_agent as cursor_agent_module
 from utils.provider_registry import _PROVIDERS
 
@@ -449,15 +451,16 @@ def _argv_for(name):
     cursor's §5.4.1 gate reads the *installed* binary's --help before it will
     emit `--trust --mode ask`, so the probe is stubbed exactly as
     `TestDeclaredOutputChannel` stubs it — this reads the adapter, not the
-    developer's cursor build.
+    developer's cursor build. Since M14 the gate has one implementation
+    (`base.read_help_tokens`), so that is what is stubbed.
     """
     if name == "cursor-agent":
         with mock.patch.object(
-            cursor_agent_module,
-            "_help_flag_tokens",
-            lambda _b: frozenset({"--trust", "--mode"}),
+            base_module,
+            "read_help_tokens",
+            lambda _b, **_kw: frozenset({"--trust", "--mode"}),
         ), mock.patch.object(
-            cursor_agent_module.shutil, "which", lambda _n: "/usr/bin/cursor-agent"
+            cursor_agent_module.shutil, "which", lambda _n: sys.executable
         ):
             return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
     return _PROVIDERS[name].build_command(PROMPT, MODELS[name])

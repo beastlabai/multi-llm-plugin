@@ -33,7 +33,7 @@ the way they do:
 | `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. Everything on disk is a `hook_event`/`agent_event` record the parser filters; cline itself refuses to call an empty completion an answer |
 | `multi-assistant` | **last**-wins, not first-wins and not concatenation. The first `run_result` reads `FIRST ANSWER (must NOT be selected)`. The one synthesized row — see below |
 | `error-envelope` | a provider error object on a **200**. Worse than "served as the answer": the text is **lost**. cline sees a completion with no choices, calls it `Model returned empty response`, and no vendor byte reaches any pattern table |
-| `auth-error` | 401 → **one** request, terminal, upstream wording intact — and still classified `runner_error`, not `auth_failed`. See below |
+| `auth-error` | 401 → **one** request, terminal, upstream wording intact. Classified `runner_error` when captured; now `auth_failed` from this row's own words. See below |
 | `rate-limit` | 429-forever → cline **does** retry rate limits internally: 3 requests over 7.8 s, so an executor-level re-dispatch doubles a wait the CLI already served |
 | `invalid-model` | 404 **naming the model**, and naming it `stub-model` — the bare id `-m` carried, not the `openai/stub-model` spec. That is the shape a stray `:effort` suffix produces |
 | `context-overflow` | 400 context-length, handled **well**: cline runs its own overflow-recovery path (three `notice` events), raises `ContextWindowOverflowError`, and **quotes the provider's sentence in full**, so `CONTEXT_OVERFLOW_MARKERS` matches and the terminal classification costs one request |
@@ -88,15 +88,23 @@ adapter's second declared marker (`"errorclass"\s*:`) does not fire on them.
 
 Four measured defects, recorded here rather than silently fixed — the fixtures
 pin today's behaviour, so each fix is a visible edit to both the adapter and the
-manifest.
+manifest. Defect 1 has since been fixed on the adapter, and its entry below
+records what changed rather than being deleted.
 
-1. **A 401 classifies as `runner_error`, not `auth_failed`.** OpenAI's own 401
-   sentence — *"Incorrect API key provided: …"* — matches none of
+1. **A 401 classified as `runner_error`, not `auth_failed` — FIXED.** OpenAI's
+   own 401 sentence — *"Incorrect API key provided: …"* — matched none of
    `base.auth_error_patterns`' ten entries, and cline's own added
-   `user not found` is a different provider's wording. The run falls through
-   every specific table to the exit-0 marker. The one-line fix is a pattern for
-   `incorrect api key` (or the machine-readable `invalid_api_key`, which is what
-   saves the identical case at pi).
+   `user not found` is a different provider's wording, so the run fell through
+   every specific table to the exit-0 marker and a credential failure sat on a
+   retryable rung. `incorrect api key` is now a `ClineProvider`
+   `auth_error_patterns` entry, driven by this row's own bytes rather than by
+   new ones, and auth is consulted before the marker (§7.2 step 4 vs step 6), so
+   `auth-error` reads `auth_failed`. It is cline's **second** measured auth
+   wording, not a replacement for the first: `user not found` came from 3.0.39
+   with an invalid OPENROUTER_API_KEY. cline glosses neither — both are the
+   upstream provider's sentence passed through — which is why this set needs one
+   entry per upstream rather than one per CLI. Checked against every capture
+   here: the phrase occurs in `auth-error` alone, so no other cell moved.
 2. **`exit_zero_failure_markers` has no exit-0 producer left.** cline exits 1 at
    3.0.55. The markers still earn their place as the last-resort classifier, but
    the adapter comment's premise ("the exit code carries no verdict") is now

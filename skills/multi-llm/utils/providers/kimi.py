@@ -75,7 +75,27 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
-from .base import InternalRetryEnvelope, LLMProvider, StructuredSchema
+from .base import (
+    InternalRetryEnvelope,
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+)
+
+#: M12 (§6.1): kimi's position on the ladder is *declined*, and the module
+#: docstring above is the measurement behind it. ``KIMI_MODEL_THINKING_EFFORT``
+#: exists as a name but is inert on the wire at 0.36.1 — byte-identical request
+#: body with and without it — so a ``:effort`` suffix would be a control that
+#: reports success and changes nothing. No ``REASONING_EFFORTS`` is declared
+#: here, which is what keeps a third ``:``-segment part of the model id.
+EFFORT_LADDER = ReasoningLadder(
+    provider="kimi",
+    declined=(
+        "KIMI_MODEL_THINKING_EFFORT is inert on the wire at 0.36.1 (byte-identical "
+        "request body with and without it), so no `:effort` suffix is parsed and a "
+        "third `:`-segment stays part of the model id"
+    ),
+)
 
 #: The retry knob this adapter pins, and the number it therefore declares.
 #:

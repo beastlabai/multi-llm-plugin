@@ -59,6 +59,7 @@ from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
+    get_provider,
     get_provider_timeout,
     is_model_valid,
     parse_model_spec,
@@ -154,21 +155,121 @@ def build_inline_plan(plan_content: str, plan_path: str) -> Tuple[str, bool]:
     return truncated + marker, True
 
 
+# ---------------------------------------------------------------------------
+# The two per-model fields of ``prompts/ask.txt``
+#
+# Same decision as the three JSON review prompts', taken the same way: from the
+# adapter's declared
+# :attr:`~utils.providers.base.LLMProvider.supports_file_output` rather than from
+# a provider name spelled out in this orchestrator
+# (:func:`utils.llm_client.render_output_location` is the review-side twin). The
+# wording cannot be shared with that function's constants — those ask for a raw
+# JSON array and ask mode's answer is markdown — but the roster, the rule and
+# the unknown-provider posture are the same one: an adapter this build no longer
+# ships renders the file variant, which is what this template did unconditionally
+# before the fields existed.
+#
+# Six shipped adapters declare ``supports_file_output = False`` and were being
+# told to write a file they can only answer with a refusal sentence. Nothing
+# downstream moves: they already land on :func:`recover_answer_text`, which
+# persists the stdout answer to ``answer_path``, so ``source: "fallback"`` stays
+# the measured outcome and aggregation still reads a file.
+#
+# The stdout variant is the shorter of the two on both fields, deliberately: the
+# rendered template is the fixed overhead ``render_prompt_guarded`` subtracts
+# from :data:`MAX_PROMPT_BYTES`, so this fix can only grow the question budget,
+# never shrink it. ``tests/test_ask.py`` pins that as an assertion.
+# ---------------------------------------------------------------------------
+
+#: The read-only bullet for a file-capable adapter. Byte-identical to the text
+#: the template carried inline before the field existed.
+FILE_READONLY_WRITE_RULE = (
+    "Do NOT modify, create, or delete any file except the single answer output\n"
+    "  file specified below ({path}). In particular, NEVER edit the plan\n"
+    "  file or any other file in the repository."
+)
+
+#: The same bullet for an adapter that cannot write: naming an exception for a
+#: file the next section has just said not to write would contradict it.
+STDOUT_READONLY_WRITE_RULE = (
+    "Do NOT modify, create, or delete any file. In particular, NEVER edit the\n"
+    "  plan file or any other file in the repository."
+)
+
+#: What a file-capable adapter is asked for. Byte-identical to the text the
+#: template carried inline before the field existed, so the rendered prompt of
+#: every adapter that declares ``supports_file_output`` is unchanged to the
+#: character.
+FILE_OUTPUT_LOCATION = (
+    "## Output Location\n"
+    "Write your answer as MARKDOWN (not JSON) to this exact absolute file path:\n"
+    "\n"
+    "{path}\n"
+    "\n"
+    "- Write to the path exactly as given above. Do NOT reinterpret, relativize, or\n"
+    "  change it. It is an absolute path; write the file there.\n"
+    "- Write ONLY your markdown answer to that file (no JSON wrapper, no code-fence\n"
+    "  around the whole answer).\n"
+    "- ALSO print your full answer to stdout. Stdout is the fallback that is used if\n"
+    "  the file write fails, so the two should contain the same answer."
+)
+
+#: What an adapter that declares ``supports_file_output = False`` is asked for
+#: instead: stdout is the channel it *does* have, it is the one
+#: :func:`recover_answer_text` already falls back to, and the answer lands in
+#: exactly the same ``answer_<model>.md`` either way.
+STDOUT_OUTPUT_LOCATION = (
+    "## Output Location\n"
+    "Print your full answer to stdout as your final message, in MARKDOWN (not JSON).\n"
+    "Do NOT write it to a file — you are running in a read-only mode and any file\n"
+    "write will be refused. Print the answer itself and nothing else: no JSON\n"
+    "wrapper, no code-fence around the whole answer."
+)
+
+
+def render_output_fields(provider_name: Optional[str], output_md_path: str) -> Dict[str, str]:
+    """The ``{readonly_write_rule}`` and ``{output_location}`` fields for
+    ``provider_name``'s rendered ask prompt.
+
+    ``provider_name`` is the already-resolved first half of the model spec (see
+    :func:`~utils.provider_registry.parse_model_spec`); ``None`` — or a name this
+    build ships no adapter for — renders the file variant, which is what every
+    caller got before these fields existed.
+    """
+    provider = get_provider(provider_name) if provider_name else None
+    if provider is not None and not provider.supports_file_output:
+        return {
+            "readonly_write_rule": STDOUT_READONLY_WRITE_RULE,
+            "output_location": STDOUT_OUTPUT_LOCATION,
+        }
+    return {
+        "readonly_write_rule": FILE_READONLY_WRITE_RULE.format(path=output_md_path),
+        "output_location": FILE_OUTPUT_LOCATION.format(path=output_md_path),
+    }
+
+
 def render_prompt(
     template: str,
     question: str,
     plan_path: str,
     plan_content: str,
     output_md_path: str,
+    provider_name: Optional[str] = None,
 ) -> str:
     """Render the ask prompt. Only template literals need ``{{`` escaping;
     substituted values (e.g. plan content with literal braces) pass through
-    untouched because ``str.format`` only parses the template's own braces."""
+    untouched because ``str.format`` only parses the template's own braces —
+    which is also why the two per-model fields are formatted *before* they are
+    substituted rather than by this call.
+
+    ``provider_name`` selects the output-channel variant
+    (:func:`render_output_fields`); omitted, the prompt asks for a file.
+    """
     return template.format(
         question=question,
         plan_path=plan_path,
         plan_content=plan_content,
-        output_md_path=output_md_path,
+        **render_output_fields(provider_name, output_md_path),
     )
 
 
@@ -178,6 +279,7 @@ def render_prompt_guarded(
     plan_path: str,
     plan_content: str,
     output_md_path: str,
+    provider_name: Optional[str] = None,
 ) -> Tuple[str, bool]:
     """Render the ask prompt and guarantee the result stays under
     :data:`MAX_PROMPT_BYTES` (the single-argv ceiling), returning
@@ -191,8 +293,15 @@ def render_prompt_guarded(
     the invocation still runs instead of hard-failing. ``plan_path`` and
     ``output_md_path`` are never truncated — the model needs them intact to read
     the full plan and write its answer.
+
+    ``provider_name`` is threaded through to :func:`render_prompt` so the
+    overhead measured here is the overhead of the variant actually dispatched —
+    the stdout variant is the shorter of the two, so a read-only adapter's
+    question budget can only be larger than a file-capable one's.
     """
-    rendered = render_prompt(template, question, plan_path, plan_content, output_md_path)
+    rendered = render_prompt(
+        template, question, plan_path, plan_content, output_md_path, provider_name
+    )
     if len(rendered.encode("utf-8")) <= MAX_PROMPT_BYTES:
         return rendered, False
 
@@ -200,7 +309,9 @@ def render_prompt_guarded(
     # question bytes we can keep so the rendered prompt fits under the ceiling.
     marker = "\n\n[... question truncated to fit the argv size limit ...]"
     overhead = len(
-        render_prompt(template, marker, plan_path, plan_content, output_md_path).encode("utf-8")
+        render_prompt(
+            template, marker, plan_path, plan_content, output_md_path, provider_name
+        ).encode("utf-8")
     )
     budget = MAX_PROMPT_BYTES - overhead
     if budget < 0:
@@ -208,7 +319,7 @@ def render_prompt_guarded(
     q_bytes = question.encode("utf-8")[:budget]
     truncated_question = q_bytes.decode("utf-8", errors="ignore") + marker
     rendered = render_prompt(
-        template, truncated_question, plan_path, plan_content, output_md_path
+        template, truncated_question, plan_path, plan_content, output_md_path, provider_name
     )
     return rendered, True
 
@@ -827,8 +938,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             except OSError:
                 pass
 
+        # provider_name (resolved above) selects the output-channel variant: an
+        # adapter declaring supports_file_output = False is asked for stdout
+        # rather than for a file it would answer with a refusal sentence.
         prompt, prompt_truncated = render_prompt_guarded(
-            template, question, plan_path, inline_plan, answer_path
+            template, question, plan_path, inline_plan, answer_path, provider_name
         )
         if prompt_truncated:
             print(f"WARNING: rendered prompt for {model_spec} exceeded "

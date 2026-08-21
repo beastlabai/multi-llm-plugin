@@ -73,6 +73,7 @@ from utils.review_orchestrator_base import (
     exec_subagents_requested,
     maybe_detach,
     merge_validation_batches,
+    resolve_result_files_by_model,
 )
 from utils.validation import (
     prepare_batched_validation_tasks,
@@ -1203,28 +1204,27 @@ async def reaggregate_from_existing_files(
     # Restore original model specs (with colons) from .status.json
     unsanitize = build_unsanitize_map(str(phase_dir))
 
-    for result_path in result_files:
-        try:
-            with open(result_path, 'r', encoding='utf-8') as f:
-                issues = json.load(f)
-                # Extract model name from filename, restore original spec
-                basename = os.path.basename(result_path)
-                sanitized = basename.replace(".json", "")
-                model = unsanitize.get(sanitized, sanitized)
-                models_found.add(model)
+    # One file per logical model (W3): a phase dir that straddles the L1 anchor
+    # upgrade holds both `<model>.json` and `<provider>_<model>.json` for the same
+    # model, and reading both double-counts every issue. `results` matters as much
+    # as the counts here — a duplicate entry renders the same model twice in the
+    # report. The precedence (anchored wins, divergence WARNs, an ambiguous legacy
+    # stem exits 3) lives in the shared helper.
+    for model, _chosen_path, issues in resolve_result_files_by_model(
+        str(phase_dir), result_files, unsanitize, noun="issues"
+    ):
+        models_found.add(model)
 
-                # Add source_model field for grouping
-                for issue in issues:
-                    issue["source_model"] = model
-                    issue["model"] = model  # Also set model for report generation
-                all_issues.extend(issues)
+        # Add source_model field for grouping
+        for issue in issues:
+            issue["source_model"] = model
+            issue["model"] = model  # Also set model for report generation
+        all_issues.extend(issues)
 
-                # Add to results dict for report generation
-                results[model] = (True, issues, None)
+        # Add to results dict for report generation
+        results[model] = (True, issues, None)
 
-                print(f"  Loaded {len(issues)} issues from {model}")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"  Warning: Could not read {result_path}: {e}")
+        print(f"  Loaded {len(issues)} issues from {model}")
 
     print(f"\nRe-aggregating {len(all_issues)} issues from {len(models_found)} models")
 

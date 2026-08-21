@@ -72,6 +72,10 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.provider_registry import get_provider  # noqa: E402
+# M14: the ONE dotted-version comparison. This module used to carry its own
+# third copy of it; part 4 below is a version *gate* assertion, so it asks
+# the gate's own rule rather than a lookalike that rounds differently.
+from utils.providers.base import version_tuple as _version_tuple  # noqa: E402
 
 from .harness import SkillRunner  # noqa: E402
 from .mocks import mock_llm  # noqa: E402
@@ -252,15 +256,6 @@ class TestRosteredIdentityHasAllFiveParts:
         assert mock_llm.is_auth_probe(list(expected)), (
             f"part 5: is_auth_probe() does not recognise {list(expected)}."
         )
-
-
-def _version_tuple(version: str):
-    """Compare dotted versions numerically, tolerating trailing junk."""
-    parts = []
-    for chunk in version.split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
 
 
 class TestEveryMockIdentityIsAShippedProvider:

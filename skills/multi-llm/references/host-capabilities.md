@@ -45,10 +45,10 @@ sentence when it is installed.
 - Install paths (legacy): *none*
 - Runners:
   - `claude-code`: bundled=`true`, needs_auth=`false`, profiles=[generate, agent-readonly, agent-write], usage=`full`
-  - `cursor-agent`: bundled=`false`, needs_auth=`true` (`cursor-agent login`), profiles=[generate], usage=`none`
+  - `cursor-agent`: bundled=`false`, needs_auth=`true` (`cursor-agent login`), profiles=[generate], usage=`partial`
 - Refuse-to-start guards stripped from a dispatched runner: `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`
 - Session-scoping variables stripped: `CLAUDE_SESSION_ID`, `CLAUDE_SKILL_DIR`
-- Sanctioned exceptions that survive stripping: `ANTHROPIC_API_KEY`
+- Sanctioned exceptions that survive stripping: *none recorded* — audited, found nothing
 - Nested-exec notes: Native subagents run in-session; the executor is not on the default path for this host.
 
 ### `codex`
@@ -59,7 +59,7 @@ sentence when it is installed.
 - Verb sentences a rendered shim carries:
   - **Spawn subagents** — run the dispatcher with `--exec-subagents`: it dispatches every materialized task itself and continues past each marker in the same process. Never spawn a subagent by hand on this host.
   - **Ask the user** — print the numbered option block exactly as the dispatcher rendered it and copy the selected option's command verbatim, and only under `--interactive`. Otherwise the documented `--yes` default applies and nothing is asked.
-  - **Run detached** — pass `--detach` (which implies `--yes`) and poll `status <plan> --view run`; the foreground stays legal for short calls. Never combine `--detach` with a host background mechanism — pick one.
+  - **Run detached** — pass `--detach` (which implies `--yes`) on every fan-out mode, then poll `status <plan> --view run`. Do this even when you expect the run to be quick: a fan-out started in the foreground cannot be handed back to once your turn ends. Only a single-model, non-fan-out call may stay in the foreground. Never combine `--detach` with a host background mechanism — pick one.
 - Install paths (project): `.codex/skills/multi-llm`
 - Install paths (global): `$HOME/.codex/skills/multi-llm`
 - Install paths (legacy): `$HOME/.codex/prompts/multi-llm.md`

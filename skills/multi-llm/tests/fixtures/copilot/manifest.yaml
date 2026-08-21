@@ -1,0 +1,323 @@
+# The §6.2 fixture manifest for copilot. Graded by tests/test_provider_fixture_rows.py,
+# which owns the format (its module docstring is the spec).
+#
+# The BYTES here are older than this file: every `*.jsonl` was captured by the
+# 2026-08-17 §6 probe and committed with a README, but consumed only by the
+# hand-written `TestCopilotProvider` in tests/test_providers.py — so copilot sat
+# in that module's `MANIFEST_PENDING` table and NOTHING pinned its
+# classification. That gap is why this manifest exists: `classify_failure` on
+# the committed `success.jsonl` read **`rate_limited`** on a run that had
+# succeeded, and no test in the repo could see it (plans/harness-residual-work.md
+# C1). The rows below are the same captures, now graded by the rig.
+schema_version: 1
+provider: copilot
+cli_version: "1.0.80"
+captured: "2026-08-17"
+method: >-
+  §6 step 5, `@github/copilot@1.0.80` in a throwaway container built FROM
+  mllm-e2e:local, every run `--network none`, UID 10001, against the committed
+  `stub_server.py` or a probe-local fail-forever server. **No GitHub token, no
+  credential, no network.** argv is `CopilotProvider.build_command`'s output
+  (`copilot --output-format json --stream off --log-level none
+  --no-custom-instructions --no-ask-user --no-auto-update
+  --disable-builtin-mcps --model <model> -p <prompt>`), and the prompt is the
+  product's own `prompts/plan_review.txt`-shaped review prompt — 30 412 bytes of
+  it, which is the whole point of the `success` row below. The full probe
+  transcript is plans/harness-expansion/probe-out/copilot/RESULTS.md and the
+  per-fixture table is §9 there.
+  ONE THING IN THIS MANIFEST IS NOT A PER-ROW MEASUREMENT: the probe committed
+  the captures without a per-row `*.meta.json` (unlike goose's), so each
+  `exit_code` below is RESULTS.md's measured *class* rule — "error on stdout,
+  **stderr 0 bytes**, exit 1", exit 0 for the answering rows and for the
+  empty-200 exit-0 failure — rather than a number read back off that row's run.
+  Where a row's exit code is neither (the killed stall run), the row says so in
+  its own notes. Nothing any row asserts turns on the value: only exit **127**
+  changes `classify_streams`' answer.
+notes: >-
+  Three facts hold across every row. (1) copilot's ONLY error channel is a
+  `session.error` JSONL record on **stdout**; stderr is 0 bytes on every
+  model-path failure, which is why no row here names a stderr file at all.
+  (2) The envelope echoes our prompt back in a NON-ephemeral `user.message`
+  record whose `data.content` is the same field an `assistant.message` uses —
+  30 412 of `success.jsonl`'s 65 KB. `parse_output` already filtered it by
+  record type; `classify_failure` did not, until `CopilotProvider.vendor_text`.
+  (3) copilot has a genuine exit-0 failure mode (an empty provider 200 ⇒ exit 0,
+  `result.exitCode: 0`, empty assistant content, no error record) that no marker
+  can catch, so it is detected structurally in `parse_output` rather than by a
+  pattern.
+
+rows:
+  success:
+    stdout: success.jsonl
+    exit_code: 0
+    notes: >-
+      THE ROW THIS MANIFEST WAS WRITTEN FOR. A completely successful tier-1 run:
+      exit 0, a `result` record, one `assistant.message` whose fenced JSON array
+      unwraps to the document below. `classify_failure` on these bytes answered
+      **`rate_limited`** — not from anything copilot said, but from the 30 412
+      bytes of OUR prompt in the `user.message` record, whose plan text reads
+      "auth patterns, rate-limit patterns and exit-zero markers are declared per
+      adapter". `rate_limited` is one of the two classes
+      `subagent_executor._classify_failed_run` forwards, so on a *failed* run
+      this echo reaches the retry ladder. `CopilotProvider.vendor_text` drops
+      `user.message` records before the tables see them; the `null` below is
+      that fix, and the bytes are unchanged and still carry the full prompt, so
+      a regression fails here.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains:
+        - '"type":"user.message"'
+        - '"type":"assistant.message"'
+        - '"type":"result"'
+      classify_failure: null
+
+  truncated:
+    stdout: truncated.jsonl
+    exit_code: 137
+    notes: >-
+      A REAL kill mid-flight — the stall probe (server accepts, never answers;
+      RESULTS.md §6 row 4 measured no client-side timeout under 180 s and ended
+      it with SIGKILL). The stream stops at `model.call_start` with **no
+      `result` record at all**, which is what this row pins: the parser must not
+      assume one exists. The `exit_code` is the shell's 128+SIGKILL encoding of
+      the probe's own kill rather than a copilot verdict — see this manifest's
+      `method` note; the classification is `None` either way, because a
+      half-written event stream says nothing about *why* it stopped.
+    expect:
+      success: false
+      error_contains: ["no assistant.message record in copilot output"]
+      raw_contains: ["model.call_start"]
+      classify_failure: null
+
+  truncated-mid-echo:
+    stdout: truncated-mid-echo.jsonl
+    exit_code: 137
+    synthesized: true
+    provenance: >-
+      The first 2 750 bytes of the real `success.jsonl`, and nothing else: a
+      byte PREFIX, so every byte here is copilot's own and appears at the same
+      offset in that capture. The cut lands 1 129 bytes into the 61 751-byte
+      `user.message` line — mid-word, in the middle of the echoed prompt — which
+      is the one shape `truncated.jsonl` cannot carry: that capture is a real
+      kill that happened to land on a record boundary, and no committed byte
+      sequence puts a cut inside the echo. Truncating a capture is what a real
+      kill does, so nothing is fabricated; the offset is chosen rather than
+      measured, which is why the row is marked synthesized.
+    notes: >-
+      THE RESIDUAL `vendor_text` WOULD HAVE LEFT. The echo is one record of
+      61 751 bytes — the largest in the stream by two orders of magnitude — so a
+      random cut lands inside it more often than anywhere else, and a line
+      filter that only drops what `json.loads` ACCEPTS passes the fragment
+      through: these 2 750 bytes carry three `rate-limit` occurrences of our own
+      plan text and **classified `rate_limited`** on exactly the failed-run path
+      (`_classify_failed_run` forwards that class) the hook exists to fix.
+      `CopilotProvider.vendor_text` therefore drops an unparseable line too when
+      its opener is `{"type": "user.message"` — removal-only, never a parse of
+      the fragment — and the `null` below is that. `truncated.jsonl` is
+      unaffected and stays the record-boundary case.
+    expect:
+      success: false
+      error_contains: ["no assistant.message record in copilot output"]
+      raw_contains: ['{"type":"user.message"', "rate-limit"]
+      classify_failure: null
+
+  ephemeral-only:
+    stdout: ephemeral-only.jsonl
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      The real `success.jsonl` capture with every non-ephemeral record removed.
+      The five lines that remain are byte-identical to their originals (asserted:
+      each appears verbatim in `success.jsonl`); no content was edited and
+      nothing was written by hand. Necessary because the stub always answers, so
+      an all-noise run cannot be produced end to end.
+    notes: >-
+      An all-noise run is a **failure**, not an empty-string success: every
+      record is one `parse_output` filters, so there is no answer to serve.
+      Note what is NOT here — no `user.message` — which makes this the row where
+      `vendor_text` is a no-op, and the classification `None` before and after.
+    expect:
+      success: false
+      error_contains: ["no assistant.message record in copilot output"]
+      classify_failure: null
+
+  multi-assistant:
+    stdout: multi-assistant.jsonl
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      Synthesized from the real record by inserting a SECOND `assistant.message`
+      ahead of the real one, carrying `FIRST ANSWER (must NOT be selected)`.
+      copilot emits one `assistant.message` per turn and a second requires a
+      tool loop the committed stub deliberately never drives. The rule it pins is
+      real and this repo has paid for it: muse's silent concatenation.
+    notes: >-
+      LAST-wins, not first-wins and not concatenation. A first-wins parser
+      returns the decoy and a concatenating one returns neither. This capture
+      also carries the echoed `user.message`, so it is the second row whose
+      classification moved from `rate_limited` to `null` with the C1 fix.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)"]
+      classify_failure: null
+
+  error-envelope:
+    not_applicable: >-
+      No separate file, and a separate file would be a duplicate rather than a
+      distinct case. `session.error` on **stdout** — copilot's success channel —
+      IS copilot's only error channel, so every error row in this manifest
+      (`auth-error`, `rate-limit`, `invalid-model`, `context-overflow`) is
+      already the "the error arrived on the channel the answer uses" shape, and
+      each one is graded for exactly that: the vendor's message reaches the
+      pattern tables and is never served back as an answer.
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.jsonl
+    exit_code: 0
+    notes: >-
+      REAL, and the shape §6.2 names: a provider 200 with an empty body yields
+      process exit **0**, `result.exitCode: 0`, an `assistant.message` whose
+      `data.content` is `""`, and **no error record anywhere**. There is no text
+      for a marker to match, which is why `exit_zero_failure_markers` is empty
+      for this adapter and the detection is structural in `parse_output`. The
+      classification is therefore `None`, correctly: nothing in the capture says
+      what went wrong.
+    expect:
+      success: false
+      error_contains: ["copilot returned an empty assistant message"]
+      raw_contains: ['"exitCode":0']
+      classify_failure: null
+
+  stdout-error:
+    not_applicable: >-
+      §6.2's `stdout-error` row wants error text on stdout with stderr empty and
+      a nonzero exit. That is not one capture here, it is the shape of EVERY
+      error capture here: copilot writes `session.error` to stdout and leaves
+      stderr at 0 bytes on every model-path failure (RESULTS.md §1's error-channel
+      row), which is why not one row in this manifest names a stderr file. A
+      dedicated fixture would duplicate `auth-error.jsonl` byte for byte.
+
+  empty:
+    stdout: empty.jsonl
+    exit_code: 1
+    notes: >-
+      Zero bytes on stdout, and stderr empty too — distinguishable from a valid
+      empty answer, which is the point: `parse_output` names the cause rather
+      than restating the symptom, and reports the stderr text when there is any
+      (there is none here, so an argument-parse error is ruled out by the same
+      branch). The classifier answers `None` on an empty haystack by
+      construction. `exit_code` is the class rule from this manifest's `method`
+      note; nothing here depends on it.
+    expect:
+      success: false
+      error_contains: ["Empty output from copilot"]
+      classify_failure: null
+
+  auth-error:
+    stdout: auth-error.jsonl
+    exit_code: 1
+    requests: 3
+    notes: >-
+      A real 401 → `session.error` with `errorType: authentication` and
+      `statusCode: 401`, on **stdout** with stderr at 0 bytes. What classifies it
+      is the vendor's own `(HTTP 401)` wording carried through verbatim; the
+      adapter adds no pattern of its own for it.
+    expect:
+      success: false
+      error_contains: ["authentication (HTTP 401)"]
+      raw_contains:
+        - '"errorType":"authentication"'
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rate-limit.jsonl
+    exit_code: 1
+    notes: >-
+      A real 429 → `errorType: rate_limit`. The message self-reports "retried 5
+      times (total retry wait time: 85.66 seconds)", which is the independent
+      cross-check on this adapter's declared `max_requests=6` /
+      `retries_rate_limit=True` envelope — an executor-level re-dispatch of a
+      rate-limited copilot slot repeats a chain the CLI already ran.
+    expect:
+      success: false
+      error_contains: ["rate_limit (HTTP 429)"]
+      raw_contains:
+        - '"errorType":"rate_limit"'
+        - "retried 5 times"
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: invalid-model.jsonl
+    exit_code: 1
+    notes: >-
+      A real 404 that NAMES the model — `Model 'gpt-5.5' not found on provider
+      …` — which is what makes a stray `:effort` suffix findable. It classifies
+      `invalid_model` rather than `server_error` because copilot's gloss does not
+      contain the words "api error", which is the token that sends muse's and
+      vibe's otherwise-identical 404s to the server rung (that ordering defect is
+      C2's, not this row's).
+    expect:
+      success: false
+      error_contains: ["query (HTTP 404)"]
+      raw_contains: ["Model 'gpt-5.5' not found on provider"]
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: context-overflow.jsonl
+    exit_code: 1
+    requests: 1
+    notes: >-
+      A real 400. copilot preserves the upstream sentence verbatim — "This
+      model's maximum context length is 8192 tokens, however you requested 99999
+      tokens" — so `CONTEXT_OVERFLOW_MARKERS` matches, the condition is called
+      terminal at the right rung, and **no retry budget is spent** (one request).
+      That is the opposite of goose, which swallows the same upstream text and
+      substitutes its own compaction report.
+    expect:
+      success: false
+      error_contains: ["query (HTTP 400)"]
+      raw_contains: ["maximum context length is 8192 tokens"]
+      classify_failure: "context_length_exceeded"
+
+  # ----- beyond §6.2's twelve, graded the same way -------------------------- #
+
+  success-streamed:
+    stdout: success-streamed.jsonl
+    exit_code: 0
+    notes: >-
+      The same successful run under `--stream on`: two extra ephemeral records,
+      and the SAME terminal `assistant.message`, so one parser serves both stream
+      modes and the adapter needs no mode branch. It carries the echoed
+      `user.message` too, so this is the third row whose classification moved
+      from `rate_limited` to `null` — the reduction is keyed on record type, not
+      on stream mode.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ['"type":"assistant.message"']
+      classify_failure: null
+
+  success-silent:
+    stdout: success-silent.txt
+    exit_code: 0
+    notes: >-
+      The `-s` bare-text shape, committed as the record of why `--output-format
+      json` is what ships: 200 bytes against 65 KB, and it loses `exitCode`, the
+      model echo and the whole structured error channel. Through the shipped
+      adapter it is a FAILURE, and correctly so — there are no JSON records to
+      walk, so there is no `assistant.message` and no way to tell this answer
+      from a `session.error`. The row exists to keep that trade-off measured
+      rather than remembered.
+    expect:
+      success: false
+      error_contains: ["no assistant.message record in copilot output"]
+      raw_contains: ["S001"]
+      classify_failure: null

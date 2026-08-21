@@ -41,7 +41,6 @@ tier claim something it cannot observe.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 
@@ -495,12 +494,26 @@ def graded(request, posture, utc):
     # meant to trip is the executor's preflight of the CONFIGURED runner — so a
     # codex runner would sail past opencode's auth.json going missing and the row
     # would assert nothing at all.
+    #
+    # AND THE SLUG MUST BE IN THAT CLI'S OWN ADDRESSING SCHEME. opencode resolves
+    # models as `provider/model`; handed a bare `stub-model` it parses provider
+    # `stub-model` with an empty model half and raises
+    # `ProviderModelNotFoundError: Model not found: stub-model/.` before a single
+    # HTTP call leaves the process — which is what exited `opencode-auth-negative`
+    # 3 on `runs/20260820T093838Z`, with `stub.jsonl` holding exactly two records
+    # (a `/__health` and the codex fan-out's `POST /v1/responses`) and zero
+    # opencode calls. The provider lane already pins the qualified form
+    # (`tests/container/redirect.yaml:1024`, `model_arg: "stub/stub-model"`), so
+    # this matches it rather than inventing a second spelling. codex keeps its
+    # bare token, which codex resolves fine; `host_matrix.yaml` declares no runner
+    # for either row, so this expression is the only place the slug is built.
     negative = bool(matrix_row.get("remove_seed"))
+    negative_model = "stub/stub-model" if host == "opencode" else "stub-model"
     row = harness.Row(
         row_id=row_id, lane="host", host=host, creds="openrouter",
         helpers=sorted({"codex", host} if negative else {"codex"}),
         spec="codex:stub-model",
-        runner=f"{host}:stub-model" if negative else "codex:stub-model",
+        runner=f"{host}:{negative_model}" if negative else "codex:stub-model",
         row_timeout_s=int(matrix_row.get("wall_clock_s") or 600) + 500,
         # Without it the worker really runs and really fails: a scenario-less
         # stub answers a bare "OK", which is not a suggestions document, and the
@@ -1132,9 +1145,13 @@ class TestTheWriteRowsAreGradedOnBytes:
         declared = (matrix_row.get("expect") or {}).get("paths")
         if not declared:
             pytest.skip(f"{result.row.row_id}: the row declares no write paths")
-        stray = sorted(name for name in _source_delta(result)
-                       if not any(fnmatch.fnmatch(name, pattern)
-                                  for pattern in declared))
+        # The predicate itself lives in `harness.stray_paths` — same behaviour,
+        # one importable place — because this assertion is `live`-marked beneath
+        # this module's container gate and therefore only ever answers inside a
+        # credentialed Docker run. `tests/test_stray_write_paths.py` pins it in
+        # both directions on plain CI, where a PR that widens a `paths:` glob too
+        # far is actually read.
+        stray = harness.stray_paths(_source_delta(result), declared)
         assert not stray, (
             f"{result.row.host}: bytes moved outside the row's declared "
             f"{declared}: {stray}. A change outside the declared set fails the row "

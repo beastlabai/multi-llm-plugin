@@ -68,7 +68,7 @@ hosts:
                     profiles: [generate, agent-readonly, agent-write], usage: full}
       cursor-agent: {bundled: false, needs_auth: true,
                      login_cmd: "cursor-agent login",
-                     profiles: [generate], usage: none}
+                     profiles: [generate], usage: partial}
     # In-session native dispatch: no process of ours sits between parent and child,
     # so there is nothing to strip and nothing to neutralize.
     nested_exec: {spawn: allowed, network: allowed, credentials: allowed,
@@ -77,10 +77,31 @@ hosts:
     # Audited and non-empty: these are the variables Claude Code injects, which a
     # dispatched third-party runner must not inherit. Literal names only — a
     # wildcard would strip the runner's own credentials along with the guard.
+    #
+    # `passthrough` is EMPTY, and the entry that used to sit here is the reason
+    # this comment is worth reading. It carried `ANTHROPIC_API_KEY`, sanctioned
+    # as "an API key the host owns". `subagent_executor` re-admits every
+    # passthrough name last, so that one cell silently cancelled M3/§2.1's
+    # credential strip on the agent-profile lane while leaving it in force on
+    # the fan-out lane: the same claude-code slot stripped the key on Lane A and
+    # inherited it on Lane B, and the money bug the strip exists to close stayed
+    # open for every subagent dispatch. Re-adding it would restore exactly that.
+    #
+    # The strip is not unconditional and does not need a passthrough as its
+    # escape hatch: it is gated on the sanitized `claude auth status` preflight
+    # and fails OPEN — an API-key-only user's key is preserved byte-for-byte —
+    # and a user who wants it back unconditionally sets
+    # `providers.claude-code.strip_vendor_keys: never` in providers.yaml, which
+    # is a per-provider decision rather than a host-wide one.
+    #
+    # NOTE: this is a HOST-side allowlist, keyed by the host multi-llm is
+    # *running inside*, not by the runner it dispatches. `codex` and `opencode`
+    # both already carry `passthrough: []`, so emptying this one changes exactly
+    # one situation: claude-code dispatched from inside claude-code.
     env_guards:
       guards: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
       session_scoped: ["CLAUDE_SESSION_ID", "CLAUDE_SKILL_DIR"]
-      passthrough: ["ANTHROPIC_API_KEY"]
+      passthrough: []
     max_concurrent_subagents: 10
     timeout_ceiling_s: 600            # Bash tool hard cap, silently clamped above
     timeout_override: {frontmatter: none, env: none, config: none}

@@ -79,11 +79,11 @@ def _clean_module_state(tmp_path, monkeypatch):
     monkeypatch.setattr(cursor_agent_module.tempfile, "tempdir", str(scratch))
     monkeypatch.delenv("CURSOR_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CURSOR_DATA_DIR", raising=False)
-    cursor_agent_module.reset_flag_cache()
+    cursor_agent_module.reset_flag_gate_cache()
     cursor_agent_module.reset_side_effect_guard()
     cursor_agent_module.reset_profile_state()
     yield
-    cursor_agent_module.reset_flag_cache()
+    cursor_agent_module.reset_flag_gate_cache()
     cursor_agent_module.reset_side_effect_guard()
     cursor_agent_module.reset_profile_state()
 
@@ -901,3 +901,75 @@ class TestRefusalFallsBackToTheGuard:
         assert "CURSOR_CONFIG_DIR" not in env
         assert cursor_agent_module.armed_snapshot() is not None
         assert env["GIT_TERMINAL_PROMPT"] == "0", "the shared env delta survives"
+
+
+class TestTheFallbackGuardIsArmedWithTheDispatchCwd:
+    """A Lane B dispatch runs in an explicit ``cwd``; the guard must record it.
+
+    ``_marker_is_ours`` only removes a ``.workspace-trusted`` whose
+    ``workspacePath`` names a workspace *this process ran in*. Arming the
+    fallback without the dispatch's ``cwd`` records the **orchestrator's**
+    directory instead, so the durable marker the run really wrote survives as if
+    the user had trusted that repo on purpose — which also trusts it for their
+    own later interactive sessions.
+    """
+
+    @staticmethod
+    def _force_the_fallback(monkeypatch):
+        """Make the redirect unbuildable, whatever this platform's `auto` does."""
+
+        def boom(*_args, **_kwargs):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(cursor_agent_module.tempfile, "mkdtemp", boom)
+
+    def test_the_guard_records_the_dispatch_cwd_not_the_process_one(
+        self, provider, user_profile, tmp_path, monkeypatch
+    ):
+        self._force_the_fallback(monkeypatch)
+        workspace = tmp_path / "checkout"
+        workspace.mkdir()
+
+        provider.resolve_env("composer-2.5", PROFILE_GENERATE, cwd=str(workspace))
+
+        armed = cursor_agent_module.armed_snapshot()
+        assert armed is not None
+        assert os.path.realpath(str(workspace)) in armed.workspaces
+        assert os.path.realpath(os.getcwd()) not in armed.workspaces
+
+    def test_a_marker_written_for_that_cwd_is_removed_at_restore(
+        self, provider, user_profile, tmp_path, monkeypatch
+    ):
+        self._force_the_fallback(monkeypatch)
+        workspace = tmp_path / "checkout"
+        workspace.mkdir()
+
+        env = provider.resolve_env("composer-2.5", PROFILE_GENERATE, cwd=str(workspace))
+        child_run(env, "composer-2.5", workspace=str(workspace))
+
+        marker = (
+            user_profile["data_dir"] / "projects" / "slug-of-the-run" / ".workspace-trusted"
+        )
+        assert marker.is_file(), "the child really wrote into the user's profile"
+
+        assert str(marker) in cursor_agent_module.restore_side_effects()
+        assert not marker.exists()
+
+    def test_omitting_the_cwd_still_means_this_process_directory(
+        self, provider, user_profile, tmp_path, monkeypatch
+    ):
+        """Lane A's usual case: no explicit cwd, so the child inherits ours."""
+        self._force_the_fallback(monkeypatch)
+
+        env = provider.resolve_env("composer-2.5", PROFILE_GENERATE)
+
+        armed = cursor_agent_module.armed_snapshot()
+        assert armed is not None
+        assert os.path.realpath(os.getcwd()) in armed.workspaces
+
+        child_run(env, "composer-2.5", workspace=os.getcwd())
+        marker = (
+            user_profile["data_dir"] / "projects" / "slug-of-the-run" / ".workspace-trusted"
+        )
+        assert str(marker) in cursor_agent_module.restore_side_effects()
+        assert not marker.exists()

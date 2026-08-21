@@ -55,6 +55,18 @@ notes: >-
   `ENV_CARRY_EXACT` carries both into the child. 4 requests per API call × 2
   calls = the 7-8 seen on the fail-forever rows (7 vs 8 is a race between the two
   concurrent calls, not a retry-count difference).
+  (5) **The envelope's two verdict fields never disagree here, and that is
+  measured across all eleven rows rather than assumed**: `terminal_reason:
+  "completed"` occurs on exactly the three `is_error: false` rows (`success`,
+  `ephemeral-only`, `multi-assistant`) and `terminal_reason: "api_error"` on all
+  eight `is_error: true` rows. `parse_result_envelope` refuses on EITHER, so the
+  `or` between them is belt-and-braces at this version;
+  `tests/test_result_envelope_verdicts.py` asserts the agreement directly, which
+  is what turns a future capture where they diverge into a red test rather than
+  into whichever field happened to be read first. `api_error_status` is the
+  third field and the only one of the three that is sometimes `null` on a
+  failure — see the `zero-byte-response` and `truncated` rows, where no HTTP
+  response ever arrived.
 
 rows:
   success:
@@ -99,9 +111,17 @@ rows:
       non-streamed** — visible in the stub log as stream true/false alternating —
       where the 300-byte cut lands inside a 322-byte body. 4 requests = 2 calls ×
       (1 streamed + 1 non-streamed). Exit **1**; the CLI's gloss is
-      `Connection to the API was lost (ECONNRESET)`.
+      `Connection to the API was lost (ECONNRESET)`, and since C5 that gloss is
+      the parser's error rather than a generic no-JSON sentence: the envelope
+      says `is_error: true` and `parse_result_envelope` refuses it quoting the
+      CLI's own words. `api_error_status` is **null** here — no HTTP response
+      ever arrived — so the classifier's status rung defers and the cell below
+      is still the text ladder's answer.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "API Error: Connection to the API was lost (ECONNRESET)"
       raw_contains:
         - "API Error: Connection to the API was lost (ECONNRESET)"
         - '"is_error":true'
@@ -141,11 +161,14 @@ rows:
     wall_s: 0.48
     requests: 2
     notes: >-
-      **FIRST-wins, and it is the wrong answer.** Two JSON documents in one
+      **LAST-wins, and it selects the answer.** Two JSON documents in one
       answer, the first reading `FIRST ANSWER (must NOT be selected)`;
       `parse_result_envelope` falls through to
-      `extract_json_from_text(prefer_arrays=True)` and returns the FIRST array.
-      The row pins today's behaviour unweakened — see README, defect 1.
+      `extract_json_from_text(prefer_arrays=True)`, which takes the LAST
+      top-level array — the S001/S002 pair — under the one rule the extractor
+      now states for every caller: the last document wins, at every level. The
+      decoy is still in the bytes (`raw_contains` pins it), so the row still
+      tests selection rather than parsing. See README, defect 1.
       The literal §6.2 shape (two assistant *messages*) is unreachable through
       this CLI: `--output-format json` prints a single result envelope with one
       `result` string, so multiple assistant turns are concatenated by the CLI
@@ -154,7 +177,8 @@ rows:
     expect:
       success: true
       data:
-        - {id: "S000", title: "FIRST ANSWER (must NOT be selected)", severity: "low"}
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ["FIRST ANSWER (must NOT be selected)", "Bound the retry ladder"]
       classify_failure: null
 
@@ -171,13 +195,20 @@ rows:
       response (HTTP 200) — check for a proxy or gateway intercepting the
       request` — so the provider's text is LOST rather than mis-served. Note the
       envelope contradicts itself: `is_error: true` and `terminal_reason:
-      "api_error"` next to `subtype: "success"`. `parse_output` reads NEITHER —
-      it only looks at `result` — which is safe here because the substituted
-      sentence carries no JSON, and is the reason defect 2 in the README is
-      worth stating.
+      "api_error"` next to `subtype: "success"`. **`parse_output` reads both of
+      the first two** (C5) and refuses on them, which is what moved this row's
+      error from the generic `No valid JSON found in text` — true, but an
+      accident of the substituted sentence carrying no JSON — to the envelope's
+      own verdict plus its own words. The row was always `success: false`; what
+      changed is WHY, and a `result` holding a parseable document would now be
+      refused just the same. `api_error_status` is **null** on this one (the
+      transport succeeded — HTTP 200 — and the body was the problem), so the
+      classification cell below is still the text ladder's.
     expect:
       success: false
-      error_contains: ["No valid JSON found in text"]
+      error_contains:
+        - "terminal_reason: api_error"
+        - "API returned an empty or malformed response (HTTP 200)"
       raw_contains:
         - "API returned an empty or malformed response (HTTP 200)"
         - '"is_error":true'
@@ -211,9 +242,15 @@ rows:
       4.4 s is the full pinned envelope in one capture (4 per API call ×
       2 calls, `CLAUDE_CODE_MAX_RETRIES=3`). The 5xx text also proves the harness
       is talking to the stub and not to a vendor: the CLI's own gloss names
-      `127.0.0.1:8099` as the inference gateway.
+      `127.0.0.1:8099` as the inference gateway. This is the row that pins
+      **5xx** in the `api_error_status` map: `500` → `server_error`, which is
+      what the text ladder already answered, so the map changes nothing here and
+      its value is that it keeps answering when the sentence is reworded.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "API Error: 500 The server had an error while processing your request."
       raw_contains:
         - "API Error: 500"
         - "The server had an error while processing your request."
@@ -241,20 +278,29 @@ rows:
     notes: >-
       failserver `--mode 401`. claude-code **retries a 401** — 8 requests over
       4.7 s, the same envelope as the 5xx row — which is itself worth knowing:
-      no retry fixes a bad credential. The classification measured here is
-      `server_error`, NOT `auth_failed`, and that is the most consequential
-      finding in this set (README, defect 3): the CLI's gloss is `Failed to
-      authenticate. API Error: 401 …`, not one of base.auth_error_patterns' ten
-      entries matches it, and `\bapi error\b` in SERVER_ERROR_MARKERS matches the
-      universal `API Error:` prefix. Auth is consulted BEFORE server, so two
-      added patterns would fix it — the row pins today's behaviour unweakened.
+      no retry fixes a bad credential. This row measured `server_error` when it
+      was captured, and it was the most consequential finding in the set: the
+      CLI's gloss is `Failed to authenticate. API Error: 401 …`, not one of
+      base.auth_error_patterns' ten entries matched it, and `\bapi error\b` in
+      SERVER_ERROR_MARKERS matches the universal `API Error:` prefix, so a
+      credential failure landed on a RETRYABLE category. **Two independent
+      fixes now answer `auth_failed` on these same bytes**, and the row grades
+      both: C3 added `failed to authenticate` to this adapter's
+      `auth_error_patterns` (the CLI's own gloss, not the upstream sentence),
+      and C5 reads `"api_error_status":401` as a rung ahead of the text ladder.
+      They agree — asserted for every failure row of this manifest by
+      `tests/test_result_envelope_verdicts.py`, which is what stops the same
+      cell being moved twice by two tasks.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "Failed to authenticate. API Error: 401"
       raw_contains:
         - "Failed to authenticate. API Error: 401"
         - "Incorrect API key provided"
         - '"api_error_status":401'
-      classify_failure: "server_error"
+      classify_failure: "auth_failed"
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -270,9 +316,15 @@ rows:
       against the same upstream for the same verdict. This is the one failure row
       that classifies on the vendor's own words rather than on claude-code's
       prefix — `429` and `rate limit` are both base rate-limit patterns, and rate
-      limit is consulted before the server table.
+      limit is consulted before the server table. It is also the row that pins
+      **429 → `rate_limited`** in the `api_error_status` map: the cell was
+      already right, so the requirement on the map is that it must NOT change
+      it.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "API Error: Request rejected (429)"
       raw_contains:
         - "API Error: Request rejected (429)"
         - "Rate limit reached for stub-model"
@@ -291,18 +343,28 @@ rows:
       resolved wire id, not the `haiku` alias handed to `--model`, because
       claude-code resolves the alias before dispatch. That asymmetry is what
       makes a stray `:effort` suffix findable at all, and it is why the assertion
-      below is on the resolved id. **The measured classification is `None`**:
-      claude-code replaces the vendor's `The model \`X\` does not exist` with its
-      own `There's an issue with the selected model (X). It may not exist or you
-      may not have access to it.`, which no INVALID_MODEL_MARKERS entry matches —
-      see README, defect 4.
+      below is on the resolved id. **The text ladder answers `None` on these
+      bytes and always will**: claude-code replaces the vendor's `The model
+      \`X\` does not exist` with its own `There's an issue with the selected
+      model (X). It may not exist or you may not have access to it.`, which no
+      INVALID_MODEL_MARKERS entry matches at any ladder order — so C2's reorder
+      (invalid-model consulted before server-error) did not move this cell and
+      could not have. **The `api_error_status` rung is the only route to
+      `invalid_model` here** (C5): `"api_error_status":404` is the same integer
+      the HTTP response carried, whatever sentence the CLI substitutes for it.
+      This is the one row of the eleven where the status map is not a no-op, and
+      `tests/test_result_envelope_verdicts.py` names it as such rather than
+      leaving the disagreement between the two routes implicit.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "There's an issue with the selected model (claude-haiku-4-5-20251001)"
       raw_contains:
         - "There's an issue with the selected model (claude-haiku-4-5-20251001)"
         - "It may not exist or you may not have access to it"
         - '"api_error_status":404'
-      classify_failure: null
+      classify_failure: "invalid_model"
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -317,9 +379,16 @@ rows:
       base.CONTEXT_OVERFLOW_MARKERS — survives to the classifier and the terminal
       category wins over everything after it. **2 requests, not 8**: a 400 is not
       retried, which is the behaviour §7.2 wants and the opposite of the 401
-      above.
+      above. This row is also why the `api_error_status` map **defers on 400**
+      instead of naming a category: `"api_error_status":400` here and a 400 is
+      not one condition, so the sentence is the only thing that can tell a
+      context overflow from the rest and the status rung must stand aside for
+      it.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "maximum context length is 8192 tokens"
       raw_contains:
         - "maximum context length is 8192 tokens"
         - "Please reduce the length of the messages"
@@ -340,8 +409,16 @@ rows:
       because the CLI distinguishes the two in words — `Connection dropped
       (ECONNRESET)` here against `Connection to the API was lost (ECONNRESET)`
       there — and it retries this one 8 times where the truncated stream got 4.
+      It is the row that pins the map's **`null` → defer** cell: the field is
+      present and explicitly `null` (`"api_error_status":null` is asserted
+      below), so the status rung stands aside and `server_error` below is the
+      text ladder's verdict, reached through the `API Error:` prefix exactly as
+      before C5.
     expect:
       success: false
+      error_contains:
+        - "terminal_reason: api_error"
+        - "API Error: Connection dropped (ECONNRESET)"
       raw_contains:
         - "API Error: Connection dropped (ECONNRESET)"
         - '"api_error_status":null'

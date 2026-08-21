@@ -178,9 +178,9 @@ entries:
     prompt: argv
     min_records: 1
 
-  # The §5.4.1 per-flag capability gate: `claude_code._read_help_tokens` spawns
-  # `claude --help` once per process, memoised on the resolved binary, and
-  # only when a schema is attached. No other adapter probes this way.
+  # The §5.4.1 per-flag capability gate: `base.read_help_tokens` (M14 absorbed
+  # the adapter-local copies into it) spawns `claude --help` once per process,
+  # memoised on the resolved binary, and only when a schema is attached.
   - provider: claude-code
     profile: probe
     transport: stdin
@@ -459,6 +459,12 @@ entries:
     prompt: argv
     min_records: 1
 
+  # `--pure` is M4's hermetic leg: it is emitted only inside an active dispatch
+  # context, together with the run-scoped XDG_CONFIG_HOME redirect, so a run
+  # cannot pick up the user's own opencode config. `generate` and
+  # `agent-readonly` are hermetic; `agent-write` deliberately is NOT (it keeps
+  # inherited config), which is why the agent-write row below carries no
+  # `--pure` and must not gain one.
   - provider: opencode
     profile: agent-readonly
     transport: stdin
@@ -470,6 +476,7 @@ entries:
       "--log-level": "ERROR"
       "--model": "<model>"
       "--print-logs": null
+      "--pure": null
     tail: []
     prompt: stdin
     min_records: 1
@@ -499,6 +506,7 @@ entries:
       "--log-level": "ERROR"
       "--model": "<model>"
       "--print-logs": null
+      "--pure": null
     tail: ["<prompt>"]
     prompt: argv
     min_records: 1
@@ -520,6 +528,22 @@ entries:
     binary: opencode
     subcommands: ["auth", "list"]
     options: {}
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  # M4's flag gate: opencode is asked once per process whether it advertises
+  # `--pure` before the flag is emitted, so an older opencode degrades to a
+  # non-hermetic run instead of dying on an unknown flag. One help spawn per
+  # (binary, help argv) per process, hence min_records: 1 rather than one per
+  # dispatch.
+  - provider: opencode
+    profile: probe
+    transport: stdin
+    binary: opencode
+    subcommands: ["run"]
+    options:
+      "--help": null
     tail: []
     prompt: stdin
     min_records: 1

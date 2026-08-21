@@ -5,7 +5,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.json_extractor import generate_output_path, sanitize_model_name
+from utils.json_extractor import (
+    extract_json_from_text,
+    generate_output_path,
+    sanitize_model_name,
+)
 
 
 class TestSanitizeModelName:
@@ -80,3 +84,108 @@ class TestGenerateOutputPath:
             path = generate_output_path(tmp_path, "test", "review-plan", model_spec)
             expected_name = sanitize_model_name(model_spec) + ".json"
             assert path.name == expected_name, f"Mismatch for {model_spec}: {path.name} != {expected_name}"
+
+
+class TestLastDocumentWins:
+    """The extractor's one selection rule, stated as a test rather than a convention.
+
+    **The last document wins, at every level** — the last envelope record (each
+    adapter's own rule), then the last top-level candidate inside that record's
+    text — with shape preference consulted before position, and a contained
+    candidate never outranking the one that contains it. Four clauses make that
+    implementable, and there is one case per clause below, on fixed strings
+    rather than on a capture so the rule is pinned independently of any vendor's
+    bytes.
+    """
+
+    def test_the_last_top_level_document_is_the_answer(self):
+        """The rule itself: a draft followed by an answer resolves to the answer."""
+        two_documents = (
+            '[{"id": "DRAFT", "title": "FIRST ANSWER (must NOT be selected)"}]\n\n'
+            '[{"id": "S001", "title": "Bound the retry ladder"}]'
+        )
+        result = extract_json_from_text(two_documents)
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001", "title": "Bound the retry ladder"}]
+
+    def test_clause_1_a_nested_array_never_outranks_its_container(self):
+        """Reversing the raw candidate list would return the inner ``[1, 2]``."""
+        result = extract_json_from_text('[{"a": [1, 2]}]')
+
+        assert result["success"]
+        assert result["data"] == [{"a": [1, 2]}]
+
+    def test_clause_1_an_inner_document_is_still_salvaged(self):
+        """Contained candidates are ranked after, never dropped.
+
+        The outer array carries a trailing comma and does not parse; the object
+        inside it does, and ``TestMalformedJson``'s truncated and unbalanced
+        cases depend on that fallback surviving the flip.
+        """
+        result = extract_json_from_text('[{"id": "S001"}, ]')
+
+        assert result["success"]
+        assert result["data"] == {"id": "S001"}
+
+    def test_clause_2_a_trailing_object_does_not_displace_a_preceding_array(self):
+        """Shape before position: every array is tried before every object."""
+        array_then_object = (
+            '[{"id": "S001"}]\n\n'
+            'For example, one suggestion looks like {"id": "S001"}.'
+        )
+        result = extract_json_from_text(array_then_object, prefer_arrays=True)
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001"}]
+
+    def test_clause_3_an_empty_trailing_array_does_not_displace_a_full_one(self):
+        """Non-empty before empty: the last candidate that parses to a value."""
+        result = extract_json_from_text('[{"id": "S001"}]\n\n[]')
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001"}]
+
+    def test_clause_3_an_empty_document_is_still_served_when_it_is_all_there_is(self):
+        """Else the last that parses at all: an empty answer is not a failure."""
+        result = extract_json_from_text("[]")
+
+        assert result["success"]
+        assert result["data"] == []
+
+    def test_clause_4_the_last_fenced_block_wins(self):
+        """The fenced path and the bare-text path are on one rule."""
+        two_fences = (
+            "```json\n"
+            '[{"id": "DRAFT"}]\n'
+            "```\n\n"
+            "```json\n"
+            '[{"id": "S001"}]\n'
+            "```"
+        )
+        result = extract_json_from_text(two_fences)
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001"}]
+
+    def test_clause_4_an_empty_trailing_fence_does_not_displace_a_full_one(self):
+        """Clause 3 binds the fenced path too, not just the bare-text one."""
+        answer_then_empty = (
+            "```json\n"
+            '[{"id": "S001"}]\n'
+            "```\n\n"
+            "```json\n"
+            "[]\n"
+            "```"
+        )
+        result = extract_json_from_text(answer_then_empty)
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001"}]
+
+    def test_clause_4_an_empty_fence_is_still_served_when_it_is_all_there_is(self):
+        """Else the last fence that parses at all: an empty answer is not a failure."""
+        result = extract_json_from_text("```json\n[]\n```")
+
+        assert result["success"]
+        assert result["data"] == []

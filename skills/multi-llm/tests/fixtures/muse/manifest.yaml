@@ -117,11 +117,16 @@ rows:
       byte on disk is muse's own JSONL. What it pins, exactly: the terminal
       record's `text` is
       `Draft: [{…DRAFT…}][{…S001…}]` — two documents glued with NO separator —
-      so feeding the whole string to `extract_json_from_text` returns the DRAFT
-      (verified: it returns `id: DRAFT`), while the deltas after the last
-      `tool.result` return the answer. `muse.py`'s tail-after-last-`tool.result`
-      rule is the only thing between those two outcomes, and this row is the
-      only test in the repo that would notice it being removed.
+      and BOTH routes now land on the answer. Since the extractor took the one
+      last-wins rule, feeding the whole string to `extract_json_from_text`
+      returns the S001 array (verified), which is what the deltas after the last
+      `tool.result` return too. So the tail-after-last-`tool.result` rule is no
+      longer what separates the two outcomes ON THIS CAPTURE. The rule still
+      ships, and what it pins is narrower and unchanged: a `tool.result`
+      boundary is AUTHORITATIVE, not inferred from document order — text from an
+      earlier turn is never the answer, even when it is the last thing before
+      the boundary and even when it is the only thing that parses. This row is
+      still the only capture in the repo that exercises that boundary at all.
     expect:
       success: true
       data:
@@ -170,16 +175,23 @@ rows:
       two reminders that had already started), one
       `opening meta model stream attempt 1/10` and no attempt 2 — muse does not
       spend its ten-attempt ladder on an auth failure.
-      **THE DEFECT THIS ROW PINS.** muse SWALLOWS the vendor 401 completely: the
-      strings `401`, `API error` and `Incorrect API key provided` appear NOWHERE
-      in the 17 KB capture. What it writes instead is its own gloss — "your API
-      key from META_API_KEY was rejected — update or unset it" — which matches
-      none of the twelve patterns in `MuseProvider.auth_error_patterns`,
-      including the two (`api error 401`, `api error 403`) added specifically
-      for this case. So `classify_failure` answers **None**, a rejected muse
-      credential is transport-shaped, and the executor spends its whole bounded
-      retry budget on the one condition §7.2 makes terminal. The row records
-      what the code does today, unweakened; the one-line fix is in the README.
+      **THE DEFECT THIS ROW PINNED, AND THE FIX IT NOW DRIVES (C3).** muse
+      SWALLOWS the vendor 401 completely: the strings `401`, `API error` and
+      `Incorrect API key provided` appear NOWHERE in the 17 KB capture. What it
+      writes instead is its own gloss — "your API key from META_API_KEY was
+      rejected — update or unset it" — which matched none of the twelve base
+      patterns nor the two (`api error 401`, `api error 403`) added specifically
+      for this case, so `classify_failure` answered **None**, a rejected muse
+      credential was transport-shaped, and the executor spent its whole bounded
+      retry budget on the one condition §7.2 makes terminal. These same bytes
+      now drive the fix rather than pin the defect: `auth_error_patterns` gained
+      `api key from` and `update or unset it`, two independent anchors on that
+      one sentence, and the cell below reads **auth_failed**. No new bytes were
+      captured for it, and no other row in this set contains either phrase —
+      including both success captures, which is the check C3 owes an adapter
+      that echoes (`vendor_text` reduces muse's two prompt-carrying payloads but
+      leaves every `run.output.delta`, so a pattern loose enough to match a
+      model's prose would fail whole batches).
     expect:
       success: false
       error_contains: ["Muse run failed", "was rejected"]
@@ -187,7 +199,7 @@ rows:
         - '"payload_type":"run.terminal.failed"'
         - "your API key from META_API_KEY was rejected"
         - "opening meta model stream attempt 1/10"
-      classify_failure: null
+      classify_failure: "auth_failed"
 
   invalid-model:
     stdout: invalid-model.stdout.txt
@@ -200,19 +212,19 @@ rows:
       muse-spark-9.9-nonexistent`. Terminal, one attempt, 3 POSTs. The failure
       NAMES the model and keeps the vendor sentence verbatim — the best of the
       six failure shapes here, and exactly what makes a stray `:effort` suffix
-      findable. **And it classifies as `server_error`, not `invalid_model`.**
-      That is a base-table ordering fact, not a missing muse pattern: muse
-      prefixes the vendor text with `API error 404:`, `\bapi error\b` is a member
-      of `base.SERVER_ERROR_MARKERS`, and `classify_streams` consults the server
-      table BEFORE `INVALID_MODEL_MARKERS`. A config error whose fix is a config
-      edit therefore lands on a retryable rung. Recorded, not fixed — see the
-      README.
+      findable. **It now classifies `invalid_model`.** It used to read
+      `server_error` — a base-table ordering fact, not a missing muse pattern:
+      muse prefixes the vendor text with `API error 404:`, `\bapi error\b` is a
+      member of `base.SERVER_ERROR_MARKERS`, and `classify_streams` consulted the
+      server table BEFORE `INVALID_MODEL_MARKERS`, so a config error whose fix is
+      a config edit landed on a retryable rung. **C2 swapped that pair** and this
+      cell is one of the three that moved. No muse pattern was added.
     expect:
       success: false
       error_contains: ["API error 404", "muse-spark-9.9-nonexistent"]
       raw_contains:
         - "The model `muse-spark-9.9-nonexistent` does not exist or you do not have access to it."
-      classify_failure: "server_error"
+      classify_failure: "invalid_model"
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -375,16 +387,26 @@ rows:
       5.1 s.
       What this row pins that the canonical one cannot: §6.2's "partial text or
       a classified failure" branch. `raw` is the delivered `OK`, it is NOT
-      served as the answer, there is no traceback, and the terminal reason
-      survives into the parser's error through `parse_output`'s RESIDUAL branch
-      — the last three lines of that method, which no other row in this set
-      reaches (the canonical row exits at the early terminal-failed branch
-      because it salvaged no text at all).
+      served as the answer, and there is no traceback — the terminal reason is
+      the whole diagnosis and it survives into the parser's error.
+      **C3/C8 MOVED THE ROUTE, NOT THE VERDICT.** Before C8 this row's text
+      reached `parse_output`'s RESIDUAL branch — the last lines of that method —
+      because salvaged text let a failed run fall past the terminal-failed
+      branch; the error read `No valid JSON found in text (muse run failed: …)`.
+      C8 dropped the `and not full` conjunct, so a recorded non-`completed`
+      terminal now fails at the FIRST branch whatever was salvaged, and this row
+      takes the same route the canonical `truncated` row does. `success` is
+      **unchanged** — it was already false, which is the point: the row's
+      verdict never depended on the defect, only its wording did. What it still
+      pins is that the vendor's own sentence, not "no valid JSON found", is what
+      a partial-text failure reports, and that `raw` is the delivered `OK`
+      rather than `None` (Lane B reads exactly that to choose rung 5 over
+      rung 4).
     expect:
       success: false
       error_contains:
-        - "No valid JSON found in text"
-        - "muse run failed: stream ended before terminal event"
+        - "Muse run failed"
+        - "stream ended before terminal event"
       raw_contains:
         - "stream ended before terminal event"
         - '"terminal":"failed"'
@@ -398,31 +420,46 @@ rows:
     requests: 32
     notes: >-
       NOT one of §6.2's twelve — an extra row, committed because it is the one
-      shape in this whole set where the parser gets it WRONG, and nothing else
+      shape in this whole set where the parser got it WRONG, and nothing else
       here would catch it. Same `--mode trunc` as above with
       `--trunc-bytes 2100` and a `--trunc-answer` that is a complete JSON array:
       the delivered deltas therefore hold a *syntactically complete document*
       while the stream still died before its terminal event. muse exits **1**
       after ten attempts with `run.terminal.failed` /
       `model failed after 10 attempts: stream ended before terminal event`, and
-      `parse_output` returns **success: true** with that document as the answer.
-      The cause is a single guard: `parse_output`'s first branch fails a
-      non-completed run only `and not full` — with text present it falls
-      straight through to `_direct_json(tail)` and returns before the terminal
-      state is ever consulted again.
-      BLAST RADIUS, measured in the two callers rather than assumed: Lane A is
+      `parse_output` used to return **success: true** with that document as the
+      answer. The cause was a single guard: `parse_output`'s first branch failed
+      a non-completed run only `and not full` — with text present it fell
+      straight through to `_direct_json(tail)` and returned before the terminal
+      state was ever consulted again.
+      BLAST RADIUS, measured in the two callers rather than assumed: Lane A was
       safe by accident — `llm_client` short-circuits on `returncode != 0` and
-      never calls `parse_output`. The subagent executor is NOT: it documents
+      never calls `parse_output`. The subagent executor was NOT: it documents
       "exit code is evidence, never the verdict" and accepts a schema-valid
       result from a non-zero exit with only an annotation, so a muse dispatch
-      that failed ten times would have its salvaged fragment accepted as the
-      task's answer. The fix is one clause — fail when the terminal is not
-      `completed`, whatever text was salvaged, or at minimum surface it — and it
-      is left undone so this row pins today's behaviour.
+      that failed ten times would have had its salvaged fragment accepted as the
+      task's answer.
+      **LANDED (C8), AND THIS ROW IS NOW THE PROOF RATHER THAN THE RECORD.** The
+      `and not full` conjunct is gone: terminal state comes before salvaged
+      text, in one direction only — a recorded non-`completed` terminal fails
+      the run whatever parsed, while a MISSING terminal still parses (the
+      `success` row above is the guard on that half, and its cell is untouched).
+      So `success` flips **true → false**, the `data` cell is gone, and the row
+      now asserts muse's own terminal reason in `error_contains`. The two
+      `raw_contains` entries and `classify_failure: null` are deliberately
+      **unchanged** — the same bytes, the same unclassifiable transport failure,
+      a different verdict. The fix is in the adapter and nowhere else:
+      `utils/subagent_executor.py` is byte-identical, because the evidence that
+      condemns this run is `run.terminal.failed`, which only this adapter reads,
+      not the exit code several CLIs overload. `raw` stays the whole stream, so
+      Lane B lands this on rung 5 (`unparseable_result`), not rung 4 —
+      `tests/test_muse_terminal_state.py` drives the executor over these exact
+      bytes for both halves.
     expect:
-      success: true
-      data:
-        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+      success: false
+      error_contains:
+        - "Muse run failed"
+        - "model failed after 10 attempts: stream ended before terminal event"
       raw_contains:
         - "model failed after 10 attempts: stream ended before terminal event"
         - '"terminal":"failed"'

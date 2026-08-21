@@ -32,9 +32,16 @@ notes: >-
   Four measured facts govern every row, and the first is the important one.
   (1) **On EVERY failure gemini writes ZERO bytes to stdout and puts the whole
   diagnosis on stderr** — the exact inverse of the opencode/aider/claude-code
-  trap. `GeminiProvider.parse_output` reads only `stdout`, so the operator-facing
-  error for a 401, a 429, a 404 and a 400 alike is the identical, contentless
-  `JSON parse error: Expecting value: line 1 column 1 (char 0)`.
+  trap. `GeminiProvider.parse_output` used to read only `stdout`, so the
+  operator-facing error for a 401, a 429, a 404 and a 400 alike was the
+  identical, contentless `JSON parse error: Expecting value: line 1 column 1
+  (char 0)`. **C4 fixed that half**: `parse_output` now names the stderr text in
+  its error branch and `describe_failure` returns the same one-line summary to
+  both lanes, so every `error_contains` below carries the VENDOR's own words and
+  the nine failure rows are distinguishable from each other. The classification
+  cells did **not** move with it — `describe_failure` is diagnostics, never
+  classification — with the single exception of `auth-error`, which is C3's
+  pattern widening and is marked as such on its own row.
   (2) stderr carries TWO things: free-form JS prose (message + a Node stack into
   `@google/genai` and `@google/gemini-cli-core`), and then a machine-readable
   envelope `{"session_id", "error": {"type", "message", "code"}}` whose
@@ -87,7 +94,10 @@ rows:
       500 rows.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (ii): the prose after the `Full report available at:` path. The
+      # path itself never reaches the message — it is a fresh /tmp/mllm-inv/
+      # directory every run — and neither does the `    at …` Node stack.
+      error_contains: ["JSON parse error", "Incomplete JSON segment at the end"]
       raw_contains:
         - "Error when talking to Gemini API"
         - "Incomplete JSON segment at the end"
@@ -108,7 +118,10 @@ rows:
       disk is what the parser filters, so the run must be a failure rather than
       an empty-string success. Note `totalRequests: 4` inside the stats: gemini
       reports its own retry count in the same envelope, which is the only place
-      it is visible without the server log.
+      it is visible without the server log. **stderr is 0 bytes**, so this is
+      the one gemini failure row C4's rung 5 covers: `describe_failure` returns
+      `None` and the parser's error is unembellished. That is the measurement —
+      gemini wrote no diagnosis — not a gap in the hook.
     expect:
       success: false
       error_contains: ["No valid JSON found in text"]
@@ -122,18 +135,22 @@ rows:
     wall_s: 2.26
     requests: 1
     notes: >-
-      **FIRST-wins, and it is the decoy.** Two JSON documents in one `response`,
-      the first reading `FIRST ANSWER (must NOT be selected)`; `parse_output`
-      finds `response` does not start with `[` after the leading text is stripped
-      — it does, in fact, so `json.loads` fails on the trailing second document
-      and `extract_json_from_text(prefer_arrays=True)` then returns the FIRST
-      array. The row pins today's behaviour unweakened; see README, defect 4.
+      **LAST-wins, and it selects the answer.** Two JSON documents in one
+      `response`, the first reading `FIRST ANSWER (must NOT be selected)`;
+      `parse_output` finds `response` does not start with `[` after the leading
+      text is stripped — it does, in fact, so `json.loads` fails on the trailing
+      second document and `extract_json_from_text(prefer_arrays=True)` then
+      returns the LAST top-level array, the S001/S002 pair, under the one rule
+      the extractor now states for every caller: the last document wins, at
+      every level. The decoy is still in the bytes (`raw_contains` pins it), so
+      the row still tests selection rather than parsing; see README, defect 4.
       The literal §6.2 shape (two assistant *messages*) is unreachable: gemini
       concatenates every turn into one `response` string before printing.
     expect:
       success: true
       data:
-        - {id: "S000", title: "FIRST ANSWER (must NOT be selected)", severity: "low"}
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ["FIRST ANSWER (must NOT be selected)", "Bound the retry ladder"]
       classify_failure: null
 
@@ -153,7 +170,12 @@ rows:
       the two rows are distinguishable only by the server that produced them.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (ii), same sentence as `truncated` — the two rows stay
+      # indistinguishable in the ERROR too, because the provider's own text
+      # genuinely never leaves the server. What C4 changes is that the sentence
+      # is now the SSE-framing failure rather than a JSON-decoder gloss on an
+      # empty string.
+      error_contains: ["JSON parse error", "Incomplete JSON segment at the end"]
       raw_contains:
         - "Incomplete JSON segment at the end"
         - '"code": 1'
@@ -176,13 +198,24 @@ rows:
       **exit 0** and `"totalFail": 1` in the same envelope. The file does not
       exist. `parse_output` fails it only because the sentence carries no JSON —
       a model that answered with the array *and* claimed the write would be
-      reported as a success that wrote nothing. gemini declares no
+      reported as a success that wrote nothing. gemini still declares no
       `exit_zero_failure_markers`; the measured candidates are on stderr
-      (`Error executing tool`, `not found in registry`) and the adapter reads
-      stderr nowhere.
+      (`Error executing tool`, `not found in registry`) and declaring them would
+      move this row's `classify_failure` cell, which is out of C4's scope by its
+      own rule — C4 makes the sentence visible, classifying on it is a separate
+      change with its own row.
+      **This is the one capture with bytes on BOTH channels, so it is where C4's
+      rung 1 decides something.** stdout is the (false) answer and stays on
+      `raw`; stderr is the diagnosis and reaches only `error`. The row asserts
+      both halves: `error_contains` names the tool-registry sentence from stderr,
+      and `raw_contains` still names the stdout `response`. It is also the only
+      row that reaches tier (iii) — the first stderr line, verbatim — since it
+      has no `ApiError` blob, no `Full report` path and no trailing envelope.
     expect:
       success: false
-      error_contains: ["No valid JSON found in text"]
+      error_contains:
+        - "No valid JSON found in text"
+        - 'Tool "write_file" not found in registry'
       raw_contains:
         - 'Error executing tool write_file: Tool "write_file" not found in registry'
         - '"totalFail": 1'
@@ -222,20 +255,26 @@ rows:
     notes: >-
       failserver `--mode 401`. **One** request — terminal, no retry, which is
       right. Exit **145** = 401 & 0xFF, the clearest instance of fact (3) above.
-      The measured classification is **`None`**: the vendor sentence *Incorrect
-      API key provided* is not `invalid api key`, and Google's status word is
-      `UNAUTHENTICATED`, which is not the `unauthorized` substring
-      base.auth_error_patterns carries — so a logged-out gemini is
-      transport-shaped and spends the whole bounded-retry budget. See README,
-      defect 3.
+      **The classification cell moved with C3, and this is the only cell in this
+      manifest that moved.** It read `None` when captured: the vendor sentence
+      *Incorrect API key provided* is not `invalid api key`, and Google's status
+      word is `UNAUTHENTICATED`, which is not the `unauthorized` substring
+      base.auth_error_patterns carries — so a logged-out gemini was
+      transport-shaped and spent the whole bounded-retry budget on a credential
+      no retry can fix. `GeminiProvider.auth_error_patterns` now adds one pattern
+      per wording (`unauthenticated`, `incorrect api key`), driven by these
+      committed bytes rather than by new ones, and the row reads `auth_failed`.
+      See README, defect 3.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (i): the LAST `ApiError: {…}` blob's message and code. Never the
+      # trailing envelope's `error.message`, which is `[object Object]` at 0.25.2.
+      error_contains: ["JSON parse error", "401: Incorrect API key provided"]
       raw_contains:
         - "Incorrect API key provided"
         - '"status":"UNAUTHENTICATED"'
         - '"code": 401'
-      classify_failure: null
+      classify_failure: "auth_failed"
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -254,7 +293,10 @@ rows:
       own words carry `rate limit` and `429`.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (i), and the row that shows why "the LAST blob" is the rule:
+      # NINE identical `ApiError` blobs, one per backoff attempt, collapse to
+      # one line. 15,013 bytes of stderr become a single capped sentence.
+      error_contains: ["JSON parse error", "429: Rate limit reached for stub-model"]
       raw_contains:
         - "Attempt 1 failed with status 429. Retrying with backoff..."
         - "Rate limit reached for stub-model"
@@ -279,7 +321,12 @@ rows:
       classification is right — one of only four categories this CLI reaches.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (ii): no `ApiError` blob here, so the diagnosis is the prose
+      # after the `Full report` path. The trailing envelope contributes only its
+      # `code` (1), because the sentence carries no status of its own.
+      error_contains:
+        - "JSON parse error"
+        - "ModelNotFoundError: The model `gemini-2.5-flash` does not exist"
       raw_contains:
         - "ModelNotFoundError: The model `gemini-2.5-flash` does not exist"
         - "googleQuotaErrors"
@@ -301,7 +348,8 @@ rows:
       the generic `1`.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (i). The vendor's own sentence, with the 400 from the blob.
+      error_contains: ["JSON parse error", "400: This model's maximum context length"]
       raw_contains:
         - "maximum context length is 8192 tokens"
         - '"status":"INVALID_ARGUMENT"'
@@ -325,7 +373,12 @@ rows:
       pattern needs the status adjacent to the word). See README, defect 5.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (i). 14,191 bytes of stderr and ten identical blobs, capped to
+      # one line. The classification cell is unchanged and still `null` — C4
+      # makes the sentence visible without touching a pattern table.
+      error_contains:
+        - "JSON parse error"
+        - "500: The server had an error while processing your request"
       raw_contains:
         - "The server had an error while processing your request"
         - "Attempt 1 failed with status 500"
@@ -347,7 +400,12 @@ rows:
       classifies as `None`. One request: not retried.
     expect:
       success: false
-      error_contains: ["JSON parse error"]
+      # C4 tier (ii): undici's generic failure, which still matches nothing in
+      # CONNECTION_ERROR_MARKERS — so this row keeps `classify_failure: null`
+      # and gains the sentence a human can act on instead.
+      error_contains:
+        - "JSON parse error"
+        - "exception TypeError: fetch failed sending request"
       raw_contains:
         - "exception TypeError: fetch failed sending request"
         - '"code": 1'

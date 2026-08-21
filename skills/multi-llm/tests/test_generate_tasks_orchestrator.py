@@ -263,6 +263,15 @@ class TestBothInvokers:
 
         # Native leg: the same prompt, answered by the same mock function, written
         # by the same persist leg.
+        #
+        # A second plan is a second *process* in real life, and §9.3.b's run
+        # anchor is set-once per interpreter (pinned by the executor leg above).
+        # Clear it the way tests/conftest.py clears it between tests, so this
+        # test keeps asserting the bytes rather than the anchor invariant —
+        # which tests/test_run_anchor_pinning.py owns.
+        import utils.provider_registry as _registry
+        _registry._RUN_ANCHOR = None
+
         task = _materialize(native_plan)
         answer = json.loads(echo_subagent_answer("task_generation", task["prompt"]))
         _persist(native_plan, answer)

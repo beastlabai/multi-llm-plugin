@@ -292,8 +292,8 @@ class TestClaudeJsonSchemaGate:
     def _help(text):
         """Patch the help read so the gate sees exactly ``text``."""
         return patch(
-            "utils.providers.claude_code._read_help_tokens",
-            lambda binary, remove_env=(): frozenset(
+            "utils.providers.base.read_help_tokens",
+            lambda binary, **_kwargs: frozenset(
                 token for token in text.split() if token.startswith("--")
             ),
         )
@@ -345,8 +345,8 @@ class TestClaudeJsonSchemaGate:
     def test_an_undecidable_help_read_declines_the_flag_not_the_run(self, schema):
         provider = ClaudeCodeProvider()
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.claude_code._read_help_tokens",
-            lambda binary, remove_env=(): frozenset(),
+            "utils.providers.base.read_help_tokens",
+            lambda binary, **_kwargs: frozenset(),
         ):
             cmd = provider.build_command(self.PROMPT, "sonnet", schema=schema)
 
@@ -509,8 +509,8 @@ class TestSplicePosition:
     def _gate_open(self):
         reset_flag_gate_cache()
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.claude_code._read_help_tokens",
-            lambda binary, remove_env=(): frozenset(
+            "utils.providers.base.read_help_tokens",
+            lambda binary, **_kwargs: frozenset(
                 {"--json-schema", "--output-format", "--model", "--effort"}
             ),
         ):
@@ -710,8 +710,8 @@ class TestCallerLeg:
         table["generate-tasks"] = "probe.schema.json"
         table["task-decomposition"] = "probe.schema.json"
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.claude_code._read_help_tokens",
-            lambda binary, remove_env=(): frozenset({"--json-schema"}),
+            "utils.providers.base.read_help_tokens",
+            lambda binary, **_kwargs: frozenset({"--json-schema"}),
         ), patch.object(so, "SCHEMA_DIR", tmp_path), patch.object(
             so, "PHASE_SCHEMA_FILE", table
         ):

@@ -1294,23 +1294,38 @@ def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
     the minimum this release parses, a login notice) is exactly what row 5 exists
     to surface before a batch discovers it.
 
+    One thing this runs that a dispatch preflight does not: the adapter's
+    optional ``setup_probe`` readout (M13, §5.2) — cursor-agent's
+    ``about --format json`` plan tier is the only one declared today. It is a
+    *metadata* probe and never a verdict: it cannot make this function report
+    ``problem``, it never touches ``auth``, and a readout that will not run is
+    simply one less fact on the row. It is spawned here rather than in
+    ``preflight_runner`` because ``--check`` is invoked by a human, once, while a
+    preflight runs every phase and would pay a subprocess for a sentence no
+    dispatch decision reads.
+
     Returns:
-        ``{"auth", "version", "problem"}``; ``problem`` is empty when the
-        preflight passed.
+        ``{"auth", "version", "problem", "metadata"}``; ``problem`` is empty when
+        the preflight passed, and ``metadata`` is the rendered ``label=value``
+        readout — empty for every adapter that declares none.
     """
-    unknown = {"auth": "unknown", "version": "unknown", "problem": ""}
+    unknown = {
+        "auth": "unknown", "version": "unknown", "problem": "", "metadata": "",
+    }
     try:
         try:
             from .subagent_executor import (
                 PROFILE_AGENT_READONLY,
                 RunnerRejected,
                 preflight_runner,
+                probe_setup_metadata,
             )
         except ImportError:  # pragma: no cover - direct script runs
             from subagent_executor import (  # type: ignore
                 PROFILE_AGENT_READONLY,
                 RunnerRejected,
                 preflight_runner,
+                probe_setup_metadata,
             )
     except Exception:  # pragma: no cover - a partial install never fails a check
         return dict(unknown)
@@ -1323,14 +1338,56 @@ def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
             # Presence is `runner_available`'s verdict — the two ask the same
             # question of the same adapter, and row 5 reports it once.
             return dict(unknown)
-        return {"auth": "unknown", "version": "unknown", "problem": str(exc)}
+        return {
+            "auth": "unknown", "version": "unknown", "problem": str(exc),
+            "metadata": "",
+        }
     except Exception:  # pragma: no cover - a probe reports; it never blocks
         return dict(unknown)
+    try:
+        readout = probe_setup_metadata(spec.split(":", 1)[0].strip())
+    except Exception:  # pragma: no cover - a readout never fails a check
+        readout = {}
     return {
         "auth": str(info.get("auth") or "unknown"),
         "version": str(info.get("version") or "unknown"),
         "problem": "",
+        "metadata": ", ".join(f"{k}={v}" for k, v in sorted(readout.items())),
     }
+
+
+def _runner_state(provider: str, facts: Dict[str, str]) -> str:
+    """The typed availability state for a runner row 5 already probed (M10, §5.1).
+
+    Row 5 runs the two probes anyway (``preflight_runner`` → ``probe_runner``),
+    so this costs nothing extra and turns three separate facts into the one word
+    a reader acts on. It reads the probe *results* — never re-running them.
+
+    ``probe_runner`` never reports a negative auth verdict in its ``auth`` field:
+    a recognised login notice is raised by the preflight and arrives here as
+    ``problem`` instead, so that is where the ``needs-auth`` reading comes from.
+    Anything unresolvable is ``""`` — a diagnostic never fails a ``--check``.
+    """
+    try:
+        try:
+            from .provider_registry import get_provider
+        except ImportError:  # pragma: no cover - direct script runs
+            from provider_registry import get_provider  # type: ignore
+        adapter = get_provider(provider)
+        if adapter is None:
+            return ""
+        if "not_authenticated" in str(facts.get("problem") or ""):
+            auth: Optional[bool] = False
+        elif str(facts.get("auth") or "") == "ok":
+            auth = True
+        else:
+            auth = None
+        report = adapter.describe_availability(
+            auth=auth, version=str(facts.get("version") or "")
+        )
+        return report.state.value
+    except Exception:  # pragma: no cover - a diagnostic never fails a check
+        return ""
 
 
 def _runner_facts(
@@ -1372,11 +1429,16 @@ def _runner_facts(
     )
     provider = spec.split(":", 1)[0]
     version = "unknown"
+    # M10 (§5.1) — `runner_available` stays the **bool**: present or absent is
+    # the whole question this branch asks, and it is the same `is_available()`
+    # `--init` asks. The typed state rides along in the message and in the facts
+    # row below, which is where "installed but not usable" finally has a word.
     if not runner_available(provider):
+        state = _runner_state(provider, {}) or "binary-missing"
         problems.append(
             f"the CLI for the configured subagent runner '{spec}' (supplied by "
-            f"{layer}) is not installed, so every phase that dispatches a "
-            f"subagent would fail{scope}. Install the '{provider}' CLI (or point "
+            f"{layer}) is not installed [{state}], so every phase that dispatches "
+            f"a subagent would fail{scope}. Install the '{provider}' CLI (or point "
             f"`{RUNNER_KEY}` in providers.yaml at one you have) and re-check."
         )
     else:
@@ -1390,6 +1452,16 @@ def _runner_facts(
         details.append(f"runner={spec} (supplied by {layer}){scope}")
         details.append(f"auth={facts.get('auth') or 'unknown'}")
         details.append(f"version={version}")
+        state = _runner_state(provider, facts)
+        if state:
+            details.append(f"state={state}")
+        # The adapter's own metadata readout (M13, §5.2), if it declares one.
+        # It sits *after* `state` on purpose: it is context for a verdict this
+        # row has already reached, never an input to one — `_runner_state` reads
+        # `auth`, `version` and `problem`, and this key reaches none of them.
+        readout = str(facts.get("metadata") or "").strip()
+        if readout:
+            details.append(readout)
 
     nested = entry.get("nested_exec") or {}
     states = {leg: str(nested.get(leg) or "unknown") for leg in NESTED_EXEC_LEGS}

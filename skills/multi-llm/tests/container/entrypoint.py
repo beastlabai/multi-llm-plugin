@@ -865,7 +865,8 @@ def key_usage(key: str) -> dict | None:
         return None
 
 
-def credential_preflight(host: str, entry: dict, key: str) -> dict:
+def credential_preflight(host: str, entry: dict, key: str,
+                         row: dict | None = None) -> dict:
     """Refuse before a token is spent, and record what the refusal was based on.
 
     Two checks, in the order the plan puts them:
@@ -904,10 +905,19 @@ def credential_preflight(host: str, entry: dict, key: str) -> dict:
     else:
         census["checks"]["spend_limit"] = f"limit={limit}"
 
-    slug = pinned_model(entry)
+    slug = pinned_model(entry, row)
     census["model"] = slug
-    if slug != ((entry.get("model") or {}).get("slug") or "").strip():
-        census["model_override"] = "MLLM_HOST_MODEL — deliberate, recorded"
+    host_pin = ((entry.get("model") or {}).get("slug") or "").strip()
+    if slug != host_pin:
+        # WHICH override, never just "an override": the two have different
+        # authority. The env one is one variable typed by an operator for one
+        # run and leaves no diff; the row one is checked into host_matrix.yaml
+        # with its provenance and is what the next run will drive again.
+        census["model_override"] = (
+            "MLLM_HOST_MODEL — deliberate, recorded"
+            if os.environ.get("MLLM_HOST_MODEL", "").strip() else
+            f"host_matrix.yaml row pin on {(row or {}).get('id')!r} "
+            f"(host pin is {host_pin!r})")
     try:
         catalog = {m.get("id") for m in (_openrouter_get("/models", key).get("data") or [])}
     except (urllib.error.URLError, OSError, ValueError) as exc:  # noqa: BLE001
@@ -946,18 +956,34 @@ def credential_preflight(host: str, entry: dict, key: str) -> dict:
     return census
 
 
-def pinned_model(entry: dict) -> str:
+def pinned_model(entry: dict, row: dict | None = None) -> str:
     """The row's model: the checked-in pin, or a deliberately recorded override.
 
-    The pin exists so a model cannot move under a run, and the override is NOT a
-    run-time "cheapest" lookup — it is one variable, typed by an operator, for
-    the one case the plan anticipates: the pinned model is non-Anthropic and the
-    reference host's row fails in a way that is clearly the MODEL rather than our
-    shim. Whichever slug ran is recorded in the row's credential census, so a run
-    is never ambiguous about what it drove.
+    Three sources, most specific first, and each of them is a PIN — none of them
+    is a run-time "cheapest" lookup, which is the thing that would make a cost
+    table meaningless:
+
+    * ``MLLM_HOST_MODEL`` — one variable, typed by an operator, for one run. It
+      still wins, because it is the escape hatch a red row is debugged with and
+      a checked-in row pin must not be able to trap an operator inside it.
+    * the ROW's own ``model.slug`` — added 2026-08-21 for the one case
+      ``host_matrix.yaml``'s claude-code host block had already anticipated in
+      prose and then measured four times over: the host pin is non-Anthropic,
+      and ONE row on that host fails in a way that is the MODEL rather than our
+      shim. Per-row, because the alternative is re-pinning the whole host and
+      paying the Anthropic price on every row that does not need it.
+    * the HOST's ``model.slug`` — the default, and still the only pin most rows
+      have.
+
+    Whichever slug ran is recorded in the row's credential census, together with
+    WHICH of the three it came from, so a run is never ambiguous about what it
+    drove.
     """
     override = os.environ.get("MLLM_HOST_MODEL", "").strip()
-    return override or ((entry.get("model") or {}).get("slug") or "").strip()
+    if override:
+        return override
+    row_pin = ((row or {}).get("model") or {}).get("slug") or ""
+    return row_pin.strip() or ((entry.get("model") or {}).get("slug") or "").strip()
 
 
 def wire_credentials(host: str, home: Path, key: str, slug: str) -> dict:
@@ -1309,7 +1335,7 @@ def assert_claude_key_is_empty(env: dict) -> None:
 
 def build_host_argv(entry: dict, row: dict) -> list[str]:
     """Render the row's `invoke_argv` from the matrix. No argv is improvised."""
-    slug = pinned_model(entry)
+    slug = pinned_model(entry, row)
     bound = entry.get("turn_bound") or {}
     prompt = render_prompt(entry, row)
     out: list[str] = []
@@ -1745,21 +1771,21 @@ def main(argv=None) -> int:
                         raise SystemExit(
                             "entrypoint: --creds openrouter with no "
                             "OPENROUTER_API_KEY in the environment")
-                    census = credential_preflight(args.host, entry, key)
+                    census = credential_preflight(args.host, entry, key, row)
                     census["row"] = args.row
                     census["credential_mode"] = "openrouter"
                     (OUT / "credential-census.json").write_text(
                         json.dumps(census, indent=2, sort_keys=True),
                         encoding="utf-8")
                     overlay = wire_credentials(
-                        args.host, Path.home(), key, pinned_model(entry))
+                        args.host, Path.home(), key, pinned_model(entry, row))
 
                 elif args.creds == "fallback":
                     # The documented subscription / vendor-key path (C6a). It runs
                     # the SAME row the OpenRouter path does — the difference is
                     # where the credential comes from, which is why it joins the
                     # common stage-and-launch flow below rather than having one.
-                    slug = pinned_model(entry)
+                    slug = pinned_model(entry, row)
                     overlay, copied = wire_fallback_credentials(
                         args.host, Path.home(), slug)
                     secrets = fallback_secret_values(copied)

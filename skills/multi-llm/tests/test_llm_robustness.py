@@ -915,8 +915,14 @@ class TestFileOutputFailures:
 class TestMultipleJsonInOutput:
     """Tests for handling multiple JSON structures in output."""
 
-    def test_first_valid_json_preferred(self):
-        """Prefer first valid JSON when multiple are present."""
+    def test_last_valid_json_preferred(self):
+        """The LAST valid JSON wins when multiple documents are present.
+
+        A model that drafts, corrects itself, or retries in one turn leaves the
+        answer last; the earlier document is the draft. This is the extractor's
+        one rule, and every adapter with an envelope already applies it at its
+        own level.
+        """
         multiple = '''Some thinking...
         [{"title": "First", "value": 1}]
         More thinking...
@@ -925,8 +931,8 @@ class TestMultipleJsonInOutput:
         result = extract_json_from_text(multiple)
 
         assert result["success"]
-        # Should get the first one
-        assert result["data"][0]["title"] == "First"
+        # Should get the last one
+        assert result["data"][0]["title"] == "Second"
 
     def test_code_block_preferred_over_inline(self):
         """Prefer JSON in code block over inline JSON."""
@@ -952,8 +958,12 @@ class TestMultipleJsonInOutput:
         assert result["success"]
         assert result["data"][0]["title"] == "Test"
 
-    def test_multiple_code_blocks(self):
-        """Handle multiple code blocks - first should win."""
+    def test_multiple_code_blocks_last_wins(self):
+        """Handle multiple code blocks - the LAST one should win.
+
+        Clause 4 of the rule: the fenced path and the bare-text path are not
+        left on opposite rules.
+        """
         multiple_blocks = '''```json
 [{"first": true}]
 ```
@@ -964,8 +974,8 @@ class TestMultipleJsonInOutput:
         result = extract_json_from_text(multiple_blocks)
 
         assert result["success"]
-        # First code block should be used
-        assert "first" in result["data"][0]
+        # Last code block should be used
+        assert "second" in result["data"][0]
 
     def test_json_with_text_before_and_after(self):
         """Extract JSON with text before and after."""

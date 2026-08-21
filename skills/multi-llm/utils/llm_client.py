@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import structured_output
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
-from .providers.base import PROFILE_GENERATE, StructuredOutputUnavailable
+from .providers.base import (
+    PROFILE_GENERATE,
+    StructuredOutputUnavailable,
+    availability_from_failure,
+    build_child_env,
+)
 
 
 class LLMClientError(Exception):
@@ -180,6 +185,48 @@ def expand_env_home(provider_env: Dict[str, str]) -> Dict[str, str]:
         key: (os.path.expanduser(value) if isinstance(value, str) else value)
         for key, value in provider_env.items()
     }
+
+
+class DispatchContext:
+    """What one spawn learned from the adapter's own run-scoped context.
+
+    ``refusal`` is a human-readable reason the dispatch may not be attempted at
+    all — set only by an adapter that can prove the spawn would resolve to
+    nothing. ``None`` means "spawn normally", which is every adapter that
+    declares no context.
+    """
+
+    __slots__ = ("refusal",)
+
+    def __init__(self, refusal: Optional[str] = None) -> None:
+        self.refusal = refusal
+
+
+@contextlib.contextmanager
+def provider_dispatch_context(
+    provider: Any,
+    model: str,
+    profile: str,
+    *,
+    anchor: Optional[str] = None,
+):
+    """Enter an adapter's run-scoped dispatch context, if it declares one.
+
+    Lives beside :func:`expand_env_home` for the same reason: it belongs to the
+    **two spawn sites**, not to each adapter, so a context that scopes argv and
+    env together cannot be entered on one lane and skipped on the other.
+
+    The hook is duck-typed (``hermetic_dispatch``) rather than a base-class
+    method because exactly one adapter needs it — opencode, whose config layering
+    is the thing being contained. Every other adapter yields an empty context and
+    renders byte-identical argv and env.
+    """
+    enter = getattr(provider, "hermetic_dispatch", None)
+    if not callable(enter):
+        yield DispatchContext()
+        return
+    with enter(profile, model, anchor=anchor) as refusal:
+        yield DispatchContext(refusal)
 
 
 def _utf16_code_units(s: str) -> int:
@@ -551,6 +598,23 @@ def invoke_with_provider(
             ``recovered`` / ``unvalidated``; a refusal replaces the result with
             a failure carrying ``details['failure_reason']``.
 
+            **Disposition (W1): DEFER — repository owner, 2026-08-20.** No
+            production caller passes ``schema_phase`` today; the only callers
+            are in ``tests/test_structured_output.py``, and that is the standing
+            check. Lane A's fan-out phases are deliberately *not* wired, because
+            Lane A's six shipped documents are array-rooted and claude-code
+            cannot natively carry an array-rooted schema at all — wiring the
+            callers first buys one WARN per dispatch and no native transport.
+            Object-rooting those six files is a contract change for every
+            consumer of them and is explicitly not a change a call site may
+            take, so it is the repository owner's to make and it has not been
+            made.
+
+            **Re-check trigger:** claude-code accepts an array-rooted
+            ``--json-schema``. **Re-read date:** 2027-02-20. Until one of those
+            fires, wiring a production caller here is a regression, not
+            progress. See ``plans/harness-residual-work.md`` §3, W1.
+
     Returns:
         Dict with 'success' key and either:
         - On success: 'data' key with parsed response, plus 'details' dict
@@ -580,7 +644,12 @@ def invoke_with_provider(
             }
         }
 
+    # M10 (§5.1) — a **bool** consumer, and it stays one. The gate is still
+    # `is_available()` verbatim, so this refusal is byte-for-byte the decision it
+    # always was; the typed report is read only *inside* the branch, to put the
+    # state and its sentence on the error details a caller renders.
     if not provider.is_available():
+        availability = provider.describe_availability()
         return {
             "success": False,
             "error": f"{provider_name} CLI not found in PATH",
@@ -588,6 +657,8 @@ def invoke_with_provider(
             "details": {
                 "provider": provider_name,
                 "model": model,
+                "availability_state": availability.state.value,
+                "availability_detail": availability.detail,
             }
         }
 
@@ -617,25 +688,77 @@ def invoke_with_provider(
     # path, marked `recovered`/`unvalidated` and never `native`.
     schema = None
     structured_marker = structured_output.MARKER_UNVALIDATED
-    schema_cleanup = contextlib.ExitStack()
-    if schema_phase:
-        try:
-            schema, structured_marker = structured_output.schema_for_dispatch(
-                provider, schema_phase
-            )
-            if schema is not None and provider.structured_output_transport == "file":
-                # One `mkdtemp` per invocation, written by the CALLER: adapters
-                # are singletons under a concurrent fan-out and cannot hold this.
-                # The stack's `close()` in the `finally` below removes it on
-                # success, on timeout, on kill-path teardown and on exception.
-                schema = schema_cleanup.enter_context(
-                    structured_output.schema_sidecar(schema)
-                )
-        except structured_output.SchemaConfigError as exc:
-            schema_cleanup.close()
+    # M4/§2.3 — the adapter's run-scoped dispatch context is entered BEFORE argv
+    # is built, because argv and env are rendered from the same context state
+    # (opencode's `--pure` pairs with its `XDG_CONFIG_HOME` redirect and neither
+    # is emitted without the other). It rides the same `ExitStack` as the schema
+    # sidecar, so it is left on success, on timeout, on kill-path teardown and on
+    # exception alike — the `finally` half of §2.3's lifecycle, with the
+    # adapter's own `atexit` sweep as the backstop.
+    # Every post-entry setup step — the schema read, the argv build, the
+    # executable resolution and the env composition — runs INSIDE this `with`,
+    # so a raise anywhere in it unwinds the context here rather than leaving
+    # opencode's active context and its config-home reference behind for the
+    # `atexit` sweep to find. Only once setup has survived is the live stack
+    # handed to `schema_cleanup` (`pop_all`), whose owner from that point on is
+    # the subprocess `finally` at the end of this function.
+    with contextlib.ExitStack() as setup_cleanup:
+        dispatch = setup_cleanup.enter_context(
+            provider_dispatch_context(provider, model, PROFILE_GENERATE, anchor=anchor)
+        )
+        if dispatch.refusal:
             return {
                 "success": False,
-                "error": f"structured output: {exc}",
+                "error": dispatch.refusal,
+                "error_code": ERROR_SUBPROCESS_FAILED,
+                "details": {
+                    "provider": provider_name,
+                    "model": model,
+                    "retryable": False,
+                },
+            }
+        if schema_phase:
+            try:
+                schema, structured_marker = structured_output.schema_for_dispatch(
+                    provider, schema_phase
+                )
+                if schema is not None and provider.structured_output_transport == "file":
+                    # One `mkdtemp` per invocation, written by the CALLER: adapters
+                    # are singletons under a concurrent fan-out and cannot hold this.
+                    # The stack's `close()` in the `finally` below removes it on
+                    # success, on timeout, on kill-path teardown and on exception.
+                    schema = setup_cleanup.enter_context(
+                        structured_output.schema_sidecar(schema)
+                    )
+            except structured_output.SchemaConfigError as exc:
+                return {
+                    "success": False,
+                    "error": f"structured output: {exc}",
+                    "error_code": ERROR_SUBPROCESS_FAILED,
+                    "details": {
+                        "provider": provider_name,
+                        "model": model,
+                        "failure_reason": structured_output.FAILURE_CONFIG_ERROR,
+                        "retryable": False,
+                    },
+                }
+
+        # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
+        # already resolved here, so an adapter with an internal cutoff of its own
+        # (agy's `--print-timeout`) can hold it under the deadline this same call
+        # passes to `subprocess.run` below, instead of hardcoding a value that has to
+        # be kept in sync by hand. Twelve of the thirteen adapters ignore it, and
+        # dropping the keyword restores every rendered argv byte-for-byte.
+        try:
+            cmd, stdin_text = provider.build_command_for_transport(
+                prompt, model, transport, timeout_s=effective_timeout, schema=schema
+            )
+        except StructuredOutputUnavailable as exc:
+            # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
+            # the CLI. A configuration error, never retried.
+            return {
+                "success": False,
+                "error": str(exc),
                 "error_code": ERROR_SUBPROCESS_FAILED,
                 "details": {
                     "provider": provider_name,
@@ -644,73 +767,54 @@ def invoke_with_provider(
                     "retryable": False,
                 },
             }
+        launcher, is_batch_shim = _resolve_executable(cmd[0])
+        cmd = [*launcher, *cmd[1:]]
 
-    # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
-    # already resolved here, so an adapter with an internal cutoff of its own
-    # (agy's `--print-timeout`) can hold it under the deadline this same call
-    # passes to `subprocess.run` below, instead of hardcoding a value that has to
-    # be kept in sync by hand. Twelve of the thirteen adapters ignore it, and
-    # dropping the keyword restores every rendered argv byte-for-byte.
-    try:
-        cmd, stdin_text = provider.build_command_for_transport(
-            prompt, model, transport, timeout_s=effective_timeout, schema=schema
+        if _IS_WINDOWS and transport == "argv":
+            # Interim safeguard until the explicit `cmd /c` escaping path lands
+            # (launch-strategy step (c)): a batch shim means cmd.exe reparses
+            # the command line, so refuse metacharacter-bearing prompts rather
+            # than risk silent corruption or injection. Never enforced on POSIX.
+            if is_batch_shim:
+                metachar_error = _batch_shim_metachar_error(
+                    prompt, provider_name, model, cmd[0]
+                )
+                if metachar_error is not None:
+                    return metachar_error
+
+            # Prompt-on-argv transport hits hard command-line length caps on
+            # Windows; fail fast with an actionable error instead of a cryptic
+            # CreateProcess/cmd.exe failure. Measured over the full rendered
+            # command line (executable path, flags, quoting expansion), not just
+            # the prompt. Never enforced on POSIX.
+            length_error = _prompt_length_error(cmd, prompt, provider_name, model, is_batch_shim)
+            if length_error is not None:
+                return length_error
+
+        start_time = time.time()
+
+        # Build subprocess environment: add provider vars, remove blacklisted ones.
+        # `resolve_env`, not `get_env`: the Lane A fan-out IS the `generate` profile
+        # (§2.2), so it gets the global non-interactive git block plus the scoped
+        # `credential.helper=""` wipe. Naming the profile rather than leaning on the
+        # default keeps the scoping greppable — `agent-write` must never appear here.
+        # `cwd` rides along because an adapter's delta may carry a
+        # workspace-scoped side effect (cursor's trust-marker guard): the spawn
+        # site is where the child's real directory is known, and `None` here
+        # means the child inherits this process's.
+        provider_env = expand_env_home(
+            provider.resolve_env(model, PROFILE_GENERATE, anchor=anchor, cwd=cwd)
         )
-    except StructuredOutputUnavailable as exc:
-        # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
-        # the CLI. A configuration error, never retried.
-        schema_cleanup.close()
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_code": ERROR_SUBPROCESS_FAILED,
-            "details": {
-                "provider": provider_name,
-                "model": model,
-                "failure_reason": structured_output.FAILURE_CONFIG_ERROR,
-                "retryable": False,
-            },
-        }
-    launcher, is_batch_shim = _resolve_executable(cmd[0])
-    cmd = [*launcher, *cmd[1:]]
-
-    if _IS_WINDOWS and transport == "argv":
-        # Interim safeguard until the explicit `cmd /c` escaping path lands
-        # (launch-strategy step (c)): a batch shim means cmd.exe reparses
-        # the command line, so refuse metacharacter-bearing prompts rather
-        # than risk silent corruption or injection. Never enforced on POSIX.
-        if is_batch_shim:
-            metachar_error = _batch_shim_metachar_error(
-                prompt, provider_name, model, cmd[0]
-            )
-            if metachar_error is not None:
-                schema_cleanup.close()
-                return metachar_error
-
-        # Prompt-on-argv transport hits hard command-line length caps on
-        # Windows; fail fast with an actionable error instead of a cryptic
-        # CreateProcess/cmd.exe failure. Measured over the full rendered
-        # command line (executable path, flags, quoting expansion), not just
-        # the prompt. Never enforced on POSIX.
-        length_error = _prompt_length_error(cmd, prompt, provider_name, model, is_batch_shim)
-        if length_error is not None:
-            schema_cleanup.close()
-            return length_error
-
-    start_time = time.time()
-
-    # Build subprocess environment: add provider vars, remove blacklisted ones.
-    # `resolve_env`, not `get_env`: the Lane A fan-out IS the `generate` profile
-    # (§2.2), so it gets the global non-interactive git block plus the scoped
-    # `credential.helper=""` wipe. Naming the profile rather than leaning on the
-    # default keeps the scoping greppable — `agent-write` must never appear here.
-    provider_env = expand_env_home(provider.resolve_env(model, PROFILE_GENERATE, anchor=anchor))
-    remove_env = provider.get_remove_env()
-    if provider_env or remove_env:
-        env = {**os.environ, **provider_env}
-        for key in remove_env:
-            env.pop(key, None)
-    else:
-        env = None
+        # M3/M17 (A6): the *composition* is `build_child_env`, the one builder Lane B
+        # goes through too, so a slot can never strip on one lane and inherit on the
+        # other — and M17's deny-by-default allowlist has exactly one place to live.
+        # Lane A passes no host guards: a fan-out slot is a child of this process,
+        # not of the host's shell tool, so only the adapter's own list applies.
+        env = build_child_env(provider, provider_env=provider_env, anchor=anchor)
+        # Setup survived: transfer the entered contexts out of the setup
+        # stack so leaving this `with` releases nothing, and the subprocess
+        # `finally` below owns them for the rest of the dispatch.
+        schema_cleanup = setup_cleanup.pop_all()
 
     try:
         result = subprocess.run(
@@ -752,6 +856,16 @@ def invoke_with_provider(
                 reason = None
             if reason:
                 error_message = f"{error_message}: {reason}"
+            # M10 (§5.1) — the **status**-consumer half of this site. A failure
+            # whose own streams carry a login notice is an availability verdict,
+            # not a parse, so name it instead of leaving the caller with a
+            # generic tail. Only the named negatives speak (see
+            # `availability_from_failure`), and nothing is probed here.
+            unavailable = availability_from_failure(
+                provider, result.stdout, result.stderr, result.returncode
+            )
+            if unavailable is not None:
+                error_message = f"{error_message} [{unavailable.value}]"
 
             # Save log on failure if requested
             if log_file:

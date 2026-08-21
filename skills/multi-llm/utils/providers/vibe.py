@@ -101,6 +101,7 @@ from ..json_extractor import extract_json_from_text
 from .base import (
     InternalRetryEnvelope,
     LLMProvider,
+    ReasoningLadder,
     StructuredSchema,
     split_reasoning_effort,
 )
@@ -114,7 +115,16 @@ from .base import (
 #: string here so it never reaches ``VIBE_ACTIVE_MODEL`` verbatim — an alias with
 #: a stray ``:high`` glued on selects no configured model at all — and the level
 #: is emitted through :meth:`VibeProvider.get_env`.
-REASONING_EFFORTS = frozenset({"off", "low", "medium", "high", "max"})
+#:
+#: The narrowest ladder that still has a top: four rungs, no ``minimal`` and no
+#: ``xhigh``, with ``off`` as vibe's spelling of ``none``. The validator's own
+#: message above is the whole accepted set, in vibe's own words.
+EFFORT_LADDER = ReasoningLadder(
+    provider="vibe",
+    rungs=("low", "medium", "high", "max"),
+    spellings=(("off", "none"),),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 #: §4.2's decision, taken here rather than left to taste: emitted on **every**
 #: ``build_command``, never lane- or kwarg-conditional. A config-conditional flag
@@ -439,6 +449,65 @@ class VibeProvider(LLMProvider):
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         # Drop the prompt VALUE only; `-p` itself is what keeps vibe headless.
         return cmd[:-1], prompt
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The transcript minus the ``role: "user"`` entries, which are ours.
+
+        vibe's ``--output json`` transcript opens with a ``{"type": "message",
+        "role": "user"}`` entry whose ``content[].text`` is our prompt verbatim,
+        so ``classify_failure`` was classifying the plan under review: the
+        committed ``success-json.json`` classified **``rate_limited``** because
+        the reviewed plan says "unify auth errors, rate limits, …". Like
+        copilot's, this half of the defect was pinned by nothing — vibe shipped
+        with no manifest.
+
+        Two committed shapes, one rule. The ``--output json`` capture is a JSON
+        array, filtered structurally and re-rendered at the same 2-space indent
+        the CLI writes; the streamed capture is one entry per line, filtered as
+        lines so every other byte survives. In both cases the filter key is
+        ``role``, the same field :meth:`_last_assistant_text` already uses to
+        stop a user entry being served back as the model's answer.
+
+        Nothing vibe's own diagnosis needs is on this side of the filter: on
+        every measured failure vibe writes to **stderr** (``Error: API error
+        from …``, ``Rate limits exceeded``, ``The conversation context exceeds
+        …``) and stderr is returned unchanged, while a config-validation error
+        lands on stdout as bare prose that never parses as JSON and is therefore
+        passed straight through.
+        """
+        try:
+            text = stdout.strip() if stdout else ""
+            if not text or '"user"' not in text:
+                return stdout, stderr
+            if text.startswith("["):
+                entries = json.loads(text)
+                if not isinstance(entries, list):
+                    return stdout, stderr
+                kept = [
+                    entry for entry in entries
+                    if not (isinstance(entry, dict) and entry.get("role") == "user")
+                ]
+                if len(kept) == len(entries):
+                    return stdout, stderr
+                return json.dumps(kept, indent=2, ensure_ascii=False), stderr
+            lines: List[str] = []
+            dropped = False
+            for line in stdout.split("\n"):
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        entry = json.loads(stripped)
+                    except ValueError:
+                        entry = None
+                    if isinstance(entry, dict) and entry.get("role") == "user":
+                        dropped = True
+                        continue
+                lines.append(line)
+            if not dropped:
+                return stdout, stderr
+            return "\n".join(lines), stderr
+        except (AttributeError, TypeError, ValueError):
+            return stdout, stderr
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """§3.4's two-step unwrap over a JSON array of transcript entries.

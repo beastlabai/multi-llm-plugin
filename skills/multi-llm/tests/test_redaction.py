@@ -261,6 +261,63 @@ class TestRecallSeventeenShapes:
                 assert value not in out, f"{value} survived in {text[:60]!r}"
 
 
+class TestBothShapesTheProbeBoundaryReallyEmits:
+    """P13 over the *other* `about` shape, and over a short value.
+
+    `cursor-agent about` is a declared ``setup_probe`` now, so its output
+    reaches a rendered status row and an exit-3 refusal tail. A build that does
+    not know ``--format`` prints the ``Key  Value`` table
+    ``providers.cursor_agent._about_text_pairs`` parses — the shape the
+    quoted-JSON rule cannot see at all.
+    """
+
+    TEXT_TABLE = (
+        "Cursor Agent\n"
+        "CLI Version       2026.08.11-e8db854\n"
+        "Subscription      pro\n"
+        "User Email        grace@example.org\n"
+        "Terminal Program\tApple_Terminal\n"
+        "Shell: /usr/bin/fish\n"
+        "OS Platform       linux\n"
+    )
+
+    def test_the_text_table_fallback_is_redacted_too(self):
+        out = redact_text(self.TEXT_TABLE)
+        for value in ("grace@example.org", "Apple_Terminal", "/usr/bin/fish"):
+            assert value not in out, f"{value!r} survived the text-table shape"
+
+    def test_the_text_table_keeps_every_diagnostic_value(self):
+        """A row with its version and platform gone is not a usable readout."""
+        out = redact_text(self.TEXT_TABLE)
+        for value in ("2026.08.11-e8db854", "pro", "linux"):
+            assert value in out, f"{value!r} is diagnostic, not identity"
+        for label in ("User Email", "Terminal Program", "Shell"):
+            assert label in out, f"{label!r} was dropped rather than redacted in place"
+
+    def test_the_text_table_redaction_is_idempotent(self):
+        once = redact_text(self.TEXT_TABLE)
+        assert redact_text(once) == once
+
+    def test_a_two_character_json_value_is_not_below_the_floor(self):
+        """The old `{3,}` bound let a short identity value through."""
+        out = redact_text(json.dumps({"shell": "sh", "cliVersion": "2026.08.11"}))
+        assert '"sh"' not in out
+        assert "2026.08.11" in out
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "the shell = bash default is fine",
+            "Set email to whatever the reviewer prefers.",
+            "  - shell: bash",
+            "run `SHELL=/bin/sh make test` first",
+        ],
+    )
+    def test_prose_and_source_keep_the_same_words(self, line):
+        """Key-named *and* line-anchored: the reason this rule can exist at all."""
+        assert redact_text(line) == line
+
+
 # ---------------------------------------------------------------------------
 # 2. Zero false positives
 # ---------------------------------------------------------------------------

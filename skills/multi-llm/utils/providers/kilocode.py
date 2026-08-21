@@ -5,15 +5,34 @@ import shutil
 from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    REASONING_LADDER,
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Reasoning variant names accepted by `kilocode run --variant` (verified on
 # kilocode 7.4.1). Variants are model-specific: effort words for
 # OpenAI-family/glm models, "thinking"/"instant" for kimi/minimax; unknown
 # variants are silently ignored by the CLI.
-REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "thinking", "instant"}
+#
+# `thinking`/`instant` are the second axis, not two more rungs — they select a
+# MODE, so they are declared as `variants` and pass through without ever being
+# compared to (or coerced onto) a rung.
+#
+# No `model_caps` here on purpose. kilocode's per-model narrowing is *captured*
+# rather than hand-written — `tests/fixtures/kilocode/model_variants.json`, from
+# `kilocode models <backend> --verbose` — and `tests/test_providers.py` already
+# grades every configured spec against it. Restating a slice of that capture
+# here would give the same fact two owners and one of them no refresh command.
+EFFORT_LADDER = ReasoningLadder(
+    provider="kilocode",
+    rungs=REASONING_LADDER,
+    variants=("instant", "thinking"),
 )
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 #: The two names the Kilo Code CLI installs under, in preference order. Upstream
 #: ships both spellings; this adapter used to know only the first, so on a

@@ -140,16 +140,20 @@ rows:
     wall_s: 0.38
     requests: 3
     notes: >-
-      **FIRST-wins, and it is the decoy.** Two JSON documents in one `text`, the
-      first reading `FIRST ANSWER (must NOT be selected)`; `json.loads` on the
-      concatenation fails, `extract_json_from_text(prefer_arrays=True)` then
-      returns the FIRST array. The same defect claude-code and gemini have, from
-      the same helper. The literal §6.2 shape (two assistant *messages*) is
-      unreachable: grok concatenates every turn into one `text` before printing.
+      **LAST-wins, and it selects the answer.** Two JSON documents in one `text`,
+      the first reading `FIRST ANSWER (must NOT be selected)`; `json.loads` on
+      the concatenation fails, `extract_json_from_text(prefer_arrays=True)` then
+      returns the LAST top-level array, the S001/S002 pair. The same rule
+      claude-code and gemini now get, from the same helper: the last document
+      wins, at every level. The decoy is still in the bytes (`raw_contains` pins
+      it), so the row still tests selection rather than parsing. The literal
+      §6.2 shape (two assistant *messages*) is unreachable: grok concatenates
+      every turn into one `text` before printing.
     expect:
       success: true
       data:
-        - {id: "S000", title: "FIRST ANSWER (must NOT be selected)", severity: "low"}
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ["FIRST ANSWER (must NOT be selected)", "Bound the retry ladder"]
       classify_failure: null
 
@@ -278,17 +282,20 @@ rows:
       model that IS in the catalog (failserver `--mode 404`). It names the model
       — `stub-model`, the exact `-m` value, because grok is a chat-surface CLI
       that carries the model in the body — and it names the whole available list
-      too. **But the measured classification is `server_error`, not
-      `invalid_model`**: grok wraps the vendor sentence in `API error (status 404
-      Not Found)`, and `\bapi error\b` is a SERVER_ERROR marker consulted before
-      the invalid-model table. See README, defect 3.
+      too. It **now classifies `invalid_model`**. It used to read `server_error`:
+      grok wraps the vendor sentence in `API error (status 404 Not Found)`, and
+      `\bapi error\b` is a SERVER_ERROR marker that the ladder consulted BEFORE
+      the invalid-model table, so a terminal config error landed on a retryable
+      rung and burned the retry budget. **C2 swapped that pair** — a model-named
+      404 is strictly more specific than "api error" — and this cell is one of
+      the three that moved. See README, defect 3.
     expect:
       success: false
       raw_contains:
         - "The model `stub-model` does not exist or you do not have access to it."
         - "API error (status 404 Not Found)"
         - "Available: stub-model,"
-      classify_failure: "server_error"
+      classify_failure: "invalid_model"
 
   invalid-model-preflight:
     stdout: invalid-model-preflight.stdout.txt

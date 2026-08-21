@@ -60,6 +60,7 @@ from .providers.base import (
     CATEGORY_INVALID_MODEL,
     CATEGORY_PERMISSION_DENIED,
     CATEGORY_SERVER_ERROR,
+    LLMProvider,
     classify_streams,
     context_length_message,
 )
@@ -507,20 +508,39 @@ def _format_failure_details(
     returncode: int,
     stdout_text: str,
     stderr_text: str,
-    max_tail_lines: int = 20
+    max_tail_lines: int = 20,
+    *,
+    provider: Optional[LLMProvider] = None,
 ) -> str:
     """Format failure details with clear reason and tail output.
 
     The reason is the shared classifier's verdict looked up in
-    :data:`_REASON_BY_CATEGORY` (§7.1.a) — there is no second rule here. The
-    classifier is called with :class:`~utils.providers.base.LLMProvider`'s own
-    declared pattern sets, because this helper is handed two streams and an exit
-    code and never an adapter; a per-adapter override therefore reaches the
-    executor's rung decision (which does have one) but not this cosmetic line.
+    :data:`_REASON_BY_CATEGORY` (§7.1.a) — there is no second rule here.
+
+    **``provider`` is how this helper stops being the one classifier that reads
+    raw stdout.** It is handed a whole ``stdout_text``, and four shipped
+    adapters echo our prompt into that stream, so on the committed goose
+    ``prompt-echo`` bytes this function answered ``Reason: Timed out`` about a
+    run that had *succeeded*. Passing the adapter routes the verdict through
+    :meth:`~utils.providers.base.LLMProvider.classify_failure`, which applies
+    that adapter's :meth:`~utils.providers.base.LLMProvider.vendor_text`
+    reduction first — and any caller that has an adapter in hand must pass it.
+
+    With no adapter the behaviour is exactly what it was: the module-level
+    :func:`classify_streams` against :class:`~utils.providers.base.LLMProvider`'s
+    own declared pattern sets. That path is deliberately kept rather than made
+    an error, because §7.2 depends on ``classify_streams`` staying callable with
+    no adapter (``validation.py`` is the other such caller) — but it can only
+    under-reduce, never mis-reduce, and it is not a path a production caller
+    should be on.
     """
     error_parts = [f"Exit code {returncode}"]
 
-    category = classify_streams(stdout_text, stderr_text, returncode)
+    category = (
+        provider.classify_failure(stdout_text, stderr_text, returncode)
+        if provider is not None
+        else classify_streams(stdout_text, stderr_text, returncode)
+    )
     if category == STATUS_CONTEXT_LENGTH_EXCEEDED:
         error_parts.append(f"Reason: {context_length_message('')}")
     else:
@@ -1865,6 +1885,140 @@ def format_suggestion(
 # Reaggregation
 # ---------------------------------------------------------------------------
 
+def resolve_result_files_by_model(
+    phase_dir: str,
+    result_files: List[str],
+    unsanitize: Dict[str, str],
+    *,
+    noun: str = "suggestions",
+) -> List[Tuple[str, str, Any]]:
+    """Map globbed result files to logical models — one file per model (W3).
+
+    A phase dir that straddles the L1 anchor upgrade holds BOTH ``<model>.json``
+    (written before L1) and ``<provider>_<model>.json`` (written by the resume,
+    which looked for the anchored name, did not find it, and **re-ran** that
+    model). Every ``--reaggregate`` path globs ``*.json``, so it sees two files;
+    they are two answers from ONE logical model, and reading both double-counts
+    every finding. That is not cosmetic: ``source_model`` is what grouping
+    attributes by, and ``SuggestionGroup._recalculate_priority`` scores
+    ``len(self.models) + Σ importance``, so a finding read twice renders as two
+    models agreeing when one model said it once — corroboration that did not
+    happen. Collapsing the model *set* alone would not fix it; the payload of
+    exactly one file per model has to be the one that reaches the aggregate.
+
+    Identity is the **recorded canonical spec** in ``.status.json``, never the
+    filename: ``sanitize_model_name`` is lossy in one direction only, so a legacy
+    stem cannot be re-resolved into a spec, but it CAN be matched against the
+    stems the recorded specs generate. (It is also the only workable direction
+    because ``write_status`` replaces ``models_requested`` wholesale, so after the
+    resume the checkpoint holds the canonical specs only.)
+
+    Shared by both ``--reaggregate`` implementations — this module's, and
+    ``code_review_orchestrator.reaggregate_from_existing_files``, which
+    accumulates into ``all_issues``/``results`` and would otherwise render the
+    same model twice in its report. *unsanitize* is passed in rather than built
+    here so each caller keeps its own ``build_unsanitize_map`` seam.
+
+    Args:
+        phase_dir: The phase directory the files were globbed from.
+        result_files: Candidate model-result paths, already filtered of
+            non-model artifacts by the caller's ``exclude_patterns``.
+        unsanitize: ``build_unsanitize_map(phase_dir)`` — ``sanitize(spec) -> spec``
+            over the checkpoint's ``models_requested``/``models_completed``.
+        noun: What the payloads are called in the log lines ("suggestions",
+            "issues").
+
+    Returns:
+        ``[(model, chosen_path, payload)]`` ordered by model, exactly one entry
+        per logical model. Unreadable files are warned about and dropped, as
+        before.
+
+    Raises:
+        SystemExit: exit 3 when one legacy stem matches two or more recorded
+            specs — the genuine ambiguity, which fails closed.
+    """
+    recorded_specs = sorted(set(unsanitize.values()))
+    anchored_stems = {sanitize_model_name(spec): spec for spec in recorded_specs}
+    legacy_stems: Dict[str, List[str]] = {}
+    for spec in recorded_specs:
+        if ":" not in spec:
+            continue
+        legacy_stems.setdefault(
+            sanitize_model_name(spec.split(":", 1)[1]), []
+        ).append(spec)
+
+    def resolve_recorded_identity(stem: str) -> Tuple[str, bool]:
+        """Map a result-file stem to ``(model identity, is_anchored)``."""
+        if stem in anchored_stems:
+            return anchored_stems[stem], True
+        legacy_candidates = legacy_stems.get(stem, [])
+        if len(legacy_candidates) > 1:
+            # `openai:gpt-5.2` and `openrouter:gpt-5.2` both generate the legacy
+            # stem `gpt-5_2`, and there is no evidence on disk for which one wrote
+            # the file. Attributing it to either fabricates a `source_model`;
+            # splitting it across both is the double count again. Fail closed on
+            # the same needs-human code the resume reader uses on this path.
+            print(
+                "ERROR: "
+                f"{os.path.join(phase_dir, stem + '.json')} is a pre-anchor result "
+                "file whose name matches more than one model recorded in "
+                f"{os.path.join(phase_dir, '.status.json')}: "
+                + ", ".join(legacy_candidates)
+                + ". Remove it, or rename it to the <provider>_<model>.json name of "
+                "the model that wrote it, then re-run --reaggregate.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        if legacy_candidates:
+            return legacy_candidates[0], False
+        # No recorded spec claims this stem — a hand-copied dir, or one with no
+        # `.status.json` at all: the stem IS the identity, exactly as before.
+        return unsanitize.get(stem, stem), True
+
+    # identity -> [(is_anchored, path, payload)]
+    files_by_model: Dict[str, List[Tuple[bool, str, Any]]] = {}
+    for result_path in sorted(result_files):
+        try:
+            with open(result_path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"  Warning: Could not read {result_path}: {e}")
+            continue
+        stem = os.path.basename(result_path)[: -len(".json")]
+        model, is_anchored = resolve_recorded_identity(stem)
+        files_by_model.setdefault(model, []).append(
+            (is_anchored, result_path, payload)
+        )
+
+    resolved: List[Tuple[str, str, Any]] = []
+    for model in sorted(files_by_model):
+        # The anchored file wins unconditionally, identical payloads or not:
+        # `sanitize_model_name(model_spec) + ".json"` is precisely what the normal
+        # path reads, so "anchored wins" is what makes --reaggregate agree with the
+        # run it is re-aggregating, and it is the newer file by construction.
+        candidates = sorted(files_by_model[model], key=lambda e: (not e[0], e[1]))
+        _, chosen_path, payload = candidates[0]
+        for _, skipped_path, skipped in candidates[1:]:
+            if skipped != payload:
+                # Salvage never refuses a whole phase because a stale pre-anchor
+                # file disagrees with the file the normal path would have used —
+                # that strands results, and it would make salvage stricter than
+                # the run it salvages. The divergence is recorded loudly and the
+                # newer answer is used.
+                print(
+                    f"  WARN: {skipped_path} ({len(skipped)} {noun}) disagrees "
+                    f"with {chosen_path} ({len(payload)} {noun}) for "
+                    f"{model}; using the anchored file."
+                )
+            # Skipped, not merged and not content-deduplicated.
+            print(
+                f"  Skipping pre-anchor duplicate {skipped_path} "
+                f"({model} is read from {chosen_path})"
+            )
+        resolved.append((model, chosen_path, payload))
+    return resolved
+
+
 async def reaggregate_from_existing_files(
     prefix: str,
     out_dir: str,
@@ -1929,20 +2083,14 @@ async def reaggregate_from_existing_files(
     # Restore original model specs (with colons) from .status.json
     unsanitize = build_unsanitize_map(phase_dir)
 
-    for result_path in result_files:
-        try:
-            with open(result_path, 'r', encoding='utf-8') as f:
-                suggestions = json.load(f)
-                basename = os.path.basename(result_path)
-                sanitized = basename.replace(".json", "")
-                model = unsanitize.get(sanitized, sanitized)
-                models_found.add(model)
-                for s in suggestions:
-                    s["source_model"] = model
-                all_suggestions.extend(suggestions)
-                print(f"  Loaded {len(suggestions)} suggestions from {model}")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"  Warning: Could not read {result_path}: {e}")
+    for model, _chosen_path, suggestions in resolve_result_files_by_model(
+        phase_dir, result_files, unsanitize
+    ):
+        models_found.add(model)
+        for s in suggestions:
+            s["source_model"] = model
+        all_suggestions.extend(suggestions)
+        print(f"  Loaded {len(suggestions)} suggestions from {model}")
 
     print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
 

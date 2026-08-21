@@ -514,8 +514,12 @@ class TestParseBeforeExtract:
         ])
         provider = registry.get_provider("codex")
 
+        # Raw extraction matches a TRANSPORT record, never the answer document:
+        # under the extractor's last-wins rule that is the final event rather
+        # than the first, and it is the wrong object either way.
         naive = executor.extract_json_from_text(stream, prefer_arrays=False)
-        assert naive["success"] and naive["data"].get("type") == "thread.started"
+        assert naive["success"] and naive["data"].get("type") == "item.completed"
+        assert "groups" not in naive["data"]
 
         recovered = executor.extract_result(provider, stream, "", prefer_arrays=False)
         assert recovered["groups"][0]["group_hash"] == "aaaa000000000000"
@@ -1895,6 +1899,206 @@ class TestRunnerAuthPreflight:
         assert not any(
             arg in provider.auth_check for arg in ("exec", "run", "--json", "-p")
         )
+
+
+def _registered_provider_names():
+    """Every provider id in the registry, resolved at class-definition time.
+
+    `@pytest.mark.parametrize` evaluates its argument while the class body runs,
+    so the sweep below reads the registry rather than a hand-written roster — a
+    new adapter is swept the day it is registered.
+    """
+    from utils.provider_registry import _PROVIDERS
+
+    return sorted(_PROVIDERS)
+
+
+class TestStructuralModelSpecRefusal:
+    """R3 — refuse what a CLI's addressing scheme cannot express, nothing else.
+
+    The bar: refusing needs evidence that *no* installation of that CLI could
+    resolve the slug, not evidence that this one did not. A catalog miss never
+    clears it — the model may be live server-side, added in a newer CLI, or
+    served by a provider declared in the CLI's own config, which multi-llm
+    cannot read.
+
+    Exactly one predicate clears it for opencode, and the evidence is opencode's
+    own resolver rather than our inference: `opencode run --help` documents
+    `--model` as "model to use in the format of provider/model", and a bare token
+    is split into provider `<token>` with an empty model half —
+    `ProviderModelNotFoundError: Model not found: stub-model/.` on **opencode
+    1.18.18**, raised before any HTTP call. An empty model half is not a name any
+    catalog, release or server can supply.
+
+    All three cases are offline, so none of this needs a container run to stay
+    honest. If a later opencode release resolves bare tokens against a default
+    provider, the check is withdrawn back to a warning rather than kept on.
+    """
+
+    #: The version the refusal was observed on. Named here because a structural
+    #: claim about a CLI is only falsifiable against a version.
+    OBSERVED_ON = "1.18.18"
+
+    def test_a_bare_opencode_model_is_refused_before_dispatch(
+        self, tmp_path, runner_env
+    ):
+        """`opencode:stub-model` — exit 3 at preflight, no child started."""
+        runner_env.use("opencode:stub-model")
+        runner_env.echo("validation")
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        message = excinfo.value.message
+        assert excinfo.value.reason_code == "unresolvable_model"
+        assert excinfo.value.exit_code == 3
+        # The required shape, and the offending token echoed verbatim.
+        assert "provider/model" in message
+        assert "'stub-model'" in message
+        # The version the claim is falsifiable against.
+        assert self.OBSERVED_ON in message
+        # Refused at preflight: nothing was dispatched, so no result file exists.
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_a_qualified_but_uncatalogued_model_still_warns_and_dispatches(
+        self, tmp_path, runner_env, capsys
+    ):
+        """`opencode:stub/stub-model` — absent from the catalog, still dispatched.
+
+        This is the case a catalog-based refusal would have broken: the correct,
+        working slug for the host-lane negative row is *also* absent from
+        `providers.yaml`'s opencode catalog, and so is every legitimate
+        user-configured custom opencode provider.
+        """
+        runner_env.use("opencode:stub/stub-model")
+        capsys.readouterr()
+        info = executor.preflight_runner(
+            "opencode:stub/stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert info["provider"] == "opencode"
+        assert info["model"] == "stub/stub-model"
+        warning = capsys.readouterr().err
+        assert "not in opencode's configured catalog" in warning
+        assert "dispatching anyway" in warning
+
+    def test_both_verdicts_hold_when_the_catalog_is_empty_or_unreadable(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """The refusal never consults the catalog, so catalog state cannot move it.
+
+        An empty catalog and an unreadable one are both pinned, in both
+        directions: the bare token is still refused and the qualified one is
+        still dispatched. A catalog problem can only ever downgrade the advisory
+        warning to silence — never produce an exit.
+        """
+        # (a) empty catalog: opencode declares no models at all.
+        config = tmp_path / "empty-catalog.yaml"
+        config.write_text(
+            "driver:\n"
+            "  subagent_runner: opencode:stub/stub-model\n"
+            "defaults: {}\n"
+            "providers:\n"
+            "  opencode:\n"
+            "    models: []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        registry._config = None
+        registry._config_key = None
+
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner(
+                "opencode:stub-model",
+                check_version=False, check_auth=False, check_nested=False,
+            )
+        assert excinfo.value.reason_code == "unresolvable_model"
+
+        capsys.readouterr()
+        info = executor.preflight_runner(
+            "opencode:stub/stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert info["model"] == "stub/stub-model"
+        assert "not in opencode's configured catalog" in capsys.readouterr().err
+
+        # (b) unreadable catalog: the lookup itself raises. A read that fails
+        # says nothing about what the runner can serve, so it may not end a run.
+        def _unreadable(*_args, **_kwargs):
+            raise RuntimeError("catalog unreadable")
+
+        monkeypatch.setattr(executor, "is_model_valid", _unreadable)
+
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner(
+                "opencode:stub-model",
+                check_version=False, check_auth=False, check_nested=False,
+            )
+        assert excinfo.value.reason_code == "unresolvable_model"
+
+        capsys.readouterr()
+        info = executor.preflight_runner(
+            "opencode:stub/stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert info["model"] == "stub/stub-model"
+        # Downgraded to "no warning", never to an exit.
+        assert "configured catalog" not in capsys.readouterr().err
+
+    def test_a_bare_codex_model_is_not_refused(self, tmp_path, runner_env):
+        """`provider/model` is opencode's addressing scheme, not a general one."""
+        runner_env.use("codex:stub-model")
+        info = executor.preflight_runner(
+            "codex:stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert info["provider"] == "codex"
+        assert info["model"] == "stub-model"
+
+    @pytest.mark.parametrize("name", _registered_provider_names())
+    def test_no_other_adapter_gains_the_structural_check(self, name):
+        """Swept over the registry, so a new adapter cannot quietly inherit it.
+
+        Only an adapter that can answer "can my addressing scheme express this
+        token at all?" declares the hook. Every other registered adapter either
+        declares none or declines to refuse a bare token.
+        """
+        provider = registry.get_provider(name)
+        describe = getattr(provider, "describe_unresolvable_model", None)
+        refusal = describe("stub-model") if callable(describe) else None
+        if name == "opencode":
+            assert refusal, "opencode must refuse a bare, unqualified model token"
+        else:
+            assert refusal is None, (
+                f"{name} refused a bare model token; `provider/model` is "
+                f"opencode's addressing scheme, not a general one"
+            )
+
+    def test_the_refusal_reads_no_catalog(self, monkeypatch):
+        """Pinned at the adapter: the check cannot reach a catalog to consult it."""
+        provider = registry.get_provider("opencode")
+
+        def _explode(*_args, **_kwargs):  # pragma: no cover - must never run
+            raise AssertionError("the structural check consulted the catalog")
+
+        monkeypatch.setattr(registry, "get_available_models", _explode)
+        monkeypatch.setattr(registry, "is_model_valid", _explode)
+
+        assert provider.describe_unresolvable_model("stub-model")
+        assert provider.describe_unresolvable_model("stub/stub-model") is None
+        # The `:effort` suffix is stripped first, so it decides nothing.
+        assert provider.describe_unresolvable_model("stub-model:high")
+        assert provider.describe_unresolvable_model("stub/stub-model:high") is None
+
+    def test_the_message_names_the_shape_without_rewriting_the_spec(self):
+        """No fabricated prefix: the correct provider for an unknown model is unknowable."""
+        provider = registry.get_provider("opencode")
+        message = provider.describe_unresolvable_model("stub-model")
+
+        assert "has no provider prefix" in message
+        # An example, explicitly offered as one alternative among others —
+        # never a silent substitution the caller was not told about.
+        assert "e.g. 'opencode/stub-model'" in message
+        assert "or the provider that serves it" in message
 
 
 class TestNestedExecPreflight:

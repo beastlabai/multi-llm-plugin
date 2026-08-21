@@ -26,6 +26,7 @@ from utils.retry_ladder import (
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_RATE_LIMITED,
 )
+from utils.providers import base as base_module
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
@@ -248,8 +249,9 @@ This concludes the review."""
         )
         try:
             with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-                "utils.providers.claude_code._read_help_tokens",
-                lambda binary, remove_env=(): frozenset({"--json-schema"}),
+                # M14: one gate, one implementation — so one patch target.
+                "utils.providers.base.read_help_tokens",
+                lambda binary, **_kwargs: frozenset({"--json-schema"}),
             ):
                 cmd = provider.build_command("Review this code", "sonnet",
                                              schema=schema)
@@ -619,8 +621,9 @@ class TestInternalRetryEnvelopeDeclarations:
         "name",
         [
             n for n in _envelope_sweep_names()
-            if n not in ("claude-code", "codex", "copilot", "kimi", "qwen-code",
-                         "vibe")
+            if n not in ("claude-code", "codex", "copilot", "gemini",
+                         "goose", "kimi",
+                         "muse", "qwen-code", "vibe")
         ],
     )
     def test_every_unmeasured_adapter_declares_none(self, registry, name):
@@ -1533,8 +1536,8 @@ This concludes the review."""
         model = "gpt-4"
 
         with patch.object(
-            cursor_agent_module, "_help_flag_tokens", lambda _b: frozenset({"--trust", "--mode"})
-        ), patch.object(cursor_agent_module.shutil, "which", lambda _n: "/usr/bin/cursor-agent"):
+            base_module, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust", "--mode"})
+        ), patch.object(cursor_agent_module.shutil, "which", lambda _n: sys.executable):
             cmd = provider.build_command(prompt, model)
 
         assert cmd == [
@@ -3447,15 +3450,39 @@ class TestQwenCodeProvider:
     # -- parse_output: the error-shaped envelope --------------------------
 
     def test_an_error_shaped_record_is_not_served_as_the_answer(self, provider):
-        """The trap the probe found against the COMMITTED parse_result_envelope:
-        an error record has no `result` key, so the shared helper's
-        `if "result" in wrapper` guard misses and it returns the record itself."""
+        """The trap the probe found, and the half of it that is now closed.
+
+        An error record has no `result` key, so `parse_result_envelope`'s
+        `if "result" in wrapper` guard missed it and the helper returned the
+        record itself as the answer. C5 closed the half this fixture happens to
+        exercise: the helper now refuses any envelope whose own `is_error` /
+        `terminal_reason` says the run failed, and qwen's error record carries
+        `is_error: true` like claude-code's does, so the helper alone would now
+        refuse these bytes.
+
+        **The ordering this test exists for is unaffected, and the second half
+        below is why it still has to be an ordering.** The helper reads two
+        fields; qwen's rule 1 reads three — it also refuses a `subtype` other
+        than `"success"`, and a record with no `result` key at all. Strip the
+        one field C5 reads and the trap is still there, which is what the
+        `is_error`-less derivation pins.
+        """
         from utils.providers.result_envelope import parse_result_envelope
 
         raw = self._fixture("stdout-error.stdout.json")
         record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
-        # what the shared helper alone would have done
-        naive = parse_result_envelope(json.dumps(record))
+        assert record["is_error"] is True and record["subtype"] != "success"
+
+        # the shared helper, on the record as qwen really wrote it
+        refused = parse_result_envelope(json.dumps(record))
+        assert refused["success"] is False
+        assert "is_error: true" in refused["error"]
+
+        # the same record minus that one field: no `result` key, no verdict the
+        # helper reads, and the bookkeeping comes back as the model's answer
+        blind = dict(record)
+        del blind["is_error"]
+        naive = parse_result_envelope(json.dumps(blind))
         assert naive["success"] is True and naive["data"]["type"] == "result"
 
         # what the adapter does, because it classifies FIRST
@@ -3980,7 +4007,9 @@ class TestCopilotProvider:
         promotes the run to tier 4 with no argv change at all."""
         assert "COPILOT_ALLOW_ALL" in provider.get_remove_env()
 
-    # -- the token-limit ladder (§3.1) ------------------------------------
+    # -- the token-limit pair (§3.1): the catalog and the floor, full stop.
+    # The override rung above them was REMOVED rather than deferred (C9);
+    # `TestCopilotHasNoConfigurableTokenLimits` below pins its absence.
 
     def test_a_catalogued_slug_gets_its_own_pair(self, provider):
         from utils.providers.copilot import OUTPUT_RESERVE_TOKENS, token_limits_for
@@ -4042,6 +4071,114 @@ class TestCopilotProvider:
         raw = "GitHub Copilot CLI 1.0.80.\nRun 'copilot update' to check for updates.\n"
 
         assert provider.parse_version(raw, "") == "1.0.80"
+
+
+@pytest.mark.config_override
+class TestCopilotHasNoConfigurableTokenLimits:
+    """C9: the `providers.yaml` override rung is removed, not deferred.
+
+    `token_limits_for` derives the pair from the committed per-slug catalog and
+    the conservative floor, and from nothing else. What is pinned here is the
+    **absence** of the affordance, because an absence is exactly what a later
+    reader re-adds half-way: the config layer merges an undeclared
+    `max_prompt_tokens:` into the copilot block and then nothing reads it, so a
+    documented key would have been a silent no-op rather than a feature.
+
+    copilot is the only adapter in the registry that declares a token budget at
+    all, which is why the typed-config alternative was rejected instead of held
+    open, and why the one condition that reopens it is a *second* such adapter.
+    """
+
+    MODEL = "openai/gpt-4o-mini"
+
+    #: Deliberately far from both the catalog pair (128000 - 8000 / 8000) and
+    #: the floor (32000 / 8000), so a half-implemented read of either key shows
+    #: up as an equality failure rather than hiding behind a coincidence.
+    CONFIGURED_PROMPT = 190000
+    CONFIGURED_OUTPUT = 32000
+
+    def _with_the_key_configured(self, monkeypatch, tmp_path):
+        """A providers.yaml carrying both keys, as the removed rung described."""
+        import utils.provider_registry as registry
+
+        override = tmp_path / "providers.yaml"
+        override.write_text(
+            "providers:\n"
+            "  copilot:\n"
+            f"    max_prompt_tokens: {self.CONFIGURED_PROMPT}\n"
+            f"    max_output_tokens: {self.CONFIGURED_OUTPUT}\n",
+            encoding="utf-8",
+        )
+        # Deterministic layering: project discovery off, env layer on, cache dropped.
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
+        registry._config = None
+        registry._config_key = None
+        return registry
+
+    def test_the_key_really_does_reach_the_merged_provider_block(
+        self, monkeypatch, tmp_path
+    ):
+        """The premise of the removal, measured rather than argued.
+
+        `provider_registry` merges an undeclared key and then ignores it, so the
+        key is *present* in the loaded block. That is what makes documenting it
+        worse than not having it, and it is the half a reader must see before
+        the two assertions below mean anything.
+        """
+        registry = self._with_the_key_configured(monkeypatch, tmp_path)
+
+        block = registry.load_config()["providers"]["copilot"]
+
+        assert block["max_prompt_tokens"] == self.CONFIGURED_PROMPT
+        assert block["max_output_tokens"] == self.CONFIGURED_OUTPUT
+
+    def test_the_same_pair_comes_back_with_and_without_the_block(
+        self, monkeypatch, tmp_path
+    ):
+        from utils.providers.copilot import token_limits_for
+
+        without = token_limits_for(self.MODEL)
+        self._with_the_key_configured(monkeypatch, tmp_path)
+
+        assert token_limits_for(self.MODEL) == without
+
+    def test_get_env_emits_the_derived_pair_and_not_the_configured_one(
+        self, monkeypatch, tmp_path
+    ):
+        """The end of the wire: what the CLI is actually told."""
+        from utils.providers.copilot import token_limits_for
+
+        derived_prompt, derived_output = token_limits_for(self.MODEL)
+        self._with_the_key_configured(monkeypatch, tmp_path)
+
+        env = CopilotProvider().get_env(self.MODEL)
+
+        assert env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] == str(derived_prompt)
+        assert env["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"] == str(derived_output)
+        assert env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] != str(self.CONFIGURED_PROMPT)
+        assert env["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"] != str(self.CONFIGURED_OUTPUT)
+
+    def test_the_decision_is_written_where_the_next_reader_will_look(self):
+        """A rejected alternative with no reopening condition is just a gap.
+
+        Both halves live in `token_limits_for`'s own docstring, next to the
+        behaviour they explain, rather than only in a plan file.
+        """
+        from utils.providers.copilot import token_limits_for
+
+        doc = (token_limits_for.__doc__ or "").lower()
+
+        assert "second adapter" in doc, (
+            "the one reopening condition is not recorded"
+        )
+        assert "typing the key is" in doc, (
+            "the docstring no longer says that a user typing the key does NOT "
+            "reopen the decision"
+        )
+        assert "no config override" in doc, (
+            "the docstring no longer states the absence as a decision"
+        )
 
 
 class TestVibeProvider:
@@ -5412,6 +5549,100 @@ class TestAiderProvider:
         assert found == [str(plan)]
 
 
+class TestAiderGlossIsNarrowedWhereItIsWritten:
+    """C7: aider's own 5xx gloss stops classifying, the vendor's words do not.
+
+    The two moved fixture rows are graded by `test_provider_fixture_rows.py`.
+    What is only assertable here is the half no capture covers: that narrowing
+    aider's gloss did **not** weaken `overloaded` for the vendor that genuinely
+    sends it. There is no Anthropic-through-aider capture in the tree, so the
+    529 case below is built from litellm's rendering of one rather than read off
+    disk, and it is labelled as such.
+    """
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "aider"
+
+    #: An Anthropic 529 as litellm renders it into aider's stdout: the vendor's
+    #: own error body on one line, aider's gloss on the next. Synthetic (no such
+    #: capture is committed); every other assertion in this class reads bytes.
+    ANTHROPIC_529 = (
+        "\nAider v0.86.2\n"
+        "Model: anthropic/claude-sonnet-4-5 with whole edit format\n\n"
+        "litellm.InternalServerError: AnthropicException - "
+        '{"type":"error","error":{"type":"overloaded_error",'
+        '"message":"Overloaded"}}\n'
+        "The API provider's servers are down or overloaded.\n"
+        "Retrying in 0.2 seconds...\n"
+    )
+
+    def _capture(self, stem):
+        return (self.FIXTURES / f"{stem}.stdout.txt").read_text(encoding="utf-8")
+
+    def test_the_gloss_alone_no_longer_says_rate_limited(self):
+        """The two rows the excision moves, from the committed bytes."""
+        provider = AiderProvider()
+
+        assert provider.classify_failure(self._capture("truncated"), "", 0) == \
+            "connection_error"
+        assert provider.classify_failure(
+            self._capture("exit-zero-failure"), "", 0
+        ) == "runner_error"
+
+    def test_and_the_gloss_is_still_in_those_bytes(self):
+        """The fix is an excision at classification time, not an edited capture."""
+        for stem in ("truncated", "exit-zero-failure"):
+            assert "The API provider's servers are down or overloaded." in \
+                self._capture(stem)
+
+    def test_a_vendor_that_really_says_overloaded_is_still_rate_limited(self):
+        """The shared `overloaded` pattern is intact — this is C7's whole point.
+
+        Anthropic's genuine 529 is what `overloaded` carries in
+        `base.rate_limit_patterns`, and it survives the excision because the
+        vendor writes it on its own line.
+        """
+        assert AiderProvider().classify_failure(self.ANTHROPIC_529, "", 0) == \
+            STATUS_RATE_LIMITED
+
+    def test_aiders_measured_429_is_untouched(self):
+        """The committed 429 capture, which the excision must not reach."""
+        assert AiderProvider().classify_failure(
+            self._capture("rate-limit"), "", 0
+        ) == STATUS_RATE_LIMITED
+
+    def test_the_other_glosses_stay_because_they_are_the_only_evidence(self):
+        """Why the excision names one sentence rather than aider's gloss shape.
+
+        `not able to authenticate` — this adapter's own declared auth pattern —
+        IS the 401 gloss, and no other auth wording appears in that capture. An
+        excision keyed on "The API provider …" would turn a rung-1 auth failure
+        into a retryable runner error.
+        """
+        assert AiderProvider().classify_failure(
+            self._capture("auth-error"), "", 0
+        ) == STATUS_AUTH_FAILED
+
+    def test_the_excision_degrades_to_its_input(self):
+        """A capture that is nothing but the gloss must not classify as None.
+
+        An empty haystack is "nothing recognized", i.e. transport-shaped, so an
+        excision that consumed a whole capture would launder a failure into a
+        retry. The reduction returns its input instead.
+        """
+        gloss_only = "The API provider's servers are down or overloaded.\n"
+
+        assert AiderProvider()._drop_adapter_gloss(gloss_only) == gloss_only
+
+    def test_the_excision_only_ever_removes(self):
+        """Removal-only, the same contract `vendor_text` states for the hook."""
+        narrowed = AiderProvider()._drop_adapter_gloss(self._capture("truncated"))
+        original = self._capture("truncated")
+
+        assert len(narrowed) < len(original)
+        for line in narrowed.splitlines():
+            assert line in original
+
+
 # Per-provider prompt transport table. Every adapter declares
 # `prompt_transport == "argv"` — that is the transport the FAN-OUT path uses by
 # default, and it is what this table pins, so each adapter still renders the
@@ -5582,6 +5813,80 @@ class TestSubagentRunnerDeclarations:
         assert provider.verified_version, f"{name}: no verified_version"
 
 
+CAPABILITIES_PATH = Path(__file__).parent.parent / "hosts" / "capabilities.yaml"
+
+
+def _declared_host_runner_cells():
+    """Every `runners:` cell in `hosts/capabilities.yaml`, as the YAML declares it.
+
+    Read off the document rather than written out as a roster of hosts and
+    runners, so a host or a runner cell added later is swept on the day it is
+    added rather than on the day someone remembers to extend a list here.
+    """
+    import yaml
+
+    document = yaml.safe_load(CAPABILITIES_PATH.read_text(encoding="utf-8"))
+    return sorted(
+        (host_id, runner, cell.get("usage"))
+        for host_id, host in (document.get("hosts") or {}).items()
+        for runner, cell in (host.get("runners") or {}).items()
+    )
+
+
+HOST_RUNNER_USAGE_CELLS = _declared_host_runner_cells()
+
+
+class TestHostCapabilityUsageMatchesTheAdapter:
+    """W5: the third declaration of one fact, tied to the other two.
+
+    `TestSubagentRunnerDeclarations` above ties an adapter's `usage_support` to
+    whether it implements `parse_usage`. Nothing tied either of those to the
+    per-host `runners:` cell in `hosts/capabilities.yaml`, and it drifted for
+    exactly that reason: the claude-code host declared
+    `cursor-agent: {… usage: none}` long after the adapter had moved to
+    `USAGE_PARTIAL`.
+
+    Nothing reads the YAML value at run time today, which made the drift silent
+    rather than harmless — the cell is rendered into
+    `references/host-capabilities.md` and into the repo `README.md`, so it is
+    what a human reads before choosing a runner.
+    """
+
+    @pytest.mark.parametrize(
+        "host_id,runner,declared",
+        HOST_RUNNER_USAGE_CELLS,
+        ids=[f"{host}-{runner}" for host, runner, _ in HOST_RUNNER_USAGE_CELLS],
+    )
+    def test_the_cell_matches_the_named_adapters_declaration(
+        self, host_id, runner, declared
+    ):
+        from utils.provider_registry import _PROVIDERS
+
+        assert runner in _PROVIDERS, (
+            f"{host_id}: `runners:` names {runner!r}, which is not an adapter in "
+            f"the registry"
+        )
+        assert declared == _PROVIDERS[runner].usage_support, (
+            f"{host_id}/{runner}: capabilities.yaml declares usage={declared!r} "
+            f"but the adapter declares "
+            f"usage_support={_PROVIDERS[runner].usage_support!r}. The YAML is the "
+            f"rendered doc; the adapter is the code — move the cell."
+        )
+
+    def test_every_host_that_declares_runners_is_in_the_sweep(self):
+        """A loader that quietly returned nothing would make the sweep vacuous."""
+        import yaml
+
+        document = yaml.safe_load(CAPABILITIES_PATH.read_text(encoding="utf-8"))
+        with_runners = {
+            host_id for host_id, host in document["hosts"].items()
+            if host.get("runners")
+        }
+
+        assert HOST_RUNNER_USAGE_CELLS, "no runner cells were collected at all"
+        assert with_runners == {host for host, _, _ in HOST_RUNNER_USAGE_CELLS}
+
+
 class TestDeclaredOutputChannel:
     """`supports_file_output`: can this adapter write the result file at all?
 
@@ -5660,11 +5965,11 @@ class TestDeclaredOutputChannel:
         from utils.provider_registry import get_provider
 
         with patch.object(
-            cursor_agent_module,
-            "_help_flag_tokens",
-            lambda _b: frozenset({"--trust", "--mode"}),
+            base_module,
+            "read_help_tokens",
+            lambda _b, **_kw: frozenset({"--trust", "--mode"}),
         ), patch.object(
-            cursor_agent_module.shutil, "which", lambda _n: "/usr/bin/cursor-agent"
+            cursor_agent_module.shutil, "which", lambda _n: sys.executable
         ):
             cmd = get_provider("cursor-agent").build_command("prompt", "auto")
 
@@ -5757,37 +6062,152 @@ class TestClassifyFailure:
         ) == "auth_failed"
 
 
-class TestDescribeFailure:
-    """The opt-in hook that recovers a failure reason from a non-zero exit."""
+#: The adapters that override ``describe_failure``, each with **the channel its
+#: CLI really writes its diagnosis on**. It is a two-column table rather than a
+#: set because the channel is the thing being pinned: the value is what
+#: ``test_each_override_reads_only_the_channel_it_declares`` measures against
+#: that adapter's committed captures, so a row cannot be added without saying
+#: which stream it reads and being held to it.
+#:
+#: ``opencode`` and ``muse`` report their errors on **stdout** and leave stderr
+#: uninformative — the shape the hook was written for. ``pi`` and ``gemini``
+#: joined on 2026-08-20 (C4) as the exact inverse: both took ``stderr`` in
+#: ``parse_output`` and never mentioned it again, so 100% of the diagnosis was
+#: discarded while the CLI exited non-zero with the vendor's full error object
+#: sitting unused. The hook is therefore a *channel* rule, not a stream name.
+_DESCRIBE_FAILURE_CHANNELS = {
+    "opencode": "stdout",
+    "muse": "stdout",
+    "pi": "stderr",
+    "gemini": "stderr",
+}
 
-    def test_default_is_none_for_every_provider(self):
-        """Providers that report errors on stderr need no override.
 
-        stderr is already carried in details, so the base implementation adds
-        nothing. Only opencode and muse — which write their errors to stdout
-        and leave stderr uninformative — override this.
+def _describe_failure_overrides():
+    """The roster read off the CLASSES, never off the table above.
+
+    Parametrizing over the registry rather than over a literal roster is what
+    makes a new override fail by name on the day it lands instead of whenever
+    somebody remembers to widen a set.
+    """
+    from utils.provider_registry import _PROVIDERS
+
+    return {
+        name
+        for name, provider in _PROVIDERS.items()
+        if type(provider).describe_failure is not LLMProvider.describe_failure
+    }
+
+
+def _provider_capture_rows(name):
+    """``(row, stdout, stderr)`` for every committed ``.txt`` capture pair."""
+    directory = Path(__file__).parent / "fixtures" / name
+    if not directory.is_dir():
+        return []
+    rows = []
+    for row in sorted({path.name.split(".")[0] for path in directory.glob("*.txt")}):
+        streams = []
+        for key in ("stdout", "stderr"):
+            path = directory / f"{row}.{key}.txt"
+            streams.append(path.read_text(encoding="utf-8") if path.is_file() else "")
+        rows.append((row, streams[0], streams[1]))
+    return rows
+
+
+class TestDescribeFailureChannels:
+    """The opt-in hook that recovers a failure reason from **either** channel.
+
+    Renamed from ``TestDescribeFailure`` on 2026-08-20, with
+    ``test_stdout_error_providers_are_the_only_overrides`` renamed with it: both
+    names encoded the base docstring's old framing, that this is the hook for *"a
+    provider that reports its errors on stdout rather than stderr"*. C4 made that
+    false in the most direct way available — by adding the two adapters that are
+    its mirror image — so what is pinned here is the channel each override
+    declares, measured, rather than one stream's name.
+    """
+
+    @pytest.mark.parametrize("name", _envelope_sweep_names())
+    def test_an_adapter_without_an_override_inherits_none(self, name):
+        """No editorial from an adapter that has none to add.
+
+        The base returns ``None`` and most adapters inherit it, so the caller
+        sees the exit code plus ``details["stderr"]`` and nothing invented.
+        Parametrized over the whole registry, so a *new* adapter is covered on
+        the day it is registered.
         """
         from utils.provider_registry import _PROVIDERS
 
-        overriding = {
-            provider.name
-            for provider in _PROVIDERS.values()
-            if provider.describe_failure("some stdout", "some stderr") is not None
-        }
+        provider = _PROVIDERS[name]
+        if name in _describe_failure_overrides():
+            pytest.skip(f"{name} overrides describe_failure; see the channel test")
 
-        assert overriding == set()
+        assert provider.describe_failure("some stdout", "some stderr") is None
 
-    def test_stdout_error_providers_are_the_only_overrides(self):
-        """Guards the claim above: these two do return a reason when there is one."""
+    def test_the_override_roster_and_the_channel_table_agree(self):
+        """Neither half may move without the other.
+
+        The roster is derived from the classes; the table is hand-written and
+        carries the channel. Equality between them is what stops an override
+        landing with no declared channel — and stops a stale row outliving the
+        override it describes.
+        """
+        assert _describe_failure_overrides() == set(_DESCRIBE_FAILURE_CHANNELS)
+
+    @pytest.mark.parametrize("name", sorted(_DESCRIBE_FAILURE_CHANNELS))
+    def test_each_override_reads_only_the_channel_it_declares(self, name):
+        """The rule, measured on committed bytes rather than asserted in prose.
+
+        For every capture this adapter ships: blanking the **other** channel
+        must not change the answer, and blanking the **declared** channel must
+        make it ``None``. That is "stderr is the diagnosis, stdout is the
+        answer" — or its mirror — expressed as an assertion, and it is what
+        stops a future edit quietly reading the answer channel and reporting a
+        model's own words as the failure reason. gemini's ``exit-zero-failure``
+        is the row where it bites: 1,174 bytes of (false) answer on stdout and
+        193 bytes of real reason on stderr, in one capture.
+        """
         from utils.provider_registry import _PROVIDERS
 
-        overrides = {
-            name
-            for name, provider in _PROVIDERS.items()
-            if type(provider).describe_failure is not LLMProvider.describe_failure
-        }
+        provider = _PROVIDERS[name]
+        declared = _DESCRIBE_FAILURE_CHANNELS[name]
+        rows = _provider_capture_rows(name)
+        if not rows:
+            pytest.skip(f"{name} ships no .stdout.txt/.stderr.txt capture pairs")
 
-        assert overrides == {"opencode", "muse"}
+        for row, stdout, stderr in rows:
+            both = provider.describe_failure(stdout, stderr)
+            if declared == "stdout":
+                declared_only, other_only = (stdout, ""), ("", stderr)
+            else:
+                declared_only, other_only = ("", stderr), (stdout, "")
+
+            assert provider.describe_failure(*declared_only) == both, (
+                f"{name}/{row}: the answer changed when the {declared} capture "
+                f"was presented on its own — the other channel is being read"
+            )
+            assert provider.describe_failure(*other_only) is None, (
+                f"{name}/{row}: a reason was recovered from the channel "
+                f"{name} does NOT declare"
+            )
+
+    @pytest.mark.parametrize("name", sorted(_DESCRIBE_FAILURE_CHANNELS))
+    def test_every_override_survives_garbage_on_both_channels(self, name):
+        """Diagnostics must never raise.
+
+        Both callers wrap this hook in ``try``/``except`` precisely because an
+        override that threw would mask the failure it exists to explain — so the
+        contract is that it returns a string or ``None`` for any bytes at all.
+        """
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS[name]
+
+        for stdout, stderr in (("", ""), ("{", "}"), ("\x00", "\x00"),
+                               ("[]", "ApiError: {not json"),
+                               ("x" * 40000, "9" * 40000)):
+            reason = provider.describe_failure(stdout, stderr)
+
+            assert reason is None or isinstance(reason, str)
 
 
 class TestAgyProvider:
@@ -8229,3 +8649,703 @@ class TestNoChildOutlivesTheOuterDeadline:
                     os.kill(sleeper, 9)
                 except OSError:
                     pass
+
+
+# =========================================================================== #
+# C1 — `vendor_text`: the classifier reads what the VENDOR wrote
+#
+# `classify_failure` built its haystack from the WHOLE capture, and four shipped
+# adapters echo our own prompt back inside their envelope. So every marker table
+# in `classify_streams` was matching text we wrote: a green goose run classified
+# `timeout` (the review prompt's example block contains the word), and green
+# copilot and vibe runs classified `rate_limited` (the plan under review
+# discusses rate limits). On a *failed* run that is live — `_classify_failed_run`
+# forwards exactly `auth_failed` and `rate_limited`, the two classes that fail or
+# back off the whole batch.
+#
+# The fix is a per-adapter reduction hook, `LLMProvider.vendor_text`, applied
+# once inside `classify_failure`. Its default is identity, so every adapter that
+# does not override it is byte-for-byte what it was.
+# =========================================================================== #
+
+C1_FIXTURES = Path(__file__).parent / "fixtures"
+
+#: The whole committed goose corpus and its verdict on both sides of the fix.
+#: **This tuple is C1's acceptance test**: fourteen rows, and exactly one cell
+#: moves. `stdout` is `None` for the two rows the manifest declares
+#: not-applicable (goose exits 0 on every measured failure, and its envelope is
+#: never empty), which classify as `None` on empty streams either way. Every
+#: goose `*.stderr.txt` is 0 bytes, so stderr is "" throughout.
+C1_GOOSE_CORPUS = (
+    # row,                stdout file,                    before,          after
+    ("success",           "success.stdout.txt",           None,            None),
+    ("truncated",         "truncated.stdout.txt",         None,            None),
+    ("ephemeral-only",    "ephemeral-only.stdout.txt",    None,            None),
+    ("multi-assistant",   "multi-assistant.stdout.txt",   None,            None),
+    ("error-envelope",    "error-envelope.stdout.txt",    None,            None),
+    ("exit-zero-failure", "exit-zero-failure.stdout.txt", "server_error",  "server_error"),
+    ("stdout-error",      None,                           None,            None),
+    ("empty",             None,                           None,            None),
+    ("auth-error",        "auth-error.stdout.txt",        "auth_failed",   "auth_failed"),
+    ("rate-limit",        "rate-limit.stdout.txt",        "rate_limited",  "rate_limited"),
+    ("invalid-model",     "invalid-model.stdout.txt",     "invalid_model", "invalid_model"),
+    ("context-overflow",  "context-overflow.stdout.txt",  None,            None),
+    ("zero-body",         "zero-body.stdout.txt",         None,            None),
+    ("prompt-echo",       "prompt-echo.stdout.txt",       "timeout",       None),
+)
+
+#: The four adapters measured to echo our prompt, with the committed capture of a
+#: run that SUCCEEDED and the verdict that capture drew before the fix. muse's
+#: `None` is the "one plan word away" case: it echoes, nothing in its committed
+#: prompt happens to match a table, and its own `auth_error_patterns` already
+#: carry `api error 401` — which is why C1 lands before the auth-table widening.
+C1_ECHOING_SUCCESS_CAPTURES = (
+    ("goose", "prompt-echo.stdout.txt", "timeout"),
+    ("copilot", "success.jsonl", "rate_limited"),
+    ("vibe", "success-json.json", "rate_limited"),
+    ("muse", "success.stdout.txt", None),
+)
+
+
+def _c1_capture(provider, name):
+    return (C1_FIXTURES / provider / name).read_bytes().decode("utf-8")
+
+
+def _c1_adapter(provider):
+    from utils.provider_registry import _PROVIDERS
+
+    return _PROVIDERS[provider]
+
+
+def _c1_without_the_hook(monkeypatch, provider):
+    """Put one adapter back on the pre-C1 haystack, in place."""
+    monkeypatch.setattr(type(_c1_adapter(provider)), "vendor_text",
+                        LLMProvider.vendor_text)
+
+
+def _c1_goose_with_plan_sentence(sentence):
+    """goose's real cut-stream capture, with one sentence added to OUR prompt.
+
+    The bytes stay a real goose envelope: the sentence is appended to the echoed
+    user turn, which is exactly where a plan discussing 401s or rate limits would
+    have put it. Everything goose itself wrote is untouched.
+    """
+    envelope = json.loads(_c1_capture("goose", "truncated.stdout.txt"))
+    for message in envelope["messages"]:
+        if message.get("role") == "user":
+            message["content"][0]["text"] += "\n\n" + sentence
+            break
+    return json.dumps(envelope, indent=2, ensure_ascii=False)
+
+
+class TestVendorTextContract:
+    """The hook itself: identity by default, applied in exactly one place."""
+
+    def test_the_base_hook_is_identity(self):
+        """An adapter that does not override it keeps today's bytes exactly."""
+        stdout, stderr = LLMProvider.vendor_text(
+            AiderProvider(), "some stdout", "some stderr"
+        )
+        assert (stdout, stderr) == ("some stdout", "some stderr")
+
+    @pytest.mark.parametrize("provider", [
+        "agy", "aider", "claude-code", "cline", "codex", "cursor-agent",
+        "gemini", "grok", "kilocode", "kimi", "opencode", "pi", "qwen-code",
+    ])
+    def test_every_non_echoing_adapter_still_gets_the_whole_capture(self, provider):
+        """The thirteen adapters no committed capture shows echoing.
+
+        The default being identity is what makes "fix the class for the adapters
+        that echo" a bounded claim rather than a rewrite of every classifier.
+        """
+        text = "Ran into this error: 429 rate limit exceeded"
+        assert _c1_adapter(provider).vendor_text(text, "stderr text") == (
+            text, "stderr text"
+        )
+
+    def test_the_contract_is_documented_where_an_override_author_will_read_it(self):
+        """Both rules that make a reduction safe are in the hook's own docstring."""
+        doc = (LLMProvider.vendor_text.__doc__ or "").lower()
+        assert "only remove" in doc, "the removal-only rule is not documented"
+        assert "unchanged" in doc and "never" in doc, (
+            "the degrade-to-its-input rule is not documented"
+        )
+
+    @staticmethod
+    def _c1_base_source():
+        """base.py's text, read from disk rather than through ``inspect``.
+
+        ``inspect.getsource`` resolves a slice by the *imported* object's
+        ``co_firstlineno`` against the *current* file, so an unrelated edit to
+        this module while the suite runs makes it return the wrong lines. The
+        source is parsed here instead, which has no such coupling.
+        """
+        import ast
+
+        from utils.providers import base as base_module
+
+        text = Path(base_module.__file__).read_text(encoding="utf-8")
+        return text, ast.parse(text)
+
+    @staticmethod
+    def _c1_body_of(tree, name, cls=None):
+        import ast
+
+        scope = tree
+        if cls is not None:
+            scope = next(
+                node for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == cls
+            )
+        function = next(
+            node for node in scope.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        return ast.dump(ast.Module(body=function.body, type_ignores=[]))
+
+    def test_classify_failure_applies_it(self):
+        """One call, immediately before the rule runs."""
+        _text, tree = self._c1_base_source()
+        body = self._c1_body_of(tree, "classify_failure", cls="LLMProvider")
+        assert "'vendor_text'" in body, (
+            "classify_failure no longer applies the hook"
+        )
+
+    def test_nothing_else_applies_it(self):
+        """§7.2 depends on `classify_streams` staying the adapter-free rule."""
+        text, tree = self._c1_base_source()
+
+        assert text.count("self.vendor_text(") == 1, (
+            "the hook is applied in more than one place"
+        )
+        assert "'vendor_text'" not in self._c1_body_of(tree, "classify_streams")
+        assert "'vendor_text'" not in self._c1_body_of(
+            tree, "classify_auth_probe", cls="LLMProvider"
+        )
+
+    def test_a_reduction_that_empties_the_haystack_is_not_what_the_base_does(self):
+        """The degrade rule, stated as behaviour rather than as prose.
+
+        An empty haystack classifies as `None`, so a hook that returned "" on a
+        parse failure would launder a genuine 401 into a transport-shaped retry.
+        This is the shape that must NOT be written; it is here so the reason is
+        executable.
+        """
+        class _Launderer(GooseProvider):
+            def vendor_text(self, stdout, stderr):
+                return "", ""
+
+        genuine_401 = _c1_capture("goose", "auth-error.stdout.txt")
+        assert GooseProvider().classify_failure(genuine_401, "", 0) == \
+            STATUS_AUTH_FAILED
+        assert _Launderer().classify_failure(genuine_401, "", 0) is None
+
+
+class TestVendorTextOnTheFourEchoingAdapters:
+    """The measured set: goose, copilot, vibe, muse."""
+
+    @pytest.mark.parametrize("provider,capture,before", C1_ECHOING_SUCCESS_CAPTURES)
+    def test_a_successful_run_classifies_as_nothing(self, provider, capture, before):
+        """A run that produced an answer is not a transport fault."""
+        stdout = _c1_capture(provider, capture)
+        assert _c1_adapter(provider).classify_failure(stdout, "", 0) is None
+
+    @pytest.mark.parametrize("provider,capture,before", C1_ECHOING_SUCCESS_CAPTURES)
+    def test_and_that_is_a_change(self, provider, capture, before, monkeypatch):
+        """The same bytes, on the pre-C1 haystack, drew `before`."""
+        stdout = _c1_capture(provider, capture)
+        _c1_without_the_hook(monkeypatch, provider)
+        assert _c1_adapter(provider).classify_failure(stdout, "", 0) == before
+
+    @pytest.mark.parametrize("provider", ["goose", "copilot", "vibe", "muse"])
+    def test_the_reduction_only_ever_removes(self, provider):
+        """Every committed capture: a pure deletion, and no stderr.
+
+        "Shorter" is the weak half of the contract and it is not enough on its
+        own: three of the four hooks re-render a parsed envelope, so a rendering
+        that inserted bytes the capture never carried — muse re-serialized with
+        json's default ``", "``/``": "`` separators against a COMPACT stream —
+        stays under the length bound purely because the dropped prompt is
+        bigger than what the rendering added. The subsequence check is the
+        contract as written: every character of the reduction appears in the
+        capture, in order, so the hook can only have removed.
+        """
+        adapter = _c1_adapter(provider)
+        for path in sorted((C1_FIXTURES / provider).iterdir()):
+            if path.suffix not in (".txt", ".jsonl", ".json"):
+                continue
+            raw = path.read_bytes().decode("utf-8")
+            reduced, stderr = adapter.vendor_text(raw, "a stderr diagnosis")
+            assert len(reduced) <= len(raw), (
+                f"{provider}/{path.name}: the reduction GREW the capture"
+            )
+            remaining = iter(raw)
+            assert all(char in remaining for char in reduced), (
+                f"{provider}/{path.name}: the reduction INSERTED bytes the "
+                f"capture never carried"
+            )
+            assert stderr == "a stderr diagnosis", (
+                f"{provider}/{path.name}: no shipped reduction touches stderr"
+            )
+
+    @pytest.mark.parametrize("provider", ["goose", "copilot", "vibe", "muse"])
+    def test_a_broken_envelope_degrades_to_its_input(self, provider):
+        """Not `""` — see `test_a_reduction_that_empties_the_haystack…`."""
+        for junk in ("", "   ", "not json at all", '{"messages": "not a list"}',
+                     '{"unclosed": ', "\x00\x01"):
+            assert _c1_adapter(provider).vendor_text(junk, "err") == (junk, "err")
+
+    @pytest.mark.parametrize("provider,capture,expected", [
+        ("goose", "auth-error.stdout.txt", STATUS_AUTH_FAILED),
+        ("goose", "rate-limit.stdout.txt", STATUS_RATE_LIMITED),
+        ("goose", "exit-zero-failure.stdout.txt", "server_error"),
+        ("goose", "invalid-model.stdout.txt", CATEGORY_INVALID_MODEL),
+        ("copilot", "auth-error.jsonl", STATUS_AUTH_FAILED),
+        ("copilot", "rate-limit.jsonl", STATUS_RATE_LIMITED),
+        ("copilot", "invalid-model.jsonl", CATEGORY_INVALID_MODEL),
+        ("copilot", "context-overflow.jsonl", STATUS_CONTEXT_LENGTH_EXCEEDED),
+    ])
+    def test_the_vendors_own_diagnosis_still_reaches_the_tables(
+        self, provider, capture, expected
+    ):
+        """The reduction removes our turn and nothing the adapter said.
+
+        goose's `Ran into this error:`, its quoted `500 Internal Server Error`
+        status line and its `401 Unauthorized` gloss all live in the ASSISTANT
+        message; copilot's whole diagnosis is a `session.error` record. Both are
+        on the far side of the filter.
+        """
+        stdout = _c1_capture(provider, capture)
+        assert _c1_adapter(provider).classify_failure(stdout, "", 0) == expected
+
+
+class TestACutInsideCopilotsEchoIsStillDropped:
+    """The residual a whole-line parse leaves: a stream cut MID-record.
+
+    copilot's echo is one `user.message` line of 61 751 bytes — the largest in
+    the stream by two orders of magnitude — so a kill lands inside it more often
+    than anywhere else, and `json.loads` rejects the fragment. A filter that
+    dropped only what PARSED would hand the prompt bytes straight back to the
+    tables on the failed-run path `_classify_failed_run` reads.
+    `truncated.jsonl` cannot show this: that capture's cut fell on a record
+    boundary, so nothing committed pinned the shape until
+    `truncated-mid-echo.jsonl`.
+    """
+
+    CUT = "truncated-mid-echo.jsonl"
+
+    def test_the_committed_mid_echo_cut_classifies_as_nothing(self):
+        """A half-written stream says nothing about *why* it stopped."""
+        stdout = _c1_capture("copilot", self.CUT)
+        assert _c1_adapter("copilot").classify_failure(stdout, "", 137) is None
+
+    def test_and_that_is_a_change(self, monkeypatch):
+        """The same bytes on the pre-C1 haystack — and on a line-parse-only one.
+
+        `rate_limited` is one of the two classes the executor forwards, so this
+        is the live half: it would have backed the whole batch off on the
+        strength of a sentence in the plan under review.
+        """
+        stdout = _c1_capture("copilot", self.CUT)
+        _c1_without_the_hook(monkeypatch, "copilot")
+        assert _c1_adapter("copilot").classify_failure(stdout, "", 137) == \
+            STATUS_RATE_LIMITED
+
+    def test_the_prompt_bytes_are_gone_from_the_haystack(self):
+        """Stated over the bytes, not over the verdict.
+
+        The capture still carries our plan text — the fixture is worthless if a
+        later edit removes it from the bytes instead of from the haystack.
+        """
+        stdout = _c1_capture("copilot", self.CUT)
+        assert "rate-limit patterns" in stdout
+        reduced, _stderr = _c1_adapter("copilot").vendor_text(stdout, "")
+        assert "rate-limit" not in reduced
+        assert "user.message" not in reduced
+
+    def test_a_cut_record_of_ANY_OTHER_type_is_still_passed_through(self):
+        """Only the echo's opener is dropped, and only at the line start.
+
+        A fragment of an `assistant.message` is the vendor's own half-written
+        text and stays in the haystack; so does a line that merely mentions the
+        echo's type later on. Nothing about a rejected line is *parsed* — the
+        rule is a prefix match used to remove, and never to read evidence.
+        """
+        adapter = _c1_adapter("copilot")
+        vendor_fragment = (
+            '{"type":"assistant.message","data":{"content":"429 rate limit'
+        )
+        mentions_it_later = (
+            '{"note":"the record after this one is a "type":"user.message" '
+            'and it hit a rate-limit'
+        )
+        for line in (vendor_fragment, mentions_it_later):
+            stdout = _c1_capture("copilot", "success.jsonl") + "\n" + line
+            reduced, _stderr = adapter.vendor_text(stdout, "")
+            assert line in reduced, "a line that is not the echo was dropped"
+            assert adapter.classify_failure(stdout, "", 137) == \
+                STATUS_RATE_LIMITED
+
+    def test_a_cut_too_early_to_name_the_type_is_passed_through(self):
+        """It carries no prompt bytes, so there is nothing to remove."""
+        opener = '{"type":"user.mess'
+        reduced, _stderr = _c1_adapter("copilot").vendor_text(opener, "err")
+        assert (reduced, _stderr) == (opener, "err")
+
+    def test_the_record_boundary_capture_is_untouched_by_the_new_rule(self):
+        """`truncated.jsonl` is the other half of the pair and does not move."""
+        stdout = _c1_capture("copilot", "truncated.jsonl")
+        adapter = _c1_adapter("copilot")
+        assert adapter.classify_failure(stdout, "", 137) is None
+        reduced, _stderr = adapter.vendor_text(stdout, "")
+        assert "model.call_start" in reduced
+
+
+class TestTheGooseCorpusMovesExactlyOneCell:
+    """C1's acceptance test, run against every committed goose row."""
+
+    @pytest.mark.parametrize("row,capture,before,after", C1_GOOSE_CORPUS)
+    def test_each_row_classifies_as_the_table_declares(
+        self, row, capture, before, after
+    ):
+        stdout = _c1_capture("goose", capture) if capture else ""
+        assert GooseProvider().classify_failure(stdout, "", 0) == after
+
+    @pytest.mark.parametrize("row,capture,before,after", C1_GOOSE_CORPUS)
+    def test_each_row_classified_as_the_table_says_it_used_to(
+        self, row, capture, before, after, monkeypatch
+    ):
+        stdout = _c1_capture("goose", capture) if capture else ""
+        _c1_without_the_hook(monkeypatch, "goose")
+        assert GooseProvider().classify_failure(stdout, "", 0) == before
+
+    def test_exactly_one_of_the_fourteen_moved(self):
+        moved = [row for row, _, before, after in C1_GOOSE_CORPUS if before != after]
+        assert len(C1_GOOSE_CORPUS) == 14
+        assert moved == ["prompt-echo"], (
+            "C1 is a one-cell change to this corpus; anything else is a "
+            "reduction that removed more than our prompt"
+        )
+
+    def test_the_table_and_the_fixture_manifest_cannot_drift(self):
+        """The rig grades the same fourteen verdicts this table asserts."""
+        import yaml
+
+        manifest = yaml.safe_load(
+            (C1_FIXTURES / "goose" / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        rows = manifest["rows"]
+        assert set(rows) == {row for row, _, _, _ in C1_GOOSE_CORPUS}
+        for row, _capture, _before, after in C1_GOOSE_CORPUS:
+            declared = rows[row]
+            if "not_applicable" in declared:
+                continue
+            assert declared["expect"]["classify_failure"] == after, (
+                f"goose/{row}: the manifest and this table disagree"
+            )
+
+    def test_the_prompt_echo_row_was_not_inverted(self):
+        """The run always succeeded; only the classifier's answer was wrong."""
+        import yaml
+
+        manifest = yaml.safe_load(
+            (C1_FIXTURES / "goose" / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        expect = manifest["rows"]["prompt-echo"]["expect"]
+        assert expect["success"] is True
+        assert expect["classify_failure"] is None
+        raw = _c1_capture("goose", "prompt-echo.stdout.txt")
+        assert "address timeout scenarios" in raw, (
+            "the row stops pinning anything if the echoed prompt is edited out "
+            "of the bytes instead of out of the haystack"
+        )
+
+
+class TestCopilotAndVibeAreWatchedByTheRigFromNowOn:
+    """The two halves of this defect that no fixture row watched."""
+
+    @pytest.mark.parametrize("provider,capture", [
+        ("copilot", "success.jsonl"),
+        ("vibe", "success-json.json"),
+    ])
+    def test_a_manifest_exists_and_pins_the_success_row(self, provider, capture):
+        import yaml
+
+        path = C1_FIXTURES / provider / "manifest.yaml"
+        assert path.is_file(), (
+            f"{provider} ships captures with no manifest, which is how a green "
+            f"run classified `rate_limited` unnoticed"
+        )
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
+        success = manifest["rows"]["success"]
+        assert success["stdout"] == capture
+        assert success["expect"]["success"] is True
+        assert success["expect"]["classify_failure"] is None
+
+    @pytest.mark.parametrize("provider", ["copilot", "vibe"])
+    def test_neither_sits_in_the_manifest_pending_table_any_more(self, provider):
+        from tests.test_provider_fixture_rows import (
+            FIXTURES_PENDING,
+            MANIFEST_PENDING,
+        )
+
+        assert provider not in MANIFEST_PENDING
+        assert provider not in FIXTURES_PENDING
+
+
+class TestAiderStillComposesWithTheHook:
+    """`aider`'s narrowing override is the precedent, and it is unchanged."""
+
+    COST_MAP_NOISE = (
+        "Error: Unable to fetch model_prices_and_context_window.json: "
+        "Name or service not known\n"
+    )
+
+    def test_the_tolerated_line_is_still_dropped(self):
+        """A successful aider run on a host with no egress is not a failure."""
+        assert AiderProvider().classify_failure(
+            self.COST_MAP_NOISE + '["ok"]', "", 0
+        ) is None
+
+    def test_a_genuine_failure_still_survives_both_reductions(self):
+        assert AiderProvider().classify_failure(
+            self.COST_MAP_NOISE + "litellm.AuthenticationError: unauthorized (401)",
+            "", 1,
+        ) == STATUS_AUTH_FAILED
+
+    def test_the_override_still_delegates_the_rule_to_super(self):
+        """Two reductions, both removal-only, so the order does not matter.
+
+        The override narrows, ``super()`` then applies the hook. Read off the
+        file rather than through ``inspect``, for the reason
+        ``TestVendorTextContract._c1_base_source`` gives.
+        """
+        import ast
+        import sys
+
+        module = sys.modules[AiderProvider.__module__]
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        cls = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "AiderProvider"
+        )
+        method = next(
+            node for node in cls.body
+            if isinstance(node, ast.FunctionDef) and node.name == "classify_failure"
+        )
+        dumped = ast.dump(ast.Module(body=method.body, type_ignores=[]))
+        assert "'super'" in dumped and "'classify_failure'" in dumped
+
+
+class TestEchoedPlanTextNoLongerDecidesTheBatch:
+    """The integration half: `_classify_failed_run`, on a FAILED run.
+
+    This is the path the green-run measurements above are only a proxy for.
+    `_classify_failed_run` is consulted for a run with no usable result, and it
+    forwards exactly two of the classifier's answers — `auth_failed` (rung 1,
+    the whole batch fails) and `rate_limited` (rung 3, backoff). Those are
+    precisely the two an echoed plan sentence could manufacture.
+    """
+
+    AUTH_SENTENCE = "The plan says: the API returns 401 unauthorized on error."
+    RATE_SENTENCE = "The plan says: retries must cover rate-limit responses."
+
+    def _capture(self, sentence):
+        from utils.subagent_executor import _Capture
+
+        return _Capture(
+            stdout=_c1_goose_with_plan_sentence(sentence), stderr="", exit_code=0
+        )
+
+    @pytest.mark.parametrize("sentence_attr", ["AUTH_SENTENCE", "RATE_SENTENCE"])
+    def test_a_cut_stream_stays_transport_shaped(self, sentence_attr):
+        from utils.subagent_executor import _classify_failed_run
+
+        capture = self._capture(getattr(self, sentence_attr))
+        assert _classify_failed_run(GooseProvider(), capture) is None
+
+    @pytest.mark.parametrize("sentence_attr,was", [
+        ("AUTH_SENTENCE", STATUS_AUTH_FAILED),
+        ("RATE_SENTENCE", STATUS_RATE_LIMITED),
+    ])
+    def test_and_before_C1_it_did_not(self, sentence_attr, was, monkeypatch):
+        """The same bytes, the same call, on the pre-C1 haystack."""
+        from utils.subagent_executor import _classify_failed_run
+
+        capture = self._capture(getattr(self, sentence_attr))
+        _c1_without_the_hook(monkeypatch, "goose")
+        verdict = _classify_failed_run(GooseProvider(), capture)
+        assert verdict is not None and verdict[0] == was
+
+    def test_the_cut_stream_itself_is_unclassified_either_way(self):
+        """The control: goose's real `truncated` capture, no plan sentence."""
+        from utils.subagent_executor import _Capture, _classify_failed_run
+
+        capture = _Capture(
+            stdout=_c1_capture("goose", "truncated.stdout.txt"),
+            stderr="",
+            exit_code=0,
+        )
+        assert _classify_failed_run(GooseProvider(), capture) is None
+
+
+class TestTheNestedProbePromptIsCleanByConstruction:
+    """The preflight probe is safe because of what its prompt IS, not the hook.
+
+    `NESTED_PROBE_PROMPT`'s auth verdict raises `RunnerRejected` and refuses the
+    host outright, so an echo of it carrying a marker would be the worst
+    instance of this defect. It cannot: the prompt is one clean token.
+    """
+
+    def test_the_prompt_matches_no_table_of_any_adapter(self):
+        from utils.provider_registry import _PROVIDERS
+        from utils.subagent_executor import NESTED_PROBE_PROMPT
+
+        for name, adapter in sorted(_PROVIDERS.items()):
+            assert adapter.classify_failure(NESTED_PROBE_PROMPT, "", 0) is None, (
+                f"{name} reads the nested-exec probe prompt itself as a failure"
+            )
+
+    def test_an_adapter_echoing_it_verbatim_still_classifies_nothing(self):
+        """The echo, not just the prompt — which is what a runner returns."""
+        from utils.subagent_executor import NESTED_PROBE_PROMPT
+
+        echo = f"{NESTED_PROBE_PROMPT}\n{NESTED_PROBE_PROMPT}"
+        assert GooseProvider().classify_failure(echo, "", 0) is None
+
+    def test_it_stays_one_token_with_no_marker_vocabulary_in_it(self):
+        from utils.providers import base as base_module
+        from utils.subagent_executor import NESTED_PROBE_PROMPT
+
+        haystack = NESTED_PROBE_PROMPT.lower()
+        tables = (
+            base_module.CONTEXT_OVERFLOW_MARKERS,
+            base_module.TIMEOUT_MARKERS,
+            base_module.CONNECTION_ERROR_MARKERS,
+            base_module.SERVER_ERROR_MARKERS,
+            base_module.INVALID_MODEL_MARKERS,
+            base_module.SHARED_RATE_LIMIT_MARKERS,
+        )
+        for table in tables:
+            assert not base_module._matches_marker(table, haystack)
+        for _category, markers in base_module.LAUNCH_FAILURE_MARKERS:
+            assert not base_module._matches_marker(markers, haystack)
+
+
+class TestTheAuthProbeHaystackIsUntouched:
+    """`classify_auth_probe` is deliberately out of scope (base.py's second
+    `f"{stdout}\\n{stderr}"`).
+
+    An auth probe never carries our prompt, so narrowing its haystack fixes
+    nothing — and it is the one verdict allowed to refuse a run outright.
+    """
+
+    @pytest.mark.parametrize("provider,capture", [
+        ("goose", "auth-error.stdout.txt"),
+        ("copilot", "auth-error.jsonl"),
+    ])
+    def test_a_real_credential_notice_is_still_read_as_not_authenticated(
+        self, provider, capture
+    ):
+        stdout = _c1_capture(provider, capture)
+        assert _c1_adapter(provider).classify_auth_probe(stdout, "", 0) is False
+
+    def test_the_probe_reads_the_whole_capture_where_the_classifier_does_not(self):
+        """One set of bytes, two deliberately different answers.
+
+        The auth-shaped sentence is in the ECHOED user turn. `classify_failure`
+        no longer sees it; `classify_auth_probe` still does, and that is the
+        conservative direction — the probe's only pattern-drawn verdict is the
+        one that refuses.
+        """
+        stdout = _c1_goose_with_plan_sentence(
+            "The plan says: the API returns 401 unauthorized on error."
+        )
+        adapter = GooseProvider()
+        assert adapter.classify_failure(stdout, "", 0) is None
+        assert adapter.classify_auth_probe(stdout, "", 0) is False
+
+
+class TestFormatFailureDetailsIsNoLongerTheOneRawStdoutClassifier:
+    """Lane A's cosmetic `Reason:` line, routed through the hook (`:523`)."""
+
+    def _reason(self, **kwargs):
+        from utils.review_orchestrator_base import _format_failure_details
+
+        return _format_failure_details(
+            0, _c1_capture("goose", "prompt-echo.stdout.txt"), "", **kwargs
+        )
+
+    def test_with_the_adapter_it_no_longer_calls_a_green_run_timed_out(self):
+        assert "Reason: Timed out" not in self._reason(provider=GooseProvider())
+
+    def test_without_one_it_is_byte_for_byte_what_it_was(self):
+        """Kept, not made an error: §7.2 needs the adapter-free rule callable."""
+        assert "Reason: Timed out" in self._reason()
+
+    def test_the_existing_three_positional_callers_still_work(self):
+        from utils.review_orchestrator_base import _format_failure_details
+
+        assert "Reason: Rate limited" in _format_failure_details(
+            1, "", "HTTP status 429 returned"
+        )
+
+
+class TestClassifyLadderOrder:
+    """C2: invalid-model is consulted BEFORE server-error, and stays that way.
+
+    ``\\bapi error\\b`` is a member of ``SERVER_ERROR_MARKERS``, and several
+    vendors wrap a model-named 404 in exactly that phrase. While the server
+    table was asked first, a *terminal* config error landed on ``server_error``
+    — a **retryable** category — and burned the retry budget on a condition no
+    retry can fix. A model-named 404 is strictly more specific than "api
+    error", so the specific table is asked first.
+
+    These tests pin the ORDER, not one vendor's wording, because the defect was
+    an ordering fact rather than a missing pattern: no adapter gained a pattern
+    in C2.
+    """
+
+    def test_a_model_named_404_wrapped_in_api_error_is_invalid_model(self):
+        """The exact collision: both tables match, and the order decides."""
+        from utils.providers.base import classify_streams
+
+        haystack = (
+            "API error (status 404 Not Found): The model `stub-model` does not "
+            "exist or you do not have access to it."
+        )
+        assert classify_streams(haystack, "", 1) == "invalid_model"
+
+    def test_a_server_error_carrying_no_model_name_is_still_server_error(self):
+        """Reordering must not launder a genuine 5xx into a config error."""
+        from utils.providers.base import classify_streams
+
+        assert classify_streams("API error (status 503)", "", 1) == "server_error"
+        assert classify_streams("internal server error", "", 1) == "server_error"
+
+    def test_the_two_tables_are_consulted_in_the_declared_order(self):
+        """Source-order guard, so a later reshuffle is red rather than silent.
+
+        Asserted against the function's own body rather than against a sample,
+        because a sample only catches the collisions somebody thought of.
+        """
+        import inspect
+
+        from utils.providers import base
+
+        body = inspect.getsource(base.classify_streams)
+        invalid_at = body.index("INVALID_MODEL_MARKERS, haystack")
+        server_at = body.index("SERVER_ERROR_MARKERS, haystack")
+        assert invalid_at < server_at, (
+            "C2: INVALID_MODEL_MARKERS must be consulted before "
+            "SERVER_ERROR_MARKERS — a model-named 404 is more specific than "
+            "'api error', and classifying it as a retryable server_error burns "
+            "the retry budget on a terminal condition."
+        )
+
+    def test_the_ladder_docstring_still_documents_the_shipped_order(self):
+        """The docstring moved with the code in C2; keep them together."""
+        from utils.providers.base import classify_streams
+
+        doc = classify_streams.__doc__ or ""
+        assert "invalid model, then server" in doc

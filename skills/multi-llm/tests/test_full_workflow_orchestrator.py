@@ -618,6 +618,15 @@ class TestPhaseThreeClosesItsLoop:
 
         # The same prompt, answered by the same mock function, persisted by the
         # same leg: byte-identical, which is the whole D3a claim.
+        #
+        # A second plan is a second *process* in real life, and §9.3.b's run
+        # anchor is set-once per interpreter (pinned above by the `full` run's
+        # own pre-flights). Clear it the way tests/conftest.py clears it between
+        # tests, so this test keeps asserting the bytes rather than the anchor
+        # invariant — which tests/test_run_anchor_pinning.py owns.
+        import utils.provider_registry as _registry
+        _registry._RUN_ANCHOR = None
+
         native_plan = _plan(tmp_path, "native-plan")
         assert multi_llm.main(["generate-tasks", str(native_plan), "--yes"]) == 0
         capsys.readouterr()

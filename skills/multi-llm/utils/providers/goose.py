@@ -2,16 +2,32 @@
 import json
 import re
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    InternalRetryEnvelope,
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Thinking effort values accepted by goose's ThinkingEffort parser, aliases
 # included (verified on goose 1.41.0). goose has no CLI flag for this — the
 # value goes via the GOOSE_THINKING_EFFORT env var / config key; invalid
 # values are silently ignored by goose.
-REASONING_EFFORTS = frozenset({"off", "none", "low", "medium", "high", "max", "xhigh"})
+#
+# `off` is goose's own spelling of the `none` rung and it accepts BOTH, so it is
+# declared as a local spelling rather than as a rung: the ladder still emits
+# `none` for goose, and `off` is honoured because a user (or an older config)
+# may have typed it.
+EFFORT_LADDER = ReasoningLadder(
+    provider="goose",
+    rungs=("none", "low", "medium", "high", "xhigh", "max"),
+    spellings=(("off", "none"),),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 
 class GooseProvider(LLMProvider):
@@ -111,6 +127,49 @@ class GooseProvider(LLMProvider):
     #: two readings are the same marker, not two rules.
     exit_zero_failure_markers = (re.compile(r"ran into this error:"),)
 
+    # §7.6(b), declared 2026-08-20 (C12). Measured against the committed
+    # fail-forever captures in `tests/fixtures/goose/`, never inferred:
+    #
+    # * `max_requests = 8` — `GET /v1/models`, then SEVEN completions: FOUR
+    #   attempts at the real turn and THREE at the session-title completion
+    #   goose fires even under `--no-session`. Two independent rows measure the
+    #   same eight — `exit-zero-failure` (500-forever, `requests: 8`,
+    #   `wall_s: 6.67`, backoff ~0.1/1.1/2.8/6.6 s) and `rate-limit`
+    #   (429-forever, `requests: 8`, `wall_s: 7.22`) — and the set's own header
+    #   states it as the envelope for this CLI (`README.md:24-28`, `:54`;
+    #   `manifest.yaml`'s notes on both rows).
+    #
+    # * `max_wall_s = None`, and this is a JUDGEMENT recorded rather than a gap.
+    #   The ~6.7–7.2 s those rows measure is ROUND-TRIP TIME against a localhost
+    #   failserver — transport, not a ceiling goose imposes on itself — so it
+    #   says nothing about what the same eight requests cost against a real
+    #   provider, and a bound taken from it would be a bound on the stub. The
+    #   dataclass documents `None` as the honest posture for exactly this case:
+    #   rule 4 then performs no admission test, because inventing a bound "would
+    #   refuse attempts that had budget for themselves" (`base.py`'s
+    #   `max_wall_s`). `codex` declares a stub-measured 25.0 s and is not the
+    #   precedent here: codex's number is its own retry policy playing out, and
+    #   goose's is the wire.
+    #
+    # * `retries_rate_limit = True` — the `rate-limit` row is the 5xx row's
+    #   envelope: goose retries a 429 itself, four attempts at the real turn,
+    #   8 requests over 7.2 s. **The budget consequence runs the way that
+    #   surprises people**: declaring this REMOVES the harness's own rate-limit
+    #   backoff for goose (§7.5 rule 6(b), `STOP_VENDOR_ALREADY_RETRIED`). A
+    #   rate-limited goose slot used to get up to `MAX_RATE_LIMIT_BACKOFFS`
+    #   further identical dispatches — 8 requests turned into 32 — and now gets
+    #   none. It is a smaller retry budget, not a larger one.
+    #
+    # `configurable_by` is empty: `get_env` below sets only
+    # `GOOSE_THINKING_EFFORT`, which changes how the model thinks and not how
+    # many times the CLI retries, and `build_command` passes no retry knob.
+    internal_retries = InternalRetryEnvelope(
+        max_requests=8,
+        max_wall_s=None,
+        retries_rate_limit=True,
+        configurable_by=(),
+    )
+
     @property
     def name(self) -> str:
         return "goose"
@@ -168,6 +227,47 @@ class GooseProvider(LLMProvider):
         if effort is not None:
             return {"GOOSE_THINKING_EFFORT": effort}
         return {}
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The envelope minus the turns goose echoed back at us.
+
+        goose's ``{"messages": [...], "metadata": {...}}`` envelope opens with
+        the user prompt copied verbatim, so ``classify_failure`` was reading
+        ``prompts/plan_review.txt`` alongside goose's answer — and that prompt's
+        example block contains the word "timeout", which alone made a completely
+        successful run classify as a transport fault (the ``prompt-echo``
+        fixture row measured exactly that).
+
+        The rule is the narrowest one that fixes it: drop ``messages[]`` entries
+        whose ``role`` is ``"user"``, and nothing else. Everything goose's own
+        diagnosis needs survives, because it lives in the assistant message —
+        ``Ran into this error:``, ``Network error:``, the quoted
+        ``500 Internal Server Error`` status line, the ``401 Unauthorized``
+        gloss and the ``Available models for this provider`` list are all on
+        that side of the filter, and ``metadata`` is untouched.
+
+        Degrades to its input on anything unexpected: a non-JSON stdout (goose
+        prints one on no measured path, but a killed process leaves a partial
+        envelope), a non-list ``messages``, or an envelope with no user turn in
+        it at all. stderr is returned unchanged — goose writes 0 bytes there on
+        all eleven captures, and a reduction of a stream that carries no echo
+        could only lose a diagnosis.
+        """
+        try:
+            envelope = json.loads(stdout)
+            messages = envelope["messages"]
+            if not isinstance(messages, list):
+                return stdout, stderr
+            kept = [
+                message for message in messages
+                if not (isinstance(message, dict) and message.get("role") == "user")
+            ]
+            if len(kept) == len(messages):
+                return stdout, stderr
+            envelope["messages"] = kept
+            return json.dumps(envelope, indent=2, ensure_ascii=False), stderr
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return stdout, stderr
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse the single JSON envelope emitted by goose --output-format json.

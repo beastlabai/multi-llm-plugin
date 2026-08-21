@@ -51,6 +51,7 @@ from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
 from utils.cli_common import build_parent_parser  # noqa: E402
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
 from utils.provider_registry import get_provider, load_base_config  # noqa: E402
+from utils.providers.base import Availability  # noqa: E402
 
 # Template is resolved strictly relative to THIS file, never CWD / --project dir
 # (both diverge from the install location). If this moves, update the Section 4
@@ -153,14 +154,67 @@ def _report_gitignore(args: argparse.Namespace, target_dir: Path) -> None:
         )
 
 
-def _available_providers(providers_cfg: dict) -> "list[str]":
-    """Base-config provider names whose CLI is installed, in declaration order."""
-    available = []
+def _availability_rows(providers_cfg: dict) -> "list[tuple]":
+    """``(name, AvailabilityReport)`` per base-config provider (M10, §5.1).
+
+    The one walk both halves of this site read, so ``--init``'s selection and
+    ``--init``'s annotation cannot disagree about the same CLI.
+
+    No probe is run: ``--init`` is documented as making *no* subprocess calls,
+    so no ``auth`` or ``version`` evidence is handed to
+    :meth:`~utils.providers.base.LLMProvider.describe_availability` and every
+    installed row comes back ``unknown`` rather than ``ready``. That is the
+    fail-open posture, not a gap — claiming ``ready`` from a `shutil.which` is
+    exactly the "installed is not authenticated" conflation M10 exists to end.
+    """
+    rows = []
     for name in providers_cfg:  # dict preserves base-config declaration order
         provider = get_provider(name)
-        if provider is not None and provider.is_available():
-            available.append(name)
-    return available
+        if provider is not None:
+            rows.append((name, provider.describe_availability()))
+    return rows
+
+
+def _unusable_notices(detected: "list[str]") -> "list[str]":
+    """Why a **detected** runner still is not usable, one line each (M10, §5.1).
+
+    The status half of this site: a flat "Detected providers:" list means only
+    "the binary resolves", and D3c's whole point is that installed is not
+    authenticated. A row whose typed state is a *positive* negative verdict —
+    ``needs-auth`` or ``version-too-low`` — says so here rather than letting the
+    user discover it one dispatch at a time.
+
+    ``binary-missing`` is deliberately **not** in that set: a row in ``detected``
+    is by definition one whose binary resolved, so a ``binary-missing`` reading
+    here would mean the PATH moved mid-run, and re-reporting it would contradict
+    the list it annotates.
+
+    It is empty today by construction, because the verdicts it renders come only
+    from probes and ``--init`` runs none. It becomes live the moment a caller
+    hands this site evidence; until then it prints nothing, and ``--init``'s
+    output is byte-for-byte what it was.
+    """
+    lines = []
+    for name in detected:
+        provider = get_provider(name)
+        if provider is None:
+            continue
+        report = provider.describe_availability()
+        if report.state in (Availability.NEEDS_AUTH, Availability.VERSION_TOO_LOW):
+            lines.append(f"{name}: {report.detail}")
+    return lines
+
+
+def _available_providers(providers_cfg: dict) -> "list[str]":
+    """Base-config provider names whose CLI is installed, in declaration order.
+
+    The **bool** half of M10's §5.1 split, and it stays a bool: this selects
+    which providers ``--init`` uncomments. It is now derived from
+    :func:`_availability_rows` so the selection is literally
+    ``describe_availability().launchable`` — the same identity
+    ``is_available()`` answers, from one walk instead of two.
+    """
+    return [name for name, report in _availability_rows(providers_cfg) if report.launchable]
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +1017,10 @@ def _write_config(
         # default_provider is the first DETECTED in base order; detected_list is
         # already in base declaration order, so its head is that provider.
         print(f"  Detected providers: {', '.join(detected_list)}")
+        # M10 (§5.1) — the status half. "Detected" only ever meant "the binary
+        # resolves"; a row that is installed and still not usable now says why.
+        for line in _unusable_notices(detected_list):
+            print(f"  Not usable — {line}")
         print(f"  default_provider: {chosen}")
         print(f"  defaults.models: {len(expected_models)} model(s)")
         print(

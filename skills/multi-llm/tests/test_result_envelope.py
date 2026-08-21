@@ -172,18 +172,64 @@ class TestBothAdaptersDelegate:
         assert results["claude-code"] == expected
 
     def test_neither_adapter_keeps_its_own_copy(self):
-        """Both `parse_output` bodies are the shared call, not 34 lines each."""
+        """Both `parse_output` bodies are the shared call, not 34 lines each.
+
+        **Stated over the parsed body, not over the source text** (C5). The
+        earlier form asserted that the token ``json.loads`` appeared nowhere in
+        the function *as text*, docstring included — so a docstring explaining
+        what the shared parser does with the envelope failed a function whose
+        body is one delegating call. Reading a function's source by text also
+        means reading it through ``inspect.getsource``, which slices the file by
+        the loaded code object's line numbers: edit the module while a session
+        has it imported and the assertion reports on whatever block now sits at
+        those lines. The property is structural, so assert it structurally.
+
+        The property is unchanged and unweakened: each ``parse_output`` body is
+        exactly ``return parse_result_envelope(stdout)``, which is stricter than
+        "contains the call and no ``json.loads``" — a second copy of the unwrap
+        cannot hide in it in any spelling.
+
+        Scope is ``parse_output`` and nothing else, deliberately. C5 gave both
+        adapters a ``classify_failure`` override reading the same envelope's
+        ``api_error_status``, and ``claude_code.parse_usage`` has always read its
+        ``usage`` block. Those are different functions reading different fields
+        of the same bytes; neither is a second copy of the unwrap this test
+        exists to forbid.
+        """
+        import ast
         import inspect
 
         from utils.providers.claude_code import ClaudeCodeProvider
         from utils.providers.cursor_agent import CursorAgentProvider
 
         for cls in (CursorAgentProvider, ClaudeCodeProvider):
-            source = inspect.getsource(cls.parse_output)
-            assert "parse_result_envelope" in source, cls.__name__
-            assert "json.loads" not in source, (
-                f"{cls.__name__}.parse_output still carries its own envelope copy"
+            with open(inspect.getfile(cls), encoding="utf-8") as handle:
+                module = ast.parse(handle.read())
+            functions = [
+                node for node in ast.walk(module)
+                if isinstance(node, ast.FunctionDef) and node.name == "parse_output"
+            ]
+            assert len(functions) == 1, f"{cls.__name__}: expected one parse_output"
+
+            body = [
+                node for node in functions[0].body
+                if not (
+                    isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                )
+            ]
+            assert len(body) == 1 and isinstance(body[0], ast.Return), (
+                f"{cls.__name__}.parse_output is no longer a single delegating "
+                f"return — it has {len(body)} statements, which is where a "
+                f"second copy of the envelope unwrap would live"
             )
+            call = body[0].value
+            assert (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "parse_result_envelope"
+            ), f"{cls.__name__}.parse_output does not delegate to the shared parser"
 
 
 class TestLegacyChainSurvivesTheCleanup:

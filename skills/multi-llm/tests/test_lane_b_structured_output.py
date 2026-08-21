@@ -257,8 +257,9 @@ def lane(tmp_path, monkeypatch):
     with patch(
         "shutil.which", side_effect=lambda name, *a, **k: f"/usr/bin/{name}"
     ), patch(
-        "utils.providers.claude_code._read_help_tokens",
-        lambda binary, remove_env=(): frozenset({JSON_SCHEMA_FLAG}),
+        # M14: the gate has one implementation, so the sniff is pinned there.
+        "utils.providers.base.read_help_tokens",
+        lambda binary, **_kwargs: frozenset({JSON_SCHEMA_FLAG}),
     ):
         yield _Lane(tmp_path)
     reset_flag_gate_cache()

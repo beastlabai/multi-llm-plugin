@@ -5,7 +5,12 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import LLMProvider, StructuredSchema, split_reasoning_effort
+from .base import (
+    LLMProvider,
+    ReasoningLadder,
+    StructuredSchema,
+    split_reasoning_effort,
+)
 
 # Reasoning effort values accepted by `agy --effort` (read from `agy --help` on
 # agy 1.1.13, offline and unauthenticated):
@@ -21,7 +26,11 @@ from .base import LLMProvider, StructuredSchema, split_reasoning_effort
 # it stays part of the model name, where agy answers with an explicit ERROR
 # envelope naming the unknown model. A silent downgrade would be the worse of
 # the two failures, because agy's own effort request is invisible in its output.
-REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+EFFORT_LADDER = ReasoningLadder(
+    provider="agy",
+    rungs=("low", "medium", "high"),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
 
 #: Seconds by which agy's own print-mode cutoff is held UNDER the parent's
 #: `subprocess.run(timeout=…)` deadline (§9.6.c). The margin is the point and it
@@ -192,8 +201,7 @@ class AgyProvider(LLMProvider):
         #   --model "<Model Display Name>" -p "<prompt>"
         # --new-project binds the workspace to cwd (otherwise a previous
         # project's — possibly different — directory is silently reused);
-        # --dangerously-skip-permissions auto-approves tool use so headless
-        # file reads/writes work; --print-timeout raises the internal
+        # --print-timeout raises the internal
         # print-mode cutoff (agy's own default, 5m0s, is too low for
         # review-sized runs) and is DERIVED from the caller's already-resolved
         # timeout minus INNER_SHUTDOWN_MARGIN_S — see `print_timeout_value`.
@@ -207,6 +215,24 @@ class AgyProvider(LLMProvider):
         cmd = [
             "agy",
             "--new-project",
+            # A NAMED EXCEPTION, NOT A PRECEDENT (M15/§3.5). This is a
+            # `--yolo`-class write bypass on the `generate` profile, which
+            # AGENTS.md forbids: `build_command` is a read/analyze dispatch and
+            # every phase reaching it consumes a document, never a diff. §3.5
+            # allows exactly two dispositions and "it was already there" is
+            # neither. The first — replace it with agy's own read-only
+            # mechanism — needs a probe nobody has taken: `agy --help` was
+            # captured 2026-08-19 (tests/container/cli-surface.yaml) only for
+            # the flags we already emit, and nothing has measured what a
+            # headless `agy -p` does without this one. Removing it on the
+            # assumption that a read/analyze prompt needs no tool approval is a
+            # guess, and if it is wrong every agy slot becomes an unexplained
+            # timeout. So it takes the second disposition: a `null` row plus a
+            # named `bypass_exception:` in `providers.yaml`'s `read_only_modes:`
+            # table, which is what keeps `tests/test_read_only_modes.py` green
+            # here and red everywhere else. The exception cannot outlive the
+            # flag — that guard also fails if the declaration stays after the
+            # token goes.
             "--dangerously-skip-permissions",
             "--output-format",
             "json",

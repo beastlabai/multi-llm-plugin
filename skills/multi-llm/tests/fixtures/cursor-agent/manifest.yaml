@@ -85,19 +85,28 @@ rows:
       the backend chooses. So the flag is flipped and labelled instead of a
       failure being invented around it.
     notes: >-
-      THE FINDING THIS ROW PINS, and it is why the two assertions below look
-      contradictory: `parse_output` NEVER CONSULTS `is_error`. It is
-      `parse_result_envelope`, which branches only on the presence of a `result`
-      key, so an envelope flagged as an error whose `result` still holds a
-      parseable document comes back `success: True` with that document as the
-      answer. The only thing in the adapter that sees the flag is
-      `classify_failure` via `exit_zero_failure_markers` — hence
-      `success: true` AND `classify_failure: runner_error` on the same bytes.
-      That division of labour is real, load-bearing (§7.2 step 6 consults the
-      exit-0 markers last) and would be invisible without this row.
+      THE FINDING THIS ROW PINNED, and the fix it now grades. As captured, the
+      two assertions below looked contradictory: `parse_output` NEVER CONSULTED
+      `is_error`. It is `parse_result_envelope`, which branched only on the
+      presence of a `result` key, so an envelope flagged as an error whose
+      `result` still held a parseable document came back `success: True` with
+      that document as the answer — `["ok"]`, served as the review. C5 made that
+      function refuse on the flag, so `expect.success` is now **false** and the
+      `data` cell is gone: there is no answer to hand back. The error names the
+      field that refused it, which is the `error_contains` below.
+      **The division of labour survives the fix and is still what this row
+      pins.** `classify_failure` stays `runner_error`, reached the same way as
+      before — `exit_zero_failure_markers`' `"is_error"\s*:\s*true`, consulted
+      last (§7.2 step 6) on a CLI whose exit code carries no verdict at all. The
+      status rung C5 added to this adapter does NOT fire here: the nine-key
+      envelope has no `api_error_status` field (nor a `terminal_reason`), so
+      `classify_failure` delegates to `super()` on both committed rows, and the
+      map's coverage comes entirely from claude-code's. That delegation is the
+      thing this row now protects — a status rung that swallowed the text ladder
+      would take this CLI's only failure signal with it.
     expect:
-      success: true
-      data: ["ok"]
+      success: false
+      error_contains: ["is_error: true"]
       raw_contains: ['"is_error":true']
       classify_failure: "runner_error"
 

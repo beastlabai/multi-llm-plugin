@@ -103,7 +103,13 @@ FAILED = "failed"
 #: record themselves completed the moment the document is written — before a
 #: single edit exists — so a recorded completion here is a *claim about work
 #: handed out*, not about work done. ``apply-code-fixes``'s mode word is not its
-#: phase dir: the orchestrator's own ``phase_name`` is ``apply-fixes``.
+#: phase dir: the orchestrator's own ``phase_name`` is ``apply-fixes``. Its
+#: completion record is the exception to the sentence above — it is written by the
+#: invoker *after* the loop, by the ``apply-code-fixes --plan-file …
+#: --mark-completed`` command that closes ``instructions/apply-code-fixes.md``, so
+#: it IS a claim about work done: a loop that stopped early never reaches it. That
+#: record uses the **mode** word (``apply-code-fixes``), not the dir word, because
+#: it is what ``PHASE_PREREQUISITES`` and the executor's ``_finalize`` both use.
 WRITE_PHASE_DIRS: Dict[str, str] = {
     "apply-suggestions": "apply-suggestions",
     "apply-task-suggestions": "apply-task-suggestions",

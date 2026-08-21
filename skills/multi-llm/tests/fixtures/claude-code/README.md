@@ -43,13 +43,13 @@ the way they do:
 | --- | --- |
 | `success` | the single-line result envelope, unwrapped by `parse_result_envelope`'s fast path. The test asserts the unwrapped `data` **is** the suggestion-list document and that `classify_failure` is `None`. Also pins that the `haiku` alias is resolved to `claude-haiku-4-5-20251001` **before the request leaves** — the wire never carries the alias |
 | `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. The CLI emits one record and everything in it except `result` is bookkeeping the parser discards; the stub answered with an empty assistant message, so 1,164 bytes on disk are 1,164 bytes of filtered noise. `is_error: false`, `subtype: "success"`, **exit 0** — the only thing wrong is that the answer is empty |
-| `multi-assistant` | **first**-wins, and the first document is the decoy. Two JSON arrays in one `result`, the first reading `FIRST ANSWER (must NOT be selected)` — see defect 1 |
+| `multi-assistant` | **last**-wins, and the last document is the answer. Two JSON arrays in one `result`, the first reading `FIRST ANSWER (must NOT be selected)` and the second carrying S001/S002 — see defect 1 |
 | `truncated` | a **real** cut mid-record on the *anthropic* surface (SSE cut inside `content_block_start`), then claude-code's own **non-streamed retry**, cut again. 4 requests = 2 calls × (streamed + non-streamed); exit 1; gloss `Connection to the API was lost (ECONNRESET)` |
-| `error-envelope` | a provider error object on a **200**. claude-code does *not* serve it as the answer — it detects the shape and substitutes `API returned an empty or malformed response (HTTP 200) …`, so the provider's text is lost rather than mis-served. Note the self-contradicting envelope: `is_error: true` beside `subtype: "success"` |
+| `error-envelope` | a provider error object on a **200**. claude-code does *not* serve it as the answer — it detects the shape and substitutes `API returned an empty or malformed response (HTTP 200) …`, so the provider's text is lost rather than mis-served. Note the self-contradicting envelope: `is_error: true` and `terminal_reason: "api_error"` beside `subtype: "success"` — and the parser now refuses ON that verdict rather than by accident of the substituted sentence carrying no JSON — see defect 2 |
 | `stdout-error` | 5xx-forever: nonzero exit, diagnosis entirely on stdout, stderr 0 bytes — and the whole pinned retry envelope in one capture, 8 requests over 4.4 s |
-| `auth-error` | 401 → **retried 8 times**, and classified **`server_error`**, not `auth_failed`. The most consequential finding in this set — see defect 3 |
+| `auth-error` | 401 → **retried 8 times**, and classified `server_error` when captured. Now `auth_failed` by **two** independent routes, and the row grades both — see defect 3 |
 | `rate-limit` | 429-forever → claude-code **does** retry rate limits internally (7 requests / 4.4 s), so an executor-level re-dispatch of a rate-limited slot repeats a chain the CLI already ran (§7.5 rule 6b). The one failure row classified on the vendor's words rather than claude-code's prefix |
-| `invalid-model` | 404 **naming the model** — and naming the *resolved* id `claude-haiku-4-5-20251001`, not the `haiku` spec. Measured classification: **`None`** — see defect 4 |
+| `invalid-model` | 404 **naming the model** — and naming the *resolved* id `claude-haiku-4-5-20251001`, not the `haiku` spec. The text ladder answers **`None`** on these bytes at any ladder order; `invalid_model` now comes from the envelope's own `api_error_status` — see defect 4 |
 | `context-overflow` | 400 context-length, passed through **unedited**, so `maximum context length` reaches the classifier and the terminal category wins. **2 requests, not 8**: a 400 is not retried |
 | `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server that writes zero bytes still leaves 853 bytes of well-formed envelope. Distinct wording from `truncated` (`Connection dropped` vs `Connection to the API was lost`) and a different retry count (8 vs 4), which is why it is its own file |
 
@@ -71,48 +71,81 @@ Both carry their measurement in `manifest.yaml` rather than being absent (§6.3)
 
 Five measured defects, recorded here rather than silently fixed — the fixtures
 pin today's behaviour, so each fix is a visible edit to both the adapter and this
-manifest.
+manifest. **Four have since been fixed and the fifth narrowed**, and each entry
+below records what changed rather than being deleted: defect 1 in the shared
+extractor (last-wins), defects 2, 3 and 4 by reading the envelope's own
+machine-readable verdicts, and defect 5 reduced to the three rows where no HTTP
+status exists to read.
 
-1. **`multi-assistant` selects the FIRST document, and it is the decoy.**
-   `parse_result_envelope` falls through to
-   `extract_json_from_text(prefer_arrays=True)`, which returns the first array it
-   finds. Two answers in one `result` — a reasoning model that "shows its work"
-   as a draft array, or a retry appended after a correction — are resolved
-   first-wins. aider documents and implements **last**-wins (`rsplit` on its
-   ANSWER marker); claude-code has no rule at all. This is the muse trap in a
-   third CLI.
-2. **`parse_output` ignores `is_error`.** The envelope claude-code prints on a
-   failure carries `is_error: true`, `terminal_reason: "api_error"` and an
-   `api_error_status` — three unambiguous machine-readable verdicts — and the
-   parser reads none of them; it looks only at `result`. It is safe today only
-   because the substituted error sentences carry no JSON. One `wrapper.get(
-   "is_error")` check in `parse_result_envelope` would make the whole failure set
-   self-reporting instead of relying on "no JSON was extractable".
-3. **A 401 classifies as `server_error`.** claude-code's gloss is
-   *"Failed to authenticate. API Error: 401 …"*; none of `base.auth_error_patterns`'
-   ten entries matches it (`unauthorized` is absent from the text, `invalid api
-   key` is spelled *Incorrect API key provided*), while `\bapi error\b` in
-   `SERVER_ERROR_MARKERS` matches the `API Error:` prefix claude-code puts on
-   **every** failure. Since auth is consulted before the server table, adding
-   `"failed to authenticate"` (and/or `"incorrect api key"`) to the adapter's
-   `auth_error_patterns` fixes it — the same shape as aider's added pair. Until
-   then a logged-out claude-code slot is retried as a transient server fault.
-   The 401 is *also* retried 8 times by the CLI itself, so the wasted budget is
-   doubled.
-4. **`invalid-model` classifies as nothing.** claude-code replaces the vendor's
-   `The model \`X\` does not exist` with *"There's an issue with the selected
-   model (X). It may not exist or you may not have access to it."*, and no
-   `INVALID_MODEL_MARKERS` entry matches that wording — so a wrong model slug is
-   transport-shaped and burns the whole retry budget. The one-line fix is a
-   marker for the CLI's own phrasing, the way vibe's `conversation context
-   exceeds` was added.
-5. **`\bapi error\b` makes `server_error` the default verdict for this CLI.**
-   Every failure claude-code prints starts `API Error:`, and that string is a
-   `SERVER_ERROR_MARKERS` entry, so the server table absorbs the connection
-   failures (`truncated`, `zero-byte-response`) and the auth failure alike. Three
-   of the five rows that reach it are not server errors. Defects 3 and 4 are the
-   two that change the ladder's behaviour; this one is why the `Reason:` line a
-   user acts on is wrong on five rows out of eight.
+1. **`multi-assistant` selected the FIRST document, and it was the decoy —
+   FIXED.** `parse_result_envelope` falls through to
+   `extract_json_from_text(prefer_arrays=True)`, which returned the first array
+   it found. Two answers in one `result` — a reasoning model that "shows its
+   work" as a draft array, or a retry appended after a correction — resolved
+   first-wins. There was no per-adapter fix available here: `--output-format
+   json` prints one `result` string with both documents inside it, so there is
+   no message boundary to hang a rule on, which is why the rule had to be one
+   rule in the shared extractor. It now states, for every caller: **the last
+   document wins, at every level** — the last envelope record, then the last
+   top-level candidate inside that record's text, with shape preference
+   consulted before position and a contained candidate never outranking the one
+   that contains it. That generalises what aider already documented and
+   implemented at its own level (`rsplit` on its ANSWER marker), and closes the
+   muse trap in this CLI too. The fixture row moved with the fix: it now expects
+   the S001/S002 pair, and still carries the decoy in `raw_contains` so it tests
+   selection rather than parsing.
+2. **`parse_output` ignored `is_error` — FIXED.** The envelope claude-code
+   prints on a failure carries `is_error: true`, `terminal_reason: "api_error"`
+   and an `api_error_status` — three unambiguous machine-readable verdicts — and
+   the parser read none of them; it looked only at `result`. That was safe here
+   only because the substituted error sentences carry no JSON: an envelope
+   flagged as an error whose `result` still parsed would have been **served as
+   the answer**, which is exactly what cursor-agent's `exit-zero-failure` row
+   demonstrated on the sibling adapter. `parse_result_envelope` now refuses on
+   either of the first two fields, with the flag named and the CLI's own
+   sentence quoted as the error, and the value set is measured rather than
+   guessed: `terminal_reason: "completed"` on exactly the three `is_error:
+   false` rows here, `"api_error"` on all eight `is_error: true` rows. The two
+   never disagree at this version, so the `or` between them is belt-and-braces —
+   and `tests/test_result_envelope_verdicts.py` asserts the agreement directly,
+   which is what turns a future divergence into a red test rather than into
+   whichever field is read first. The third field is defects 3 and 4.
+3. **A 401 classified as `server_error` — FIXED, twice over.** claude-code's
+   gloss is *"Failed to authenticate. API Error: 401 …"*; none of
+   `base.auth_error_patterns`' ten entries matched it (`unauthorized` is absent
+   from the text, `invalid api key` is spelled *Incorrect API key provided*),
+   while `\bapi error\b` in `SERVER_ERROR_MARKERS` matches the `API Error:`
+   prefix claude-code puts on **every** failure — so a credential failure sat on
+   a retryable rung, and the CLI *also* retries the 401 eight times itself, so
+   the wasted budget was doubled. Two fixes now answer `auth_failed` on these
+   same bytes: `"failed to authenticate"` is a `ClaudeCodeProvider`
+   `auth_error_patterns` entry (the CLI's own gloss, not the upstream sentence,
+   so it survives a change of provider), and `classify_failure` reads
+   `"api_error_status":401` as a rung ahead of the text ladder. Both routes are
+   asserted to agree on every failure row in this set, which is what stops one
+   cell being moved twice by two independent fixes.
+4. **`invalid-model` classified as nothing — FIXED, and only the status could
+   fix it.** claude-code replaces the vendor's `The model \`X\` does not exist`
+   with *"There's an issue with the selected model (X). It may not exist or you
+   may not have access to it."*, and no `INVALID_MODEL_MARKERS` entry matches
+   that wording — so a wrong model slug was transport-shaped and burned the whole
+   retry budget. Reordering the ladder (invalid-model before server-error) did
+   not move this cell and could not have: there is nothing in the text to match.
+   `"api_error_status":404` is the same integer the HTTP response carried
+   whatever sentence the CLI substitutes for it, and it is the **only** row of
+   the eleven where the status rung is not a no-op.
+5. **`\bapi error\b` makes `server_error` the default verdict for this CLI —
+   NARROWED, not removed.** Every failure claude-code prints starts
+   `API Error:`, and that string is a `SERVER_ERROR_MARKERS` entry, so the
+   server table absorbed the connection failures (`truncated`,
+   `zero-byte-response`), the auth failure and the 404 alike. Defects 3 and 4
+   take the two consequential rows off it by reading a *field* instead of a
+   sentence. What remains is the two connection-shaped rows and
+   `error-envelope`, all three of which carry `"api_error_status":null` — no
+   HTTP response arrived, or a 200 did — so the status rung correctly stands
+   aside and the prefix is still what classifies them. Both the true category
+   (`connection_error`) and the measured one (`server_error`) are retryable, so
+   the cost is the `Reason:` line's wording rather than the ladder's behaviour.
 
 ## Reproducing
 

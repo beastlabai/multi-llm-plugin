@@ -1,10 +1,28 @@
 """Base protocol for LLM CLI providers."""
 
+import inspect
 import os
 import re
+import shutil
+import subprocess
+import sys
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Collection, Dict, List, Mapping, Optional, Pattern, Tuple
+from enum import Enum
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Pattern,
+    Set,
+    Tuple,
+)
 
 # The status vocabulary is the retry ladder's, never a second copy of it (§7.2).
 # The dependency runs one way only: this module may import the ladder, and the
@@ -162,6 +180,569 @@ def git_env(
     env[f"GIT_CONFIG_VALUE_{index}"] = ""
     return env
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M3 (donor §2.1) + M17 (donor §2.4) — the ONE shared child-env builder.
+#
+# These two ship as one change (atomic group **A6**): M17 without M3's sanitized
+# gate fails every API-key-only `claude-code` slot closed, and M3 without its
+# Lane B `env_guards.passthrough` half is a no-op that looks done. The reason
+# they cannot be split is structural and lives right here — Lane A applied only
+# the adapter's `get_remove_env`, while Lane B subtracted the host's
+# `env_guards` and re-admitted `passthrough`, so the two lanes *constructed*
+# the child env differently. A credential strip landing on that split strips on
+# one lane and inherits on the other; a deny-by-default allowlist landing on it
+# allows what the other denies, silently. :func:`build_child_env` is the single
+# construction both lanes go through, which is what makes "Lane A ≡ Lane B"
+# a property of the code rather than of two call sites kept in sync by hand.
+#
+# The composition order is load-bearing:
+#   1. the inherited environment, **filtered** by M17's allowlist when it is on;
+#   2. the adapter's own delta (`resolve_env`), applied last so it always wins —
+#      this is what keeps opencode's run-scoped hermetic `XDG_CONFIG_HOME` and
+#      every `MUSE_*`/`CURSOR_*` redirect intact under an allowlist that would
+#      not have *inherited* them;
+#   3. the removals: the adapter's `get_remove_env()` ∪ the host's guards, minus
+#      the host's `passthrough`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `providers.<name>.strip_vendor_keys` — the closed policy set (§2.1 rule 3).
+#: `auto` is the shipped default and means "consult the adapter's own gate";
+#: `always` skips the gate and strips; `never` disables the credential half.
+#: It is a **provider** key, not a `driver.*` key and not an env var: it changes
+#: what one provider's spawn inherits.
+STRIP_VENDOR_KEYS_AUTO = "auto"
+STRIP_VENDOR_KEYS_ALWAYS = "always"
+STRIP_VENDOR_KEYS_NEVER = "never"
+STRIP_VENDOR_KEYS_POLICIES: Tuple[str, ...] = (
+    STRIP_VENDOR_KEYS_AUTO,
+    STRIP_VENDOR_KEYS_ALWAYS,
+    STRIP_VENDOR_KEYS_NEVER,
+)
+
+#: The per-provider default for `strip_vendor_keys`, and the reason there is a
+#: table rather than one constant. claude-code has a **zero-network verdict**
+#: (`claude auth status`, §2.1 rule 1) so `auto` can mean something there.
+#: codex has none — `codex login status` false-negatives for a `CODEX_API_KEY`-
+#: only user and `codex doctor --json` is advisory (§5.3) — so `auto` behaves as
+#: `never` for it and for every other adapter: an adapter with no verdict strips
+#: nothing unless the user opts in per provider. Raising a row requires a
+#: measured zero-network probe for that CLI, never a guess.
+STRIP_VENDOR_KEYS_DEFAULTS: Dict[str, str] = {"claude-code": STRIP_VENDOR_KEYS_AUTO}
+STRIP_VENDOR_KEYS_FALLBACK = STRIP_VENDOR_KEYS_NEVER
+
+#: `providers.<name>.vendor_backend` — the *second*, independent gate (§2.1
+#: rule 4). `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/… are the configured auth path
+#: for users who really run against Bedrock, Vertex or Foundry, so they are
+#: gated on **declaration**, never on the credential probe: under `auto` such a
+#: variable is stripped iff it arrived by ambient inheritance (multi-llm never
+#: sets one itself, so an undeclared one can only have leaked in from the
+#: invoking shell). The two gates are independent — a `vendor_backend: keep`
+#: user still gets the credential row evaluated normally, and a
+#: `strip_vendor_keys: never` user still gets an undeclared backend removed.
+VENDOR_BACKEND_AUTO = "auto"
+VENDOR_BACKEND_KEEP = "keep"
+VENDOR_BACKEND_STRIP = "strip"
+VENDOR_BACKEND_POLICIES: Tuple[str, ...] = (
+    VENDOR_BACKEND_AUTO,
+    VENDOR_BACKEND_KEEP,
+    VENDOR_BACKEND_STRIP,
+)
+
+_ENV_POLICY_WARNED: set = set()
+
+
+def _warn_policy_once(key: str, message: str) -> None:
+    """One warning per distinct problem per process, on stderr.
+
+    These values are read on every dispatch, far from any parser, so raising out
+    of the middle of a fan-out over a typo would be worse than the typo — and
+    printing the same line once per slot would bury the run's real output.
+    """
+    if key in _ENV_POLICY_WARNED:
+        return
+    _ENV_POLICY_WARNED.add(key)
+    print(message, file=sys.stderr)
+
+
+def reset_env_policy_warnings() -> None:
+    """Forget the warn-once set (tests; never called on a run path)."""
+    _ENV_POLICY_WARNED.clear()
+
+
+def _merged_config(anchor: Optional[str] = None) -> Dict[str, Any]:
+    """multi-llm's merged config, or ``{}`` when it cannot be read.
+
+    A config problem may never turn into a refusal or a crash on a dispatch
+    path, so every failure resolves to "no configuration", i.e. the documented
+    defaults. Same posture as ``opencode._load_config``.
+    """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from ..provider_registry import load_config
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.provider_registry import load_config  # type: ignore[no-redef]
+    try:
+        config = load_config(anchor=anchor)
+    except Exception:  # noqa: BLE001 - a config read may not break a dispatch
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _provider_block(name: str, anchor: Optional[str] = None) -> Dict[str, Any]:
+    providers = _merged_config(anchor).get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    block = providers.get(name)
+    return block if isinstance(block, dict) else {}
+
+
+def _resolve_policy(
+    value: Any,
+    policies: Tuple[str, ...],
+    default: str,
+    key_name: str,
+) -> str:
+    if value is None:
+        return default
+    candidate = str(value).strip().lower()
+    if candidate in policies:
+        return candidate
+    _warn_policy_once(
+        f"{key_name}:{candidate}",
+        f"multi-llm config warning: ignoring {key_name}={value!r} (expected one "
+        f"of {', '.join(policies)}); using {default}",
+    )
+    return default
+
+
+def strip_vendor_keys_policy(
+    provider_name: str, anchor: Optional[str] = None
+) -> str:
+    """Resolve ``providers.<name>.strip_vendor_keys`` (§2.1 rule 3).
+
+    Read through the normal layering (base → auto-discovered
+    ``<git-root>/.multi-llm/providers.yaml`` → ``MULTI_LLM_PROVIDERS_CONFIG``),
+    so a repo can set it without editing the shipped file. The default comes
+    from :data:`STRIP_VENDOR_KEYS_DEFAULTS`, which is per provider because only
+    an adapter with a zero-network verdict can give ``auto`` a meaning.
+    """
+    default = STRIP_VENDOR_KEYS_DEFAULTS.get(provider_name, STRIP_VENDOR_KEYS_FALLBACK)
+    return _resolve_policy(
+        _provider_block(provider_name, anchor).get("strip_vendor_keys"),
+        STRIP_VENDOR_KEYS_POLICIES,
+        default,
+        f"providers.{provider_name}.strip_vendor_keys",
+    )
+
+
+def vendor_backend_policy(provider_name: str, anchor: Optional[str] = None) -> str:
+    """Resolve ``providers.<name>.vendor_backend`` (§2.1 rule 4)."""
+    return _resolve_policy(
+        _provider_block(provider_name, anchor).get("vendor_backend"),
+        VENDOR_BACKEND_POLICIES,
+        VENDOR_BACKEND_AUTO,
+        f"providers.{provider_name}.vendor_backend",
+    )
+
+
+def declared_env_names(
+    provider_name: str,
+    domain: Collection[str],
+    anchor: Optional[str] = None,
+) -> Tuple[str, ...]:
+    """The names this provider's own ``env:`` block declares, within ``domain``.
+
+    ``domain`` is the adapter's pinned list — it doubles as the **validation
+    domain** for the declaration, so the set a user may declare and the set the
+    strip reasons about cannot drift apart (§2.1's pinned-constants test (b)).
+    A declared name outside the domain warns once and is ignored rather than
+    silently widening what "declared" means.
+    """
+    block = _provider_block(provider_name, anchor).get("env")
+    if not isinstance(block, dict):
+        return ()
+    declared = []
+    for name in block:
+        key = str(name)
+        if key in domain:
+            declared.append(key)
+    return tuple(declared)
+
+
+# ── M17 (§2.4) — the deny-by-default allowlist, and the matrix that gates it ──
+
+#: `env_allowlist: off | on`, read from the **top level** of the merged config
+#: because it governs how every provider's child env is constructed, not one
+#: provider's spawn. **It ships `off`** and stays `off` until the Linux column
+#: of :func:`env_allowlist_matrix` is green over the registry *as it stands*
+#: (M0.a) — an allowlist whose matrix was derived from the donor's thirteen-name
+#: roster silently omits four adapters' credential, keyring, proxy and CA cells,
+#: and each omission is a mid-run auth or TLS failure of exactly the kind the
+#: allowlist exists to prevent. So an unrun cell degrades to today's inheritance
+#: rather than to a silent failure.
+ENV_ALLOWLIST_OFF = "off"
+ENV_ALLOWLIST_ON = "on"
+ENV_ALLOWLIST_POLICIES: Tuple[str, ...] = (ENV_ALLOWLIST_OFF, ENV_ALLOWLIST_ON)
+ENV_ALLOWLIST_DEFAULT = ENV_ALLOWLIST_OFF
+
+#: The matrix axes. Platforms and capabilities are literals because they are the
+#: axes themselves; the **CLI axis is never a literal** — it is the live
+#: registry, which is the whole of M0.a.
+ENV_ALLOWLIST_PLATFORMS: Tuple[str, ...] = ("linux", "macos", "windows")
+ENV_ALLOWLIST_CAPABILITIES: Tuple[str, ...] = (
+    "credential",
+    "keyring",
+    "proxy",
+    "ca_bundle",
+)
+
+#: A cell is **green** only when the CLI, launched under ``env -i`` plus the
+#: allowlist, reaches that capability at parity with a full-env control — not
+#: merely when it answers ``--version``. Anything else is ``unmeasured``.
+ENV_ALLOWLIST_GREEN = "green"
+ENV_ALLOWLIST_UNMEASURED = "unmeasured"
+
+#: The measurements taken so far, keyed ``(provider, platform, capability)``.
+#: **Empty on purpose.** Nothing in this pass ran a cell, so every cell reads
+#: ``unmeasured`` and the shipped default stays ``off``. A cell is added here
+#: only by a recorded parity run, never by inspection.
+ENV_ALLOWLIST_MEASURED: Dict[Tuple[str, str, str], str] = {}
+
+#: The two CA-bundle families, which is the correction M0.a makes to the donor's
+#: "all these CLIs are Node". ``NODE_EXTRA_CA_CERTS`` covers the npm installs —
+#: **ten of seventeen** once `copilot`, `kimi` and `qwen-code` are counted — and
+#: is useless for the Go/Python/Rust/native seven (`vibe` is a PyPI install),
+#: which need the OpenSSL/requests/curl names instead. A corporate-CA user is
+#: broken by the donor's list as drafted, which is why the family is declared
+#: per adapter and cross-checked against the registry.
+CA_FAMILY_NODE = "node"
+CA_FAMILY_NATIVE = "native"
+CA_BUNDLE_ENV: Dict[str, Tuple[str, ...]] = {
+    CA_FAMILY_NODE: ("NODE_EXTRA_CA_CERTS",),
+    CA_FAMILY_NATIVE: (
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class RunnerEnvProfile:
+    """One adapter's contribution to the allowlist (§2.4's per-CLI axis).
+
+    ``ca_family`` decides which CA-bundle variable is *load-bearing* for that
+    adapter's ``ca_bundle`` cell; both families are admitted for every adapter
+    regardless, because a variable a CLI ignores is inert and a wrong guess here
+    would be a TLS failure rather than a tidy one.
+
+    ``prefixes`` is the CLI's own prefix family (donor: "plus each harness's own
+    prefix family") and ``names`` the exact home/config variables the
+    measurement note enumerates.
+    """
+
+    ca_family: str
+    prefixes: Tuple[str, ...] = ()
+    names: Tuple[str, ...] = ()
+
+
+#: One row per **registered** adapter. This is declared data rather than derived
+#: because the values are measurements, but its completeness is not a matter of
+#: opinion: `tests/test_env_allowlist.py` parametrizes over the live registry and
+#: reds when a newly registered adapter has no row — which is the failure M0.a
+#: names as security-relevant rather than tidy.
+ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
+    "agy": RunnerEnvProfile(
+        CA_FAMILY_NATIVE, ("ANTIGRAVITY_",), ("ANTIGRAVITY_EXECUTABLE_DATA_DIR",)
+    ),
+    "aider": RunnerEnvProfile(CA_FAMILY_NATIVE, ("AIDER_",), ("BROWSER", "COLUMNS")),
+    "claude-code": RunnerEnvProfile(CA_FAMILY_NODE, (), ("CLAUDE_CONFIG_DIR",)),
+    "cline": RunnerEnvProfile(CA_FAMILY_NODE, ("CLINE_",), ("CLINE_DIR", "CLINE_DATA_DIR")),
+    "codex": RunnerEnvProfile(CA_FAMILY_NATIVE, ("CODEX_",), ("CODEX_HOME",)),
+    "copilot": RunnerEnvProfile(CA_FAMILY_NODE, ("COPILOT_",), ("COPILOT_HOME",)),
+    "cursor-agent": RunnerEnvProfile(
+        CA_FAMILY_NODE,
+        ("CURSOR_",),
+        ("AGENT_CLI_CREDENTIAL_STORE", "NODE_COMPILE_CACHE"),
+    ),
+    "gemini": RunnerEnvProfile(
+        CA_FAMILY_NODE, ("GEMINI_",), ("GEMINI_DIR", "GEMINI_CLI_HOME")
+    ),
+    # goose is XDG-only for config; its keyring cell is the `org.freedesktop.
+    # secrets` pair in the shared base list, which is why that pair is not
+    # optional there.
+    "goose": RunnerEnvProfile(CA_FAMILY_NATIVE, ("GOOSE_",), ()),
+    "grok": RunnerEnvProfile(CA_FAMILY_NATIVE, ("GROK_",), ("GROK_HOME",)),
+    "kilocode": RunnerEnvProfile(CA_FAMILY_NODE, ("KILO_",), ("KILO_CONFIG_DIR",)),
+    "kimi": RunnerEnvProfile(CA_FAMILY_NODE, ("KIMI_",), ("KIMI_CODE_HOME",)),
+    # muse is XDG-only too, but its launcher reads a MUSE_* family and
+    # self-updates at launch unless MUSE_NO_AUTO_UPDATE is set.
+    "muse": RunnerEnvProfile(CA_FAMILY_NATIVE, ("MUSE_",), ()),
+    "opencode": RunnerEnvProfile(
+        CA_FAMILY_NODE,
+        ("OPENCODE_",),
+        ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"),
+    ),
+    "pi": RunnerEnvProfile(CA_FAMILY_NODE, ("PI_",), ("PI_CODING_AGENT_DIR",)),
+    "qwen-code": RunnerEnvProfile(CA_FAMILY_NODE, ("QWEN_",), ("QWEN_HOME",)),
+    "vibe": RunnerEnvProfile(CA_FAMILY_NATIVE, ("VIBE_",), ("VIBE_HOME",)),
+}
+
+#: Exact names every adapter gets. The corrections the donor's own measurement
+#: forced are all here: ``SSH_AUTH_SOCK`` (every CLI shells out to git),
+#: ``DBUS_SESSION_BUS_ADDRESS`` + ``XDG_RUNTIME_DIR`` (without them goose cannot
+#: reach ``org.freedesktop.secrets``), lower-case proxies (matched
+#: case-insensitively, see :func:`env_allowlist_admits`), ``XDG_CACHE_HOME``,
+#: ``NODE_OPTIONS``, and the Windows set the last column will need.
+ENV_ALLOWLIST_BASE_NAMES: Tuple[str, ...] = (
+    "HOME", "PATH", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL", "PWD", "TZ",
+    "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS",
+    "NODE_OPTIONS",
+    "COLUMNS", "LINES", "NO_COLOR", "FORCE_COLOR",
+    # Windows — unmeasured on this pass; `windows-macos-portability.md` owns
+    # that column's runners, and an absent name there is a CLI that cannot
+    # start at all rather than one that mis-authenticates.
+    "SYSTEMROOT", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
+    "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH", "TEMP", "TMP",
+    "PROGRAMDATA", "PROGRAMFILES", "WINDIR", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+#: Prefix families every adapter gets. ``HTTP_``/``HTTPS_``/``ALL_PROXY``/
+#: ``NO_PROXY``/``FTP_PROXY`` cover the proxy capability in both cases (the
+#: comparison is case-insensitive), ``SSL_`` the OpenSSL CA names, ``XDG_`` the
+#: whole XDG set including ``XDG_RUNTIME_DIR`` and ``XDG_CACHE_HOME``,
+#: ``GIT_CONFIG_`` the numbered keys §2.2 injects, and ``MULTI_LLM_`` our own
+#: namespace, which a nested invocation reads.
+ENV_ALLOWLIST_BASE_PREFIXES: Tuple[str, ...] = (
+    "HTTP_", "HTTPS_", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "SSL_", "XDG_", "LANG", "LC_", "NPM_CONFIG_", "GIT_CONFIG_", "MULTI_LLM_",
+)
+
+
+def env_allowlist_policy(anchor: Optional[str] = None) -> str:
+    """Resolve the top-level ``env_allowlist`` key (default ``off``)."""
+    value = _merged_config(anchor).get("env_allowlist")
+    if isinstance(value, bool):
+        # YAML 1.1 resolves a bare `on`/`off` to a boolean, and a user who wrote
+        # the documented word should get the documented behaviour.
+        return ENV_ALLOWLIST_ON if value else ENV_ALLOWLIST_OFF
+    return _resolve_policy(
+        value, ENV_ALLOWLIST_POLICIES, ENV_ALLOWLIST_DEFAULT, "env_allowlist"
+    )
+
+
+def env_allowlist_enabled(anchor: Optional[str] = None) -> bool:
+    """Whether the deny-by-default filter runs for this process."""
+    return env_allowlist_policy(anchor) == ENV_ALLOWLIST_ON
+
+
+def env_allowlist_for(provider_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """``(exact names, prefixes)`` this adapter's children may inherit.
+
+    An adapter with no declared profile falls back to the shared base plus both
+    CA families — the fail-*open* direction, because a brand-new adapter that
+    inherits one variable too many is a smaller failure than one that cannot
+    reach its own credential store. The registry-parametrized completeness test
+    is what stops that fallback from becoming the normal case.
+    """
+    profile = ENV_ALLOWLIST_PROFILES.get(provider_name)
+    names: List[str] = list(ENV_ALLOWLIST_BASE_NAMES)
+    for family in CA_BUNDLE_ENV.values():
+        names.extend(family)
+    prefixes: List[str] = list(ENV_ALLOWLIST_BASE_PREFIXES)
+    if profile is not None:
+        names.extend(profile.names)
+        prefixes.extend(profile.prefixes)
+    return tuple(dict.fromkeys(names)), tuple(dict.fromkeys(prefixes))
+
+
+def env_allowlist_admits(provider_name: str, key: str) -> bool:
+    """Whether ``key`` survives the allowlist for this adapter.
+
+    Comparison is **case-insensitive**, which is what makes lower-case
+    ``http_proxy``/``https_proxy`` (aider/libcurl) and Windows' case-insensitive
+    names one rule rather than three lists.
+    """
+    names, prefixes = env_allowlist_for(provider_name)
+    upper = key.upper()
+    if upper in {n.upper() for n in names}:
+        return True
+    return any(upper.startswith(prefix.upper()) for prefix in prefixes)
+
+
+def apply_env_allowlist(
+    env: Mapping[str, str], provider_name: str
+) -> Dict[str, str]:
+    """The inherited environment, reduced to what this adapter may see."""
+    return {key: value for key, value in env.items() if env_allowlist_admits(provider_name, key)}
+
+
+def env_allowlist_matrix(
+    provider_names: Optional[Collection[str]] = None,
+) -> Dict[Tuple[str, str, str], str]:
+    """The per-CLI × per-platform × per-capability matrix (§2.4 condition 2).
+
+    The CLI axis defaults to the **live registry**, never to a name list: the
+    specifications this came from were written against thirteen adapters and the
+    registry holds more, so a matrix derived from a literal roster silently omits
+    the newcomers' credential, keyring, proxy and CA cells. Its size is therefore
+    ``len(registry) × len(platforms) × len(capabilities)``, computed, not typed.
+    """
+    if provider_names is None:
+        try:  # pragma: no cover - import shim mirrors the rest of utils/
+            from ..provider_registry import _PROVIDERS
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.provider_registry import _PROVIDERS  # type: ignore[no-redef]
+        provider_names = sorted(_PROVIDERS)
+    return {
+        (name, platform, capability): ENV_ALLOWLIST_MEASURED.get(
+            (name, platform, capability), ENV_ALLOWLIST_UNMEASURED
+        )
+        for name in sorted(provider_names)
+        for platform in ENV_ALLOWLIST_PLATFORMS
+        for capability in ENV_ALLOWLIST_CAPABILITIES
+    }
+
+
+def env_allowlist_column(
+    platform: str, provider_names: Optional[Collection[str]] = None
+) -> Dict[Tuple[str, str, str], str]:
+    """One platform's column of :func:`env_allowlist_matrix`."""
+    return {
+        cell: status
+        for cell, status in env_allowlist_matrix(provider_names).items()
+        if cell[1] == platform
+    }
+
+
+def env_allowlist_column_is_green(
+    platform: str, provider_names: Optional[Collection[str]] = None
+) -> bool:
+    """Whether every cell in a platform's column is measured green.
+
+    This is the **ship gate**: until it answers ``True`` for a platform, the
+    shipped default on that platform stays ``off``.
+    """
+    column = env_allowlist_column(platform, provider_names)
+    return bool(column) and all(
+        status == ENV_ALLOWLIST_GREEN for status in column.values()
+    )
+
+
+# ── the builder both lanes go through ────────────────────────────────────────
+
+
+def _provider_removals(
+    provider: Any,
+    *,
+    anchor: Optional[str] = None,
+    base_env: Optional[Mapping[str, str]] = None,
+) -> Tuple[str, ...]:
+    """The adapter's removal list, asked with the dispatch's own context.
+
+    :meth:`LLMProvider.get_remove_env` is a **policy** call for at least one
+    adapter — claude-code resolves ``strip_vendor_keys`` / ``vendor_backend``
+    through the normal config layering and decides against the environment the
+    child will really inherit. Both of those are dispatch-scoped, so both have to
+    reach it: an ``anchor``-less call resolves the policy against the *process
+    anchor or the CWD* rather than the requested plan (the divergence A6 exists
+    to close, one level down from the lanes), and a ``base_env``-less call
+    reasons about ``os.environ`` while the builder composes something else.
+
+    The call is signature-tolerant on purpose. An adapter whose removal list is
+    static — most of them — declares ``get_remove_env(self)`` and takes no
+    context, and this must keep working: the hook is duck-typed here
+    (``provider: Any``), and refusing a zero-parameter override would turn a
+    perfectly correct static list into a ``TypeError`` mid-dispatch. Each
+    keyword is passed only to a hook that accepts it (or one taking ``**kwargs``).
+    """
+    hook = getattr(provider, "get_remove_env", None)
+    if hook is None:
+        return ()
+    try:
+        parameters = inspect.signature(hook).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+        parameters = {}  # type: ignore[assignment]
+    accepts_any = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs: Dict[str, Any] = {}
+    if accepts_any or "anchor" in parameters:
+        kwargs["anchor"] = anchor
+    if accepts_any or "base_env" in parameters:
+        kwargs["base_env"] = base_env
+    return tuple(hook(**kwargs) or ())
+
+
+def build_child_env(
+    provider: Any,
+    *,
+    provider_env: Mapping[str, str],
+    host_guards: Collection[str] = (),
+    host_passthrough: Collection[str] = (),
+    base_env: Optional[Mapping[str, str]] = None,
+    anchor: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """The child environment for one spawn — the single construction (A6).
+
+    Both spawn sites call exactly this: ``llm_client.call_llm`` for the Lane A
+    fan-out (which passes no host guards, because a fan-out slot is a child of
+    this process and not of the host's shell tool) and
+    ``subagent_executor._spawn_in_context`` for the agent-profile lane (which
+    passes the running host's ``env_guards``). A slot must never strip on one
+    lane and inherit on the other, and after this function exists there is no
+    ordering in which it can: the credential verdict, the removals and the
+    allowlist are all computed here, once, from the adapter and the host entry.
+
+    ``provider_env`` arrives already expanded (``expand_env_home``) from the
+    spawn site — §2.5's rule that ``~`` is expanded before it reaches a child
+    belongs to the two spawn sites, and ``tests/test_env_home_expansion.py``
+    pins it there structurally.
+
+    Returns ``None`` when nothing about the inherited environment changes, which
+    is what lets ``subprocess`` inherit it directly — byte-identical to the
+    behaviour before this function existed.
+    """
+    source = os.environ if base_env is None else base_env
+    passthrough = set(host_passthrough)
+    # The union, not the adapter's list alone (D3c): the adapter guards against
+    # its own nesting marker, the host entry declares what *this* host injects
+    # into every child. A name the host sanctions for the runner (`passthrough`)
+    # is re-admitted last — but a host that sanctions a **vendor credential**
+    # cancels the §2.1 strip on the agent-profile lane only, which is the
+    # asymmetry A6 exists to close; see `hosts/capabilities.yaml`.
+    #
+    # The adapter is asked with **this dispatch's** anchor and the **composed**
+    # source env, not with the process defaults: the strip is a policy read
+    # (`strip_vendor_keys`, `vendor_backend`) over a set of names whose presence
+    # is judged against what the child will really inherit, and both halves are
+    # dispatch-scoped. See :func:`_provider_removals`.
+    removals = [
+        name
+        for name in dict.fromkeys(
+            [
+                *_provider_removals(provider, anchor=anchor, base_env=source),
+                *host_guards,
+            ]
+        )
+        if name not in passthrough
+    ]
+    allowlist = env_allowlist_enabled(anchor)
+    if not provider_env and not removals and not allowlist:
+        return None
+    if allowlist:
+        env = apply_env_allowlist(source, getattr(provider, "name", ""))
+    else:
+        env = dict(source)
+    env.update(provider_env)
+    for key in removals:
+        env.pop(key, None)
+    return env
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §4.2.1 — the structured-output retry budget, pinned in the child env.
 #
@@ -311,6 +892,204 @@ class ProfileUnsupported(Exception):
         self.profile = profile
 
 
+# ---------------------------------------------------------------------------
+# M13 (§5.3) — per-adapter install / login / status metadata
+# ---------------------------------------------------------------------------
+#
+# §5.3's rule is "probe by running the CLI's own *status subcommand*, never by
+# reading a credential file", and this metadata is what lets a message say how
+# to fix what such a probe found. Two of §5.3's four rows already shipped under
+# their executor-facing names — `auth_check` **is** the status argv (D3c) and
+# `login_cmd` **is** the login command, both already read by
+# `subagent_executor._detect_auth` and by `describe_availability` — so this adds
+# only the two that were missing (`install_hint`, `auth_hint`) and exposes all
+# four through one record. Declaring `status_args`/`login_args` as second
+# storage would give one fact two owners and let a probe drift from the refusal
+# that names its fix.
+#
+# **No auto-install.** `install_hint` is a sentence a human reads; nothing in
+# this repo executes it, and nothing may. Running a vendor installer because a
+# probe came back `BINARY_MISSING` is the trust boundary §5.3 refuses to cross —
+# it is the same boundary M16 was declined on.
+
+
+@dataclass(frozen=True)
+class SetupHints:
+    """§5.3's four rows for one adapter: how to install, log in, and check.
+
+    A *derived* view, never a second declaration: :attr:`status_args` and
+    :attr:`login_args` are built from the adapter's own ``auth_check`` and
+    ``login_cmd``, so this record cannot disagree with the argv the preflight
+    really runs or with the fix a refusal really prints.
+
+    Every field is safe to render into ``--init`` output, a log or a failure
+    artifact: all four are adapter *declarations*, and no probe stdout, stderr
+    or environment value reaches any of them.
+    """
+
+    #: How a human installs this CLI, verbatim. **Never executed.**
+    install_hint: str = ""
+    #: ``login_cmd`` as argv. Empty when the adapter declares no login command.
+    login_args: Tuple[str, ...] = ()
+    #: ``auth_check`` — the CLI's own status subcommand. Empty means this CLI
+    #: offers none, and the auth state is then ``UNKNOWN``, never assumed good.
+    status_args: Tuple[str, ...] = ()
+    #: One sentence naming what this CLI's credential actually *is*, for the
+    #: cases where "run the login command" is not the whole story.
+    auth_hint: str = ""
+
+
+# ---------------------------------------------------------------------------
+# M10 (§5.1) — a typed availability status *beside* the bool
+# ---------------------------------------------------------------------------
+#
+# `is_available()` is a bare `shutil.which` in all seventeen adapters, which
+# collapses "not installed" / "logged out" / "too old" into one message. The
+# fix is **additive**: a status type on a new method, with `is_available()`
+# left alone. The donor's widened-return-type proposal (a bool-or-string union
+# on the existing name) is rejected in §5.1 and is not what ships — every one
+# of those strings is truthy, so `if provider.is_available():` would have
+# silently started admitting a logged-out CLI.
+
+
+class Availability(str, Enum):
+    """Why a runner is or is not usable. For humans and pickers, never for dispatch.
+
+    A ``str`` mixin rather than :class:`enum.StrEnum` because this package
+    declares ``requires-python = ">=3.10"`` and ``StrEnum`` is 3.11+. The
+    members compare equal to their wire strings either way, and ``__str__`` is
+    pinned below so an interpolated member renders ``needs-auth`` rather than
+    ``Availability.NEEDS_AUTH`` on every supported version.
+
+    **Only :attr:`BINARY_MISSING` refuses a launch.** ``NEEDS_AUTH``,
+    ``VERSION_TOO_LOW`` and ``UNKNOWN`` all still dispatch, because an auth or
+    version problem must surface at run time carrying the CLI's own message
+    rather than vanishing into a preflight refusal (D3c: *installed is not
+    authenticated*). That is the whole compatibility rule, and it is one
+    assertable line — see :meth:`LLMProvider.describe_availability`.
+    """
+
+    #: The binary resolves **and** a probe positively said it is usable.
+    READY = "ready"
+    #: The binary does not resolve. The only state that refuses a launch.
+    BINARY_MISSING = "binary-missing"
+    #: A probe positively recognised a login notice — the only positive auth
+    #: verdict, and the only one drawn from a pattern match.
+    NEEDS_AUTH = "needs-auth"
+    #: A *read* version is below ``min_version``. A label, not a second launch
+    #: gate: the refusal that uses this word is issued by the preflight's own
+    #: version check, and it does not flow back into ``is_available()``.
+    VERSION_TOO_LOW = "version-too-low"
+    #: Inconclusive: no probe declared, no probe run, a timeout, or an
+    #: unrecognised non-zero exit. The **fail-open** state, and mandatory
+    #: rather than decorative — absence of evidence is never a negative
+    #: verdict, and never a positive one either.
+    UNKNOWN = "unknown"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.value
+
+
+#: The retry-ladder statuses that carry an availability verdict. §5.1's rule is
+#: that the two tri-states **map, they do not merge**: exactly one run status
+#: says something about whether the CLI is usable at all, and it is the one
+#: drawn from a positive login-notice match. Everything else a run can fail
+#: with (a timeout, a 429, a parse failure) says nothing, and mapping it would
+#: manufacture a verdict the CLI never gave.
+AVAILABILITY_BY_STATUS: Dict[str, Availability] = {
+    STATUS_AUTH_FAILED: Availability.NEEDS_AUTH,
+}
+
+#: The states worth naming in a failure message. ``READY`` adds nothing to a run
+#: that just failed, and ``UNKNOWN`` is the state almost every un-probed adapter
+#: is in, so printing either would be noise on every single failure.
+NAMED_UNAVAILABILITY = (
+    Availability.BINARY_MISSING,
+    Availability.NEEDS_AUTH,
+    Availability.VERSION_TOO_LOW,
+)
+
+
+def availability_from_failure(
+    provider: "LLMProvider", stdout: str, stderr: str, exit_code: int = 0
+) -> Optional[Availability]:
+    """The availability verdict a **failed run's own streams** carry, or ``None``.
+
+    §5.1's status-consumer leg, shared by the two ``describe_failure`` call
+    sites (``llm_client`` and ``subagent_executor``) so they cannot render the
+    same failure differently. It spawns nothing and probes nothing: the streams
+    are already in the caller's hand, and :meth:`LLMProvider.classify_failure`
+    is the one implementation of "what is this failure".
+
+    ``None`` means *say nothing*, which is the answer for almost every failure.
+    Only a state in :data:`NAMED_UNAVAILABILITY` comes back — a run that failed
+    is not the moment to announce ``ready``, and ``unknown`` is the state every
+    un-probed adapter sits in, so either would append noise to every message.
+    """
+    try:
+        status = provider.classify_failure(stdout, stderr, exit_code)
+    except Exception:  # noqa: BLE001 - a diagnostic may never break a failure path
+        return None
+    state = AVAILABILITY_BY_STATUS.get(status or "")
+    return state if state in NAMED_UNAVAILABILITY else None
+
+
+def _version_token(text: str) -> str:
+    """The first dotted-numeric token in ``text``, or ``""``.
+
+    Two jobs, and the second one is the load-bearing one. It normalizes a
+    version read that carries trailing build noise (``2026.08.11-e8db854``,
+    ``codex-cli 0.146.0``) so the comparison sees the number; and it is the
+    **only** thing from this parameter that reaches an
+    :class:`AvailabilityReport`'s ``detail``. ``describe_availability`` is a
+    public method, so a caller can hand it any string — echoing that string back
+    into a sentence bound for ``--init`` output, a log and a failure artifact
+    would be a redaction hole opened by a diagnostic. A dotted numeric token
+    cannot be a credential.
+    """
+    match = re.search(r"\b(\d+(?:\.\d+)*)\b", text or "")
+    return match.group(1) if match else ""
+
+
+def _version_below(version: str, minimum: str) -> bool:
+    """``version < minimum``, through the one shared comparison.
+
+    **M14 (§5.4) merged the twin away.** This used to carry its own copy of
+    ``subagent_executor._version_tuple``'s component-wise parse, with a comment
+    saying M14 owned the merge; it now calls :func:`version_tuple`, which is the
+    single rule both the availability label here and the executor's preflight
+    refusal are computed from. One rule, one owner — a build can no longer be
+    "too old" for the refusal and fine for the report, and
+    ``tests/test_version_gate.py`` pins the two against each other.
+    """
+    return version_tuple(version) < version_tuple(minimum)
+
+
+@dataclass(frozen=True)
+class AvailabilityReport:
+    """One runner's availability verdict, plus the sentence a human reads.
+
+    :attr:`detail` is composed **only from data the adapter declares** — its
+    name, its ``auth_check`` argv, its ``login_cmd``, its ``min_version``, and
+    the already-parsed version token. No probe stdout or stderr reaches it, by
+    construction, which is what keeps it safe to put in ``--init`` output, a log
+    or a failure artifact without a second redaction pass (§4.5.1).
+    """
+
+    state: Availability
+    detail: str = ""
+
+    @property
+    def launchable(self) -> bool:
+        """The launch gate, in one place.
+
+        Everything but :attr:`Availability.BINARY_MISSING` dispatches. This is
+        the right-hand side of the compatibility identity
+        ``is_available() == describe_availability().launchable``.
+        """
+        return self.state is not Availability.BINARY_MISSING
+
+
 def split_reasoning_effort(model: str, efforts: Collection[str]) -> Tuple[str, Optional[str]]:
     """Split an optional trailing ``:effort`` suffix off a model string.
 
@@ -324,6 +1103,251 @@ def split_reasoning_effort(model: str, efforts: Collection[str]) -> Tuple[str, O
     if base and suffix in efforts:
         return base, suffix
     return model, None
+
+
+# ---------------------------------------------------------------------------
+# M12 (§6.1) — the canonical reasoning-effort ladder
+# ---------------------------------------------------------------------------
+#
+# Before this region every adapter carried a private ``REASONING_EFFORTS`` set
+# with no shared vocabulary behind it, so the tree had no answer to "is ``off``
+# the same rung as ``none``", "is ``ultra`` a rung at all" or "is ``thinking``
+# weaker than ``high``". Each set is now *expressed through* one ladder instead
+# of being restated beside it: an adapter declares which canonical rungs its CLI
+# takes, what that CLI calls them locally, and which off-ladder names it must let
+# through — and its ``REASONING_EFFORTS`` is **derived** from that declaration.
+#
+# Nothing about :func:`split_reasoning_effort` moves. It still takes an arbitrary
+# ``Collection[str]`` and every adapter still hands it ``REASONING_EFFORTS``; the
+# value is computed now rather than typed out, which is the whole difference.
+#
+# Three rules the plan states normatively, each measured, and each pinned by
+# ``tests/test_reasoning_effort_ladder.py`` over the **registry** rather than
+# over a list of adapter names:
+#
+#   1. Seven rungs, one total order, and nothing else joins it.
+#   2. ``thinking``/``instant`` are a SECOND AXIS, not rungs (21 models each in
+#      kilocode and opencode). They are accepted and passed through verbatim,
+#      never compared to a rung and never coerced onto one — which is why
+#      acceptance is "is this name accepted *here*", not "is it on the ladder".
+#   3. ``none`` and ``minimal`` are taken on the wire by CLIs whose own catalogs
+#      advertise neither. An unadvertised rung may be *passed through* when a
+#      user names it, never *chosen* by a default or by a rung-down.
+#
+# The two alias pairs run in both directions and are per-provider *spellings*,
+# never ladder members: ``off`` ≡ ``none`` (goose, pi, vibe) and ``ultra`` ≡
+# ``max`` — outbound for muse, which has no ``max`` and wants the word ``ultra``,
+# and inbound-only for codex, which takes ``max`` verbatim, so codex's own
+# client-side ``ultra → max`` normalization is an unused backstop rather than a
+# dependency.
+#
+# Caps are per MODEL, never per provider: ``max → xhigh`` is something a
+# particular model's ``supported_reasoning_levels``/``variants`` list says, not
+# something a provider name implies. :attr:`ReasoningLadder.model_caps` is where
+# a measured per-model narrowing lives, including the one combination measured to
+# hang forever rather than fail.
+
+#: The canonical rungs, weakest → strongest. One vocabulary for every adapter.
+REASONING_LADDER: Tuple[str, ...] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
+#: Membership, for "is this name a rung at all" — asked separately from "does
+#: this CLI accept it", because rule 2 turns on exactly that distinction.
+LADDER_RUNGS = frozenset(REASONING_LADDER)
+
+#: Rung → position, so "weaker than" and "one rung down" are arithmetic on a
+#: shared order rather than a comparison between two adapters' private lists.
+LADDER_POSITION: Dict[str, int] = {
+    rung: index for index, rung in enumerate(REASONING_LADDER)
+}
+
+#: Rungs that CLIs accept on the wire while advertising them in no catalog
+#: entry (rule 3). They stay in the accepted sets — the CLIs really do take
+#: them — but :meth:`ReasoningLadder.rung_down` steps over them, because a rung
+#: nothing advertises may never be the one the harness picks on a user's behalf.
+UNADVERTISED_RUNGS = frozenset({"none", "minimal"})
+
+#: Off-ladder names that select a *mode* rather than an amount of effort
+#: (rule 2). Declared here so an adapter listing one is visibly declaring a
+#: second-axis variant rather than inventing an eighth rung.
+SECOND_AXIS_VARIANTS = frozenset({"thinking", "instant"})
+
+
+@dataclass(frozen=True)
+class ReasoningLadder:
+    """One CLI's accepted effort vocabulary, expressed against the ladder.
+
+    Every field is a *measurement* of what the CLI takes, never a preference.
+    The mapping fields are tuples of pairs rather than dicts so the whole
+    declaration stays immutable and hashable.
+
+    :attr:`rungs`
+        The canonical rungs this CLI accepts, stated in ladder order and emitted
+        verbatim.
+    :attr:`spellings`
+        ``local name → canonical rung`` for a rung this CLI calls something else.
+        Accepted **and emitted**: muse wants ``ultra`` where the ladder says
+        ``max``; goose, pi and vibe want ``off`` where the ladder says ``none``.
+    :attr:`inbound_aliases`
+        ``local name → canonical rung`` accepted at the harness boundary and
+        rewritten *before* argv is built, so the emitted value is always a name
+        this adapter states. codex's ``ultra`` is the only entry.
+    :attr:`variants`
+        Off-ladder second-axis names (:data:`SECOND_AXIS_VARIANTS`) passed
+        through verbatim.
+    :attr:`model_caps`
+        ``model id → the names accepted for that model``. An empty tuple means
+        *no* effort value is safe on that model. This is the per-model half of
+        §6.1 and the only place a cap may live.
+    :attr:`declined`
+        Non-empty when the CLI has no per-run effort mechanism at all. The
+        reason, not a flag: four adapters are in this state and each is there
+        for a different measured reason.
+    """
+
+    provider: str = ""
+    rungs: Tuple[str, ...] = ()
+    spellings: Tuple[Tuple[str, str], ...] = ()
+    inbound_aliases: Tuple[Tuple[str, str], ...] = ()
+    variants: Tuple[str, ...] = ()
+    model_caps: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    declined: str = ""
+
+    # -- the declaration, read back ---------------------------------------
+
+    @property
+    def local_names(self) -> Dict[str, str]:
+        """``spellings`` as a mapping: local name → canonical rung."""
+        return dict(self.spellings)
+
+    @property
+    def aliases(self) -> Dict[str, str]:
+        """``inbound_aliases`` as a mapping: local name → canonical rung."""
+        return dict(self.inbound_aliases)
+
+    @property
+    def accepted(self) -> "frozenset":
+        """Every name this CLI accepts **and may be handed back**.
+
+        This is what an adapter's ``REASONING_EFFORTS`` is, and therefore what
+        :func:`split_reasoning_effort` is called with. Inbound-only aliases are
+        deliberately absent: they are accepted on a *spec* and rewritten, never
+        emitted.
+        """
+        return frozenset(self.rungs) | set(self.local_names) | set(self.variants)
+
+    @property
+    def accepted_inbound(self) -> "frozenset":
+        """:attr:`accepted` plus the inbound-only aliases — what a spec may say."""
+        return self.accepted | set(self.aliases)
+
+    @property
+    def caps(self) -> Dict[str, Tuple[str, ...]]:
+        """``model_caps`` as a mapping: model id → accepted names."""
+        return dict(self.model_caps)
+
+    # -- the questions the dispatch path asks ------------------------------
+
+    def normalize(self, name: str) -> Optional[str]:
+        """Which canonical rung ``name`` denotes, or ``None``.
+
+        Answers "what rung is this word", independent of whether this CLI
+        accepts it — a second-axis variant and an unknown word both answer
+        ``None``, which is rule 2 in one line.
+        """
+        if name in LADDER_RUNGS:
+            return name
+        return self.local_names.get(name) or self.aliases.get(name)
+
+    def render(self, rung: str) -> Optional[str]:
+        """The word this CLI wants for canonical ``rung``, or ``None``.
+
+        The canonical spelling wins whenever the CLI takes it (goose accepts
+        both ``none`` and ``off`` and gets ``none``); the local spelling is used
+        only where the canonical one is not accepted at all (muse has no ``max``
+        and gets ``ultra``; pi and vibe have no ``none`` and get ``off``).
+        """
+        if rung in self.rungs:
+            return rung
+        for local, canonical in self.spellings:
+            if canonical == rung:
+                return local
+        return None
+
+    def accepted_for(self, model: Optional[str] = None) -> "frozenset":
+        """:attr:`accepted`, narrowed by any declared cap for ``model``.
+
+        ``model`` may carry its own ``:effort`` suffix; it is split off with the
+        adapter's own inbound set first, so a caller can pass the spec it has.
+        """
+        if not model:
+            return self.accepted
+        base, _ = split_reasoning_effort(model, self.accepted_inbound)
+        caps = self.caps
+        if base in caps:
+            return frozenset(caps[base]) & self.accepted
+        return self.accepted
+
+    def accepts(self, name: str, model: Optional[str] = None) -> bool:
+        """Whether ``name`` may be handed to this CLI (for ``model``, if given)."""
+        return name in self.accepted_for(model)
+
+    def refuses_for_model(self, model: str, name: str) -> bool:
+        """``name`` is fine for this provider but declared unsafe on ``model``."""
+        return name in self.accepted and name not in self.accepted_for(model)
+
+    def resolve(self, raw: str, model: Optional[str] = None) -> Optional[str]:
+        """The value to emit for a requested ``raw`` effort — ``None`` to refuse.
+
+        §6.1's coercion rule, exactly: an alias is applied **only when the raw
+        value is unsupported but the canonical one is**. A name this CLI already
+        accepts is therefore returned untouched, and a name that maps to no rung
+        this CLI has is refused rather than being rounded onto a neighbour — a
+        silent downgrade is the worse of the two failures, because the effort a
+        run actually used is invisible in almost every CLI's output.
+        """
+        name = (raw or "").strip()
+        if not name:
+            return None
+        allowed = self.accepted_for(model)
+        if name in allowed:
+            return name
+        rung = self.normalize(name)
+        if rung is None:
+            return None
+        spelled = self.render(rung)
+        if spelled is not None and spelled in allowed:
+            return spelled
+        return None
+
+    def rung_down(self, rung: str) -> Optional[str]:
+        """The next weaker rung this CLI accepts — never an unadvertised one.
+
+        Rule 3 lives here: ``none``/``minimal`` are reachable only by a user
+        naming them, so a rung-down that runs out of advertised rungs returns
+        ``None`` instead of stepping onto one.
+        """
+        position = LADDER_POSITION.get(rung)
+        if position is None:
+            return None
+        for candidate in reversed(REASONING_LADDER[:position]):
+            if candidate in self.rungs and candidate not in UNADVERTISED_RUNGS:
+                return candidate
+        return None
+
+
+#: The declaration a provider makes when its CLI has no per-run effort
+#: mechanism at all. Adapters in that state name their own reason; this exists
+#: so :class:`LLMProvider`-adjacent code has a falsy default that is visibly
+#: *undeclared* rather than visibly "declines".
+NO_REASONING_LADDER = ReasoningLadder()
 
 
 #: Terms that make a *bare* token a real failure signal rather than a
@@ -624,7 +1648,16 @@ def classify_streams(
     4. auth, then rate limit — the existing order, pinned by
        ``TestClassifyFailure::test_auth_wins_over_a_rate_limit_in_the_same_stream``:
        misreading a logged-out CLI as a rate limit retries what cannot be fixed.
-    5. timeout, connection, server, invalid model — the rest of the allowlist.
+    5. timeout, connection, **invalid model, then server** — the rest of the
+       allowlist. Invalid-model is consulted **before** server-error, and the
+       pair is the one step of this ladder that did not earn its original
+       order (C2). ``\\bapi error\\b`` sits in :data:`SERVER_ERROR_MARKERS`,
+       so a 404 that correctly *names the model* used to land on
+       ``server_error`` — a **retryable** category — and burn the retry budget
+       on a terminal condition. A model-named 404 is strictly more specific
+       than "api error", so the specific table is asked first. Measured on
+       ``claude-code``, ``grok``, ``muse`` and ``vibe``; pinned by
+       ``TestClassifyLadderOrder``.
     6. the adapter's own exit-0 marker, last: it says only "this run failed",
        so anything more specific must have had its chance first.
 
@@ -669,10 +1702,10 @@ def classify_streams(
         return STATUS_TIMEOUT
     if _matches_marker(CONNECTION_ERROR_MARKERS, haystack):
         return CATEGORY_CONNECTION_ERROR
-    if _matches_marker(SERVER_ERROR_MARKERS, haystack):
-        return CATEGORY_SERVER_ERROR
     if _matches_marker(INVALID_MODEL_MARKERS, haystack):
         return CATEGORY_INVALID_MODEL
+    if _matches_marker(SERVER_ERROR_MARKERS, haystack):
+        return CATEGORY_SERVER_ERROR
 
     if _matches_marker(exit_zero_markers, haystack):
         # The exit code carried no verdict (goose, aider, cursor-agent and cline
@@ -694,6 +1727,333 @@ def context_length_message(model: str) -> str:
         f"the prompt exceeded {model or 'this model'}'s context window; narrow "
         f"the plan/diff scope or configure a larger-context model"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M14 (§5.4, §5.4.1) — ONE version gate.
+#
+# Before this section the same rule lived in several places at once, on purpose
+# and with the reason written down each time: `_version_below` above carried a
+# copy of `subagent_executor._version_tuple`'s comparison, and L7, M1 and M7
+# each shipped their own per-flag help sniff *inside the task*, because §11.1
+# needs those tasks severable from §11.2. Absorbing them is what this section
+# is. It was never a precondition for any of them — each one-off worked on its
+# own, and each is deleted only once its replacement is here and its own tests
+# point at it.
+#
+# What "one gate" means concretely:
+#
+#   * **One parse-and-compare rule** — :func:`version_tuple`, used by
+#     `_version_below` (the availability *label*) and by the executor's
+#     preflight *refusal*. A build can no longer be too old for one and fine for
+#     the other.
+#   * **Floors and ceilings, both declared** — `min_version` and
+#     `max_version_exclusive` (§5.4), read together by :func:`version_verdict`.
+#     Every floor and ceiling carries a comment naming the **feature** that
+#     requires it, never a bare number: a measured-at version is an upper bound
+#     on the true floor, so a number with no feature behind it disables installs
+#     that work (§5.4.1(a)).
+#   * **One help read per CLI per process** — :func:`read_help_tokens`, memoised
+#     on the resolved binary path *and* the help argv, so a four-model ×
+#     ten-phase run performs at most one help spawn per CLI however many flags
+#     that CLI gates.
+#   * **One failure posture, in two documented shapes.** An *optional* flag that
+#     cannot be confirmed is dropped with one WARN and the run proceeds
+#     (:meth:`LLMProvider.supports_flag`); a *load-bearing* one is refused
+#     before spawn, because there is no safe argv to fall back to
+#     (:meth:`LLMProvider.missing_flags`). Both decline toward the status quo —
+#     emitting a flag the binary may reject is the one outcome neither may
+#     produce.
+#
+# Version reads take stdout and stderr **concatenated** (§5.4): some CLIs banner
+# their version to stderr and opencode is stdout-only, so
+# :meth:`LLMProvider.parse_version` reads both and `tests/test_version_gate.py`
+# pins it with a CLI that prints its version on stderr alone.
+#
+# One thing this gate deliberately does **not** do: invent a sixth availability
+# word. §5.1's report vocabulary is a closed five (`Availability`), so a build
+# at or above a declared ceiling surfaces as the preflight's named refusal
+# rather than as a mislabelled `version-too-low` report.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: How long one version or help probe may take, matching §2.1's probe
+#: containment. A gate that hangs is worse than a gate that declines.
+GATE_PROBE_TIMEOUT_S = 5
+
+#: The gate's verdict words. ``VERSION_TOO_LOW`` is spelled from the availability
+#: vocabulary rather than re-typed, so the refusal, the report and cursor's
+#: load-bearing refusal (`cursor_agent.CursorFlagsUnconfirmed`) all say the same
+#: word.
+VERSION_OK = "ok"
+VERSION_UNREAD = "unread"
+VERSION_TOO_LOW = Availability.VERSION_TOO_LOW.value
+#: At or above a declared ``max_version_exclusive``. **Exclusive**: the declared
+#: number is the first build that is refused, which is what lets a ceiling name
+#: the release that broke the parser instead of the last one that worked.
+VERSION_TOO_NEW = "version-too-new"
+#: Above ``verified_version`` — a warning, never a refusal: blocking on new
+#: releases would rot faster than the CLIs do.
+VERSION_ABOVE_VERIFIED = "above-verified"
+
+
+def version_tuple(text: str) -> Tuple[int, ...]:
+    """``text``'s leading integers, component-wise, for **ordering only**.
+
+    The single comparison rule of the whole harness (M14). ``"2026.08.11-e8db854"``
+    is ``(2026, 8, 11)`` and ``"codex-cli 0.146.0"`` is ``(0,)`` — the caller
+    passes a *parsed* version (:meth:`LLMProvider.parse_version` or
+    :func:`_version_token`), never raw probe output.
+
+    A component that does not start with a digit contributes ``0`` rather than
+    raising, so a build suffix can never turn a version comparison into a crash
+    on a dispatch path, and an empty string is ``(0,)`` — below everything.
+    """
+    parts: List[int] = []
+    for chunk in (text or "").split("."):
+        match = re.match(r"^(\d+)", chunk)
+        parts.append(int(match.group(1)) if match else 0)
+    return tuple(parts) or (0,)
+
+
+#: A ceiling value that is safe to compare, matched **whole**: dotted integers,
+#: an optional ``v`` prefix, and an optional ``-``/``+`` build or prerelease
+#: suffix (opencode versions look like ``2026.08.11-e8db854``). Group 1 is the
+#: part :func:`version_tuple` may read; anything this does not match entirely is
+#: dropped by :func:`version_ceiling` rather than compared.
+_CEILING_VERSION_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)(?:[-+][0-9A-Za-z.+-]*)?$")
+
+
+def version_ceiling(provider: Any, anchor: Optional[str] = None) -> str:
+    """This adapter's ``max_version_exclusive``, or ``""`` for "no ceiling".
+
+    Config first (``providers.<name>.max_version_exclusive``), the class
+    declaration second — the same layering ``default_timeout`` already has, and
+    the reason the key is *reachable from config at all*: a vendor can ship a
+    broken build between two of this repo's releases, and pinning a ceiling then
+    must not require editing an adapter.
+
+    A blank, non-scalar or **non-numeric** value is "no ceiling" plus one
+    warning, never an error and never a refusal. That last case is the one worth
+    spelling out: ``version_tuple`` maps a value with no leading digits to
+    ``(0,)``, so an unusable ceiling compared naively would sit *below* every
+    real build and refuse the entire roster. A typo in a YAML file may not
+    disable a provider, so it is dropped here, where it is read, rather than
+    reaching the comparison. (YAML 1.1's bare ``on``/``yes`` resolving to a bool
+    is exactly how such a value arrives.)
+
+    "Numeric" means the value matches :data:`_CEILING_VERSION_RE` **whole**, and
+    what is returned is that match's numeric core: ``v2.0.0`` and
+    ``2.0.0-rc1`` both resolve to ``2.0.0``, and ``2026.08.11-e8db854`` (an
+    opencode build string) to ``2026.08.11``. Both halves of that are load
+    bearing, because a *substring* search would re-open the same footgun one
+    step further along: ``release-2.0`` contains a version, so it would pass the
+    check, and ``version_tuple`` then reads the returned string as ``(0, 0)`` —
+    below every real build, so the ceiling refuses the whole roster it was
+    supposed to leave alone. Returning the core rather than the string also
+    keeps :func:`version_verdict`'s printed sentence numeric, for the reason
+    :func:`_version_token` documents: that sentence reaches logs and failure
+    artifacts, and a dotted numeric token cannot be a credential.
+    """
+    name = getattr(provider, "name", "") or ""
+    declared = getattr(provider, "max_version_exclusive", "") or ""
+    source = "declaration"
+    if name:
+        configured = _provider_block(name, anchor).get("max_version_exclusive")
+        if configured is not None:
+            declared, source = configured, "config"
+    if isinstance(declared, bool) or not isinstance(declared, (str, int, float)):
+        candidate = ""
+    else:
+        candidate = str(declared).strip()
+    if not candidate:
+        return ""
+    match = _CEILING_VERSION_RE.match(candidate)
+    if match is None:
+        _warn_policy_once(
+            f"max_version_exclusive:{name}:{candidate}",
+            f"multi-llm config warning: ignoring "
+            f"providers.{name}.max_version_exclusive={declared!r} ({source}) — a "
+            f"ceiling must be a version number (e.g. \"2.0.0\"); running with no "
+            f"ceiling for {name}",
+        )
+        return ""
+    return match.group(1)
+
+
+@dataclass(frozen=True)
+class VersionVerdict:
+    """Where one *read* version sits against one adapter's declared bounds.
+
+    :attr:`detail` is composed only from declared data and the parsed version
+    token — the same redaction rule :class:`AvailabilityReport` holds itself to,
+    because this sentence is printed, logged and stored in failure artifacts.
+    """
+
+    state: str
+    version: str = "unknown"
+    detail: str = ""
+
+    @property
+    def refuses(self) -> bool:
+        """Whether a preflight must refuse this runner before spawning a child."""
+        return self.state in (VERSION_TOO_LOW, VERSION_TOO_NEW)
+
+
+def version_verdict(
+    provider: Any,
+    version: Optional[str],
+    *,
+    name: Optional[str] = None,
+    anchor: Optional[str] = None,
+) -> VersionVerdict:
+    """The floor/ceiling/verified verdict for one read version (§5.4).
+
+    The **one** place the three bounds are compared, so the preflight refusal and
+    any other consumer cannot disagree about the same build. Order matters and
+    is the preflight's own: floor, then ceiling, then the advisory
+    ``verified_version`` warning.
+
+    ``"unknown"``, ``""`` and ``None`` are :data:`VERSION_UNREAD` — *absence of
+    evidence is never a negative verdict*. A CLI that dropped ``--version`` still
+    answers prompts, so an unread version warns and dispatches; it never blocks.
+
+    Args:
+        provider: the adapter, read for ``min_version``, ``verified_version``
+            and ``max_version_exclusive``.
+        version: what :meth:`LLMProvider.parse_version` recovered.
+        name: the name to put in the sentence, defaulting to ``provider.name``.
+            The executor passes the *registry* key it was asked for, so the
+            message names the runner the user typed.
+    """
+    label = (name or getattr(provider, "name", "") or "").strip()
+    read = (version or "").strip()
+    if not read or read == "unknown":
+        return VersionVerdict(VERSION_UNREAD, "unknown", "")
+
+    minimum = (getattr(provider, "min_version", "") or "").strip()
+    ceiling = version_ceiling(provider, anchor)
+    verified = (getattr(provider, "verified_version", "") or "").strip()
+
+    if minimum and version_tuple(read) < version_tuple(minimum):
+        return VersionVerdict(
+            VERSION_TOO_LOW,
+            read,
+            f"{label} {read} is older than the minimum this release parses "
+            f"({minimum}); its event stream shape is not the one the adapter was "
+            f"written against. Upgrade {label} to >= {minimum}.",
+        )
+    if ceiling and version_tuple(read) >= version_tuple(ceiling):
+        return VersionVerdict(
+            VERSION_TOO_NEW,
+            read,
+            f"{label} {read} is at or above {ceiling}, the build this release "
+            f"declines to parse (max_version_exclusive); install a {label} "
+            f"below {ceiling}.",
+        )
+    if verified and version_tuple(read) > version_tuple(verified):
+        return VersionVerdict(
+            VERSION_ABOVE_VERIFIED,
+            read,
+            f"{label} {read} is newer than the release the shipped parser "
+            f"fixtures were captured from ({verified}); stream parsing is "
+            f"best-effort above that.",
+        )
+    return VersionVerdict(VERSION_OK, read, "")
+
+
+#: A whole-word long-option token. ``--model`` must never be read as ``--mode``,
+#: and ``--fallback-model`` must never be confirmed by a help text that only
+#: documents ``--fallback-model-chain``: confirming the wrong flag is exactly the
+#: failure this gate exists to prevent.
+_FLAG_TOKEN_RE = re.compile(r"(?<![\w-])(--[A-Za-z0-9][A-Za-z0-9-]*)(?![\w-])")
+
+#: One help read per (resolved binary, help argv) per process. The argv is part
+#: of the key because a flag can live on a subcommand's help rather than the
+#: top-level one, and those are two different reads of the same binary.
+_HELP_TOKENS: Dict[Tuple[str, Tuple[str, ...]], FrozenSet[str]] = {}
+_HELP_TOKENS_LOCK = threading.Lock()
+
+#: One WARN per declined capability per process, not one per dispatch.
+_GATE_WARNED: Set[Any] = set()
+
+
+def reset_flag_gate_cache() -> None:
+    """Forget the memoised help reads and the warn-once set (tests only).
+
+    Never called on a run path: the whole point of the cache is that a fan-out
+    spawns one help probe per CLI, not one per slot.
+    """
+    with _HELP_TOKENS_LOCK:
+        _HELP_TOKENS.clear()
+    _GATE_WARNED.clear()
+
+
+def warn_gate_once(key: Any, message: str) -> None:
+    """Print one gate WARN per distinct key per process, on stderr.
+
+    The *sentence* stays with the adapter, because it names the capability that
+    run is doing without; only the once-ness is shared.
+    """
+    if key in _GATE_WARNED:
+        return
+    _GATE_WARNED.add(key)
+    print(message, file=sys.stderr)
+
+
+def read_help_tokens(
+    binary: str,
+    *,
+    help_argv: Tuple[str, ...] = ("--help",),
+    env: Optional[Mapping[str, str]] = None,
+) -> FrozenSet[str]:
+    """Every long-option token this binary's own help documents (§5.4.1).
+
+    Containment matches §2.1's probe: ``stdin=DEVNULL``, captured output, a
+    :data:`GATE_PROBE_TIMEOUT_S` timeout, zero network, and an environment the
+    caller composed with the same builder a dispatch uses
+    (:meth:`LLMProvider.gate_probe_env`), so Lane A and Lane B can never
+    disagree about which flags a run emits.
+
+    ``TERM=dumb`` and a wide ``COLUMNS`` are the caller's job and are
+    load-bearing: §3.6's own history is a *truncated* help rendering that hid
+    what a flag required, and a token sniff must not inherit that failure mode.
+    Both streams are read **concatenated** (§5.4) because some CLIs banner to
+    stderr.
+
+    Failure posture — decline the *flag*, keep the *run*. A timeout, a non-zero
+    exit, an empty help, an unreadable stream or anything else this probe can
+    hit all resolve to the empty set, i.e. "unsupported". The ``except`` is
+    deliberately total: a diagnostic read of a binary's own help text may not be
+    the thing that ends a dispatch.
+    """
+    key = (str(binary), tuple(help_argv))
+    with _HELP_TOKENS_LOCK:
+        cached = _HELP_TOKENS.get(key)
+    if cached is not None:
+        return cached
+
+    tokens: FrozenSet[str] = frozenset()
+    try:
+        completed = subprocess.run(
+            [str(binary), *help_argv],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GATE_PROBE_TIMEOUT_S,
+            env=dict(env) if env is not None else None,
+        )
+        if completed.returncode == 0:
+            text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+            if text.strip():
+                tokens = frozenset(_FLAG_TOKEN_RE.findall(text))
+    except Exception:  # noqa: BLE001 - see the failure posture above
+        tokens = frozenset()
+
+    with _HELP_TOKENS_LOCK:
+        _HELP_TOKENS.setdefault(key, tokens)
+        return _HELP_TOKENS[key]
 
 
 class LLMProvider(ABC):
@@ -831,9 +2191,45 @@ class LLMProvider(ABC):
     #: parser is known to handle, and the release the shipped parser fixtures
     #: were captured from (D3m). Empty means "not declared" — the executor
     #: records ``unknown`` and warns rather than blocking.
+    #:
+    #: **M14/§5.4: a declared floor carries a comment naming the FEATURE it
+    #: protects, never a bare number.** A measured-at version is an upper bound
+    #: on the true floor, so a floor raised to "the version this happened to be
+    #: probed on" disables installs that work — which is why the flags verified
+    #: on one recent build are gated per flag (:meth:`supports_flag`) instead of
+    #: raising the number here.
     version_cmd: Tuple[str, ...] = ()
     min_version: str = ""
     verified_version: str = ""
+
+    #: M14 (§5.4) — the first build this release **refuses**, exclusive, or ``""``
+    #: for "no ceiling". The mirror of ``min_version`` and subject to the same
+    #: rule: it carries a comment naming the feature (or the breakage) behind it.
+    #: Overridable per install through ``providers.<name>.max_version_exclusive``
+    #: (:func:`version_ceiling`), because a vendor can ship a broken build
+    #: between two releases of this repo and pinning it must not require an
+    #: adapter edit. A ceiling is a **refusal**, unlike ``verified_version``'s
+    #: warning: the two are different claims, and merging them would either
+    #: block every new release or refuse nothing.
+    max_version_exclusive: str = ""
+
+    #: M14 (§5.4.1) — the argv, after the binary, that prints the help
+    #: documenting this adapter's gated flags. An adapter whose flags live on a
+    #: subcommand declares that subcommand here (``("run", "--help")``); the
+    #: default is the CLI's top-level help.
+    help_argv: Tuple[str, ...] = ("--help",)
+
+    #: M14/§5.4.1(a) — flags this adapter emits **unconditionally** because each
+    #: was verified *functionally* at the declared ``min_version``, not merely
+    #: found in help text. The shared gate answers :meth:`supports_flag` ``True``
+    #: for these **without probing**: there is no release in the supported range
+    #: that would need gating, and a runtime probe would only add a failure mode.
+    #:
+    #: This is the exemption §5.4.1 grants, written as data rather than as prose
+    #: in one adapter's comment block, so the claim is assertable: every flag
+    #: named here must really be documented by that CLI at its floor, and every
+    #: flag *not* named here that an adapter adds to argv takes a gate.
+    flags_verified_at_floor: Tuple[str, ...] = ()
 
     #: A cheap, **non-generating** argv that reports whether this CLI is logged in
     #: (D3c) — a ``login status`` / ``whoami``-class subcommand. The executor
@@ -849,6 +2245,36 @@ class LLMProvider(ABC):
     #: exit-3 refusal. Mirrors ``runners[*].login_cmd`` in ``hosts/capabilities.yaml``,
     #: which is the same fact from the host's side.
     login_cmd: str = ""
+
+    #: M13 (§5.2) — an optional **metadata** readout: the cheap, non-generating
+    #: argv that reports what a *status* surface prints beside the auth verdict
+    #: (a plan tier, an entitlement), and nothing else. It is emphatically **not**
+    #: a second auth probe: :meth:`classify_auth_probe` never sees it, no verdict
+    #: is derived from it, and a run that cannot read it reports nothing rather
+    #: than reporting a state. Empty — the default for every adapter — means this
+    #: CLI has no such readout, and the status row simply has less to say.
+    #:
+    #: It is spawned only by the human-invoked status path
+    #: (``install-host --check`` row 5, through
+    #: :func:`utils.subagent_executor.probe_setup_metadata`), never by a dispatch
+    #: preflight: the facts it carries change nothing about whether a child may
+    #: start, so paying a subprocess for them once per phase would be cost
+    #: without a decision.
+    setup_probe: Tuple[str, ...] = ()
+
+    #: M13 (§5.3) — how a human installs this CLI, verbatim. It is printed, and
+    #: **never run**: no auto-install, because installing a vendor's binary
+    #: because a probe said ``binary-missing`` crosses the same trust boundary
+    #: M16 was declined on. Empty means "not declared", which is the honest
+    #: state for a CLI whose install route this repo has not measured.
+    install_hint: str = ""
+
+    #: M13 (§5.3) — one sentence naming what this CLI's credential actually *is*
+    #: (a profile directory, an OS keyring, an env var), for the adapters where
+    #: ``login_cmd`` is not the whole story. Declared data only: it is rendered
+    #: beside a probe verdict, so it may never carry a credential, a path from
+    #: the environment, or probe output.
+    auth_hint: str = ""
 
     #: Substrings that identify a login/credential notice on either stream, so a
     #: logged-out CLI lands on D3k rung 1 (``auth_failed``, no retry) instead of
@@ -902,6 +2328,56 @@ class LLMProvider(ABC):
         """Whether this adapter can deliver a prompt over ``transport``."""
         return transport in self.supported_prompt_transports
 
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The part of this capture the vendor wrote. Base: the capture, unchanged.
+
+        **Why this is a hook and not a parameter.** Four shipped adapters echo
+        our own prompt back inside their JSON envelope (goose, copilot, vibe,
+        muse), so ``f"{stdout}\\n{stderr}"`` is not "what the runner said" — it
+        is the runner's answer *plus* ``prompts/plan_review.txt``. Every marker
+        table in :func:`classify_streams` then matches against text we wrote:
+        a completely successful goose run classified ``timeout`` because the
+        prompt's example block contains the word, and copilot's and vibe's
+        successful runs classified ``rate_limited`` because the plan under
+        review discusses rate limits. On a *failed* run that verdict is live —
+        ``subagent_executor._classify_failed_run`` forwards exactly
+        ``auth_failed`` and ``rate_limited``, the two classes that change the
+        whole batch's fate.
+
+        A caller-supplied ``vendor_text=`` argument could not fix it: every
+        existing call site would have to opt in, and the §6.2 fixture rig calls
+        ``adapter.classify_failure(stdout, stderr, exit_code)`` with no extra
+        argument. The reduction therefore happens *inside* this class, where the
+        default is identity and every caller inherits it for free.
+
+        The contract for an override, all three parts load-bearing:
+
+        * **It may only remove.** An override returns the same capture with the
+          echoed turn taken out of it. Returning text that was not in the
+          capture is out of contract — this hook narrows a haystack, it never
+          synthesizes one.
+        * **A failed reduction returns its input unchanged, never ``""``.** An
+          empty haystack classifies as ``None`` (see :func:`classify_streams`),
+          so a hook that swallowed a genuine 401 on a parse error would launder
+          a credential failure into a transport-shaped retry — a worse bug than
+          the one this fixes. Every override is a ``try``/``except`` around a
+          parse of an envelope the adapter does not control.
+        * **stderr is not reduced** by any shipped override: the echo lives in
+          the structured stdout envelope, and the diagnosis a real failure
+          carries must reach the tables untouched.
+
+        Applied by :meth:`classify_failure` and by nothing else. The
+        module-level :func:`classify_streams` deliberately does **not** grow it:
+        ``validation.py`` and ``_format_failure_details`` call that function with
+        no adapter in hand, and §7.2 depends on it staying the one rule both
+        lanes share. :meth:`classify_auth_probe`'s haystack — the second place
+        this module builds ``f"{stdout}\\n{stderr}".lower()``, over an
+        ``auth_check`` run — is out of scope too: an auth probe never carries
+        our prompt, so narrowing it fixes nothing and risks the one verdict
+        allowed to refuse a run outright.
+        """
+        return stdout, stderr
+
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0
     ) -> Optional[str]:
@@ -929,7 +2405,14 @@ class LLMProvider(ABC):
         never as a bare substring: the sets contain a status code (``429``) and
         short words (``unauthorized``) that occur inside numbers and longer
         tokens a runner routinely prints.
+
+        One thing happens before the rule runs: :meth:`vendor_text` reduces the
+        capture to the part the *vendor* wrote, so an adapter that echoes our
+        prompt back into its envelope stops classifying our own words. The base
+        implementation is identity, so an adapter that does not override it is
+        byte-for-byte what it was.
         """
+        stdout, stderr = self.vendor_text(stdout, stderr)
         return classify_streams(
             stdout,
             stderr,
@@ -958,6 +2441,50 @@ class LLMProvider(ABC):
         if exit_code != 0:
             return None
         return True
+
+    def describe_setup(self) -> SetupHints:
+        """This adapter's install / login / status metadata (M13, §5.3).
+
+        Derived from what the adapter already declares — ``install_hint``,
+        ``login_cmd``, ``auth_check``, ``auth_hint`` — so the four rows and the
+        argv the preflight really runs cannot drift apart. Implemented once,
+        here: no adapter overrides it, and a new adapter gets the rows by
+        declaring them rather than by implementing a method.
+
+        ``login_cmd`` is split on whitespace rather than with :mod:`shlex`
+        because it is a *declaration*, not user input: every shipped value is a
+        two- or three-word subcommand (``codex login``, ``opencode auth
+        login``). A declared login command that needs quoting is a bug in the
+        declaration, not a parsing problem to solve here.
+        """
+        return SetupHints(
+            install_hint=(self.install_hint or "").strip(),
+            login_args=tuple((self.login_cmd or "").split()),
+            status_args=tuple(self.auth_check or ()),
+            auth_hint=(self.auth_hint or "").strip(),
+        )
+
+    def read_setup_probe(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Dict[str, str]:
+        """What a ``setup_probe`` run says, as printable ``label -> value`` (M13).
+
+        The reader half of :attr:`setup_probe`, and it is held to the same rule
+        the argv is: **nothing here is a verdict.** An adapter may report a plan
+        tier or an entitlement the status row would otherwise have no way to
+        show; it may not report whether the CLI is logged in, whether it is
+        usable, or anything else a caller could branch on — that is
+        :meth:`classify_auth_probe`'s job, from a different probe.
+
+        Every value returned is rendered into a status row, so an override owes
+        the same care ``AvailabilityReport.detail`` is owed: report the one or
+        two facts the readout exists for, bounded and stripped of anything the
+        envelope carries beside them, never the envelope itself.
+
+        The default is ``{}`` — the honest answer for the adapters that declare
+        no readout, which is all of them but one.
+        """
+        return {}
 
     def supports_profile(self, profile: str) -> bool:
         """Whether this adapter declares ``profile`` (D3e)."""
@@ -1065,7 +2592,10 @@ class LLMProvider(ABC):
 
         The default finds the first dotted numeric token on either stream, which
         covers ``codex-cli 0.146.0``, ``1.18.12`` and ``2.1.224 (Claude Code)``
-        alike. Unparseable output is ``None`` (recorded ``unknown`` plus a
+        alike. **Both streams are read** (§5.4): some CLIs banner their version
+        to stderr and opencode is stdout-only, so a probe that read one stream
+        would report ``unknown`` for whichever half of the roster it guessed
+        wrong. Unparseable output is ``None`` (recorded ``unknown`` plus a
         warning, never a block: a CLI that dropped ``--version`` still answers
         prompts fine).
         """
@@ -1076,6 +2606,117 @@ class LLMProvider(ABC):
             if match:
                 return match.group(1)
         return None
+
+    # ── M14 (§5.4.1) — the shared per-flag capability gate ────────────────
+    #
+    # Implemented once, here. The three one-off gates this replaced (L7's
+    # `--fallback-model`, M7's `--json-schema` and M1's `--trust --mode ask`)
+    # each had their own copy of the probe, the cache and the token regex; what
+    # stays with each adapter is only what is genuinely its own — which flags it
+    # gates, and what one WARN says about the capability a declined flag costs.
+
+    def gate_binary_name(self) -> str:
+        """The binary the gate probes, taken from what the adapter **declares**.
+
+        ``version_cmd[0]`` first, then ``auth_check[0]`` — both are the CLI's own
+        name by construction, so no adapter has to repeat that literal for the
+        gate's benefit. An adapter that declares neither has no probeable binary
+        here, which resolves to "undecidable" and therefore to declining an
+        optional flag; it never resolves to a refusal.
+        """
+        for argv in (self.version_cmd, self.auth_check):
+            if argv:
+                return str(argv[0])
+        return ""
+
+    def gate_binary(self, *, runnable: bool = False) -> Optional[str]:
+        """The resolved path the gate would read, or ``None``.
+
+        ``runnable=True`` additionally requires a spawnable file, which is what
+        the **load-bearing** form asks for: a path that cannot be spawned cannot
+        reject a flag either, and turning "not installed" into "version-too-low"
+        would only lose information — ``is_available()`` already reports that,
+        precisely, and callers check it before building anything.
+        ``shutil.which`` already tests for an executable, so in production the
+        extra check is a no-op guarding against a resolver that points somewhere
+        unrunnable.
+        """
+        name = self.gate_binary_name()
+        if not name:
+            return None
+        binary = shutil.which(name)
+        if binary is None:
+            return None
+        if runnable and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            return None
+        return binary
+
+    def gate_probe_env(self) -> Dict[str, str]:
+        """The environment one help probe runs in — §5.4.1's containment clause.
+
+        Composed by :func:`build_child_env`, the same builder both spawn lanes
+        go through, so the flags a run emits cannot depend on which lane asked.
+        On top of it: the ``generate`` profile's git block (a probe must never
+        reach a credential helper), and ``TERM=dumb`` / a wide ``COLUMNS`` /
+        ``NO_COLOR`` so the help is rendered in full — §3.6's own history is a
+        *truncated* help rendering that hid what a flag required.
+
+        The adapter's ``get_remove_env`` is applied through the builder, which is
+        what keeps a probe run from inside a Claude Code session from being
+        refused by that CLI's nested-session guard.
+        """
+        delta = dict(git_env(PROFILE_GENERATE))
+        delta.update({"TERM": "dumb", "COLUMNS": "1000", "NO_COLOR": "1"})
+        return build_child_env(self, provider_env=delta) or dict(os.environ)
+
+    def flag_tokens(self, *, runnable: bool = False) -> FrozenSet[str]:
+        """Every long option this CLI's own help documents, or ``frozenset()``."""
+        binary = self.gate_binary(runnable=runnable)
+        if not binary:
+            return frozenset()
+        return read_help_tokens(
+            binary, help_argv=tuple(self.help_argv), env=self.gate_probe_env()
+        )
+
+    def supports_flag(self, flag: str) -> bool:
+        """§5.4.1's gate in its **optional-flag** form: undecidable ⇒ ``False``.
+
+        On an older CLI an unrecognised flag is not a degraded run, it is
+        ``unknown option`` and a dead slot, so this declines toward the status
+        quo: the flag is omitted, the run proceeds, and the caller emits one WARN
+        naming the capability the run is doing without.
+
+        A flag the adapter declares in :attr:`flags_verified_at_floor` is
+        supported **without a probe** — §5.4.1(a)'s exemption, granted only to a
+        flag verified functionally at the declared ``min_version``.
+        """
+        if flag in tuple(self.flags_verified_at_floor):
+            return True
+        return flag in self.flag_tokens()
+
+    def missing_flags(self, flags: Iterable[str]) -> Tuple[str, ...]:
+        """§5.4.1's gate in its **load-bearing** form: which of ``flags`` is unconfirmed.
+
+        For an argv that has no safe degraded form — cursor's ``--trust``/
+        ``--mode`` pair, where dropping ``--trust`` fails the launch and the only
+        other way past the trust gate is the ``-f``/``--yolo`` write bypass — the
+        caller refuses the slot naming exactly what came back from here.
+
+        **An unresolvable or unspawnable binary reports nothing missing.** That
+        is the asymmetry with :meth:`supports_flag` and it is deliberate: an
+        absent CLI is ``is_available()``'s refusal to make, with its own precise
+        message, and a binary that cannot be spawned cannot reject a flag.
+        """
+        binary = self.gate_binary(runnable=True)
+        if not binary:
+            return ()
+        tokens = read_help_tokens(
+            binary, help_argv=tuple(self.help_argv), env=self.gate_probe_env()
+        )
+        exempt = tuple(self.flags_verified_at_floor)
+        return tuple(
+            flag for flag in flags if flag not in tokens and flag not in exempt
+        )
 
     def build_command_for_transport(
         self,
@@ -1206,12 +2847,34 @@ class LLMProvider(ABC):
         pass
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
-        """Extract a human-readable reason from a non-zero-exit invocation.
+        """Extract a human-readable reason from a failed invocation.
 
-        ``parse_output`` is only called when the CLI exits 0, so a provider
-        that reports its errors on *stdout* rather than stderr would otherwise
-        have them discarded — the caller sees a bare exit code with empty
-        stderr and nothing to diagnose. Override this to recover the message.
+        **Either channel, not one of them.** The hook was written for the
+        stdout direction — ``parse_output`` is only called when the CLI exits 0,
+        so a provider that reports its errors on *stdout* rather than stderr
+        would otherwise have them discarded (opencode and muse are both that
+        shape) — but the *inverse* shape is just as common and just as blind.
+        ``pi`` writes **zero bytes to stdout on all ten** of its committed
+        failure captures and ``gemini`` on **eight of its nine**, putting 100%
+        of the diagnosis on stderr; before C4 both adapters took ``stderr`` in
+        ``parse_output`` and never mentioned it again. So the rule is a
+        *channel* rule rather than a stream name: **stderr is the diagnosis,
+        stdout is the answer** — an override reads whichever channel its CLI
+        really writes its reason on, and returns one short line of it.
+
+        Reading stderr here is not duplication of what the caller already has.
+        Neither caller prints raw stderr of its own: Lane A builds
+        ``f"{provider} exited with code {n}"`` and appends only this hook's
+        answer (``llm_client``), Lane B folds it into the rung-4 message
+        (``subagent_executor``), and the full text stays in
+        ``details["stderr"]`` and the log file. This hook is the **summary**,
+        so a 15 KB retry log must be reduced to one line rather than copied.
+
+        **Diagnostics, never classification.** Both callers wrap this in
+        ``try``/``except`` and neither lets its answer change a category —
+        that is :meth:`classify_failure`'s job, on declared pattern tables. An
+        override may not move any run's classification, and returning ``None``
+        must always stay safe.
 
         Args:
             stdout: The standard output from the failed CLI invocation.
@@ -1267,6 +2930,7 @@ class LLMProvider(ABC):
         credential_helper: Optional[str] = None,
         base_env: Optional[Mapping[str, str]] = None,
         anchor: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> Dict[str, str]:
         """The full env delta a spawn applies: the §2.2 git block, then the adapter's.
 
@@ -1279,6 +2943,15 @@ class LLMProvider(ABC):
 
         ``profile`` is what scopes the credential-helper wipe, and
         ``agent-write`` must keep resolving to *no* wipe — see :func:`git_env`.
+
+        ``cwd`` is the directory the child will really be spawned in (``None``
+        means "inherit this process's"), and the base composition ignores it: it
+        is here because this is the only hook that sees every real spawn, so an
+        adapter whose delta carries a **workspace-scoped side effect** — cursor's
+        snapshot/restore guard, which has to know which ``.workspace-trusted``
+        markers are its own — can be told the workspace instead of guessing
+        ``os.getcwd()``. Both spawn sites pass it; a caller that only wants the
+        env may omit it.
         """
         policy = (
             credential_helper
@@ -1289,13 +2962,150 @@ class LLMProvider(ABC):
         env.update(self.get_env(model) or {})
         return env
 
-    def get_remove_env(self) -> List[str]:
+    def get_remove_env(
+        self,
+        anchor: Optional[str] = None,
+        base_env: Optional[Mapping[str, str]] = None,
+    ) -> List[str]:
         """Return environment variable names to remove for subprocess.
 
         Override this method if the provider needs certain env vars stripped
         from the inherited environment (e.g., to avoid nested-session guards).
 
+        Both parameters are the dispatch's own context, supplied by
+        :func:`build_child_env`, and both are **optional in every direction**:
+        an override whose list is static may keep the zero-parameter signature
+        (:func:`_provider_removals` passes each keyword only to a hook that
+        declares it), and a caller with no dispatch in hand may omit them, which
+        is what a bare ``provider.get_remove_env()`` means.
+
+        Args:
+            anchor: The plan/run anchor this dispatch resolved against, so an
+                override reading `providers.<name>.*` policy resolves it against
+                the **requested project** rather than the process CWD.
+            base_env: The environment the child will inherit, so an override
+                deciding by presence judges the composed source rather than
+                ``os.environ``. ``None`` means ``os.environ``.
+
         Returns:
             A list of environment variable names to remove. Empty by default.
         """
         return []
+
+    # ── M10 (§5.1) — the typed status that sits beside is_available() ────────
+
+    def describe_availability(
+        self,
+        *,
+        auth: Optional[bool] = None,
+        version: Optional[str] = None,
+    ) -> AvailabilityReport:
+        """Why this runner is or is not usable, as a typed state (§5.1).
+
+        **This does not replace :meth:`is_available`, and it does not widen it.**
+        ``is_available()`` keeps its ``-> bool`` signature, its name and its
+        meaning: it is the dispatch gate, it stays binary-only, and every
+        existing ``if provider.is_available():`` behaves exactly as it did. This
+        method is the *sibling* that can say **why**, for the surfaces that
+        render a sentence to a human rather than branch on a yes/no.
+
+        The two can never drift, because the first thing done here is to ask
+        ``is_available()`` and return :attr:`Availability.BINARY_MISSING` when —
+        and only when — it says no. That makes the compatibility identity
+
+            ``self.is_available() == self.describe_availability().launchable``
+
+        true *by construction* for every adapter in the registry, including ones
+        that do not exist yet, and ``tests/test_availability.py`` asserts it
+        parametrized over the live registry rather than over a name list.
+
+        **It never spawns a child.** The probes this reads (``auth_check``,
+        ``version_cmd``) are run once per distinct runner per run by the
+        executor's preflight, which caches them; re-running them from inside a
+        picker loop would turn a `shutil.which` into a fan-out of subprocesses.
+        So evidence is *handed in*, and both parameters default to "nothing was
+        probed".
+
+        **Implemented once, here.** No adapter is required to override it; the
+        seventeen subclasses gain nothing to implement. An override that changes
+        the ``BINARY_MISSING`` leg breaks the identity above and the test says so.
+
+        Args:
+            auth: exactly what :meth:`classify_auth_probe` returned for this
+                runner's ``auth_check`` — ``True`` clean, ``False`` a recognised
+                login notice, ``None`` inconclusive — or ``None`` when no probe
+                was run or the adapter declares none. The two ``None`` readings
+                deliberately collapse: "the probe could not tell" and "there is
+                no probe" are the same amount of evidence, which is none.
+            version: exactly what :meth:`parse_version` recovered, or ``None`` /
+                ``"unknown"`` when the version was not read. Only its leading
+                dotted-numeric token is used, for the comparison *and* for the
+                sentence (:func:`_version_token`), so trailing build noise is
+                tolerated and nothing else from this string can reach a stored
+                ``detail``.
+
+        Returns:
+            An :class:`AvailabilityReport`. Its ``detail`` is built only from
+            declared adapter data, never from probe output.
+
+        The order of the legs below is the order the preflight applies its own
+        refusals (version before auth), so a report and the refusal a run would
+        actually hit cannot name different problems for the same runner.
+
+        ``READY`` requires a **positive** verdict and is never inferred from
+        silence: an adapter that declares no auth probe reports ``UNKNOWN``,
+        never ``READY`` and never ``NEEDS_AUTH``. That is the fail-open posture
+        held *by construction* rather than by convention.
+
+        **cursor-agent was that row and is not any more.** It declared neither
+        ``auth_check`` nor ``version_cmd`` when this method was written; M13
+        shipped its real ``cursor-agent status --format json`` probe and M14 its
+        ``cursor-agent --version``, so it now declares **both** and reports a
+        verdict like every other row. Deleting either declaration to "fix" a
+        cursor report would put it back to a permanent ``UNKNOWN`` — the probes
+        are what upgrade that row, and a default never can.
+        """
+        name = self.name
+        if not self.is_available():
+            return AvailabilityReport(
+                Availability.BINARY_MISSING,
+                f"{name}: the CLI is not on PATH.",
+            )
+
+        # Only the numeric token survives into the comparison and the sentence —
+        # see :func:`_version_token`. ``"unknown"`` carries no token, so the
+        # executor's own "version not read" value falls out here for free.
+        read = _version_token(version or "")
+        minimum = (self.min_version or "").strip()
+        if read and minimum and _version_below(read, minimum):
+            return AvailabilityReport(
+                Availability.VERSION_TOO_LOW,
+                f"{name} {read} is older than the {minimum} this release parses; "
+                f"upgrade {name} to >= {minimum}.",
+            )
+
+        if auth is False:
+            login = (self.login_cmd or "").strip()
+            fix = f" Fix: run `{login}`." if login else ""
+            return AvailabilityReport(
+                Availability.NEEDS_AUTH,
+                f"{name} is installed but its auth probe recognised a login "
+                f"notice.{fix}",
+            )
+        if auth is True:
+            return AvailabilityReport(
+                Availability.READY,
+                f"{name} is installed and its auth probe came back clean.",
+            )
+
+        probe = " ".join(self.auth_check) if self.auth_check else ""
+        why = (
+            f"`{probe}` was inconclusive"
+            if probe
+            else f"{name} declares no auth probe"
+        )
+        return AvailabilityReport(
+            Availability.UNKNOWN,
+            f"{name} is installed; {why}, so whether it is logged in could not "
+            f"be determined.",
+        )

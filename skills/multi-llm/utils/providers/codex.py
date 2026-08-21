@@ -10,8 +10,10 @@ from .base import (
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
     USAGE_FULL,
+    REASONING_LADDER,
     InternalRetryEnvelope,
     LLMProvider,
+    ReasoningLadder,
     StructuredOutputUnavailable,
     StructuredSchema,
     split_reasoning_effort,
@@ -30,18 +32,71 @@ from .base import (
 # `none`/`minimal` stay in the set because the CLI takes them on the wire, but
 # no catalog entry advertises them: they may be passed through when a user asks
 # for one, never chosen by a default or a rung-down.
-REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-
-# Inbound-only aliases: accepted on a model spec, rewritten before argv is built,
-# and never emitted. codex takes `ultra` as an input alias and normalizes it down
-# to `max` client-side; the harness does that rewrite itself so the emitted value
-# is always a name this adapter states, and codex's own normalization becomes an
-# unused backstop rather than a dependency. (Muse is the mirror case: it has no
-# `max` and renders the same pair in the opposite direction.)
-EFFORT_ALIASES = {"ultra": "max"}
+#
+# codex is the one adapter that takes the ladder whole — all seven rungs, under
+# their canonical names — plus one inbound-only alias below.
+EFFORT_LADDER = ReasoningLadder(
+    provider="codex",
+    rungs=REASONING_LADDER,
+    # Inbound-only alias: accepted on a model spec, rewritten before argv is
+    # built, and never emitted. codex takes `ultra` as an input alias and
+    # normalizes it down to `max` client-side; the harness does that rewrite
+    # itself so the emitted value is always a name this adapter states, and
+    # codex's own normalization becomes an unused backstop rather than a
+    # dependency. (Muse is the mirror case: it has no `max` and renders the same
+    # pair in the opposite direction.)
+    inbound_aliases=(("ultra", "max"),),
+)
+REASONING_EFFORTS = EFFORT_LADDER.accepted
+EFFORT_ALIASES = EFFORT_LADDER.aliases
 
 #: What a model spec may CARRY, as opposed to what argv may show.
-_ACCEPTED_EFFORTS = REASONING_EFFORTS | set(EFFORT_ALIASES)
+_ACCEPTED_EFFORTS = EFFORT_LADDER.accepted_inbound
+
+#: The codex sandbox policy each invocation profile runs under — the one place
+#: in this adapter a `--sandbox` value is spelled (M5).
+#:
+#: Before this table the same three policies were stated three unconnected ways:
+#: a literal inside `_BASE_ARGV` for `generate`, an *implicit* re-use of that
+#: literal by `build_agent_command`'s `agent-write` leg (which simply returned
+#: `build_command`), and a second literal in its `agent-readonly` leg's
+#: positional rewrite. Nothing tied them together, so editing the `generate`
+#: default silently edited BOTH agent profiles: agent-write inherits it and the
+#: readonly rewrite degenerates into a no-op, which makes agent-write and
+#: agent-readonly byte-identical while `supports_file_edits` stays `True` —
+#: nothing refuses the dispatch, so every write batch would run, move zero bytes
+#: and be recorded as a D3g "clean failure". Each profile now names its own
+#: policy here, so a change to one row cannot travel to another.
+#:
+#: The values are codex's own documented sandbox policies (`codex exec --help`,
+#: verified against codex-cli 0.146.0) rather than anything this repo enforces
+#: after the fact, which is what makes `agent-readonly` a real denial mechanism
+#: and `agent-write` a real (cwd-rooted) boundary rather than a bypass.
+_SANDBOX_BY_PROFILE = {
+    PROFILE_GENERATE: "workspace-write",
+    PROFILE_AGENT_WRITE: "workspace-write",
+    PROFILE_AGENT_READONLY: "read-only",
+}
+
+
+def _sandbox_for(profile: str) -> str:
+    """The `--sandbox` value codex runs ``profile`` under (M5).
+
+    Unknown profiles do not reach here: :meth:`CodexProvider.build_agent_command`
+    hands anything outside :attr:`~CodexProvider.agent_profiles` to the base
+    class, which raises ``ProfileUnsupported`` naming the adapter and the
+    declared set. The raise below is a structural backstop for a *future* call
+    site rather than a reachable path — what it rules out is this function ever
+    answering an unrecognised profile with a default sandbox.
+    """
+    try:
+        return _SANDBOX_BY_PROFILE[profile]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"codex has no sandbox policy for profile {profile!r} "
+            f"(declared: {', '.join(_SANDBOX_BY_PROFILE)})"
+        ) from None
+
 
 #: The invariant head of every `codex exec` this adapter builds.
 #:
@@ -49,7 +104,11 @@ _ACCEPTED_EFFORTS = REASONING_EFFORTS | set(EFFORT_ALIASES)
 #: no version gate, no floor raise (M2). Both were re-verified functionally, not
 #: merely in help text, at the declared `min_version` 0.144.0 as well as at
 #: 0.146.0, so there is no release in the supported range that would need gating
-#: and a runtime probe would only add a failure mode.
+#: and a runtime probe would only add a failure mode. That claim is no longer
+#: only prose: M14 turned it into the declaration
+#: `CodexProvider.flags_verified_at_floor`, which the shared gate reads, so
+#: "exempt" is a *checked* statement about these flags rather than a paragraph
+#: beside them.
 #:
 #: * `--ephemeral` suppresses the rollout file every call otherwise writes into
 #:   `$CODEX_HOME/sessions`. multi-llm never resumes one, and a four-model,
@@ -68,17 +127,24 @@ _ACCEPTED_EFFORTS = REASONING_EFFORTS | set(EFFORT_ALIASES)
 #: valueless flag in final position would take the prompt as its value, and
 #: `build_command_for_transport`'s stdin leg (which drops `cmd[-1]`) would then
 #: drop the wrong element. Keeping them inside this head makes that structural.
+#:
+#: The sandbox value is `_sandbox_for(PROFILE_GENERATE)` rather than a literal:
+#: this head is what `build_command` — the `generate` path — renders, so this is
+#: that profile's call site into `_SANDBOX_BY_PROFILE` (M5). `--sandbox` keeps
+#: its fixed offset either way, which is what the agent legs' positional rewrite
+#: relies on.
 _BASE_ARGV = (
-    "codex", "exec", "--sandbox", "workspace-write", "--json",
+    "codex", "exec", "--sandbox", _sandbox_for(PROFILE_GENERATE), "--json",
     "--ephemeral", "--skip-git-repo-check",
 )
 
 #: §4.2's contract asymmetry, encoded from day one: claude takes the schema
-#: **inline**, codex takes a **file path**. No §5.4.1 gate — this is the
+#: **inline**, codex takes a **file path**. No §5.4.1 probe — this is the
 #: exemption, not an omission: `--output-schema <FILE>` is documented by
 #: `codex exec --help` at the declared floor 0.144.0 and was re-verified
 #: functionally, which is exactly §5.4.1's "verified at the adapter's declared
-#: min_version" clause (the same reason `--ephemeral` carries none).
+#: min_version" clause (the same reason `--ephemeral` carries none). It is
+#: declared as such in `flags_verified_at_floor` below.
 OUTPUT_SCHEMA_FLAG = "--output-schema"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,8 +219,29 @@ class CodexProvider(LLMProvider):
     auth_check = ("codex", "login", "status")
     login_cmd = "codex login"
     version_cmd = ("codex", "--version")
+    # M14/§5.4 — the floor names the FEATURE, not a bare number: 0.144.0 is the
+    # oldest build measured to emit the `item.completed`/`agent_message` JSONL
+    # shape `parse_output` reads AND to accept the three flags below at the same
+    # time. Both halves matter — a build that answers prompts but streams the
+    # older event names produces a clean run this adapter cannot parse.
     min_version = "0.144.0"
+    # No ceiling: no codex release has been measured to break this parser, and a
+    # guessed `max_version_exclusive` would refuse runs nobody showed to be
+    # broken. `verified_version` carries the "newer than the capture" *warning*,
+    # which is the honest posture for an unmeasured future build.
     verified_version = "0.146.0"
+
+    # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
+    # FUNCTIONALLY (not merely found in help text) at the declared floor above
+    # as well as at 0.146.0, which is the one clause that lets a flag ship with
+    # no runtime gate: there is no release in the supported range that would
+    # need one, and a probe would only add a failure mode. See `_BASE_ARGV` for
+    # what each one buys and how it was measured.
+    flags_verified_at_floor = (
+        "--ephemeral",
+        "--skip-git-repo-check",
+        OUTPUT_SCHEMA_FLAG,
+    )
 
     # §7.2 — the per-adapter pattern overrides. Before this, *zero* adapters
     # extended the base English lists, including the four with structured error
@@ -315,12 +402,18 @@ class CodexProvider(LLMProvider):
     ) -> List[str]:
         """Build ``codex exec`` under an explicit sandbox policy (D3e).
 
-        ``agent-readonly`` swaps ``--sandbox workspace-write`` (what the
-        ``generate`` path hardcodes) for ``--sandbox read-only``: codex refuses
+        Both profiles start from :meth:`build_command` and then point the
+        ``--sandbox`` slot at their **own** row of ``_SANDBOX_BY_PROFILE`` (M5).
+        Neither leg inherits the other's policy by accident, and neither restates
+        a policy string of its own — which is what makes the two profiles argv-
+        distinguishable by construction rather than by the coincidence that they
+        happen to have been written with different literals.
+
+        ``agent-readonly`` renders ``--sandbox read-only``: codex refuses
         model-generated writes itself, so a prompt-injected validator cannot edit
         the repository while pretending to score suggestions.
 
-        ``agent-write`` keeps ``--sandbox workspace-write`` — codex's own
+        ``agent-write`` renders ``--sandbox workspace-write`` — codex's own
         documented write policy, rooted at the process ``cwd``, which the executor
         pins to the resolved repo root (D3h). It is deliberately **not**
         ``--dangerously-bypass-approvals-and-sandbox`` (nor the older
@@ -329,28 +422,30 @@ class CodexProvider(LLMProvider):
         boundary that makes the profile eligible. Network access is left at
         codex's own workspace-write default rather than being widened here.
         """
-        if profile == PROFILE_AGENT_WRITE:
-            # Identical to `build_command`, which already names the sandbox
-            # explicitly: codex's no-flag default is trust-dependent, so the flag
-            # is the policy statement, and restating it would be the only change.
-            return self.build_command(
-                prompt, model, timeout_s=timeout_s, schema=schema
-            )
-        if profile != PROFILE_AGENT_READONLY:
+        if profile not in (PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE):
             return super().build_agent_command(
                 prompt, model, profile, timeout_s=timeout_s, schema=schema
             )
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
-        # Rewrite the sandbox *value* by position — the element right after the
-        # first `--sandbox` — never by sweeping argv for "workspace-write". The
-        # prompt is the final element and a model string is arbitrary text, so a
-        # value sweep would silently rewrite either one if it happened to equal
-        # "workspace-write", leaving a stray "read-only" positional that codex
-        # would take as the prompt (and that
-        # `base.build_agent_command_for_transport` could no longer recognise at
-        # argv[-1]).
+        return self._apply_sandbox(cmd, profile)
+
+    @staticmethod
+    def _apply_sandbox(cmd: List[str], profile: str) -> List[str]:
+        """Point ``cmd``'s ``--sandbox`` value at ``profile``'s policy (M5).
+
+        The rewrite is *positional* — the element right after the first
+        ``--sandbox`` — never a sweep of argv for the outgoing value. The prompt
+        is the final element and a model string is arbitrary text, so a value
+        sweep would silently rewrite either one if it happened to equal
+        ``workspace-write``, leaving a stray ``read-only`` positional that codex
+        would take as the prompt (and that
+        ``base.build_agent_command_for_transport`` could no longer recognise at
+        ``argv[-1]``). ``cmd`` is mutated in place and returned; every caller
+        hands over a list :meth:`build_command` just built, so nothing shared is
+        touched.
+        """
         sandbox_at = cmd.index("--sandbox")
-        cmd[sandbox_at + 1] = "read-only"
+        cmd[sandbox_at + 1] = _sandbox_for(profile)
         return cmd
 
     def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
