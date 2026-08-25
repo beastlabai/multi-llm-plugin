@@ -1054,6 +1054,69 @@ hosts:
     # tokens would downgrade `invoke_provenance: verified` to a guess in the one
     # lane whose whole value is that its cells were observed. If the host lane
     # is re-run for another reason, adding `--ephemeral` here is a free tidy-up.
+    # ----------------------------------------------------------------------- #
+    # THE DOCUMENTED INVOCATION — what README.md and docs/hosts.md tell a reader
+    # to type after `install-host`, driven by `--documented-invocation` at
+    # `--creds none` and graded by tests/test_container_documented_invocation.py.
+    #
+    # This is NOT `invoke_argv`. That cell is how the RIG launches a headless
+    # turn, and its `prompt_template` ("Use the multi-llm skill with exactly
+    # these arguments: …") proves the writer — the shim landed somewhere the host
+    # reads and an argument reaches the dispatcher. It says nothing about the
+    # published spelling, because nothing had ever typed it.
+    # ----------------------------------------------------------------------- #
+    documented_invocation:
+      surface: tui
+      # The published string, with `{plan}` substituted per run by a unique
+      # marker so a fact can never match stale text. Copied from README.md's
+      # "invoke it exactly as in Claude Code, minus the plugin namespace" block
+      # and from docs/hosts.md's per-host quickstart, which both spell it
+      # `/multi-llm <the same arguments the Claude Code skill takes>`.
+      typed: "/multi-llm --review-plan {plan}"
+      launch_argv: ["codex", "--model", "<stub-model>"]
+      stub_model: "stub-model"
+      ready: 'OpenAI Codex \(v'
+      ready_timeout_s: 120
+      settle_s: 3.0
+      wall_clock_s: 240
+      refusal: "Unrecognized command '/multi-llm'"
+      # MEASURED 2026-08-24, codex-cli 0.146.0, and it is a NEGATIVE result:
+      # codex does not accept the documented spelling on either surface.
+      #
+      #   * TUI. Typing `/multi-llm --review-plan plans/<marker>.md` into a fresh
+      #     session and pressing Enter prints
+      #         • Unrecognized command '/multi-llm'. Type "/" for a list of
+      #           supported commands.
+      #     and sends NOTHING: zero requests reached the stub. The `/` popup
+      #     lists /model, /ide, /permissions, /keymap, /vim, /experimental,
+      #     /approve, /memories … and no skill; typing `/multi` offers no
+      #     completion.
+      #   * The deprecated `install_paths.legacy` location does not rescue it: a
+      #     file at `$CODEX_HOME/prompts/zzprobe.md` gets the same
+      #     "Unrecognized command '/zzprobe'" on this version, so custom prompts
+      #     are no longer a slash surface either.
+      #   * Headless. `codex exec "/multi-llm --review-plan plans/<marker>.md"`
+      #     exits 0 and sends the line VERBATIM as the user message — no
+      #     expansion, no shim text, `{SKILL_DIR}` never involved.
+      #
+      # WHAT CODEX DOES DO, measured on the same run: it enumerates the installed
+      # skill and advertises it to the model inside `<skills_instructions>` —
+      #   - multi-llm: Orchestrate plan reviews, task generation, implementation
+      #     and code reviews … (file: $CODEX_HOME/skills/multi-llm/SKILL.md)
+      # — so the skill is discovered by NAME and reached by the model deciding to
+      # read that file, which is what this lane's `prompt_template` asks for and
+      # what the README should describe. A codex skill is a model-invoked
+      # instruction source, not a command the composer resolves.
+      resolves: false
+      alternative: "Use the multi-llm skill with exactly these arguments: <args>"
+      # What counts as a page having been CORRECTED, so the guard grades the
+      # substance rather than one author's sentence. Any one of these phrases,
+      # anywhere in README.md / docs/hosts.md, says the thing a reader needs:
+      # that `/multi-llm` is not what this host takes. Deliberately loose — the
+      # wording belongs to whoever owns those files, and a guard that pinned a
+      # sentence would be the hand-maintenance failure D4 refuses.
+      doc_qualifier: "not a (?:codex )?slash command|model-invoked|Unrecognized command"
+      provenance: verified
     invoke_argv: ["codex", "exec", "--json", "--sandbox", "danger-full-access",
                   "--model", "<model>", "<prompt>"]
     invoke_provenance: verified
@@ -1453,6 +1516,40 @@ hosts:
         *skills*, our shim installs as a *command*, and it happily returns exit 0
         listing only the built-in `customize-opencode` — a green command that
         proves nothing.
+    # ----------------------------------------------------------------------- #
+    # THE DOCUMENTED INVOCATION — see the codex entry's header for why this is a
+    # different question from `invoke_argv`.
+    # ----------------------------------------------------------------------- #
+    documented_invocation:
+      surface: tui
+      typed: "/multi-llm --review-plan {plan}"
+      launch_argv: ["opencode", "--model", "<stub-model>"]
+      stub_model: "stub/stub-model"
+      # The composer's status bar, which is painted once the TUI is up. Chosen
+      # over the banner because opencode repaints the whole screen and the banner
+      # scrolls; this line does not.
+      ready: 'ctrl\+p commands'
+      ready_timeout_s: 120
+      settle_s: 3.0
+      submit_gap_s: 2.0
+      wall_clock_s: 300
+      refusal: null
+      # MEASURED 2026-08-24, opencode 1.18.18: the documented spelling WORKS in a
+      # fresh TUI session. Typing `/multi-llm --review-plan plans/<marker>.md`
+      # expands the installed command into the turn — the prompt the host sent
+      # carried the shim's own title, its dispatcher block with `{SKILL_DIR}`
+      # already substituted to the absolute skill path, `--host opencode --yes
+      # --exec-subagents`, and `--review-plan plans/<marker>.md` still adjacent.
+      #
+      # HEADLESS IS A DIFFERENT ANSWER, and the README already half-says so.
+      # `opencode run -- "/multi-llm --review-plan plans/<marker>.md"` does NOT
+      # expand: the line goes to the model as literal text. The headless form is
+      # `opencode run --command multi-llm -- "<args>"` (capabilities.yaml's
+      # `headless_invocation`), whose mandatory `--` the README documents; the
+      # part it does not say is that `--command` is what performs the resolution,
+      # not the separator.
+      resolves: true
+      provenance: verified
     invoke_argv: ["opencode", "run", "--command", "multi-llm", "--format", "json",
                   "--print-logs", "--log-level", "ERROR", "--model",
                   "openrouter/<model>", "--", "<args>"]

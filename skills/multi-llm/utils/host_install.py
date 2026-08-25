@@ -650,7 +650,7 @@ ROW_NAMES: Dict[int, str] = {
 
 #: Windows needs Git Bash: every shim we write is a POSIX-shell command block, so
 #: a Windows host without it would get a shim it cannot run. Same prerequisite the
-#: README and ``references/uv-check.md`` state; no second detector.
+#: the README and ``references/uv-check.md`` state; no second detector.
 GIT_BASH_MISSING = (
     "Git for Windows (Git Bash) is required on Windows: every command in a "
     "rendered shim is POSIX shell, and there is no PowerShell instruction path. "
@@ -774,9 +774,9 @@ class CheckResult:
 def repair_line(host_id: str, base: Optional[str] = None) -> str:
     """The one string a stale shim is repaired with, everywhere it is printed.
 
-    The same string D1c's moved-skill-dir message and the README quickstart print:
-    the instruction a user sees and the command that repairs are never two
-    different things.
+    The same string D1c's moved-skill-dir message and the `docs/hosts.md`
+    quickstart print: the instruction a user sees and the command that repairs
+    are never two different things.
     """
     prefix = dispatcher_prefix(Path(str(base)) if base else None)
     return f"{prefix} install-host {host_id}"

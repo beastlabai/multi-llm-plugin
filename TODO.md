@@ -1,6 +1,6 @@
 # TODO
 
-- Port plugin to other code harnesses (Codex, OpenCode, etc.) — currently tailored to Claude Code only.
+- Host multi-llm in more code harnesses — it ships as a Claude Code plugin and already runs unchanged inside Codex and OpenCode, where `install-host <host>` writes the entry shim (see [docs/hosts.md](docs/hosts.md)). Remaining work is adding further hosts: an entry in `skills/multi-llm/hosts/capabilities.yaml` plus a shim template per harness.
 
 - Improve LLM prompts for better suggestions and fixes. Also, customize prompt wording per code harness, since some harnesses require instructions to be formulated in a specific way to get useful output.
 

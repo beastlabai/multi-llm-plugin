@@ -259,41 +259,45 @@ class TestDeclaredPromptIndex:
 
 
 class TestDocumentedEndpointRecipesStillWork:
-    """The README's endpoint recipes (GLM / Z.ai) cannot rot silently.
+    """The documented endpoint recipes (GLM / Z.ai) cannot rot silently.
 
     §5 of `plans/harness-expansion.md` ships those recipes as **documentation
     only** — there is no `env:` config key and no code path that validates them
     (§5.1: a key the base does not declare merges and is then ignored, so a
     commented example would fail silently and send the run to Anthropic on the
     user's own account). The whole mechanism is that nothing in the plugin
-    strips or overwrites the variables the README tells users to export.
+    strips or overwrites the variables the recipes tell users to export.
 
     That is exactly one assumption, and it is one edit away from being false:
     the day someone adds `ANTHROPIC_BASE_URL` to a strip list, every documented
     recipe stops working with nothing to read. So the guard reads the variable
-    names **out of the README itself** rather than duplicating a list nobody
-    would maintain — a recipe that gains a variable gains its assertion for
-    free, and a recipe that loses one loses it.
+    names **out of the recipe document itself** (`DOC` below) rather than
+    duplicating a list nobody would maintain — a recipe that gains a variable
+    gains its assertion for free, and a recipe that loses one loses it.
     """
 
     from pathlib import Path as _Path
 
     REPO_ROOT = _Path(__file__).resolve().parents[3]
-    HEADING = "### Pointing a provider CLI at a different endpoint"
+    #: The recipes moved out of the README when it was trimmed to a front page.
+    #: The guard follows them rather than being deleted — that is what the
+    #: assertion below says in words.
+    DOC = "docs/providers.md"
+    HEADING = "## Pointing a provider CLI at a different endpoint"
 
-    #: The two names the README explicitly tells users NOT to build a recipe on,
+    #: The two names `DOC` explicitly tells users NOT to build a recipe on,
     #: because `detach._STRIPPED_ENV` deletes them from every detached run. This
     #: guard runs in the opposite direction from the one below: these MUST stay
-    #: stripped, or the README's warning is the thing that has gone stale.
+    #: stripped, or the documented warning is the thing that has gone stale.
     DOCUMENTED_AS_STRIPPED = ("ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
 
     def _subsection(self) -> str:
         import re
 
-        text = (self.REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        text = (self.REPO_ROOT / self.DOC).read_text(encoding="utf-8")
         start = text.find(self.HEADING)
         assert start != -1, (
-            f"README.md no longer contains {self.HEADING!r}. The endpoint recipes "
+            f"{self.DOC} no longer contains {self.HEADING!r}. The endpoint recipes "
             f"are a shipped deliverable; if the heading moved, move this guard "
             f"with it rather than deleting it."
         )
@@ -325,7 +329,7 @@ class TestDocumentedEndpointRecipesStillWork:
 
         offenders = sorted(self._exported_names() & set(detach._STRIPPED_ENV))
         assert not offenders, (
-            f"README's endpoint recipes export {offenders}, which "
+            f"{self.DOC}'s endpoint recipes export {offenders}, which "
             f"detach._STRIPPED_ENV deletes — the recipes would work "
             f"interactively and silently fall back to the vendor default under "
             f"--detach."
@@ -337,7 +341,7 @@ class TestDocumentedEndpointRecipesStillWork:
         removed = set(ClaudeCodeProvider().get_remove_env())
         offenders = sorted(self._exported_names() & removed)
         assert not offenders, (
-            f"README's endpoint recipes export {offenders}, which "
+            f"{self.DOC}'s endpoint recipes export {offenders}, which "
             f"ClaudeCodeProvider.get_remove_env() deletes from the child env — "
             f"the documented recipe cannot reach the CLI."
         )
@@ -348,7 +352,7 @@ class TestDocumentedEndpointRecipesStillWork:
         from utils import detach
 
         assert name in detach._STRIPPED_ENV, (
-            f"README tells users never to pin models with {name} because a "
+            f"{self.DOC} tells users never to pin models with {name} because a "
             f"detached run strips it. It is no longer stripped, so either the "
             f"warning or this guard is now wrong."
         )

@@ -19,7 +19,7 @@ non-mapping provider value is restored from base when it shadows a known provide
 
 List values *replace* wholesale on merge; only nested dicts deep-merge. A blank
 (``None``) override value is skipped (keeps base); an explicit empty list ``[]``
-is a deliberate wipe-out. See the per-project override docs in README.md.
+is a deliberate wipe-out. See the per-project override docs in docs/configuration.md.
 """
 import copy
 import os

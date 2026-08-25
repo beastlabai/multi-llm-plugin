@@ -43,6 +43,21 @@ _log_path: Path | None = None
 _scenario_path: Path | None = None
 _resolver = None
 
+#: `[(fact_name, compiled_regex)]` — the OPT-IN prompt-fact probe (`--facts`).
+#:
+#: The log records a prompt's sha256 and byte length, never its body, and that
+#: rule is not relaxed here: a fact is a *boolean over a pattern the rig itself
+#: wrote*, so what lands in the log is a list of the rig's own fact names and
+#: nothing the model was sent. It exists because one question cannot be answered
+#: from a digest — *did the host expand its own command shim into the prompt, and
+#: did the user's argument survive its parser* — and the alternative (dumping the
+#: request body) would put tens of KB of third-party text into an artifact this
+#: repo publishes.
+#:
+#: Absent `--facts` the log shape is byte-identical to what it always was: the
+#: key is written only when at least one pattern is configured.
+_facts: list[tuple[str, "re.Pattern[str]"]] = []
+
 DEFAULT_ANSWER = "OK"
 
 # Every model id any row may pin, served by the catalogs. A CLI that fetches a
@@ -388,6 +403,9 @@ class Handler(BaseHTTPRequestHandler):
             "unhandled": False, "unmatched": False, "fixture": None,
             "surface": None, "t": round(time.time(), 3),
         }
+        if _facts:
+            # Names only, and only the ones that matched — see `_facts`.
+            entry["facts"] = [name for name, rx in _facts if rx.search(prompt)]
 
         try:
             self._route(method, path, query, body, model, prompt, turn,
@@ -546,12 +564,39 @@ def install_resolver(scenario: Path | None):
     _resolver = _resolve
 
 
+def install_facts(path: Path | None) -> None:
+    """Load the opt-in prompt-fact probe: `{"<fact name>": "<regex>"}`.
+
+    Compiled case-insensitively, to match :meth:`PromptRule.matches`, so a
+    scenario pattern and a fact pattern cannot mean two different things. A
+    pattern spanning lines writes its own `(?s)`.
+
+    An unparseable file or an invalid pattern is fatal rather than ignored: a
+    silently empty probe would report "the host expanded nothing" for every row,
+    which is the one verdict this probe must never fabricate.
+    """
+    global _facts
+    if path is None:
+        return
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not data:
+        raise SystemExit(f"stub: --facts {path} carries no {{name: regex}} map")
+    _facts = [(str(name), re.compile(str(pattern), re.IGNORECASE))
+              for name, pattern in sorted(data.items())]
+    print(f"stub: prompt-fact probe armed with {len(_facts)} pattern(s): "
+          f"{[name for name, _ in _facts]}", flush=True)
+
+
 def main(argv=None) -> int:
     global _log_path, _scenario_path
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--scenario", default=None)
+    parser.add_argument("--facts", default=None,
+                        help="JSON {name: regex}; each request's log entry gains "
+                             "`facts: [name…]` for the patterns that matched its "
+                             "prompt. Names only — never the prompt body.")
     args = parser.parse_args(argv)
 
     _log_path = Path(args.log)
@@ -559,6 +604,7 @@ def main(argv=None) -> int:
     _log_path.touch()
     _scenario_path = Path(args.scenario) if args.scenario else None
     install_resolver(_scenario_path)
+    install_facts(Path(args.facts) if args.facts else None)
 
     # 127.0.0.1 explicitly, never 0.0.0.0: there is no other interface to serve
     # and binding one is how a stub eventually answers something it shouldn't.

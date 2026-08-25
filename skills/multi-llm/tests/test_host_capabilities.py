@@ -336,10 +336,25 @@ class TestConservativeResolution:
     #: output and following `MULTI_LLM_RESULT.next` unprompted — which is the
     #: whole of the `multi_turn` claim. No subagent was dispatched and nothing
     #: was asked, so `subagents` and `ask` stay documented.
+    #:
+    #: codex 0.146.0 and opencode 1.18.18, 2026-08-24, the container
+    #: documented-invocation row (`tests/test_container_documented_invocation.py`,
+    #: `--creds none`): each host's shim was installed into a fresh `$HOME` and the
+    #: published `/multi-llm …` string was typed into a fresh pty session. opencode
+    #: expanded it — the turn it sent carried the shim's own text, `{SKILL_DIR}`
+    #: substituted, the baked `--host … --yes --exec-subagents`, and the mode flag
+    #: still adjacent to its argument. codex refused it — `Unrecognized command
+    #: '/multi-llm'`, zero requests sent — while advertising the same skill to the
+    #: model inside `<skills_instructions>`. That row promotes `invocation` on both
+    #: hosts and nothing else: it graded a command surface, so codex's `shim`,
+    #: `arguments` and `install_paths` stay where they were.
     RECORDED_SMOKES = {
+        "codex": {
+            "invocation",
+        },
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",
-            "headless_invocation", "detach", "multi_turn",
+            "headless_invocation", "detach", "multi_turn", "invocation",
         },
     }
 

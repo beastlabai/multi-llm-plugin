@@ -468,7 +468,7 @@ class TestReferenceShimSpecifics:
         assert "{SKILL_DIR}" not in text.replace("${CLAUDE_SKILL_DIR}", "")
 
     def test_the_shim_carries_no_provider_config_reference_or_summary_prose(self):
-        """What moved out: the README owns configuration, the core owns workflow."""
+        """What moved out: `docs/` owns configuration, the core owns workflow."""
         text = self.SKILL_MD.read_text(encoding="utf-8")
         for gone in ("### providers.yaml Format", "## Critical Rules",
                      "## Summary Format", "### Mode Detection Logic",

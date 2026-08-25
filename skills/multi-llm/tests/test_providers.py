@@ -5848,8 +5848,9 @@ class TestHostCapabilityUsageMatchesTheAdapter:
 
     Nothing reads the YAML value at run time today, which made the drift silent
     rather than harmless — the cell is rendered into
-    `references/host-capabilities.md` and into the repo `README.md`, so it is
-    what a human reads before choosing a runner.
+    `references/host-capabilities.md`, whose per-runner `usage=` line is what a
+    human reads before choosing a runner. (`docs/hosts.md` renders the *default
+    runner* column only; the repo README carries neither.)
     """
 
     @pytest.mark.parametrize(

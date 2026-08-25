@@ -6,8 +6,8 @@
 # plugin (which is global and gets clobbered on update).
 #
 # It lives at:   <git-root>/.multi-llm/providers.yaml
-# Scaffold it:   use the `--init` flag (see README "Per-project configuration"),
-#                or run init_config.py directly.
+# Scaffold it:   use the `--init` flag (see `docs/configuration.md` in the
+#                repository), or run init_config.py directly.
 #
 # ----------------------------------------------------------------------------
 # HOW `--init` BUILDS THIS FILE (auto-detect, zero prompts)
@@ -76,7 +76,8 @@
 #    claude-code at GLM/Z.ai or at OpenRouter) is SHELL configuration this plugin
 #    neither owns nor validates. An `env:` block written here would merge and
 #    then be ignored — it would fail SILENTLY, which is worse than not existing.
-#    The recipes live in README "Pointing a provider CLI at a different endpoint".
+#    The recipes live in `docs/providers.md` in the repository, under "Pointing a
+#    provider CLI at a different endpoint".
 #
 # ----------------------------------------------------------------------------
 # ONE OVERRIDE PER REPO

@@ -24,8 +24,11 @@
 # timeout. Promoting either is a one-line edit here, not a shim rewrite — but only
 # once a smoke run has recorded it.
 #
-# Every cell below is *documentation, not measurement*: nothing here has been run.
-# That is why the conservative resolution is what executes.
+# A cell is `documented` until a recorded run has observed it, and most of them
+# still are — which is why the conservative resolution is what executes. The
+# `verified` cells each name the run that promoted them in a comment beside the
+# entry, and `tests/test_host_capabilities.py`'s smoke ledger fails any promotion
+# that does not.
 
 version: 1
 
@@ -51,6 +54,11 @@ hosts:
       legacy: []
     reload: none
     arguments: placeholder            # $ARGUMENTS / ${CLAUDE_SKILL_DIR}
+    # The plugin's own invocation, namespace included. `documented`, not
+    # `verified`: no row has ever typed it into a Claude Code session — the
+    # container lane drives this host headless with a prompt, exactly as the two
+    # installable hosts' `documented` cells were before 2026-08-24.
+    invocation: "as `/multi-llm:multi-llm <mode-flag> <plan-path> [options]`."
     multi_turn: true
     subagents: native
     ask: structured
@@ -112,6 +120,7 @@ hosts:
       install_paths: documented
       reload: documented
       arguments: verified
+      invocation: documented
       multi_turn: verified
       subagents: verified
       ask: verified
@@ -127,8 +136,18 @@ hosts:
       timeout_override: documented
 
   codex:
-    # Same skills format *on paper* — the claim is a hypothesis, not a premise, so
-    # shim/arguments/install_paths all stay `documented` until the spike runs.
+    # Same skills format, and no longer on paper. The 2026-08-24 container
+    # documented-invocation row installed this shim into a fresh `$HOME` and codex
+    # enumerated it, advertising `multi-llm` to the model inside
+    # `<skills_instructions>` with its `SKILL.md` locator — so the format claim
+    # itself is measured. What the same row measured is the half that claim never
+    # covered, and it is a negative: see `invocation` below. A codex skill is
+    # reached by the MODEL choosing to read it; the composer rejects `/multi-llm`
+    # outright. `invocation` is therefore the one cell promoted to `verified` here.
+    # shim/arguments/install_paths stay `documented`: that row graded the host's
+    # command surface in one scope on one platform, not placeholder substitution
+    # and not the rest of the path matrix, and a promotion may not claim more than
+    # the run behind it.
     shim: {template: hosts/codex/shim.md.tmpl, installed: SKILL.md,
            format: markdown+frontmatter}
     installable: true
@@ -144,6 +163,21 @@ hosts:
       legacy: ["$HOME/.codex/prompts/multi-llm.md"]
     reload: new-session
     arguments: placeholder
+    # MEASURED 2026-08-24, codex-cli 0.146.0, container documented-invocation row,
+    # and it is a NEGATIVE result: typing `/multi-llm --review-plan <plan>` into a
+    # fresh composer prints `Unrecognized command '/multi-llm'` and sends nothing
+    # at all — no request reached the stub. The `/` popup lists no skill, `/multi`
+    # offers no completion, and a file at the deprecated `install_paths.legacy`
+    # prompts location is rejected the same way. Headless, `codex exec "/multi-llm
+    # …"` passes the line through verbatim. The shim IS discovered — codex
+    # advertises it to the model inside `<skills_instructions>` with its `SKILL.md`
+    # locator — so it is model-invoked rather than typed, which is what this
+    # sentence has to say. Read into the generated pages after "Invoke it ".
+    invocation: >-
+      by name rather than as a slash command — `Use the multi-llm skill with
+      exactly these arguments: <the same arguments the Claude Code skill takes>`.
+      Codex installs this shim as a **skill**, which is model-invoked rather than
+      typed: its composer answers `/multi-llm` with `Unrecognized command`.
     multi_turn: true                 # documented, not observed: `codex exec`
                                      # runs a tool loop and `codex exec resume`
                                      # continues the session — either would give
@@ -181,6 +215,7 @@ hosts:
       install_paths: documented
       reload: documented
       arguments: documented
+      invocation: verified
       multi_turn: documented
       subagents: documented
       ask: documented
@@ -221,6 +256,16 @@ hosts:
     # `--` separator is mandatory headless. Harmless in the TUI, where
     # `/multi-llm --ask …` needs no separator.
     headless_invocation: 'opencode run --command multi-llm -- "<args>"'
+    # MEASURED 2026-08-24, opencode 1.18.18, container documented-invocation row:
+    # the published spelling WORKS in a fresh TUI session. Typing
+    # `/multi-llm --review-plan <plan>` expanded the installed command into the
+    # turn the host sent — the shim's own text, its dispatcher block with
+    # `{SKILL_DIR}` already substituted, the baked `--host opencode --yes
+    # --exec-subagents`, and the mode flag still adjacent to its argument. Read
+    # into the generated pages after "Invoke it "; the headless correction above
+    # is rendered separately, because `--command` is what resolves the shim
+    # there, not this spelling.
+    invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`."
     multi_turn: true                 # measured: its agent takes further tool
                                      # turns inside one `opencode run` and acts
                                      # on what they printed — see the promotion
@@ -273,6 +318,7 @@ hosts:
       reload: verified
       arguments: verified
       headless_invocation: verified
+      invocation: verified
       multi_turn: verified
       subagents: documented
       ask: documented
