@@ -1,8 +1,8 @@
 <!-- The section below is GENERATED from skills/multi-llm/hosts/capabilities.yaml
      by skills/multi-llm/hosts/render_capabilities.py, between the two markers.
      Edit the YAML and re-render; CI byte-compares this file, so a hand-edit
-     inside the markers cannot ship. The short version of this page is the
-     README's "Codex and OpenCode" section. -->
+     inside the markers cannot ship. The README points here; it does not keep a
+     second copy of the install recipes. -->
 
 <!-- BEGIN GENERATED: host-install (hosts/render_capabilities.py) -->
 
@@ -15,7 +15,36 @@ multi-llm ships as a Claude Code plugin, and it runs unchanged inside `codex` an
 uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host <host> [--global|--project]
 ```
 
-`SKILL` is either a git checkout of this repository or the plugin install `claude plugin list --json` reports; the README's [Codex and OpenCode](../README.md#codex-and-opencode) block resolves it, with a `jq`-free fallback for machines without a JSON parser.
+`SKILL` is either a git checkout of this repository or the plugin install `claude plugin list --json` reports. Set it once — the first of these three that applies to you, not all three. On Windows the shell must be **Git Bash** (see [Prerequisites](../README.md#prerequisites)):
+
+```bash
+# Set SKILL once - the first of these three that applies to you, not all three.
+
+# 1. You cloned this repository:
+SKILL=<checkout>/skills/multi-llm
+
+# 2. You installed the plugin: ask Claude Code where it put it (needs `jq`). Installs of the
+#    same plugin coexist per project and per version, and versions older than the dispatcher
+#    are still in the cache - so prefer enabled and most-recently-updated, then take the first
+#    that actually carries multi_llm.py:
+SKILL=$(claude plugin list --json \
+  | jq -r 'map(select(.id == "multi-llm@beastlabai")) | sort_by([.enabled, .lastUpdated]) | reverse | .[].installPath' \
+  | while IFS= read -r p; do [ -f "$p/skills/multi-llm/multi_llm.py" ] && { echo "$p/skills/multi-llm"; break; }; done)
+
+# 3. Same, but no `jq` on this machine: glob the cache, whose path changes on every update.
+#    The marketplace segment is pinned to the one `/plugin install` used in the README - change it if
+#    you installed from a fork:
+SKILL=$(dirname "$(ls -t ~/.claude/plugins/cache/beastlabai/multi-llm/*/skills/multi-llm/multi_llm.py | head -1)")
+
+# Then install, gated on SKILL: an unresolved SKILL is empty (2) or the current directory (3),
+# and either would run install-host against the wrong tree.
+if [ -f "$SKILL/multi_llm.py" ]; then
+  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex      # add --project to scope it to one repo
+  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode   # add --check to verify an install
+else
+  echo "no multi-llm skill tree at '$SKILL' - install the plugin, or set SKILL=<checkout>/skills/multi-llm" >&2
+fi
+```
 
 It writes a **rendered copy** — never a symlink or junction, so nothing here needs symlink privileges on Windows — atomically, then verifies what it wrote and rolls back if the verification fails. `--check` re-runs that verification on its own: shim present (every copy found, in the host's discovery order, naming the one that loads), baked skill-dir prefix still current, rendered shape valid, shim generation current, and `uv` plus the host's runner CLI resolvable.
 
@@ -31,6 +60,11 @@ uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex --c
 
 Writes `$HOME/.codex/skills/multi-llm/SKILL.md` (`--project`: `.codex/skills/multi-llm/SKILL.md`), then start a new codex session afterwards (it enumerates its commands/skills at session start). Invoke it by name rather than as a slash command — `Use the multi-llm skill with exactly these arguments: <the same arguments the Claude Code skill takes>`. Codex installs this shim as a **skill**, which is model-invoked rather than typed: its composer answers `/multi-llm` with `Unrecognized command`. Unattended is the default on every host but Claude Code, so `--yes` is baked in.
 
+```text
+Use the multi-llm skill with exactly these arguments: plans/my-feature.md
+Use the multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
+```
+
 **`opencode`**
 
 ```bash
@@ -42,6 +76,19 @@ uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode 
 Writes `$XDG_CONFIG_HOME/opencode/commands/multi-llm.md` (whose `$XDG_CONFIG_HOME` falls back to `~/.config` when unset) (`--project`: `.opencode/commands/multi-llm.md`), then start a new opencode session afterwards (it enumerates its commands/skills at session start). Invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`. Unattended is the default on every host but Claude Code, so `--yes` is baked in.
 
 Headless, the argument list needs the host's own separator: `opencode run --command multi-llm -- "<args>"`.
+
+```text
+/multi-llm plans/my-feature.md
+/multi-llm --review-code plans/my-feature.md
+```
+
+## What differs from Claude Code
+
+Three differences worth knowing on these hosts:
+
+- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. Pass `--interactive` to opt back into a rendered gate.
+- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on `codex` and `opencode:opencode/sonnet` on `opencode` — not a Claude subagent.
+- **Headless `opencode` needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
 
 ## Capability matrix
 

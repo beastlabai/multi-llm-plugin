@@ -12,7 +12,7 @@ Orchestrate **plan reviews, task generation, implementation, and code reviews ac
 
 `multi-llm` fans a single workflow out to several CLI-based LLMs ([Cursor Agent](https://cursor.com/docs/cli/overview), [Gemini CLI](https://geminicli.com/docs/get-started/), [Grok Build](https://docs.x.ai/build), [Codex](https://developers.openai.com/codex/cli), [OpenCode](https://opencode.ai/docs/cli/), [Kilocode](https://kilo.ai/docs/cli), [Cline](https://docs.cline.bot/), [goose](https://block.github.io/goose/), [Aider](https://aider.chat/), [Antigravity CLI](https://antigravity.google/docs/cli/using), [Pi](https://pi.dev/docs/latest/usage), [Muse Code](https://dev.meta.ai/docs/muse-code/extending), [Kimi Code](https://code.kimi.com/docs), [Qwen Code](https://qwenlm.github.io/qwen-code-docs/), [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), [Mistral Vibe](https://docs.mistral.ai/vibe/), and [Claude Code](https://code.claude.com/docs/en/) itself), validates and consolidates their suggestions, and hands the host structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that the host executes through its own tools, so every change stays reviewable.
 
-It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too - `install-host` writes a native entry point into either one: an OpenCode `/multi-llm` command, a Codex skill. See [Codex and OpenCode](#codex-and-opencode).
+It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too - `install-host` writes a native entry point into either one: an OpenCode `/multi-llm` command, a Codex skill. See [docs/hosts.md](docs/hosts.md).
 
 ---
 
@@ -55,62 +55,7 @@ The marketplace cache only refreshes when you explicitly ask it to - `/plugin ma
 
 ### Codex and OpenCode
 
-The workflow is host-neutral, so it is not Claude-Code-only: `install-host` writes a small **entry shim** carrying this skill's path - a native command on OpenCode, a native skill on Codex - into another harness. It needs this skill tree **on disk** to point at, put there either by the `/plugin install` above or by a git checkout of this repository - `SKILL` is whichever of the two you have. Run it from a shell; on Windows that shell must be **Git Bash** (see [Prerequisites](#prerequisites)):
-
-```bash
-# Set SKILL once - the first of these three that applies to you, not all three.
-
-# 1. You cloned this repository:
-SKILL=<checkout>/skills/multi-llm
-
-# 2. You installed the plugin: ask Claude Code where it put it (needs `jq`). Installs of the
-#    same plugin coexist per project and per version, and versions older than the dispatcher
-#    are still in the cache - so prefer enabled and most-recently-updated, then take the first
-#    that actually carries multi_llm.py:
-SKILL=$(claude plugin list --json \
-  | jq -r 'map(select(.id == "multi-llm@beastlabai")) | sort_by([.enabled, .lastUpdated]) | reverse | .[].installPath' \
-  | while IFS= read -r p; do [ -f "$p/skills/multi-llm/multi_llm.py" ] && { echo "$p/skills/multi-llm"; break; }; done)
-
-# 3. Same, but no `jq` on this machine: glob the cache, whose path changes on every update.
-#    The marketplace segment is pinned to the one `/plugin install` used above - change it if
-#    you installed from a fork:
-SKILL=$(dirname "$(ls -t ~/.claude/plugins/cache/beastlabai/multi-llm/*/skills/multi-llm/multi_llm.py | head -1)")
-
-# Then install, gated on SKILL: an unresolved SKILL is empty (2) or the current directory (3),
-# and either would run install-host against the wrong tree.
-if [ -f "$SKILL/multi_llm.py" ]; then
-  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex      # add --project to scope it to one repo
-  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode   # add --check to verify an install
-else
-  echo "no multi-llm skill tree at '$SKILL' - install the plugin, or set SKILL=<checkout>/skills/multi-llm" >&2
-fi
-```
-
-That writes `~/.codex/skills/multi-llm/SKILL.md` and `$XDG_CONFIG_HOME/opencode/commands/multi-llm.md` (whose `$XDG_CONFIG_HOME` falls back to `~/.config` when unset); `--project` puts them in the repository instead, as `.codex/skills/multi-llm/SKILL.md` and `.opencode/commands/multi-llm.md`.
-
-Then **start a new session** in that host - both enumerate their commands and skills at startup. How you invoke it differs, because `install-host` writes two different kinds of artifact:
-
-**OpenCode** gets a *command*, so it is the Claude Code invocation minus the plugin namespace:
-
-```text
-/multi-llm plans/my-feature.md
-/multi-llm --review-code plans/my-feature.md
-```
-
-**Codex** gets a *skill*, and a Codex skill is model-invoked rather than typed: `/multi-llm` is not a slash command there - the composer answers it with `Unrecognized command '/multi-llm'`. Ask for it by name instead, with the same arguments:
-
-```text
-Use the multi-llm skill with exactly these arguments: plans/my-feature.md
-Use the multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
-```
-
-Three differences worth knowing on these hosts:
-
-- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. Pass `--interactive` to opt back into a rendered gate.
-- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on Codex and `opencode:opencode/sonnet` on OpenCode - not a Claude subagent.
-- **Headless OpenCode needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
-
-A plugin update moves the skill directory, which stales every installed shim - `install-host --check --all` reports it and `install-host --all` re-renders. Install paths per scope, the capability matrix and `uninstall-host` are in **[docs/hosts.md](docs/hosts.md)**.
+This plugin also works with **Codex** and **OpenCode**. `install-host` writes a native entry point into either one: an OpenCode `/multi-llm` command, a Codex skill. Install, invocation, and host-specific differences are in **[docs/hosts.md](docs/hosts.md)**.
 
 ### Configure providers (required before first use)
 
@@ -151,7 +96,7 @@ Throughout this README and the linked docs, `{plan}/...` refers to that derived 
 
 ## Modes
 
-Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCode the same command is `/multi-llm`, without the plugin namespace; on Codex the shim installs as a skill, so you ask for it by name instead (see [Codex and OpenCode](#codex-and-opencode)). With no mode flag, `--review-plan` is the default.
+Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCode the same command is `/multi-llm`, without the plugin namespace; on Codex the shim installs as a skill (model-invoked, not a slash command), so you ask for it by name instead (see [docs/hosts.md](docs/hosts.md)). With no mode flag, `--review-plan` is the default.
 
 | Flag | What it does |
 | --- | --- |
@@ -258,7 +203,7 @@ The apply and implement modes accept additional approval flags (`--yes`, `--appr
 
 ### Letting Claude decide ambiguous findings
 
-When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([above](#codex-and-opencode)). Every such prompt also offers a **Let Claude decide** option, per item or for a whole batch, that hands just that judgment to a Claude subagent instead of you.
+When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let Claude decide** option, per item or for a whole batch, that hands just that judgment to a Claude subagent instead of you.
 
 To skip the prompts entirely and have a subagent judge **every** `needs-human-decision` finding up front, pass `--claude-decide` (alias `--let-claude-decide`) - which is what the baked-in `--yes` already does on Codex and OpenCode:
 
