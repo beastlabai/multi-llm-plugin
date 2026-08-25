@@ -37,7 +37,7 @@ import contextlib
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -471,3 +471,169 @@ class TestCodeReviewCopyReadsOneFilePerLogicalModel:
         assert "rename" in err.lower() or "remove" in err.lower()
         # Nothing was aggregated behind the refusal.
         assert not _issues_json_path(plan).exists()
+
+
+# ---------------------------------------------------------------------------
+# The checkpoint the code-review copy reads has to be one review-code writes
+# ---------------------------------------------------------------------------
+#
+# Everything above hands `.status.json` to the reaggregate path ready-made, so it
+# pins how the map is *used* and says nothing about whether the phase that owns
+# the dir ever writes one. `review-code` did not: `code_review_orchestrator.main`
+# crossed its detach boundary straight into the fan-out without the
+# `write_status` the base performs at the same point, so `build_unsanitize_map`
+# read no `models_requested`, returned `{}`, and every group was re-attributed to
+# the sanitized *stem* — `cursor-agent_cursor-grok-4_6-xhigh` for
+# `cursor-agent:cursor-grok-4.6-xhigh`, the colon and the dot gone for good.
+#
+# That is not a cosmetic relabel either. It rewrites `models` and
+# `source_model` in `grouped.json`, which changes the file's bytes, which breaks
+# the `grouped_sha256` binding `--reaggregate` checks against
+# `validation_tasks.json` moments later (`subagent_tasks.check_task_file_inputs`)
+# — so the documented validate-then-reaggregate path refused its own task file
+# with "the inputs it was materialized from have changed".
+#
+# Byte-identity of `grouped.json` across a group → reaggregate round trip is
+# therefore the invariant to hold, and it takes two things, which is why the
+# second test asserts on bytes rather than on the specs it can read back. The
+# recorded canonical specs are one. The other is **key order**: this phase is
+# the only one that stamps *two* attribution fields on a suggestion, and its
+# reaggregate copy used to stamp them `source_model`-then-`model` while its
+# fan-out stamps them `model`-then-`source_model`. `to_dict` carries a
+# suggestion's dict through unreordered and `grouped_sha256` hashes bytes, so
+# with the checkpoint restored and every spec identical the round trip still
+# moved the file. The base fan-out is immune to that half by construction — it
+# sets `source_model` and nothing else, on both sides.
+#
+# These two drive `main()` rather than asserting on the checkpoint write
+# directly: the write has to land *after* the detach boundary (so it never runs
+# in the invoker) and against the phase dir the fan-out actually uses, and only
+# the real entry point can be wrong about either.
+
+
+def _fanout_args(plan, models):
+    """`parse_args` output for a foreground `review-code` run with no validation."""
+    return argparse.Namespace(
+        plan_file=str(plan),
+        models=list(models),
+        interactive=False,
+        quick=False,
+        timeout=None,
+        max_parallel=2,
+        base_ref=None,
+        skip_validation=True,
+        validation_model=None,
+        apply_fixes=False,
+        force=False,
+        rerun_all=False,
+        reaggregate=False,
+        report_style="pr",
+    )
+
+
+def _fanout_state():
+    fake_state = MagicMock()
+    fake_state.get = MagicMock(
+        side_effect=lambda k, default=None: {
+            "tracked_files": [{"path": "src/a.py"}],
+            "head_before_implement": "abc123",
+            "head_at_start": "abc123",
+            "pre_existing_changes": [],
+        }.get(k, default)
+    )
+    fake_state.is_phase_completed = MagicMock(return_value=False)
+    fake_state.state = {"phases_completed": {}}
+    return fake_state
+
+
+def _run_cro_fanout(tmp_path, issues_by_model):
+    """Drive `code_review_orchestrator.main()` with the providers mocked out.
+
+    Only the model invocation and the report renderer are stubbed — the phase
+    dir, `save_model_result`, grouping and `grouped.json` are the real ones, so
+    what lands on disk is what a real fan-out leaves for `--reaggregate` to read.
+    """
+    plan = tmp_path / "auth-feature.md"
+    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+
+    models = list(issues_by_model)
+    results = {m: (True, issues_by_model[m], None) for m in models}
+
+    with patch.object(cro, "parse_args", return_value=_fanout_args(plan, models)), \
+         patch.object(cro, "get_or_create_state", return_value=_fanout_state()), \
+         patch.object(cro, "resolve_models", return_value=models), \
+         patch.object(cro, "is_model_valid", return_value=True), \
+         patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
+         patch.object(cro, "intent_to_add_untracked",
+                      side_effect=lambda files: contextlib.nullcontext()), \
+         patch.object(cro, "run_all_reviews", new=AsyncMock(return_value=results)), \
+         patch.object(cro, "generate_review_report", return_value="# report\n"):
+        asyncio.run(cro.main())
+
+    return plan, cro.get_phase_dir(plan, "code-review")
+
+
+#: Two specs whose sanitized stems are lossy in both of the ways that matter: the
+#: `:` that separates provider from model and the `.` inside a version number.
+_REAL_SPECS = ["claude-code:sonnet-4.6", "cursor-agent:cursor-grok-4.6-xhigh"]
+
+
+class TestReviewCodeWritesTheCheckpointReaggregationReads:
+    def test_the_fanout_records_the_canonical_specs(self, tmp_path):
+        """`.status.json` exists, and it holds specs — not filename stems."""
+        plan, phase_dir = _run_cro_fanout(
+            tmp_path,
+            {
+                _REAL_SPECS[0]: _issues(["Issue A"]),
+                _REAL_SPECS[1]: _issues(["Issue B"]),
+            },
+        )
+
+        status_path = phase_dir / ".status.json"
+        assert status_path.exists(), (
+            "review-code left no checkpoint, so build_unsanitize_map has nothing "
+            "to restore the colon-bearing specs from"
+        )
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        assert status["phase"] == "code-review"
+        assert status["models_requested"] == _REAL_SPECS
+        assert status["models_completed"] == _REAL_SPECS
+
+        # And the map the reaggregate path builds from it actually inverts the
+        # sanitization, which is the whole point of recording them.
+        unsanitize = cro.build_unsanitize_map(str(phase_dir))
+        assert unsanitize == {
+            "claude-code_sonnet-4_6": "claude-code:sonnet-4.6",
+            "cursor-agent_cursor-grok-4_6-xhigh": "cursor-agent:cursor-grok-4.6-xhigh",
+        }
+
+    def test_reaggregating_reproduces_grouped_json_byte_for_byte(self, tmp_path):
+        """The round trip `--reaggregate` promises, on the bytes `grouped_sha256` binds.
+
+        Fails on the missing checkpoint: without it every `models` entry and
+        every `source_model` comes back as the sanitized stem, the file's bytes
+        change, and `check_task_file_inputs` refuses `validation_tasks.json`
+        against a `grouped.json` that reaggregation itself just rewrote.
+        """
+        plan, phase_dir = _run_cro_fanout(
+            tmp_path,
+            {
+                _REAL_SPECS[0]: _issues(["Shared issue", "Only A"]),
+                _REAL_SPECS[1]: _issues(["Shared issue", "Only B"]),
+            },
+        )
+
+        grouped_path = phase_dir / "grouped.json"
+        before = grouped_path.read_bytes()
+
+        _run_cro_reaggregate(plan, phase_dir)
+
+        assert grouped_path.read_bytes() == before, (
+            "reaggregating a review-code phase rewrote grouped.json, so the "
+            "grouped_sha256 recorded in validation_tasks.json no longer matches"
+        )
+
+        payload = json.loads(before.decode("utf-8"))
+        attributed = {m for group in payload["groups"] for m in group["models"]}
+        assert attributed == set(_REAL_SPECS)
+        assert all(":" in spec and "." in spec for spec in attributed)

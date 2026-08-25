@@ -583,12 +583,20 @@ class TestSaveModelResult:
         assert "Timeout exceeded" in content
 
     def test_save_model_result_invalid_json_creates_salvage(self, phase_dir, temp_dir):
-        """Unparseable output creates a salvage file for later recovery."""
+        """Unparseable output creates a salvage file for later recovery.
+
+        The payload is an answer the model really produced and then damaged —
+        a fence around an array truncated mid-object. That is what salvage
+        repairs, and it is the half of this branch that never moved; the case
+        this test used to carry (a bare sentence, with no JSON anywhere in it)
+        is the other half, and it is now
+        ``test_save_model_result_without_any_json_skips_salvage``.
+        """
         ok = save_model_result(
             prefix="test-plan",
             model="opencode:gpt-4",
             success=True,
-            output="This is not JSON at all",
+            output='```json\n[{"title": "Finding 1", "desc": "Descripti',
             error=None,
             out_dir=str(temp_dir),
             phase_dir=phase_dir,
@@ -606,6 +614,40 @@ class TestSaveModelResult:
         assert salvage["model"] == "opencode:gpt-4"
         assert salvage["phase"] == "review_tasks"
         assert "raw_output" in salvage
+
+    def test_save_model_result_without_any_json_skips_salvage(self, phase_dir, temp_dir):
+        """Output with no JSON in it is a failed model, not a salvage request.
+
+        Salvage can only answer such a request with the empty array its prompt
+        falls back to, which reaggregation would then read as a model that
+        reviewed the document and found nothing. The error log is still written
+        — the failure is recorded, just not as a parse failure.
+        """
+        ok = save_model_result(
+            prefix="test-plan",
+            model="opencode:gpt-4",
+            success=True,
+            output="This is not JSON at all",
+            error=None,
+            out_dir=str(temp_dir),
+            phase_dir=phase_dir,
+            phase_name="review_tasks",
+        )
+        assert ok is False
+
+        from utils.json_extractor import sanitize_model_name
+        sanitized = sanitize_model_name("opencode:gpt-4")
+        assert not os.path.isfile(
+            os.path.join(phase_dir, f"salvage_{sanitized}.json")
+        )
+        assert not os.path.isfile(
+            os.path.join(phase_dir, f"salvage_task_{sanitized}.json")
+        )
+
+        error_path = os.path.join(phase_dir, f"error_{sanitized}.log")
+        content = Path(error_path).read_text(encoding="utf-8")
+        assert "No JSON in response" in content
+        assert "This is not JSON at all" in content
 
     def test_save_model_result_normalizes_fields(self, phase_dir, temp_dir):
         """Importance is uppercased and type is lowercased during save."""
