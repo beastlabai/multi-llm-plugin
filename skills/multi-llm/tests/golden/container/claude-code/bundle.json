@@ -41,11 +41,11 @@
   },
   "manifest": {
     "bundle_version": 1,
-    "captured_at": "2026-08-17T09:12:11Z",
+    "captured_at": "2026-08-25T09:25:57Z",
     "cli": "claude-code",
     "image": "mllm-e2e:local",
     "row_id": "chain-claude-code",
-    "run_bundle": "20260817T084716Z"
+    "run_bundle": "20260825T090022Z"
   },
   "markers": [
     "[VALIDATION_BATCHES_PENDING]",
@@ -4545,6 +4545,27 @@
     },
     "code-review/.status.json": {
       "shape": {
+        "error": "<null>",
+        "models_completed": {
+          "<item-types>": [
+            "<str>"
+          ],
+          "<items>": [
+            "<str>"
+          ],
+          "<list>": 1
+        },
+        "models_failed": {},
+        "models_requested": {
+          "<item-types>": [
+            "<str>"
+          ],
+          "<items>": [
+            "<str>"
+          ],
+          "<list>": 1
+        },
+        "phase": "<str>",
         "progress": {
           "subagents": {
             "counts": {
@@ -4565,9 +4586,13 @@
             "total": "<int>"
           }
         },
+        "started_at": "<str>",
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
+        "phase=code-review",
+        "state=models_complete",
         "progress.subagents"
       ]
     },

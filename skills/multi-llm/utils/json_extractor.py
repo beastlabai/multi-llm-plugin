@@ -240,6 +240,77 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     }
 
 
+#: ANSI colour/OSC escapes, removed before anything goes looking for a bracket.
+#: A provider CLI paints its own diagnostics — kilocode's dead-account failure
+#: arrives as ``\x1b[91m\x1b[1mError: \x1b[0mUser not found.`` — and every one of
+#: those ``\x1b[`` sequences is an opening bracket with no JSON behind it. This
+#: is a second copy of the pattern ``providers/cursor_agent`` keeps for reading
+#: *its* human-readable output, and deliberately so: ``json_extractor`` is below
+#: the provider layer and importing upward would invert the dependency.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+#: A JSON structure that was **started**: ``[`` or ``{`` followed by a token
+#: only JSON puts in that position — a string, a nested structure, or an
+#: unquoted key (mechanical damage salvage exists to repair). Truncation is why
+#: balanced matching alone is not enough: ``[{"title": "x"`` never closes, so
+#: :func:`find_json_candidates` cannot see it, and a half-written array is
+#: precisely what salvage is for. Requiring that token is what keeps ``[ERROR]``,
+#: ``[91m`` and ``[docs]`` — brackets from log levels, escapes and prose — out.
+_JSON_STRUCTURE_OPENING = re.compile(r'[\[{]\s*(?:["\[{]|[A-Za-z_][A-Za-z0-9_]*\s*:)')
+
+
+def has_salvageable_json(text: str) -> bool:
+    """True when *text* still holds a model answer a salvage pass could repair.
+
+    Salvage repairs *mechanical* damage to an answer the model did produce —
+    truncation, a markdown fence, prose around the array, a trailing comma. It
+    cannot conjure an answer that was never produced, and its prompt ends "if
+    nothing recoverable is present, print an empty {type}"
+    (``subagent_prompts.build_salvage_prompt``). So dispatching salvage at output
+    with no JSON in it at all buys exactly one thing: an empty array written to
+    that model's result file, where reaggregation reads it as "this model
+    reviewed the diff and found nothing". A hard credential failure
+    (``Error: User not found.`` on a non-zero exit) is that shape, and it is also
+    the case where a ``[SALVAGE_NEEDED]`` marker sends the operator to a JSON
+    repair when the fix is the provider's auth.
+
+    Two ways text qualifies, in order:
+
+    1. **A balanced candidate that parses.** A fenced array, an array with prose
+       either side of it, an object where an array was wanted, or the inner
+       object of an array truncated after it — :func:`find_json_candidates`
+       finds all of them, and parsing is what separates a real structure from
+       ``[ERROR]``.
+    2. **Failing that, a structure that was started.** Clause 1 cannot see a
+       truncated document, because an unclosed bracket is not a candidate.
+
+    The expected type is deliberately not a parameter: a model that wrapped the
+    array in an object (``{"suggestions": [ …``) is the ordinary salvage case,
+    not a second failure mode, so both shapes count.
+
+    Args:
+        text: Raw model output — whichever stream the failure left behind.
+
+    Returns:
+        True when a salvage subagent would have something to work with. False
+        means this is not a parse failure at all, and the caller must fail the
+        model cleanly instead (the D6 row-3 partial-results path already covers
+        a model that produced nothing).
+    """
+    body = _ANSI_ESCAPE.sub("", text or "")
+    if not body.strip():
+        return False
+
+    for candidate in find_json_candidates(body, "both"):
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        return True
+
+    return _JSON_STRUCTURE_OPENING.search(body) is not None
+
+
 def generate_output_path(
     out_dir: Union[str, Path],
     prefix: str,

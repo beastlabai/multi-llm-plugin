@@ -12,13 +12,16 @@ All tests use MULTI_LLM_TEST_FAST_BACKOFF=1 to ensure quick execution
 without real multi-second delays.
 """
 
+import asyncio
 import json
 import os
 import re
+import sys
 import time
 import pytest
 from pathlib import Path
 from typing import Dict, Any, List
+from unittest.mock import patch
 
 from .harness import (
     SkillRunner,
@@ -26,6 +29,11 @@ from .harness import (
     MockProvider,
     AssertionHelpers,
 )
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import code_review_orchestrator as cro
+from utils.review_orchestrator_base import save_model_result as base_save_model_result
 
 
 class TestLLMTimeoutHandled:
@@ -912,3 +920,219 @@ Testing all models failing.
                 f"If successful despite failures, should show warning/error info. "
                 f"Output: {output[:500]}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Salvage repairs a damaged answer; it cannot invent a missing one
+# ---------------------------------------------------------------------------
+
+#: One real `review-code` slot, verbatim — kilocode's own colours, its banner
+#: line, and a four-word account failure on a non-zero exit. Non-empty stderr
+#: with no JSON in it is exactly the combination that used to materialize a
+#: salvage request *and* a salvage task, whose best possible answer is the empty
+#: array `build_salvage_prompt` tells the subagent to fall back to: a model that
+#: never ran, written over `output_path` as one that reviewed the diff and found
+#: nothing, and an operator sent to a JSON repair when the fix is provider auth.
+KILOCODE_AUTH_FAILURE = (
+    "\x1b[0m\n> code · moonshotai/kimi-k3\n\x1b[0m\n"
+    "\x1b[91m\x1b[1mError: \x1b[0mUser not found.\n"
+)
+
+#: The other direction, and the one the gate may never cost us: an answer that
+#: really was produced and then cut off mid-array. Nothing in it balances, so
+#: only "a structure was started" can see it — and it must, because a truncated
+#: array is what salvage exists for.
+TRUNCATED_ARRAY = (
+    '[{"title": "Missing null check", "desc": "user.profile is not guarded", '
+    '"importance": "high", "file": "src/auth.py"}, {"title": "Unbounded ret'
+)
+
+KILOCODE_SPEC = "kilocode:openrouter/moonshotai/kimi-k3:thinking"
+
+
+def _hard_failure(stderr: str) -> Dict[str, Any]:
+    """What `invoke_with_file_output` returns when the CLI exited non-zero."""
+    return {
+        "success": False,
+        "error": "kilocode exited with code 1",
+        "details": {"stderr": stderr},
+        "output_file": "",
+        "data": None,
+    }
+
+
+def _unparseable_reply(raw: str) -> Dict[str, Any]:
+    """...and when it exited 0 but neither channel held a JSON array."""
+    return {
+        "success": True,
+        "data": {"raw": raw},
+        "source": "stdout",
+        "output_file": "",
+        "details": {},
+    }
+
+
+def _plan_file(tmp_path: Path) -> Path:
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("# Plan\n", encoding="utf-8")
+    return plan_path
+
+
+class TestSalvageOnlyWhenThereIsSomethingToSalvage:
+    """Both directions of the gate in front of every `[SALVAGE_NEEDED]` marker.
+
+    A failure with no JSON in it is not a parse failure: the model stays failed
+    and D6 row 3 aggregates the slots that answered. A failure *with* a damaged
+    answer in it routes to salvage exactly as it always did.
+    """
+
+    def test_an_auth_failure_is_a_failed_model_not_a_salvage_request(
+        self, tmp_path, capsys
+    ):
+        """Salvage site A (the non-zero-exit path), on the payload that found it."""
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _hard_failure(KILOCODE_AUTH_FAILURE),
+        ):
+            success, issues, error = asyncio.run(
+                cro.run_single_review(KILOCODE_SPEC, plan_path, tmp_path / "out")
+            )
+
+        assert (success, issues) == (False, None)
+        assert error == "kilocode exited with code 1"
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert "nothing to salvage" in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        # Reported as a failed model, on the same leg as every other dead slot:
+        # an error log, `False` back to main(), and the spec in `failed_models`
+        # that feeds `[PARTIAL_RESULTS: …]`.
+        assert cro.save_model_result(
+            "plan", KILOCODE_SPEC, success, issues, error, phase_dir
+        ) is False
+        error_log = phase_dir / f"error_{cro.sanitize_model_name(KILOCODE_SPEC)}.log"
+        assert error_log.exists()
+        assert "kilocode exited with code 1" in error_log.read_text(encoding="utf-8")
+
+    def test_a_truncated_array_on_the_same_path_still_salvages(
+        self, tmp_path, capsys
+    ):
+        """The regression guard on the gate: genuine salvage is untouched."""
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _hard_failure(TRUNCATED_ARRAY),
+        ):
+            success, _, _ = asyncio.run(
+                cro.run_single_review(KILOCODE_SPEC, plan_path, tmp_path / "out")
+            )
+
+        assert success is False
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        sanitized = cro.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{sanitized}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert request["expected_type"] == "array"
+        assert (phase_dir / f"salvage_task_{sanitized}.json").exists()
+
+    def test_a_reply_with_no_json_in_it_is_not_a_parse_failure(
+        self, tmp_path, capsys
+    ):
+        """Salvage site B: §40's write refusal, which exits 0 and answers in prose."""
+        plan_path = _plan_file(tmp_path)
+        refusal = "I can't write the requested file while Ask mode is active."
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _unparseable_reply(refusal),
+        ):
+            success, issues, error = asyncio.run(
+                cro.run_single_review("cursor-agent:auto", plan_path, tmp_path / "out")
+            )
+
+        assert (success, issues) == (False, None)
+        # The failure names what happened, rather than claiming extraction failed.
+        assert error.startswith("Model produced no JSON output:")
+        assert refusal in error
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+    def test_a_damaged_reply_on_the_same_path_still_salvages(self, tmp_path, capsys):
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _unparseable_reply(
+                f"Here is what I found:\n{TRUNCATED_ARRAY}"
+            ),
+        ):
+            success, _, error = asyncio.run(
+                cro.run_single_review("cursor-agent:auto", plan_path, tmp_path / "out")
+            )
+
+        assert success is False
+        assert error.startswith("Could not extract JSON from response:")
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert (phase_dir / "salvage_cursor-agent_auto.json").exists()
+        assert (phase_dir / "salvage_task_cursor-agent_auto.json").exists()
+
+    def test_the_fan_out_base_holds_the_same_rule(self, tmp_path, capsys):
+        """`review_orchestrator_base.save_model_result` — review-plan/review-tasks."""
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+
+        saved = base_save_model_result(
+            "plan", "gemini:gemini-2.5-flash", True, KILOCODE_AUTH_FAILURE,
+            None, str(tmp_path), str(phase_dir), "review_plan",
+        )
+
+        assert saved is False
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "nothing to salvage" in output
+
+        # The error log is written on both paths; only its wording moves.
+        error_log = phase_dir / "error_gemini_gemini-2_5-flash.log"
+        assert "No JSON in response" in error_log.read_text(encoding="utf-8")
+
+    def test_the_fan_out_base_still_salvages_a_damaged_answer(self, tmp_path, capsys):
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+
+        saved = base_save_model_result(
+            "plan", "gemini:gemini-2.5-flash", True, TRUNCATED_ARRAY,
+            None, str(tmp_path), str(phase_dir), "review_plan",
+        )
+
+        assert saved is False
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+        assert (phase_dir / "salvage_gemini_gemini-2_5-flash.json").exists()
+        assert (phase_dir / "salvage_task_gemini_gemini-2_5-flash.json").exists()
+        error_log = phase_dir / "error_gemini_gemini-2_5-flash.log"
+        assert "Parse error" in error_log.read_text(encoding="utf-8")

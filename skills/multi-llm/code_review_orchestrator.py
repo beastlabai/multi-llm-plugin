@@ -74,6 +74,8 @@ from utils.review_orchestrator_base import (
     maybe_detach,
     merge_validation_batches,
     resolve_result_files_by_model,
+    update_status,
+    write_status,
 )
 from utils.validation import (
     prepare_batched_validation_tasks,
@@ -98,7 +100,13 @@ from utils.provider_registry import (
     is_model_valid,
     set_run_anchor,
 )
-from utils.json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
+from utils.json_extractor import (
+    build_unsanitize_map,
+    generate_output_path,
+    has_salvageable_json,
+    read_json_from_file,
+    sanitize_model_name,
+)
 from utils.llm_client import invoke_with_provider, invoke_with_file_output
 from utils.git_utils import get_project_root, validate_git_ref, _run_git
 from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
@@ -658,13 +666,26 @@ async def run_single_review(
             print(f"[{display_name}] File error: {file_error}")
         print(f"[{display_name}] Agent failed ({duration:.1f}s): {error_msg}")
 
-        # Write salvage request if we have any raw output to salvage
+        # Write a salvage request only when the failure output still holds an
+        # answer to repair. "stderr is non-empty" is not that test: a hard
+        # provider failure — kilocode answering `Error: User not found.` on a
+        # dead account, in ANSI colour — passes it with no JSON anywhere in the
+        # stream, and the salvage prompt's own "if nothing recoverable is
+        # present, print an empty array" then writes `[]` over this model's
+        # result path, so a model that never ran is aggregated as one that
+        # reviewed the diff and found nothing. It also spends the operator's
+        # next move on a JSON repair when the fix is `kilocode` auth. With
+        # nothing to salvage the model simply stays failed, which is the D6
+        # row-3 partial-results path already taken by every other dead slot.
+        # `has_salvageable_json` subsumes the old condition: a `stdout_error`
+        # with empty stderr only ever produced a salvage request whose
+        # `raw_output` was the empty string.
         raw_content = ""
         details = result.get("details", {})
         if details.get("stderr"):
             raw_content = details["stderr"]
 
-        if raw_content or result.get("stdout_error"):
+        if has_salvageable_json(raw_content):
             salvage_request = {
                 "model": model_spec,
                 "phase": "code_review",
@@ -684,6 +705,18 @@ async def run_single_review(
                 json.dump(salvage_request, f, indent=2)
             print(f"[SALVAGE_NEEDED] {salvage_path}")
             emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
+        else:
+            # Say which failure this was, in the same line-per-model channel the
+            # markers use. Silence here would read as "salvage was not reached",
+            # when what happened is that the provider failed before it produced
+            # an answer — an auth, quota or launch failure whose fix is the
+            # provider, not a JSON repair. The stream itself is in the log file
+            # named above; the one-line summary belongs to the adapter's
+            # `describe_failure` hook, which is why it is not re-printed here.
+            print(
+                f"[{display_name}] Provider failed before producing any JSON — "
+                f"nothing to salvage, model recorded as failed"
+            )
 
         return False, None, error_msg
 
@@ -703,6 +736,17 @@ async def run_single_review(
         # No valid JSON found - write salvage request for Claude Code to process
         raw_content = output_data["raw"]
         raw_preview = raw_content[:500] if raw_content else "(empty)"
+
+        # Same rule as the hard-failure path above, for the same reason: a reply
+        # with no JSON in it is not a parse failure, and salvage against it can
+        # only print the empty array its prompt falls back to. This branch is
+        # where §40's two write-refusal shapes land — cursor-agent's "I can't
+        # write the requested file while Ask mode is active" and gemini's
+        # "JSON written to …" confirmation for a write that never happened —
+        # and a `[]` recorded for either would be an invented clean review.
+        if not has_salvageable_json(raw_content):
+            print(f"[{display_name}] Response carries no JSON — nothing to salvage")
+            return False, None, f"Model produced no JSON output: {raw_preview}"
 
         salvage_request = {
             "model": model_spec,
@@ -1215,10 +1259,19 @@ async def reaggregate_from_existing_files(
     ):
         models_found.add(model)
 
-        # Add source_model field for grouping
         for issue in issues:
-            issue["source_model"] = model
-            issue["model"] = model  # Also set model for report generation
+            # `model` before `source_model`, which is the order the fan-out
+            # stamps them in (`main` sets `model` as it flattens `results`, then
+            # fills `source_model` in just before grouping). Insertion order is
+            # not cosmetic here: `SuggestionGroup.to_dict` carries a suggestion's
+            # dict through unreordered, `json.dump` writes keys in that order,
+            # and `grouped_sha256` hashes the file's *bytes*. Stamped the other
+            # way round, reaggregating a phase whose specs are already canonical
+            # still moved grouped.json's bytes and still made
+            # `check_task_file_inputs` refuse `validation_tasks.json` — the same
+            # failure the missing checkpoint caused, from the other direction.
+            issue["model"] = model            # report generation reads this one
+            issue["source_model"] = model     # grouping attributes by this one
         all_issues.extend(issues)
 
         # Add to results dict for report generation
@@ -1660,6 +1713,31 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
+
+    # The checkpoint this phase's *own* salvage path reads back (W3). Below the
+    # boundary for the same reason the base fan-out writes it there — nothing
+    # under that line runs in the invoker — and against `detach_phase_dir`,
+    # which `get_phase_dir` has already created.
+    #
+    # `models_requested` is the only record anywhere of the canonical
+    # `provider:model` specs this run fanned out to. `sanitize_model_name` is
+    # lossy in one direction only, so `cursor-agent_cursor-grok-4_6-xhigh` can
+    # never be turned back into `cursor-agent:cursor-grok-4.6-xhigh` from the
+    # filename. Without this write `build_unsanitize_map` finds no `.status.json`
+    # and returns `{}`, `resolve_result_files_by_model` falls through to "the
+    # stem IS the identity", and `--reaggregate` re-attributes every group to the
+    # stem — rewriting `grouped.json`'s `models` and `source_model`, and so its
+    # bytes, and so the `grouped_sha256` that `check_task_file_inputs`
+    # (`utils/subagent_tasks.py`) checks `validation_tasks.json` against moments
+    # later in the same command. review-code's documented validate-then-
+    # reaggregate path refused its own task file until this line existed.
+    write_status(str(detach_phase_dir), {
+        "phase": "code-review",
+        "state": "models_running",
+        "started_at": datetime.now().isoformat(),
+        "models_requested": list(model_specs),
+        "error": None,
+    })
     if unattended and not args.models and not args.quick:
         # D6 row 2, recorded rather than merely applied (see review base): an
         # auto-selection nobody can see afterwards is indistinguishable from a
@@ -1783,6 +1861,23 @@ async def main(argv: Optional[List[str]] = None) -> int:
             phase_dir=str(phase_dir),
             unattended=unattended,
         )
+
+        # The base fan-out's completion fields, on the same post-salvage truth.
+        # Two things read them and neither is optional here: `status --view run`
+        # prints the top-level `state` on its own line, so a review-code run left
+        # at `models_running` reports as still fanning out forever; and
+        # `build_unsanitize_map` unions `models_requested` with
+        # `models_completed`, so writing only the first would leave this phase's
+        # checkpoint a different document from the base's for the one reader that
+        # has to treat both alike.
+        update_status(str(phase_dir), {
+            "state": "models_complete",
+            "models_completed": completed_models,
+            "models_failed": failed_models,
+            # Added only when something was attributed, so a default run's
+            # `.status.json` gains no key.
+            **({"models_served": served_models} if served_models else {}),
+        })
 
         # Save raw issues as JSON
         all_issues = []

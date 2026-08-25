@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.json_extractor import (
     extract_json_from_text,
     generate_output_path,
+    has_salvageable_json,
     sanitize_model_name,
 )
 
@@ -189,3 +190,82 @@ class TestLastDocumentWins:
 
         assert result["success"]
         assert result["data"] == []
+
+
+#: One real kilocode stderr, verbatim, from a `review-code` run against an
+#: account the key no longer belongs to: the CLI's own colours, its banner line,
+#: and a four-word failure. Non-empty, non-zero exit, and not one character of
+#: JSON — which is exactly the combination that used to materialize a salvage
+#: request whose only possible answer was `[]`.
+KILOCODE_AUTH_FAILURE = (
+    "\x1b[0m\n> code · moonshotai/kimi-k3\n\x1b[0m\n"
+    "\x1b[91m\x1b[1mError: \x1b[0mUser not found.\n"
+)
+
+
+class TestHasSalvageableJson:
+    """The gate in front of every salvage request: is there anything to repair?"""
+
+    def test_a_provider_auth_failure_is_not_salvageable(self):
+        """The defect, as the run produced it — colours and all."""
+        assert has_salvageable_json(KILOCODE_AUTH_FAILURE) is False
+
+    def test_the_same_failure_with_its_escapes_already_stripped(self):
+        """A log that lost its ESC bytes leaves `[0m`/`[91m` as bare text.
+
+        The token requirement, not the ANSI strip, is what rejects those — so
+        the verdict may not depend on which of the two the text arrived as.
+        """
+        stripped = KILOCODE_AUTH_FAILURE.replace("\x1b", "")
+        assert has_salvageable_json(stripped) is False
+
+    def test_a_bracketed_log_level_is_not_a_json_array(self):
+        """`[ERROR]` and `[docs]` balance; neither is a document."""
+        assert has_salvageable_json("[ERROR] User not found.\nSee [docs].") is False
+
+    def test_prose_refusal_is_not_salvageable(self):
+        """§40's write refusal: a sentence, on a slot that exited 0."""
+        assert has_salvageable_json(
+            "I can't write the requested file while Ask mode is active."
+        ) is False
+
+    def test_empty_output_is_not_salvageable(self):
+        assert has_salvageable_json("") is False
+        assert has_salvageable_json("   \n\t  \n  ") is False
+
+    def test_an_array_with_prose_either_side_is_salvageable(self):
+        """The case the gate must never cost us: a real answer plus chatter."""
+        assert has_salvageable_json(
+            'Here is what I found:\n[{"title": "x", "desc": "y"}]\nHope that helps!'
+        ) is True
+
+    def test_a_fenced_array_is_salvageable(self):
+        assert has_salvageable_json(
+            'Suggestions:\n\n```json\n[{"title": "Test"}]\n```\n'
+        ) is True
+
+    def test_a_truncated_array_is_salvageable(self):
+        """Clause 2's whole reason: an unclosed bracket is not a candidate."""
+        assert has_salvageable_json(
+            '[{"title": "Test", "desc": "Description"}, {"title": "Anoth'
+        ) is True
+
+    def test_an_array_truncated_before_its_first_object_closes(self):
+        """Nothing balances anywhere in this one — not even an inner object."""
+        assert has_salvageable_json('[{"title": "Test"') is True
+
+    def test_an_object_wrapping_the_array_is_salvageable(self):
+        """A model that wrapped the array is the ordinary salvage case."""
+        assert has_salvageable_json(
+            '{"theme": "Add validation", "suggestions": [{"title": "Test"'
+        ) is True
+
+    def test_an_unquoted_key_is_salvageable(self):
+        """Mechanical damage is precisely what the salvage prompt repairs."""
+        assert has_salvageable_json(
+            '{"title": "Test", desc: "Missing quotes on key"}'
+        ) is True
+
+    def test_an_empty_array_is_a_document_the_model_really_wrote(self):
+        """`[]` reaching salvage is a model saying nothing, not a model missing."""
+        assert has_salvageable_json("[]") is True

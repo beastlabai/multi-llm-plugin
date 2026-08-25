@@ -44,10 +44,12 @@ changes:
       than a leaf.
   - pointer: /output_root_paths
     rationale: >
-      The same one file (`review-plan/.status.lock`) seen from the plan output
-      root, with the same positional shift. `review-plan` is the only phase in
-      this fixture that writes a checkpoint at all, so it is the only dir that
-      gains a mutex.
+      The same checkpoint files seen from the plan output root, with the same
+      positional shift: `review-plan/.status.lock` for the mutex above, plus
+      `code-review/.status.json` and `code-review/.status.lock` for the
+      review-code checkpoint declared under
+      `/phases/code-review/created_paths` below. Both fan-out phases in this
+      fixture write a checkpoint now, so both dirs carry a mutex beside one.
   # ---------------------------------------------------------------------------
   # L1 (§9.3.d) — canonicalised model specs.
   #
@@ -274,8 +276,24 @@ changes:
       L1 / §9.3.d — a model *attribution* string copied from the resolved spec
       list: the fixture's bare `cursor-agent` now reads
       `cursor-agent:cursor-agent`. See the block comment above.
-  - pointer: /phases/code-review/created_paths/0
+  - pointer: /phases/code-review/created_paths
     rationale: >
+      Two declared changes land on one positionally-flattened list, and the
+      second renumbers the leaves the first used to name, so this covers the
+      list — the same reason `/phases/review-plan/created_paths` does.
+
+      `review-code` now writes `{phase}/.status.json` at the point in its
+      fan-out where `review_orchestrator_base` already wrote one (after the
+      detach boundary, before the first model), and `status_file` creates
+      `.status.lock` beside it on the first read-modify-write. It wrote neither
+      before, which is exactly why `build_unsanitize_map` found no
+      `models_requested` for this phase, `--reaggregate` fell back to "the
+      sanitized stem IS the identity", and a validate-then-reaggregate run
+      rewrote `grouped.json`'s attribution — moving its bytes and so refusing
+      its own `validation_tasks.json` on the `grouped_sha256` binding. Both new
+      names sort ahead of every other entry, so everything after them shifts by
+      two.
+
       L1 / §9.3.d, file-name half — `sanitize_model_name` derives the per-model
       result and log file names from the resolved spec, so `cursor-agent.json`
       / `log_cursor-agent.txt` become `cursor-agent_cursor-agent.json` /
@@ -283,15 +301,25 @@ changes:
       current name, so a run started before L1 and resumed after it re-runs its
       bare-spec models once — stated, not discovered. The identical rename in
       `review-plan` and at the output root falls under the two entries above.
-  - pointer: /phases/code-review/created_paths/3
+  - pointer: /phases/code-review/status_shape
     rationale: >
-      L1 / §9.3.d, file-name half — `sanitize_model_name` derives the per-model
-      result and log file names from the resolved spec, so `cursor-agent.json`
-      / `log_cursor-agent.txt` become `cursor-agent_cursor-agent.json` /
-      `log_cursor-agent_cursor-agent.txt`. The resume predicate looks for the
-      current name, so a run started before L1 and resumed after it re-runs its
-      bare-spec models once — stated, not discovered. The identical rename in
-      `review-plan` and at the output root falls under the two entries above.
+      The checkpoint document itself, absent from the baseline because
+      `review-code` wrote none at all: `phase`, `state`, `started_at`,
+      `models_requested`, `models_completed`, `models_failed`, `error`,
+      `updated_at`. Not a shape of this phase's own — it is the field set
+      `review_orchestrator_base` already writes for `review-plan`, mirrored
+      rather than reinvented, because `build_unsanitize_map` reads
+      `models_requested`/`models_completed` out of both and must not meet two
+      documents.
+  - pointer: /phases/code-review/status_steps
+    rationale: >
+      The same write seen as a sequence: `phase=code-review` then
+      `state=models_complete`, where the baseline had no checkpoint to read a
+      sequence out of. It stops one transition short of `review-plan`'s
+      `state=grouping_complete`: the base's later phase-machine transitions are
+      deliberately not mirrored here, since the reaggregation fix needs the
+      recorded specs and the honest "the fan-out finished" state, and nothing
+      reads a `grouping_complete` from this phase.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

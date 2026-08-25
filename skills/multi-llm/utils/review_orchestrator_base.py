@@ -48,7 +48,13 @@ from .provider_registry import (
     is_model_valid,
     set_run_anchor,
 )
-from .json_extractor import generate_output_path, read_json_from_file, sanitize_model_name, build_unsanitize_map
+from .json_extractor import (
+    build_unsanitize_map,
+    generate_output_path,
+    has_salvageable_json,
+    read_json_from_file,
+    sanitize_model_name,
+)
 from .llm_client import (
     STDOUT_OUTPUT_LOCATION,
     invoke_with_provider,
@@ -1431,46 +1437,65 @@ def save_model_result(
         return True
 
     except (json.JSONDecodeError, ValueError) as e:
-        salvage_request = {
-            "model": model,
-            "phase": phase_name,
-            "raw_output": output,
-            "expected_type": "array",
-            "expected_schema": {
-                "fields": list(REQUIRED_FIELDS),
-                "importance_values": list(VALID_IMPORTANCE),
-                "type_values": list(VALID_TYPES),
-            },
-            "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
-            "timestamp": datetime.now().isoformat()
-        }
-        salvage_path = os.path.join(phase_dir, f"salvage_{sanitized_model}.json")
-        with open(salvage_path, 'w', encoding='utf-8') as f:
-            json.dump(salvage_request, f, indent=2)
+        # The fan-out's sibling of code_review_orchestrator's two salvage sites,
+        # and it holds the same rule: salvage only when the reply still holds an
+        # answer to repair. A model that answered in prose — §40's write
+        # refusals, a provider printing its auth failure on the channel it
+        # exited 0 on — reaches this `except` with not one character of JSON,
+        # and the salvage prompt's "if nothing recoverable is present, print an
+        # empty array" would then write `[]` over `output_path`: a model that
+        # produced nothing, recorded as one that reviewed the document and found
+        # nothing. Unsalvageable is not fatal here either — the model stays
+        # failed and D6 row 3 aggregates what the other slots returned — so the
+        # error log below is written on both paths and only its wording moves.
+        salvageable = has_salvageable_json(output)
+        if salvageable:
+            salvage_request = {
+                "model": model,
+                "phase": phase_name,
+                "raw_output": output,
+                "expected_type": "array",
+                "expected_schema": {
+                    "fields": list(REQUIRED_FIELDS),
+                    "importance_values": list(VALID_IMPORTANCE),
+                    "type_values": list(VALID_TYPES),
+                },
+                "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
+                "timestamp": datetime.now().isoformat()
+            }
+            salvage_path = os.path.join(phase_dir, f"salvage_{sanitized_model}.json")
+            with open(salvage_path, 'w', encoding='utf-8') as f:
+                json.dump(salvage_request, f, indent=2)
 
-        print(f"[SALVAGE_NEEDED] {salvage_path}")
-        # The salvage prompt is materialized in Python (D2/D2i) instead of being
-        # assembled from references/salvage-handling.md, so any invoker can run
-        # it. Best-effort: a salvage request that cannot be paired with a task
-        # file is still recoverable by hand, and must not mask the parse error
-        # that produced it.
-        try:
-            salvage_task_path = write_salvage_task_file(
-                salvage_request=salvage_request,
-                salvage_request_path=salvage_path,
-                phase_dir=phase_dir,
-            )
-            print(f"[SALVAGE_TASK] {salvage_task_path}")
-        except Exception as task_error:  # noqa: BLE001 - diagnostics only
-            print(f"[{model}] Warning: could not materialize salvage task: {task_error}")
+            print(f"[SALVAGE_NEEDED] {salvage_path}")
+            # The salvage prompt is materialized in Python (D2/D2i) instead of
+            # being assembled from references/salvage-handling.md, so any invoker
+            # can run it. Best-effort: a salvage request that cannot be paired
+            # with a task file is still recoverable by hand, and must not mask
+            # the parse error that produced it.
+            try:
+                salvage_task_path = write_salvage_task_file(
+                    salvage_request=salvage_request,
+                    salvage_request_path=salvage_path,
+                    phase_dir=phase_dir,
+                )
+                print(f"[SALVAGE_TASK] {salvage_task_path}")
+            except Exception as task_error:  # noqa: BLE001 - diagnostics only
+                print(f"[{model}] Warning: could not materialize salvage task: {task_error}")
 
         error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
         with open(error_path, 'w', encoding='utf-8') as f:
             f.write(f"Model: {model}\n")
             f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-            f.write(f"Parse error: {e}\n")
+            f.write(f"{'Parse error' if salvageable else 'No JSON in response'}: {e}\n")
             f.write(f"\nRaw output:\n{output}\n")
-        print(f"[{model}] JSON parse error, raw output saved to: {error_path}")
+        if salvageable:
+            print(f"[{model}] JSON parse error, raw output saved to: {error_path}")
+        else:
+            print(
+                f"[{model}] Response carries no JSON — nothing to salvage, "
+                f"raw output saved to: {error_path}"
+            )
         return False
 
 
