@@ -53,7 +53,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
 # The image tags are values, never rule targets: `mllm-e2e:local` contains a colon,
 # which make would read as a target/prerequisite separator.
 .PHONY: help e2e-preflight e2e-image e2e-image-latest e2e-container e2e-container-host \
-        e2e-container-host-discovery e2e-version-delta e2e-container-latest \
+        e2e-container-host-discovery e2e-container-host-invocation \
+        e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
         e2e-clean
 
@@ -63,6 +64,7 @@ help:
 	@echo "  make e2e-container                 pinned build; provider lane (no secrets, --network none)"
 	@echo "  make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)"
 	@echo "  make e2e-container-host-discovery  host lane, --creds none tier: stage + list, no key, no network"
+	@echo "  make e2e-container-host-invocation host lane, --creds none tier: type the documented /multi-llm string"
 	@echo "  make e2e-container-latest         CLIs @latest; provider lane only; credential-free by construction"
 	@echo "  make e2e-container-latest-host    CLIs @latest; host lane; guarded, opt-in, needs OPENROUTER_API_KEY"
 	@echo "  make e2e-live-provider [CLI=x]    credentialed PROVIDER lane; SPENDS CREDITS on openrouter.ai"
@@ -120,6 +122,26 @@ e2e-container-host: e2e-image
 e2e-container-host-discovery: e2e-image
 	env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
 	  $(PYTEST)/test_container_host_lane.py -m "container and not live"
+
+# The FOURTH credential-free host row, and the only one that types anything:
+# install the shim, open a FRESH session with the host's own model pointed at the
+# loopback stub, and type the exact `/multi-llm …` string README.md and
+# docs/hosts.md publish. It answers the acceptance row those documents had no
+# evidence for -- *does the published spelling reach our dispatcher on this
+# host?* -- and it answers it per installable host, because the two do not
+# install the same kind of object.
+#
+# Same terms as the discovery tier and for the same reasons: no credential, no
+# route out, `--network none`. What is under test is ARGUMENT DELIVERY, not model
+# output, so a stub is not a compromise here -- the question is answered by the
+# bytes the host sends, not by what comes back. It runs in well under a minute.
+#
+# It is ALSO selected by `make e2e-container` (`container`, not `live`), which is
+# deliberate: a documentation claim that has gone false should surface on the
+# gate a contributor already runs, not only on a target they have to know about.
+e2e-container-host-invocation: e2e-image
+	env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+	  $(PYTEST)/test_container_documented_invocation.py -m "container and not live"
 
 # --------------------------------------------------------------------------- #
 # Drift probe: CLI layer @latest, every other pin held.

@@ -28,11 +28,22 @@ What is asserted:
   installed for one host can neither collide with nor shadow another's;
 * the Windows seam (``%USERPROFILE%``/XDG token expansion, the Git Bash
   prerequisite, no symlink API anywhere in the installer) — **asserted**, not
-  skipped, on POSIX too, because a skipped seam is an unverified one.
+  skipped, on POSIX too, because a skipped seam is an unverified one;
+* the **generated host-install page and the front page that points at it**: the
+  block is byte-identical to a fresh render, a missing or marker-less
+  ``docs/hosts.md`` is a ``--check`` failure rather than a skipped step, the
+  opening sentence is the one composed from ``_installable_prose()`` at every
+  arity, and every host fact the README states *by hand* — host ids, one
+  ``install-host <slug>`` line each, the printed shim paths, the reload
+  instruction, the baked-in ``--yes``, the runner slugs and the headless
+  separator — is compared against ``hosts/capabilities.yaml`` and, for the
+  paths, against a real ``install-host --project`` run.
 """
 
 import ast
+import copy
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -41,11 +52,18 @@ import pytest
 
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
+sys.path.insert(0, str(SKILL_ROOT / "hosts"))
 
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
+import render_capabilities as renderer  # noqa: E402
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install as hi  # noqa: E402
+
+#: The repository (and published-plugin) root: the directory holding `README.md`
+#: and `docs/`. Anchored on the skill root, never derived from the depth of
+#: `renderer.HOST_DOC` — see :func:`readme_path`.
+REPO_ROOT = SKILL_ROOT.parent.parent
 
 #: The fixture skill dir name: a space in every segment that can carry one, so a
 #: quoting bug cannot hide behind a clean path (D1b/D7c — spaces are the
@@ -1254,6 +1272,63 @@ class TestCli:
 # 8. Packaging and the generated documentation
 # ---------------------------------------------------------------------------
 
+def readme_path() -> Path:
+    """The front page, resolved from the repo root.
+
+    Deliberately *not* ``renderer.host_doc_path().parent.parent / "README.md"``:
+    that expression is the repo root only while ``HOST_DOC`` happens to be
+    exactly two segments deep. Move the generated section one level down —
+    ``docs/hosts/index.md``, the obvious next step once ``docs/hosts/`` grows a
+    second page — and the same walk lands on ``docs/README.md``, which today
+    raises and, the day that file exists, silently guards the wrong document.
+    ``HOST_DOC`` is free to move by one line (D2); the repo root is not.
+    """
+    return REPO_ROOT / "README.md"
+
+
+def readme_body() -> str:
+    return readme_path().read_text(encoding="utf-8")
+
+
+def readme_section(body: str, heading: str) -> str:
+    """One ``##`` section of the README, its heading line included."""
+    lines = body.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(heading))
+    end = next(
+        (
+            i for i, line in enumerate(lines[start + 1:], start + 1)
+            if line.startswith("## ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def path_spellings(path: str) -> set:
+    """Every spelling of one ``install_paths`` entry a README may legitimately use.
+
+    The data stores ``$HOME``; prose addressed to a human writes ``~``. Nothing
+    else is normalized — in particular ``$XDG_CONFIG_HOME`` has no second
+    spelling, which is exactly why naming its ``~/.config`` fallback *as the
+    destination* was wrong rather than merely informal (D5).
+    """
+    return {path, path.replace("$HOME", "~"), path.replace("~", "$HOME")}
+
+
+def mentions(text: str, path: str) -> bool:
+    """Is *path* named as a path of its own, rather than as the tail of a longer one?
+
+    ``.codex/skills/multi-llm/SKILL.md`` is a suffix of
+    ``~/.codex/skills/multi-llm/SKILL.md``, so a plain substring test would let
+    the ``--project`` half of the sentence vanish behind the global half and
+    still pass.
+    """
+    return any(
+        re.search(r"(?<![\w/~$.-])" + re.escape(spelling), text)
+        for spelling in path_spellings(path)
+    )
+
+
 class TestPackagingAndDocs:
     def test_exactly_one_auto_discoverable_skill_manifest_still_ships(self):
         manifests = [
@@ -1276,32 +1351,73 @@ class TestPackagingAndDocs:
         current = (SKILL_ROOT / renderer.OUTPUT).read_text(encoding="utf-8")
         assert current == renderer.render()
 
-    def test_the_readme_section_is_byte_identical_to_a_fresh_render(self):
+    def test_the_host_doc_section_is_byte_identical_to_a_fresh_render(self):
         sys.path.insert(0, str(SKILL_ROOT / "hosts"))
         import render_capabilities as renderer
 
-        readme = renderer.readme_path()
-        assert readme.is_file(), readme
-        body = readme.read_text(encoding="utf-8")
-        assert renderer.README_BEGIN in body and renderer.README_END in body
-        assert renderer.readme_with_section(body) == body, (
-            "the README's host-install section is generated from "
+        host_doc = renderer.host_doc_path()
+        assert host_doc.is_file(), host_doc
+        body = host_doc.read_text(encoding="utf-8")
+        assert renderer.HOST_DOC_BEGIN in body and renderer.HOST_DOC_END in body
+        assert renderer.host_doc_with_section(body) == body, (
+            f"{renderer.HOST_DOC}'s host-install section is generated from "
             "hosts/capabilities.yaml — re-run hosts/render_capabilities.py and "
             "commit the result; a hand-maintained copy is a CI failure"
         )
 
-    def test_the_readme_section_carries_the_quickstarts_and_the_matrix(self):
+    def test_the_host_doc_section_carries_the_quickstarts_and_the_matrix(self):
         sys.path.insert(0, str(SKILL_ROOT / "hosts"))
         import render_capabilities as renderer
 
-        section = renderer.render_readme_section()
-        assert "## Hosting multi-llm in other harnesses" in section
-        assert "### After a plugin update" in section
+        section = renderer.render_host_doc_section()
+        assert "# Hosting multi-llm in other harnesses" in section
+        assert "## After a plugin update" in section
         assert "install-host --check --all" in section
         for host_id in caps.host_ids():
             assert f"`{host_id}`" in section
         for host_id in INSTALLABLE:
             assert f"install-host {host_id} --check" in section
+
+    def test_the_readme_points_at_the_host_doc_rather_than_carrying_it(self):
+        """The section moved out of the README; the pointer is what replaced it.
+
+        A trim that dropped the link would leave the two installable hosts with
+        no route from the front page, which is the failure this catches — not
+        the wording, only that the README still names the generated document and
+        no longer holds a second, hand-maintained copy of its heading.
+
+        The README is resolved by :func:`readme_path` — from the repo root, not
+        by walking up from the generated file — so ``HOST_DOC`` can move without
+        dragging this guard onto another document with it.
+        """
+        body = readme_body()
+        assert renderer.HOST_DOC.replace(os.sep, "/") in body
+        assert renderer.HOST_DOC_BEGIN not in body
+
+    def test_the_readme_is_still_found_when_the_host_doc_moves_a_level_down(
+        self, monkeypatch
+    ):
+        """D2's promise, made testable: retargeting the section is *one* line.
+
+        This script keys on the two markers and never on the filename, so
+        ``docs/hosts/index.md`` is a one-line edit to ``HOST_DOC``. It only stays
+        one line while nothing else derives the repo root from that constant's
+        depth: the previous spelling of the test above resolved
+        ``host_doc_path().parent.parent / "README.md"``, which under this
+        monkeypatch is ``docs/README.md`` — a second edit in a second file today,
+        and a guard silently pointed at the wrong document the day that file
+        exists.
+        """
+        monkeypatch.setattr(
+            renderer, "HOST_DOC", os.path.join("docs", "hosts", "index.md")
+        )
+        assert readme_path() == REPO_ROOT / "README.md"
+        assert readme_path().is_file()
+        assert renderer.host_doc_path() == REPO_ROOT / "docs" / "hosts" / "index.md"
+        assert renderer.host_doc_path().parent.parent / "README.md" != readme_path(), (
+            "the README lookup is deriving the repo root from HOST_DOC's depth "
+            "again; anchor it on REPO_ROOT so the constant stays free to move"
+        )
 
     def test_the_check_guard_covers_both_generated_files(self, monkeypatch,
                                                          capsys):
@@ -1310,7 +1426,555 @@ class TestPackagingAndDocs:
 
         assert renderer.main(["--check"]) == 0
         monkeypatch.setattr(
-            renderer, "render_readme_section", lambda base=None: "drifted\n"
+            renderer, "render_host_doc_section", lambda base=None: "drifted\n"
         )
         assert renderer.main(["--check"]) == 1
-        assert "README.md" in capsys.readouterr().err
+        assert renderer.HOST_DOC in capsys.readouterr().err
+
+
+class TestTheOpeningSentenceOfTheGeneratedPage:
+    """`_installable_prose()` at every arity, and the sentence built from it.
+
+    Two halves that do not overlap. The parametrized rows pin the **join**; the
+    sentence tests pin that `render_host_doc_section()` actually composes its
+    opening from the helper. Neither is what the shipped assertions above make:
+    those check that each current host id appears somewhere in the section as an
+    isolated `` `codex` `` token, which a mangled join satisfies too (D4).
+    """
+
+    @pytest.mark.parametrize(
+        "host_ids,expected",
+        [
+            ([], "no other host yet"),
+            (["a"], "`a`"),
+            (["a", "b"], "`a` and `b`"),
+            (["a", "b", "c"], "`a`, `b` and `c`"),
+        ],
+    )
+    def test_the_helper_renders_one_shape_per_arity(self, host_ids, expected):
+        assert renderer._installable_prose(host_ids) == expected
+
+    def test_the_rendered_opening_is_the_sentence_composed_from_the_helper(self):
+        installable = [
+            host_id for host_id in sorted(caps.host_ids())
+            if caps.entry(host_id)["installable"]
+        ]
+        expected = (
+            "multi-llm ships as a Claude Code plugin, and it runs unchanged "
+            f"inside {renderer._installable_prose(installable)} as well."
+        )
+        section = renderer.render_host_doc_section()
+        assert section.splitlines()[2].startswith(expected), (
+            "the generated page's first sentence is not the one composed from "
+            "_installable_prose(); a hand-written host list there is the exact "
+            "staleness this whole file exists to prevent"
+        )
+
+    def test_the_empty_list_gets_its_own_sentence_not_an_empty_slot(
+        self, monkeypatch
+    ):
+        """The one arity the D4 sentence cannot absorb.
+
+        Flipping every ``installable:`` in ``hosts/capabilities.yaml`` to
+        ``false`` is a data-only change — no code edit, nothing to review in a
+        diff of ``.py`` files — so the sentence it produces has to be true on
+        its own. "…it runs unchanged inside no other host yet as well" is not:
+        the helper's contract is the *list*, and the repair belongs to the
+        sentence around it.
+        """
+        data = copy.deepcopy(caps.load())
+        for host in data["hosts"].values():
+            host["installable"] = False
+        monkeypatch.setattr(caps, "load", lambda base=None: data)
+
+        section = renderer.render_host_doc_section()
+        assert section.splitlines()[2].startswith(renderer._opening_sentence([]))
+        assert "no other host is installable yet" in section
+        assert "inside no other host yet as well" not in section
+        assert "no other host yet" not in section, (
+            "the helper's bare noun phrase reached the page: it is a list, not "
+            "a sentence, and interpolating it states something false"
+        )
+
+
+class TestTheHostDocMustExistToBeUpToDate:
+    """Absence is staleness, not a skipped step.
+
+    Both the ``--check`` path and the write path used to wrap the host doc in
+    ``if host_doc.is_file()``, which was harmless while the target was the
+    always-present ``README.md``. Against ``docs/hosts.md`` it means "the
+    install page for two of the three hosts does not exist" prints as "… are up
+    to date." (§3, Goal).
+    """
+
+    def test_a_missing_host_doc_fails_check_and_names_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        missing = tmp_path / "docs" / "hosts.md"
+        monkeypatch.setattr(renderer, "host_doc_path", lambda: missing)
+        problem = renderer.host_doc_problem(missing)
+        assert problem and "does not exist" in problem
+
+        assert renderer.main(["--check"]) == 1
+        captured = capsys.readouterr()
+        assert renderer.HOST_DOC in captured.err
+        assert str(missing) in captured.err
+        assert "up to date" not in captured.out
+
+    def test_a_marker_less_host_doc_fails_the_same_way(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        doc = tmp_path / "hosts.md"
+        doc.write_text(
+            "# Hosting multi-llm in other harnesses\n\nhand-written, no markers\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(renderer, "host_doc_path", lambda: doc)
+        problem = renderer.host_doc_problem(doc)
+        assert problem and "markers" in problem
+
+        assert renderer.main(["--check"]) == 1
+        captured = capsys.readouterr()
+        assert renderer.HOST_DOC in captured.err
+        assert renderer.HOST_DOC_BEGIN in captured.err, (
+            "the failure has to be a usable instruction: both marker lines, "
+            "since this script fills a block and never creates the page"
+        )
+        assert "up to date" not in captured.out
+
+    def test_the_write_path_refuses_rather_than_creating_the_page(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A first write into a missing file must not no-op in silence.
+
+        The renderer owns the block between the two markers and nothing else —
+        the comment header above and the footer link row below are hand-written
+        and have no source to be rendered from — so it reports and exits 1.
+        """
+        missing = tmp_path / "docs" / "hosts.md"
+        monkeypatch.setattr(renderer, "host_doc_path", lambda: missing)
+        monkeypatch.setattr(renderer, "OUTPUT", str(tmp_path / "reference.md"))
+
+        assert renderer.main([]) == 1
+        assert not missing.exists(), "the write path conjured the page"
+        assert renderer.HOST_DOC_BEGIN in capsys.readouterr().err
+
+
+class TestTheHostDocFlag:
+    def test_the_deprecated_readme_spelling_still_selects_the_host_doc(
+        self, capsys
+    ):
+        """`--host-doc`'s former name, kept as an alias (§3) and now exercised.
+
+        A compatibility shim with no guard is the kind of thing the next
+        refactor removes by accident; one assertion is the whole price of
+        keeping the promise that anything still typing `--readme` works.
+        """
+        assert renderer.main(["--stdout", "--host-doc"]) == 0
+        current = capsys.readouterr().out
+        assert renderer.main(["--stdout", "--readme"]) == 0
+        deprecated = capsys.readouterr().out
+        assert deprecated == current == renderer.render_host_doc_section()
+        assert deprecated != renderer.render(), (
+            "--readme parsed, but selected the reference matrix: the alias has "
+            "to reach the same dest as --host-doc, not merely be accepted"
+        )
+
+
+class TestThePublishedSkillOneLiner:
+    """Every `$SKILL` route the README publishes, asserted as a shape.
+
+    None of this is covered by the sanity check the README prints beside them:
+    that gates on the *resolved* `$SKILL`, so a glob that terminates on a
+    directory, or one that matched some other marketplace's plugin, passes it.
+    Measured on a real machine, four cache copies of this plugin existed and
+    three of them — including the newest by mtime — did **not** contain
+    `multi_llm.py`, which is what makes the terminator load-bearing rather than
+    decorative (D6). Read that measurement narrowly: those three are versions
+    predating the dispatcher (added in `e4e43a9`), and the fourth carries one
+    only because `link-skill.sh` symlinks it at a dev checkout. On an ordinary
+    machine every installed version ships a dispatcher and `ls -t` picks the
+    genuinely newest, so the terminator is a guard against *stale versions*,
+    not proof that the newest copy is usually unusable. The defect `ls -t`
+    cannot fix at all is the one the query route addresses: a directory mtime
+    does not know which install is enabled, or which project it belongs to.
+
+    The block publishes three routes, each with its own way of rotting:
+
+    * the **checkout** assignment, which the gate's own error message tells the
+      reader to fall back to — so it has to exist above that message;
+    * the **supported query**, `claude plugin list --json`, which asks Claude
+      Code for its own install path instead of re-deriving the cache layout;
+    * the **glob**, kept as the route for a machine with no JSON parser. `jq`
+      is not part of Git for Windows, and Git Bash is a hard prerequisite on
+      Windows, so a `jq`-only block would be a block Windows readers cannot run.
+    """
+
+    def section(self) -> str:
+        return readme_section(readme_body(), "## Installation")
+
+    def skill_routes(self) -> list:
+        """Every published `SKILL=` assignment, line continuations folded in."""
+        lines = self.section().splitlines()
+        routes = []
+        for index, line in enumerate(lines):
+            if not line.startswith("SKILL="):
+                continue
+            block = [line]
+            while block[-1].rstrip().endswith("\\"):
+                index += 1
+                block.append(lines[index])
+            routes.append("\n".join(block))
+        return routes
+
+    def marketplace(self) -> str:
+        """The marketplace the README's own `/plugin install` line names."""
+        installs = set(re.findall(r"/plugin install multi-llm@(\S+)", readme_body()))
+        assert len(installs) == 1, (
+            f"the README installs from {sorted(installs)}; a route that pins a "
+            "marketplace can only pin one"
+        )
+        return installs.pop()
+
+    def one_liner(self) -> str:
+        """The cache-glob route — the one with the `ls -t` picker."""
+        globbing = [route for route in self.skill_routes() if "ls -t" in route]
+        assert len(globbing) == 1, globbing
+        return globbing[0]
+
+    def plugin_query(self) -> str:
+        """The supported route: Claude Code reporting its own install path."""
+        asking = [
+            route for route in self.skill_routes() if "claude plugin list" in route
+        ]
+        assert len(asking) == 1, (
+            "the README publishes exactly one `claude plugin list` route; found "
+            f"{len(asking)}"
+        )
+        return asking[0]
+
+    def test_it_globs_the_plugin_cache_and_terminates_at_the_dispatcher(self):
+        line = self.one_liner()
+        assert "plugins/cache/" in line, (
+            "the one-liner no longer reads the Claude Code plugin cache, which "
+            "is the only thing it was ever resolving"
+        )
+        match = re.search(r"ls -t (\S+)", line)
+        assert match, line
+        glob = match.group(1)
+        assert glob.endswith("/multi_llm.py"), (
+            f"the cache glob ends at {glob!r}: `ls -t | head -1` picks the "
+            "newest *match*, and the newest version directory need not contain "
+            "the dispatcher at all — terminating on multi_llm.py is what makes "
+            "the pick a tree that actually runs"
+        )
+        assert "| head -1" in line
+        assert line.startswith("SKILL=$(dirname "), (
+            "$SKILL is a directory, so the dispatcher path the glob resolves "
+            "has to be handed to dirname"
+        )
+
+    def test_the_marketplace_segment_is_the_one_the_readme_installs_from(self):
+        marketplace = self.marketplace()
+        assert f"plugins/cache/{marketplace}/" in self.one_liner(), (
+            f"the cache glob does not pin the '{marketplace}' marketplace the "
+            "README installs from. A wildcard there matches every marketplace "
+            "on the machine, so a fork, a mirror or a private marketplace "
+            "shipping a plugin named multi-llm wins the `ls -t` whenever its "
+            "copy was written last — a different project's code at the end of "
+            "$SKILL, and the sanity check below it passes"
+        )
+
+    def test_the_supported_query_asks_claude_code_for_its_own_install_path(self):
+        """The point of the route: `installPath`, not a re-derived layout.
+
+        `plugins/cache/<marketplace>/<plugin>/<version>` is Claude Code's own
+        business, and the glob works only because it happens to match today's
+        shape. `claude plugin list --json` reports the directory outright, so a
+        route built on `installPath` survives a layout change the glob cannot —
+        and reports two things the filesystem cannot be asked for at all,
+        whether an install is enabled and which project it belongs to.
+        """
+        query = self.plugin_query()
+        assert "claude plugin list --json" in query, (
+            "the supported route no longer asks `claude plugin list --json`. "
+            "That query, not the cache layout, is what makes this route the "
+            "authoritative one"
+        )
+        assert ".installPath" in query, (
+            "the query no longer reads the reported `installPath`; rebuilding "
+            "the path out of `id` and `version` puts the cache layout back "
+            "into the README, which is what the glob below already does"
+        )
+        assert "plugins/cache" not in query, (
+            "the supported route hard-codes the plugin cache layout, so it "
+            "buys nothing over the glob it is published above"
+        )
+        assert f'"multi-llm@{self.marketplace()}"' in query, (
+            f"the query does not select the 'multi-llm@{self.marketplace()}' "
+            "plugin id the README's own `/plugin install` line names. Every "
+            "row in that list is some plugin's install, so an unfiltered pick "
+            "puts another plugin's directory at the end of $SKILL"
+        )
+
+    def test_the_query_prefers_an_enabled_install_rather_than_filtering_on_it(self):
+        """`enabled` is a ranking key here, and may not become a filter.
+
+        Measured against a real `claude plugin list --json`: the flag is
+        answered for the *current directory*, not for the install, and every
+        row reports `enabled: false` when the command runs somewhere Claude
+        Code has no project — a bare directory, a fresh clone, `/tmp`. A
+        `select(.enabled)` therefore resolves nothing on exactly the machines
+        whose reader is standing outside a project, which a command the README
+        says to run "from a shell" invites.
+        """
+        query = self.plugin_query()
+        selects = re.findall(r"select\(([^)]*)\)", query)
+        assert selects, f"the query filters nothing: {query}"
+        for predicate in selects:
+            assert "enabled" not in predicate, (
+                "`enabled` is being used as a filter. It is reported per "
+                "current directory and reads false for every row outside a "
+                f"Claude Code project, so `select({predicate})` resolves "
+                "nothing there — rank on it instead of dropping rows"
+            )
+        ranking = re.search(r"sort_by\(([^)]*)\)", query)
+        assert ranking and "enabled" in ranking.group(1), (
+            "nothing prefers an enabled install any more. Several installs of "
+            "this plugin coexist on one machine — one per project — so the "
+            "pick becomes whichever row the tie-break happens to reach first"
+        )
+
+    def test_the_query_probes_the_dispatcher_before_accepting_a_candidate(self):
+        """The check that survives both traps at once.
+
+        Ranking alone cannot be right: the highest-ranked row may belong to
+        another project, and — measured — a version directory older than the
+        dispatcher carries no `multi_llm.py` at all, so three of four cache
+        copies on the machine this was written on would have failed the gate.
+        Probing each candidate on disk and taking the first that answers is
+        what turns a ranked list into a usable tree.
+        """
+        query = self.plugin_query()
+        assert re.search(r'-f\s+"\$\w+/skills/multi-llm/multi_llm\.py"', query), (
+            "the query accepts a candidate without testing that its tree "
+            "carries multi_llm.py. Rows are ranked, not verified: a version "
+            "predating the dispatcher, or an install belonging to a different "
+            "project, ranks like any other"
+        )
+
+    def test_a_parser_free_route_is_published_beside_the_jq_one(self):
+        """`jq` is a dependency, so it cannot be the only way through.
+
+        Git for Windows ships no `jq`, and the README makes Git Bash a hard
+        prerequisite on Windows — a block whose only `$SKILL` route needs a
+        JSON parser is a block those readers cannot run at all.
+        """
+        section = self.section()
+        assert "jq" in section, (
+            "the supported query's `jq` dependency is not named anywhere in "
+            "the Installation section; a reader without it gets `jq: command "
+            "not found` and an empty $SKILL with no idea what to do next"
+        )
+        parser_free = [
+            route
+            for route in self.skill_routes()
+            if "jq" not in route and "SKILL=$(" in route
+        ]
+        assert parser_free, (
+            "every resolving `$SKILL` route now needs `jq`. Keep one that does "
+            "not — the cache glob needs only `ls`, `head` and `dirname`, all of "
+            "which Git Bash bundles"
+        )
+
+    def test_the_checkout_route_the_failure_message_names_is_published(self):
+        """The gate's advice has to point at a line the block actually carries."""
+        section = self.section()
+        advice = re.findall(r"""set (SKILL=[^\s"']+)""", section)
+        assert advice, (
+            "the sanity check no longer tells a reader with an unresolved "
+            "$SKILL what to set instead"
+        )
+        for suggestion in set(advice):
+            assert any(
+                route.startswith(suggestion) for route in self.skill_routes()
+            ), (
+                f"the failure message tells the reader to `set {suggestion}`, "
+                "which is not one of the routes the block publishes"
+            )
+
+
+class TestTheReadmeStatesEveryInstallableHostsFacts:
+    """D8 extended: the front page's hand-written host facts, tied to the data.
+
+    `_installable_prose()` keeps the *generated* page honest, but the strings a
+    new reader actually meets are hand-written on the README — the pointer
+    paragraph, the install heading, the `install-host` command lines, the
+    printed shim paths, the reload instruction, the unattended default, the
+    runner slugs and the headless separator. A fourth `installable: true` host
+    would join `docs/hosts.md` automatically and none of those, which is the
+    exact staleness D4 exists to prevent, one document to the left.
+
+    Six comparisons against loaded YAML — one per row of D8's table — and no
+    prose frozen around them.
+    """
+
+    def section(self) -> str:
+        return readme_section(readme_body(), "## Installation")
+
+    # Row 1: the host ids.
+    def test_the_pointer_paragraph_and_the_heading_name_every_installable_host(
+        self
+    ):
+        intro = readme_body().split("## Installation", 1)[0]
+        pointing = [
+            paragraph for paragraph in intro.split("\n\n")
+            if "install-host" in paragraph
+        ]
+        assert len(pointing) == 1, (
+            "exactly one paragraph above ## Installation promises the other "
+            f"hosts; found {len(pointing)}"
+        )
+        for host_id in INSTALLABLE:
+            assert host_id in pointing[0].lower(), (
+                f"the README's opening promise never names {host_id}, which "
+                "hosts/capabilities.yaml declares installable"
+            )
+
+        headings = [
+            line for line in self.section().splitlines() if line.startswith("### ")
+        ]
+        naming = [
+            line for line in headings
+            if all(host_id in line.lower() for host_id in INSTALLABLE)
+        ]
+        assert len(naming) == 1, (
+            f"exactly one Installation subsection heading names every "
+            f"installable host {INSTALLABLE}; the headings are {headings}"
+        )
+
+    # Row 2: one `install-host <slug>` line per host — count *and* slug.
+    def test_one_install_host_command_line_per_installable_host(self):
+        slugs = re.findall(
+            r'multi_llm\.py" install-host ([a-z][\w-]*)', self.section()
+        )
+        assert sorted(slugs) == sorted(INSTALLABLE), (
+            "the Installation section runs `install-host <slug>` once per "
+            f"installable host: capabilities.yaml declares {sorted(INSTALLABLE)}, "
+            f"the README runs {sorted(slugs)}"
+        )
+
+    # Row 3: the printed shim paths, from `install_paths` + `shim.installed`.
+    def test_the_printed_shim_paths_are_the_preferred_ones(self):
+        section = self.section()
+        for host_id in INSTALLABLE:
+            entry = caps.entry(host_id)
+            filename = os.path.basename(entry["shim"]["installed"])
+            for scope in ("global", "project"):
+                preferred = f"{entry['install_paths'][scope][0]}/{filename}"
+                assert mentions(section, preferred), (
+                    f"the README does not print {host_id}'s {scope} shim path "
+                    f"{preferred} — install_paths.{scope}[0] joined with "
+                    "shim.installed is the file install-host writes"
+                )
+
+    def test_a_later_install_path_may_only_appear_as_a_fallback(self):
+        """`global[-1]` is where an already-drifted fact came from.
+
+        The data carries OpenCode's second global entry as the fallback for an
+        unset ``$XDG_CONFIG_HOME``; the installer writes the *first*. Printing
+        the fallback as the destination told every reader with the variable set
+        that their shim landed somewhere it did not, and left them unable to
+        find the install ``--check`` reports as present (D5).
+        """
+        section = self.section()
+        for host_id in INSTALLABLE:
+            entry = caps.entry(host_id)
+            filename = os.path.basename(entry["shim"]["installed"])
+            for later in entry["install_paths"]["global"][1:]:
+                for spelling in path_spellings(f"{later}/{filename}"):
+                    for line in section.splitlines():
+                        if spelling not in line:
+                            continue
+                        assert "fall" in line.lower(), (
+                            f"{host_id}'s {spelling} is a later install_paths."
+                            "global entry — the unset-$XDG_CONFIG_HOME fallback "
+                            "— and the README states it as the destination "
+                            "install-host writes"
+                        )
+
+    @pytest.mark.parametrize("host_id", INSTALLABLE)
+    def test_the_printed_project_path_is_the_file_install_host_really_writes(
+        self, host_id, skill, env, project, ready
+    ):
+        """The one row with a second source of truth: the artifact itself.
+
+        Reading ``install_paths`` on both sides would only prove the README and
+        the YAML agree with each other; this proves both agree with what the
+        installer put on disk, so a renderer that stopped honouring
+        ``install_paths`` fails here too.
+        """
+        install(host_id, skill, env, project, scope=hi.SCOPE_PROJECT)
+        written = target(host_id, skill, env, project, hi.SCOPE_PROJECT)
+        relative = written.relative_to(project).as_posix()
+        assert mentions(self.section(), relative), (
+            f"install-host --project wrote {relative}; the README's "
+            "Installation section prints some other path"
+        )
+
+    # Row 4: "start a new session" ← `reload`.
+    def test_the_reload_instruction_matches_the_reload_field(self):
+        wording = {
+            "new-session": "start a new session",
+            "restart": "restart",
+            "none": "no reload step",
+        }
+        section = self.section().lower()
+        for host_id in INSTALLABLE:
+            value = caps.entry(host_id)["reload"]
+            assert value in wording, (
+                f"{host_id} declares reload: {value}, which the README has no "
+                "sentence for — state it where the install is, per D5"
+            )
+            assert wording[value] in section, (
+                f"{host_id} is reload: {value}, and the README's Installation "
+                f"section never tells the reader to {wording[value]!r}"
+            )
+
+    # Row 5: the baked-in `--yes` claim ← `ask`.
+    def test_the_baked_in_yes_claim_tracks_the_ask_field(self):
+        section = self.section()
+        for host_id in INSTALLABLE:
+            assert caps.entry(host_id)["ask"] != "structured", (
+                f"{host_id} now declares a structured question tool, so the "
+                "README's 'the shim bakes in --yes' bullet is false: unattended "
+                "is no longer the default there, and the bullet has to be "
+                "rewritten rather than merely re-read"
+            )
+        assert "`--yes`" in section
+        assert "structured question tool" in section
+        for host_id in caps.host_ids():
+            if caps.entry(host_id)["ask"] == "structured":
+                assert host_id.replace("-", " ") in section.lower(), (
+                    f"{host_id} is the host that bullet excepts, and the "
+                    "README never names it"
+                )
+
+    # Row 6: runner slug and headless separator ← the data, where declared.
+    def test_the_runner_slugs_and_the_headless_separator_come_from_the_data(self):
+        section = self.section()
+        for host_id in INSTALLABLE:
+            entry = caps.entry(host_id)
+            runner = entry["default_subagent_runner"]
+            assert f"`{runner}`" in section, (
+                f"{host_id}'s default_subagent_runner is {runner}; the README's "
+                "Installation section names a different one"
+            )
+            headless = entry.get("headless_invocation")
+            if headless:
+                assert headless in section, (
+                    f"{host_id} declares a headless_invocation ({headless}) "
+                    "because the obvious headless form fails confusingly rather "
+                    "than loudly; the README's Installation section has to "
+                    "carry it verbatim"
+                )

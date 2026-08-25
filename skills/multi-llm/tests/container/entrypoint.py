@@ -24,17 +24,23 @@ step did not run is a **failed row**, not a row with an empty golden diff.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import pty
 import re
+import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -479,10 +485,16 @@ class Stub:
     land in the previous row's session table and silently corrupt both.
     """
 
-    def __init__(self, port: int, log_path: Path, scenario: Path | None):
+    def __init__(self, port: int, log_path: Path, scenario: Path | None,
+                 facts: Path | None = None):
         self.port = port
         self.log_path = log_path
         self.scenario = scenario
+        #: The documented-invocation probe's `{fact: regex}` file, or None. The
+        #: stub then records which of those patterns each prompt matched — names
+        #: only, never the prompt — which is the one question a sha256 cannot
+        #: answer. See `invocation_facts`.
+        self.facts = facts
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "Stub":
@@ -490,6 +502,8 @@ class Stub:
                 "--port", str(self.port), "--log", str(self.log_path)]
         if self.scenario:
             argv += ["--scenario", str(self.scenario)]
+        if self.facts:
+            argv += ["--facts", str(self.facts)]
         self.proc = subprocess.Popen(argv)
         self._wait_healthy()
         log(f"stub ready on 127.0.0.1:{self.port}")
@@ -813,6 +827,410 @@ def discovery_step(host: str, home: Path) -> dict:
             "the host enumerated its commands and ours was NOT among them — the "
             "shim landed somewhere this host no longer scans"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# The DOCUMENTED-INVOCATION probe (--documented-invocation, `--creds none`)
+#
+# Follow-up 7 of plans/readme-trim-and-multi-host-install-docs.md, and the one
+# acceptance row that lane had no way to answer: *does the string the README
+# tells a reader to type actually reach our dispatcher on this host?*
+#
+# WHAT WAS ALREADY COVERED, AND WHY IT IS NOT THIS. The credentialed rows prompt
+# each host with `Use the multi-llm skill with exactly these arguments: …`
+# (`prompt_template`), which proves the WRITER — the shim landed somewhere the
+# host reads, and an argument string reaches the dispatcher. It says nothing
+# about the INVOCATION, because the two installable hosts do not install the
+# same kind of object: codex gets a **skill** (`.codex/skills/multi-llm/SKILL.md`)
+# and opencode gets a **command** (`.opencode/commands/multi-llm.md`), and each
+# host does its own resolution, namespacing and word-splitting on its own format.
+# `/multi-llm …` is therefore a claim about the host's command parser, and only
+# typing it into a session can settle it.
+#
+# THREE PROPERTIES OF THIS ROW, each one deliberate:
+#
+# * **It is free, and structurally so.** It runs at `--creds none`, i.e. under
+#   `--network none` with every credential variable asserted absent. The host's
+#   own model is the container stub on loopback, which is enough because what is
+#   under test is ARGUMENT DELIVERY, not model output: the question is answered
+#   by the bytes the host sends, not by what comes back.
+# * **The evidence is the prompt the host composed**, read through the stub's
+#   opt-in fact probe (`stub_server.install_facts`) — a list of the rig's own
+#   fact names per request, never the prompt body. A host that resolved the
+#   command sends its shim's text; a host that did not sends the literal
+#   characters the user typed.
+# * **The verdict is written, not decided here.** `invocation.json` records what
+#   happened; `tests/test_container_documented_invocation.py` grades it against
+#   the matrix's `documented_invocation.resolves` cell. The entrypoint exits 0
+#   either way, exactly as `run_host` does, because "the host refused the
+#   documented spelling" is a finding rather than a rig failure.
+# --------------------------------------------------------------------------- #
+
+#: A no-credential placeholder for hosts that insist on *some* API key being set
+#: before they will talk to a base_url. It is not a secret and is not one of
+#: `CREDENTIAL_VARS`; the stub accepts anything.
+STUB_PLACEHOLDER_KEY = "stub-not-a-credential"
+
+#: Escape sequences a full-screen TUI writes, stripped before anything is matched
+#: or written to the bundle. A TUI transcript is a repaint stream, so this makes
+#: it readable rather than parseable: nothing in this module ever asserts on the
+#: transcript's *content* except a host's own refusal line, which both hosts emit
+#: as plain text.
+_ANSI = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC … BEL / ST
+    r"|\x1bP[^\x1b]*\x1b\\"                 # DCS … ST
+    r"|\x1b\[[0-9;?<>=]*[ -/]*[@-~]"        # CSI
+    r"|\x1b[()][A-Za-z0-9]"                 # designate charset
+    r"|\x1b[=>NOMc78]"                      # single-character escapes
+)
+
+
+def _plain(raw: bytes) -> str:
+    return _ANSI.sub("", raw.decode("utf-8", "replace"))
+
+
+def invocation_facts(host: str, typed: str, plan_rel: str,
+                     marker: str) -> dict[str, str]:
+    """The graded ladder, as `{fact: regex}` for the stub's `--facts` probe.
+
+    Every entry is a question the acceptance row asks in as many words, and the
+    ladder is ordered so that a partial result still names how far the host got
+    rather than collapsing to one boolean:
+
+    ``typed_string_verbatim``
+        the characters the user typed are in the prompt at all — true on a host
+        that resolved the command *and* on one that passed the line through.
+    ``shim_body`` / ``shim_dispatcher_block``
+        the host expanded its own installed shim into the turn. This is the
+        discriminator: a host that never resolved `/multi-llm` has no reason to
+        have read the file.
+    ``skill_dir_placeholder_unfilled``
+        the NEGATIVE. `{SKILL_DIR}` surviving into the prompt means the shim was
+        rendered without substitution, which is a shipped-artifact bug wearing a
+        pass.
+    ``unattended_default_baked``
+        D5's claim, at the point of use: `--host <host> --yes --exec-subagents`.
+    ``mode_flag_with_argument``
+        the flag and the plan path still adjacent, so a host parser that dropped,
+        reordered or word-split the argument cannot satisfy it.
+    ``argument_marker``
+        the distinguishable argument survived at all — the weaker half of the
+        row above, kept so "arrived mangled" and "did not arrive" stay apart.
+    """
+    return {
+        "typed_string_verbatim": re.escape(typed),
+        "shim_body": r"Multi-LLM . (?:Codex|OpenCode) entry shim",
+        "shim_dispatcher_block": re.escape(f'python "{SKILL_DIR}/multi_llm.py"'),
+        "skill_dir_placeholder_unfilled": r"\{SKILL_DIR\}",
+        "unattended_default_baked": re.escape(
+            f"--host {host} --yes --exec-subagents"),
+        "mode_flag_with_argument": r"--review-plan\s+" + re.escape(plan_rel),
+        "argument_marker": re.escape(marker),
+    }
+
+
+#: The facts whose presence means the host really resolved the documented string,
+#: plus the one whose presence means it resolved it badly.
+RESOLVED_FACTS = ("shim_body", "shim_dispatcher_block",
+                  "unattended_default_baked", "mode_flag_with_argument")
+UNRESOLVED_FACT = "skill_dir_placeholder_unfilled"
+
+
+def wire_stub_host(host: str, home: Path, base_url: str) -> dict:
+    """Point the HOST's own model at the container stub. No credential, no route.
+
+    The credentialed twin of this is `wire_credentials`, and the differences are
+    the point: there is no key here, the base URL is loopback, and the row runs
+    under `--network none`, so the host has no endpoint to reach except ours.
+    Everything else — the trust entry, the permission gates, opencode's baked
+    cold-start tree — is the same wiring for the same reasons, and is shared with
+    that function rather than re-derived.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    seed = RIG_DIR / "home_seed" / host
+    overlay: dict[str, str] = {}
+
+    if host == "codex":
+        codex_home = home / ".codex"
+        codex_home.mkdir(parents=True, exist_ok=True)
+        (codex_home / "config.toml").write_text(
+            'model_provider = "stub"\n'
+            + _codex_first_run_config()
+            + "\n"
+            "[model_providers.stub]\n"
+            'name = "stub"\n'
+            f'base_url = "{base_url}"\n'
+            'wire_api = "responses"\n'
+            # `env_key` rather than the credentialed path's command-based auth:
+            # there is no key to keep out of the file here, and the warning that
+            # form exists to suppress is about OpenRouter's catalog, which this
+            # row never reaches.
+            'env_key = "MLLM_STUB_API_KEY"\n',
+            encoding="utf-8")
+        overlay["CODEX_HOME"] = str(codex_home)
+        overlay["MLLM_STUB_API_KEY"] = STUB_PLACEHOLDER_KEY
+
+    elif host == "opencode":
+        # The image's baked cold-start tree, for the same reason the credentialed
+        # row copies it: without it the first launch npm-installs ~63 MB, which
+        # `--network none` makes impossible rather than slow.
+        if seed.is_dir():
+            shutil.copytree(seed, home, dirs_exist_ok=True)
+        config_dir = home / ".config" / "opencode"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "opencode.json").write_text(json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {"stub": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Stub",
+                "options": {"baseURL": base_url, "apiKey": STUB_PLACEHOLDER_KEY},
+                "models": {"stub-model": {"name": "Stub Model"}},
+            }},
+            "permission": {"bash": "allow", "edit": "allow", "webfetch": "deny"},
+        }, indent=2), encoding="utf-8")
+    else:
+        raise SystemExit(
+            f"entrypoint: no stub wiring for host {host!r} — the "
+            f"documented-invocation probe runs on the INSTALLABLE hosts only")
+
+    log(f"wired {host} at the stub in {home} (env overlay: {sorted(overlay)})")
+    return overlay
+
+
+def _stub_facts_seen(log_path: Path) -> tuple[set[str], int]:
+    """`(fact names seen, request count)` from the stub's log, health excluded."""
+    seen: set[str] = set()
+    requests = 0
+    if not log_path.is_file():
+        return seen, requests
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:      # a torn last line while the stub is still writing
+            continue
+        if entry.get("surface") == "health" or entry.get("path") == "/__health":
+            continue
+        requests += 1
+        seen.update(str(name) for name in (entry.get("facts") or []))
+    return seen, requests
+
+
+def drive_documented_invocation(host: str, entry: dict, home: Path,
+                                overlay: dict, marker: str,
+                                stub_log: Path) -> dict:
+    """Launch a FRESH session, type the documented string, and record what reached
+    the model. Never asserts — the grader does that over `invocation.json`.
+
+    **A fresh session is satisfied by construction, not by a sleep.** Both
+    installable hosts are `reload: new-session`, and this row launches exactly one
+    host process, started after `install-host` has already written the shim: there
+    is nothing to reload into, because the process IS the new session.
+
+    **Why a pty.** Both hosts' documented surface is the interactive one — the
+    README says *start a new session in that host and invoke it exactly as in
+    Claude Code* — and a full-screen TUI that finds no terminal either refuses to
+    start or falls back to a different parser, which would make the row answer a
+    question nobody asked. The transcript is captured with its escape sequences
+    stripped, and only a host's own refusal line is ever matched in it.
+
+    **Why TMPDIR moves.** `posture.yaml` mounts /tmp `noexec` (docker's default
+    for `--tmpfs`), and opencode's TUI is a bun single-file binary that extracts
+    its native render library to $TMPDIR and dlopen()s it — under noexec it exits
+    before painting with `failed to map segment from shared object`. The bundle
+    bind is the one writable exec-capable path in this posture, so the probe puts
+    $TMPDIR there and deletes it again afterwards. This is a RIG accommodation and
+    is recorded as one: it changes where a temporary file lands, never what the
+    host is asked or what it does with it.
+    """
+    cell = dict(entry.get("documented_invocation") or {})
+    if not cell:
+        raise SystemExit(
+            f"entrypoint: host_matrix.yaml carries no `documented_invocation` "
+            f"cell for {host!r}. The row cannot improvise the string a document "
+            f"tells users to type — that is precisely the thing under test.")
+
+    plan_rel = f"plans/{marker}.md"
+    typed = str(cell["typed"]).replace("{plan}", plan_rel)
+    plan_path = WORKSPACE / plan_rel
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(
+        f"# {marker}\n\nA one-line plan whose only job is to be a "
+        f"distinguishable argument.\n", encoding="utf-8")
+
+    argv = [str(token).replace("<stub-model>",
+                               str(cell.get("stub_model") or "stub-model"))
+            for token in (cell.get("launch_argv") or [])]
+    if not argv:
+        raise SystemExit(
+            f"entrypoint: {host}: `documented_invocation.launch_argv` is empty")
+    binary = argv[0]
+    argv[0] = str(REAL_DIR / binary)
+    if not Path(argv[0]).exists():
+        raise SystemExit(f"entrypoint: no real host binary at {argv[0]}")
+
+    ready_rx = re.compile(str(cell["ready"])) if cell.get("ready") else None
+    refusal_rx = (re.compile(str(cell["refusal"]))
+                  if cell.get("refusal") else None)
+    ready_timeout = float(cell.get("ready_timeout_s") or 120)
+    settle_s = float(cell.get("settle_s") or 2.0)
+    submit_gap_s = float(cell.get("submit_gap_s") or 1.5)
+    enter_grace_s = float(cell.get("enter_grace_s") or 15.0)
+    max_enters = int(cell.get("max_enters") or 3)
+    after_first_request_s = float(cell.get("after_first_request_s") or 30.0)
+    wall = float(cell.get("wall_clock_s") or 300)
+
+    tmpdir = OUT / "tui-tmp"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["TERM"] = str(cell.get("term") or "xterm-256color")
+    env["TMPDIR"] = str(tmpdir)
+    env.update(overlay)
+    for var, value in (entry.get("env_extra") or {}).items():
+        env[str(var)] = str(value)
+
+    log(f"documented-invocation: launching {binary} in a pty "
+        f"(fresh session; marker {marker})")
+    log(f"documented-invocation: will type {typed!r}")
+
+    started = time.time()
+    pid, fd = pty.fork()
+    if pid == 0:                                    # pragma: no cover - child
+        try:
+            os.chdir(str(WORKSPACE))
+            os.execve(argv[0], argv, env)
+        finally:
+            os._exit(127)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
+
+    captured = bytearray()
+    ready_at: float | None = None
+    typed_at: float | None = None
+    enters: list[float] = []
+    refused_at: float | None = None
+    first_request_at: float | None = None
+    facts: set[str] = set()
+    requests = 0
+    stop_reason = "wall-clock"
+
+    def _elapsed() -> float:
+        return time.time() - started
+
+    while _elapsed() < wall:
+        readable, _, _ = select.select([fd], [], [], 0.25)
+        if readable:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                stop_reason = "host exited"
+                break
+            captured += chunk
+        text = _plain(bytes(captured))
+
+        if ready_at is None:
+            if ready_rx is not None and ready_rx.search(text):
+                ready_at = _elapsed()
+                log(f"documented-invocation: session ready after {ready_at:.1f}s")
+            elif _elapsed() > ready_timeout:
+                # Not a failure HERE: the row records that the session never
+                # announced itself and types anyway, so the bundle distinguishes
+                # "the host never started" from "the host rejected the string".
+                ready_at = -1.0
+                log(f"documented-invocation: no ready marker within "
+                    f"{ready_timeout}s — typing anyway, and recording it")
+            else:
+                continue
+
+        if typed_at is None:
+            if _elapsed() < (max(ready_at, 0.0) + settle_s):
+                continue
+            os.write(fd, typed.encode("utf-8"))
+            typed_at = _elapsed()
+            continue
+
+        if not enters:
+            if _elapsed() >= typed_at + submit_gap_s:
+                os.write(fd, b"\r")
+                enters.append(_elapsed())
+            continue
+
+        facts, requests = _stub_facts_seen(stub_log)
+        if requests and first_request_at is None:
+            first_request_at = _elapsed()
+        if refusal_rx is not None and refused_at is None and refusal_rx.search(text):
+            refused_at = _elapsed()
+            stop_reason = "host refused the spelling"
+            break
+        if "shim_body" in facts:
+            stop_reason = "the shim reached the model"
+            break
+        if (first_request_at is not None
+                and _elapsed() >= first_request_at + after_first_request_s):
+            stop_reason = "a turn was sent and settled"
+            break
+        # A composer that opened an autocomplete popup eats the first Enter, so
+        # the recipe that was MEASURED to work sends a second one. Bounded, and
+        # counted into the record: an answer that needed three Enters is a
+        # different fact from one that needed one.
+        if (len(enters) < max_enters
+                and _elapsed() >= enters[-1] + enter_grace_s
+                and not requests):
+            os.write(fd, b"\r")
+            enters.append(_elapsed())
+
+    facts, requests = _stub_facts_seen(stub_log)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    transcript = _plain(bytes(captured))
+    (OUT / "invocation-transcript.txt").write_text(transcript, encoding="utf-8")
+
+    resolved = (all(name in facts for name in RESOLVED_FACTS)
+                and UNRESOLVED_FACT not in facts)
+    record = {
+        "host": host,
+        "surface": str(cell.get("surface") or "tui"),
+        "launch_argv": [binary, *argv[1:]],
+        "typed": typed,
+        "marker": marker,
+        "plan": plan_rel,
+        "resolved": resolved,
+        "facts_seen": sorted(facts),
+        "facts_missing": sorted(name for name in RESOLVED_FACTS
+                                if name not in facts),
+        "stub_requests": requests,
+        "session_ready": ready_at is not None and ready_at >= 0,
+        "ready_after_s": None if ready_at is None or ready_at < 0 else round(ready_at, 2),
+        "typed_after_s": None if typed_at is None else round(typed_at, 2),
+        "enters_sent": len(enters),
+        "refusal_observed": refused_at is not None,
+        "refusal_pattern": str(cell.get("refusal") or "") or None,
+        "declared_resolves": bool(cell.get("resolves")),
+        "stop_reason": stop_reason,
+        "wall_clock_s": round(_elapsed(), 2),
+        "transcript_bytes": len(transcript),
+    }
+    (OUT / "invocation.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    log(f"documented-invocation: {host} -> resolved={resolved} "
+        f"({stop_reason}; facts {sorted(facts)})")
+    return record
 
 
 def _host_matrix() -> dict:
@@ -1700,6 +2118,15 @@ def main(argv=None) -> int:
                         help="host lane: wire, stage and render the argv, then "
                              "stop before the host process — the whole "
                              "credentialed path at zero cost")
+    parser.add_argument("--documented-invocation", action="store_true",
+                        help="host lane, --creds none: install the shim, start a "
+                             "FRESH session with the host's own model pointed at "
+                             "the loopback stub, type the exact `/multi-llm …` "
+                             "string README.md and docs/hosts.md publish, and "
+                             "record whether it reached our dispatcher "
+                             "(invocation.json). Credential-free by construction "
+                             "— what is under test is argument delivery, not "
+                             "model output.")
     parser.add_argument("--stub-port", type=int,
                         default=int(os.environ.get("MLLM_STUB_PORT", "8099")))
     parser.add_argument("--scenario", default=None)
@@ -1730,8 +2157,37 @@ def main(argv=None) -> int:
 
     plan = WORKSPACE / "plans" / "auth-feature.md"
     exit_code = 1
+
+    # The documented-invocation probe's marker and fact ladder are minted BEFORE
+    # the stub starts, because the stub is the thing that has to carry them: a
+    # probe armed after the first request would silently grade a turn it never
+    # inspected.
+    facts_path: Path | None = None
+    marker = ""
+    if args.documented_invocation:
+        if args.lane != "host" or not args.host:
+            raise SystemExit("entrypoint: --documented-invocation is a host-lane "
+                             "flag and needs --host")
+        if args.creds != "none":
+            raise SystemExit(
+                "entrypoint: --documented-invocation runs at --creds none. It "
+                "asks whether an argument reaches the dispatcher, which the stub "
+                "answers for free; a credential here would buy nothing and spend "
+                "something.")
+        marker = f"mllm-invocation-{uuid.uuid4().hex[:8]}"
+        cell = dict((_host_matrix().get(args.host) or {})
+                    .get("documented_invocation") or {})
+        typed_preview = str(cell.get("typed") or "").replace(
+            "{plan}", f"plans/{marker}.md")
+        facts_path = OUT / "prompt-facts.json"
+        facts_path.write_text(json.dumps(
+            invocation_facts(args.host, typed_preview,
+                             f"plans/{marker}.md", marker),
+            indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     with Stub(args.stub_port, OUT / "stub.jsonl",
-              Path(args.scenario) if args.scenario else None):
+              Path(args.scenario) if args.scenario else None,
+              facts=facts_path):
         # NOTE: the seed templates are deliberately left UNSUBSTITUTED here.
         # `{{base_url}}` and `{{stub_session_key}}` are filled by the wrapper, per
         # `exec`, because the exec id that keys the stub's turn counter is minted
@@ -1906,6 +2362,31 @@ def main(argv=None) -> int:
                     # ran" are different failures and only the receipt answers
                     # the second one.
                     log(f"host row complete (host exit {record['exit']})")
+                    return 0
+
+                if args.creds == "none" and args.documented_invocation:
+                    # The FOURTH thing a `--creds none` row can be, and the only
+                    # one that types anything: wire the host at the stub, install
+                    # the shim, start a fresh session and type the published
+                    # string. Ordered exactly as the credentialed path is —
+                    # wiring first, staging second — because `install-host`'s
+                    # own environment row probes the configured runner and a
+                    # half-wired $HOME makes that row answer about the wrong
+                    # thing.
+                    overlay = wire_stub_host(
+                        args.host, Path.home(),
+                        f"http://127.0.0.1:{args.stub_port}/v1")
+                    code = stage_host(args.host, Path.home())
+                    if code != 0:
+                        log(f"stage step exited {code}; not typing anything — a "
+                            f"shim that was never installed cannot be invoked")
+                        return code
+                    drive_documented_invocation(
+                        args.host, entry, Path.home(), overlay, marker,
+                        OUT / "stub.jsonl")
+                    # 0 either way: whether the host takes the documented
+                    # spelling is the GRADER's verdict over invocation.json, and
+                    # "it does not" is a finding rather than a broken row.
                     return 0
 
                 if args.creds == "none":

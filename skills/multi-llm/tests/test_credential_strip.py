@@ -285,7 +285,8 @@ class TestTheDecisionTable:
         When the org pays through a gateway the subscription-vs-API-key billing
         question does not apply either way, and stripping would produce a run
         that authenticates against the public API with credentials meant for the
-        gateway. It is also what keeps the README's endpoint recipes working.
+        gateway. It is also what keeps `docs/providers.md`'s endpoint recipes
+        working.
         """
         with patch.dict(
             os.environ, {"ANTHROPIC_BASE_URL": "https://gateway.example.com"}, clear=False

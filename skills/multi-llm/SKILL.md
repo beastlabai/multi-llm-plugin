@@ -104,4 +104,4 @@ Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complet
 ```
 
 Providers and models live in `${CLAUDE_SKILL_DIR}/providers.yaml` (per-repository
-override via `--init`); the README has the rest.
+override via `--init`); `docs/providers.md` in the repository has the rest.

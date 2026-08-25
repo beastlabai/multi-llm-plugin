@@ -7,8 +7,8 @@
 #      block — over base, identical to the env layer below)
 #   3. MULTI_LLM_PROVIDERS_CONFIG=/path.yaml   (optional env escape hatch)
 # Each layer is deep-merged over the one below; LIST values replace wholesale.
-# Scaffold a per-project override with `--init`. See the README
-# "Per-project configuration" section for the full semantics.
+# Scaffold a per-project override with `--init`. See `docs/configuration.md` in
+# the repository for the full semantics.
 #
 # Note: Command construction (flags, arguments, subcommands) — and the binary
 # name itself — is handled by provider classes in utils/providers/. This config
@@ -131,7 +131,8 @@ providers:
     # credential strips under `auto`: when the org pays through a gateway the
     # subscription-vs-API-key billing question does not apply, and stripping
     # would authenticate against the public API with credentials meant for the
-    # gateway. That is what keeps the README's endpoint recipes working.
+    # gateway. That is what keeps the endpoint recipes in the repository's
+    # `docs/providers.md` working.
     # OPENAI_API_KEY, CLAUDE_CONFIG_DIR and CODEX_HOME are never stripped either.
     strip_vendor_keys: auto
     # vendor_backend: auto | keep | strip   (default: auto)

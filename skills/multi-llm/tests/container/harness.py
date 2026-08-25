@@ -124,6 +124,12 @@ class Row:
     #: Host lane: wire, stage and render the argv, then stop before the host
     #: process. The whole credentialed path except the model turn, at zero cost.
     dry_run_host: bool = False
+    #: Host lane, `creds="none"`: install the shim, start a FRESH session with the
+    #: host's own model pointed at the loopback stub, and type the exact
+    #: `/multi-llm …` string README.md and docs/hosts.md publish. Credential-free
+    #: by construction — what is under test is argument delivery, not model
+    #: output. The verdict lands in the bundle as `invocation.json`.
+    documented_invocation: bool = False
 
 
 @dataclass
@@ -167,6 +173,15 @@ class RowResult:
             return []
         return [json.loads(p.read_text(encoding="utf-8"))
                 for p in sorted(directory.glob("*.receipt.json"))]
+
+    @property
+    def invocation(self) -> dict:
+        """The documented-invocation probe's verdict, or `{}` — see the entrypoint.
+
+        `{}` is itself a finding on a row that asked for the probe: it means the
+        host process never got far enough to record one.
+        """
+        return _read_json(self.out_dir / "invocation.json")
 
     @property
     def host_run(self) -> dict:
@@ -449,6 +464,8 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
         argv += ["--mock-runner", row.mock_runner]
     if row.dry_run_host:
         argv += ["--dry-run-host"]
+    if row.documented_invocation:
+        argv += ["--documented-invocation"]
     if row.command:
         argv += ["--command", row.command]
     for extra in row.commands:
@@ -615,8 +632,8 @@ def classify_cap_hit(result: RowResult) -> str:
 # credentialed host rows at ~1400 s and a per-CLI surface probe behind them is
 # most of an afternoon, and every one of those rows is individually "within its
 # cap" the whole time. An export nobody reads is worse than no cap at all — it
-# reads as a bound in the Makefile, in the README and in the plan while the lane
-# runs open-ended.
+# reads as a bound in the Makefile, in `docs/development.md`, in this directory's
+# own `README.md` and in the plan while the lane runs open-ended.
 #
 # So the rule is the plan's, in its own words: once the cap is spent the driver
 # **launches nothing further**, reports which rows ran, which failed and which
@@ -765,7 +782,8 @@ class MatrixBudget:
         return {
             "cap_s": self.timeout_s,
             # The lane total, beside each row's own wall clock: it is the number
-            # the README quotes and the one a later cap is derived from.
+            # this directory's own `README.md` quotes and the one a later cap is
+            # derived from.
             "elapsed_s": round(self.elapsed(), 2),
             "expired": bool(self.refused),
             "ran": ran,
@@ -1047,7 +1065,12 @@ def credential_mode(row: Row, result: RowResult) -> str:
     recorded = str(result.credential_census.get("credential_mode") or "")
     if recorded in ("openrouter", "fallback"):
         return recorded
-    if (result.out_dir / "discovery.json").is_file():
+    # Both credential-free host tiers land here, and both really exercised the
+    # host: `discovery.json` is the listing tier's verdict, `invocation.json` the
+    # documented-invocation probe's. A row that reached either is `discovery-only`
+    # rather than a quiet zero — the distinction the census exists to keep.
+    if ((result.out_dir / "discovery.json").is_file()
+            or (result.out_dir / "invocation.json").is_file()):
         return "discovery-only"
     return row.creds if row.creds in ("openrouter", "fallback", "none") else "none"
 
@@ -1235,6 +1258,28 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
     if row.lane != "host" or not row.host:
         return set()
     fields: set[str] = set()
+    if row.documented_invocation:
+        # THE ONE ROW WHOSE RECEIPTS ARE NOT THE HOST'S. Its only dispatcher
+        # invocation is the rig's own `install-host`, which `dispatch()` runs
+        # through the same `uv` wrapper that writes receipts — so the receipt
+        # rule below would credit the HOST with a call it never made, and a
+        # second receipt from the same leg would promote `multi_turn` on a row
+        # where the host took no turn at all. Both were observed on
+        # `runs/20260824T164940Z`, where codex REFUSED the command and still
+        # printed five promotions.
+        #
+        # This row's evidence is `invocation.json` and nothing else. A host that
+        # resolved the published `/multi-llm …` string in a fresh session found
+        # the shim at the path `install_paths` declares, crossed its `reload`
+        # boundary to do it, and expanded our `arguments` into the turn — which
+        # is a stronger demonstration of those four than a receipt, because it
+        # is the spelling the documents publish. A host that did not resolve it
+        # demonstrates none of them, `shim` included: an installed file at a path
+        # we chose is `install-host --check`'s claim, and this lane is explicit
+        # that a green `--check` is not discovery.
+        if (result.invocation or {}).get("resolved"):
+            fields |= {"shim", "install_paths", "arguments", "reload"}
+        return fields
     if result.receipts:
         fields |= {"shim", "install_paths", "arguments", "reload"}
     if len(result.receipts) >= 2:

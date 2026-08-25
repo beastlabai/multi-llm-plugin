@@ -26,14 +26,15 @@ sentence when it is installed.
 | Host | Shim (repo → installed) | `arguments` | *spawn subagents* | *ask the user* | *run detached* | Default runner | `nested_exec` (spawn/network/creds) | Max subagents | Timeout ceiling | Verified |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `claude-code` | *not rendered* → `SKILL.md` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | allowed/allowed/allowed | 10 | 600 s (not raisable) | `arguments`, `ask`, `default_subagent_runner`, `detach`, `installable`, `multi_turn`, `native_tool`, `shim_max_lines`, `subagent_tiers`, `subagents` |
-| `codex` | `hosts/codex/shim.md.tmpl` → `SKILL.md` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | unknown/unknown/unknown | 4 | none documented | *none yet* |
-| `opencode` | `hosts/opencode/shim.md.tmpl` → `commands/multi-llm.md` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | unknown/unknown/unknown | 4 | 120 s (raise via env: `unknown`, config: `unknown`) | `arguments`, `detach`, `headless_invocation`, `install_paths`, `installable`, `multi_turn`, `reload`, `shim` |
+| `codex` | `hosts/codex/shim.md.tmpl` → `SKILL.md` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | unknown/unknown/unknown | 4 | none documented | `invocation` |
+| `opencode` | `hosts/opencode/shim.md.tmpl` → `commands/multi-llm.md` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | unknown/unknown/unknown | 4 | 120 s (raise via env: `unknown`, config: `unknown`) | `arguments`, `detach`, `headless_invocation`, `install_paths`, `installable`, `invocation`, `multi_turn`, `reload`, `shim` |
 
 ## Per-host notes and stripped variables
 
 ### `claude-code`
 
 - Installable: `false`; reload after install: `none`
+- Invocation (documented): invoke it as `/multi-llm:multi-llm <mode-flag> <plan-path> [options]`.
 - Driving agent gets a turn after a command returns (`multi_turn`): `true` — verified. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: full `sonnet`, cheap `haiku`
 - Verb sentences a rendered shim carries:
@@ -54,6 +55,7 @@ sentence when it is installed.
 ### `codex`
 
 - Installable: `true`; reload after install: `new-session`
+- Invocation (verified): invoke it by name rather than as a slash command — `Use the multi-llm skill with exactly these arguments: <the same arguments the Claude Code skill takes>`. Codex installs this shim as a **skill**, which is model-invoked rather than typed: its composer answers `/multi-llm` with `Unrecognized command`.
 - Driving agent gets a turn after a command returns (`multi_turn`): `true` — documented. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: resolved from `providers.yaml` `driver.subagent_runner{,_cheap}` (this host does not dispatch subagents natively)
 - Verb sentences a rendered shim carries:
@@ -74,6 +76,7 @@ sentence when it is installed.
 ### `opencode`
 
 - Installable: `true`; reload after install: `new-session`
+- Invocation (verified): invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`.
 - Driving agent gets a turn after a command returns (`multi_turn`): `true` — verified. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: resolved from `providers.yaml` `driver.subagent_runner{,_cheap}` (this host does not dispatch subagents natively)
 - Verb sentences a rendered shim carries:

@@ -116,4 +116,4 @@ any host, a plain terminal, or CI.
 - One override per repository (discovery anchors at the git root). For per-run or
   out-of-tree overrides use `MULTI_LLM_PROVIDERS_CONFIG=/path.yaml`.
 
-See the "Per-project configuration" section of the README for the full semantics.
+See `docs/configuration.md` in the repository for the full semantics.

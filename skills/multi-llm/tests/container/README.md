@@ -47,6 +47,7 @@ A contributor with no API key can run the half of the suite that gates correctne
 make e2e-container                 pinned build; provider lane
 make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)
 make e2e-container-host-discovery  host lane, --creds none tier: no key, no network
+make e2e-container-host-invocation host lane, --creds none: type the documented /multi-llm string
 make e2e-container-latest          CLIs @latest; provider lane only; credential-free
 make e2e-container-latest-host     CLIs @latest; host lane; guarded, opt-in only
 make e2e-version-delta             print the pinned → installed versions of the @latest image
@@ -308,7 +309,7 @@ output, so the cap can only ever cost coverage, never fabricate it.
 
 ## What the host lane covers
 
-Three tiers, and only the first needs nothing:
+Four tiers, and only the first two need nothing:
 
 **`--creds none` (free, and it runs today).** `make e2e-container-host-discovery`.
 Stages the shim, crosses the `reload` boundary, asks the host what it can see, and
@@ -342,6 +343,49 @@ the other.
 > `opencode debug skill` is the trap, and it looks right: it lists *skills*, our
 > shim installs as a *command*, and it exits 0 listing only a built-in. A green
 > command that proves nothing.
+
+**`--creds none`, the documented-invocation row (free, and it runs today).**
+`make e2e-container-host-invocation`. The other half of the same question, and
+the one nothing had ever asked: *does the string the documents tell a reader to
+type actually dispatch?* Discovery answers "the host can see the command";
+this answers "the published spelling reaches our dispatcher".
+
+They are genuinely different, because the two installable hosts do not install
+the same kind of object — codex gets a **skill** (`.codex/skills/multi-llm/SKILL.md`),
+opencode gets a **command** (`.opencode/commands/multi-llm.md`) — so each does its
+own resolution, namespacing and word-splitting. The credentialed rows do not
+settle it either: they prompt with *"Use the multi-llm skill with exactly these
+arguments: …"*, which proves the writer and says nothing about `/multi-llm`.
+
+The row installs the shim, points the **host's own model** at the loopback stub,
+opens a **fresh session in a pty** (both hosts are `reload: new-session`; one host
+process per row satisfies that by construction), types the published string with a
+per-run marker, and reads back the prompt the host composed through the stub's
+opt-in fact probe — *names of patterns the rig wrote, never the prompt body*. A
+host that resolved the command sends its own shim's text; one that did not sends
+the characters the user typed. No credential is needed because what is under test
+is argument delivery, not model output.
+
+| Host | `/multi-llm …` typed into a fresh session | measured |
+| --- | --- | --- |
+| `opencode` 1.18.18 | **resolves** — shim body, `{SKILL_DIR}` substituted, `--host opencode --yes --exec-subagents`, and `--review-plan plans/<marker>.md` still adjacent | 2026-08-24 |
+| `codex` 0.146.0 | **refused** — `• Unrecognized command '/multi-llm'.` and *zero* requests sent | 2026-08-24 |
+
+Codex's shim is discovered — the skill is advertised to the model by name inside
+`<skills_instructions>` with its `SKILL.md` locator — but a Codex *skill* is a
+model-invoked instruction source, not a composer command; its slash surface lists
+`/model`, `/ide`, `/permissions`, `/keymap`, `/vim`, `/experimental`, `/approve`,
+`/memories` and no skill, and the deprecated `install_paths.legacy` prompts
+directory does not rescue it either. **That makes it a documentation defect**, and
+`test_the_documents_state_the_syntax_each_host_actually_takes` fails until
+`README.md` and the sentence `render_capabilities.py` renders into `docs/hosts.md`
+say so per host.
+
+> One rig accommodation, recorded rather than buried: `posture.yaml` mounts /tmp
+> `noexec`, and opencode's TUI is a bun binary that dlopen()s a native render
+> library out of `$TMPDIR`. The row points `$TMPDIR` at the bundle bind — the one
+> writable exec-capable path in this posture — and deletes it again afterwards. It
+> changes where a temporary file lands, never what the host is asked.
 
 **OpenRouter (default).** One `OPENROUTER_API_KEY`, three hosts. Cents for the 3×3
 matrix — **measured, on the rows that have run**: $0.008 (`opencode --ask`),
