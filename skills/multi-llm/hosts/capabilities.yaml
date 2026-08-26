@@ -188,7 +188,37 @@ hosts:
                                      # `executor` until a recorded run says
                                      # otherwise. native_tool names the tool for
                                      # documentation, not for dispatch.
+                                     #
+                                     # EVIDENCE, NOT A PROMOTION (2026-08-25,
+                                     # codex-cli 0.149.1, read out of the captured
+                                     # tools[] array of a real headless request):
+                                     # `multi_agent_v1` IS offered in `codex exec`,
+                                     # carrying spawn_agent, wait_agent, send_input,
+                                     # resume_agent and close_agent with a
+                                     # documented model-override list. That closes
+                                     # "is it offered" and leaves "does it work"
+                                     # open, which is the half this cell grades — a
+                                     # tool in the array is not a recorded run, and
+                                     # the failure mode here is silent-then-fatal.
+                                     # One detail a `native` promotion would have to
+                                     # clear: spawn_agent's own description reads
+                                     # "Do not spawn sub-agents unless the user or
+                                     # applicable AGENTS.md/skill instructions
+                                     # explicitly ask" — a skill CAN grant that
+                                     # permission, so the lever exists.
     ask: free-text                   # request_user_input is Plan-Mode-only
+                                     #
+                                     # EVIDENCE, NOT A PROMOTION (same capture):
+                                     # request_user_input is in the tool list and
+                                     # its own description says "This tool is only
+                                     # available in Plan mode." — which CONFIRMS the
+                                     # line above rather than contradicting it, so
+                                     # the cell does not move. What is new is a flag
+                                     # to watch: `codex features list` reports
+                                     # `default_mode_request_user_input under
+                                     # development false`. That is the switch that
+                                     # would make the tool generally available, so
+                                     # re-probe it on each codex bump.
     detach: python
     native_tool:
       subagents: agent

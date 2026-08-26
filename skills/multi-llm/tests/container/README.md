@@ -387,6 +387,17 @@ say so per host.
 > writable exec-capable path in this posture — and deletes it again afterwards. It
 > changes where a temporary file lands, never what the host is asked.
 
+> A second one, found while probing codex's plugin surface and recorded here
+> before a row depends on it: **codex refuses to create its PATH-alias helper
+> binaries when `CODEX_HOME` is under a temporary directory.** It prints
+> `WARNING: proceeding, even though we could not create PATH aliases: Refusing to
+> create helper binaries under temporary dir "/tmp"` and carries on with **no
+> aliases created**. The lane's `$HOME` is a tmpfs, so this fires on every codex
+> row today; it is harmless *because* nothing here reaches for those helpers. The
+> note exists so that the day a row does, the failure is read as posture rather
+> than as a multi-llm defect. Moving `$CODEX_HOME` off tmpfs is the fix, and it is
+> a posture change, not a code change.
+
 **OpenRouter (default).** One `OPENROUTER_API_KEY`, three hosts. Cents for the 3×3
 matrix — **measured, on the rows that have run**: $0.008 (`opencode --ask`),
 $0.011 (`codex --ask`), $0.020 (`claude-code --ask`), $0.024 (`opencode
