@@ -1,0 +1,5 @@
+{
+  "name": "beastlabai",
+  "description": "Codex marketplace catalog for this repository. Deliberately empty until packaging/codex/multi-llm/ ships (plans/codex-native-plugin.md, Phase 1). Its job today is to SHADOW .claude-plugin/marketplace.json, which codex also reads and whose one entry has source './' — the repository root. Measured on codex-cli 0.149.1: with only that file present, `codex plugin add multi-llm@beastlabai` succeeded and copied the entire working tree (264 MB here; 1.5 GB before the runs/ cap) into plugins/cache/beastlabai/multi-llm/local/, .git, .venv and the gitignored plans/ scratch included, at a version segment of 'local' that no version-pinned resolution can match. With this file present the same command exits 1 with `plugin `multi-llm` was not found in marketplace `beastlabai`` and copies nothing. A clean error beats a 264 MB wrong answer. Phase 1 replaces the empty array with the real entry; tests/test_marketplace_manifest_location.py is the guard on both states.",
+  "plugins": []
+}
