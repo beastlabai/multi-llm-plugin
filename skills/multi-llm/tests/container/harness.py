@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -51,6 +52,57 @@ HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs"
 #: The tracked half (C10). `runs/` is gitignored and prunable; this is not.
 RECORDS = HERE / "records"
+#: `runs/<utc>[-<suffix>]/` — the only entries the retention sweep may touch.
+#: `README.md`, `lock-update/` and `surface/` share the directory and are not run
+#: bundles, so the sweep is keyed off this shape rather than off "every child of
+#: runs/" the way `make e2e-clean` is.
+_RUN_BUNDLE_RE = re.compile(r"^\d{8}T\d{6}Z(?:-[\w.-]+)?$")
+#: How many bundles survive a sweep. `runs/` is gitignored, but **nothing that
+#: copies a working tree consults .gitignore** — `codex plugin add` from a local
+#: marketplace and a local-path `/plugin install` both take the directory as it
+#: stands. Uncapped, this lane grew the checkout to 1.5 GB against 18 MB of
+#: tracked files, and a plugin install would have copied all of it. `0` disables
+#: the sweep; `MLLM_E2E_RUNS_KEEP` overrides it.
+RUNS_KEEP_DEFAULT = 8
+
+
+def prune_runs(runs_root: Path | None = None, keep: int | None = None,
+               protect: Path | None = None) -> list[Path]:
+    """Delete all but the newest `keep` run bundles; return what was removed.
+
+    Ordering is by directory NAME, which is a UTC stamp — a real chronology that
+    does not move when a filesystem restamps mtimes (a copy, a restore, a
+    `chmod -R`). `protect` survives however old it sorts, which is what lets the
+    sweep run *during* a row rather than only between them.
+
+    Best-effort by construction: a bundle another process still holds open can
+    fail to unlink, and a retention sweep is never a reason to fail a run.
+    """
+    root = runs_root or RUNS
+    if keep is None:
+        raw = os.environ.get("MLLM_E2E_RUNS_KEEP", "").strip()
+        try:
+            keep = int(raw) if raw else RUNS_KEEP_DEFAULT
+        except ValueError:
+            keep = RUNS_KEEP_DEFAULT
+    if keep <= 0 or not root.is_dir():
+        return []
+    kept = protect.resolve() if protect else None
+    bundles = sorted(
+        (p for p in root.iterdir()
+         if p.is_dir() and _RUN_BUNDLE_RE.match(p.name)),
+        key=lambda p: p.name,
+    )
+    removed: list[Path] = []
+    for path in bundles[:-keep]:
+        if kept is not None and path.resolve() == kept:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
 RECORD_SCHEMA = RECORDS / "record.schema.json"
 #: Written by `verify_versions.py` in the final build layer: what the image really
 #: installed, as opposed to what `cli-versions.lock` asked for. It is the only
@@ -1798,6 +1850,12 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
     # and prunable because their parent is the developer's.
     out_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(out_dir, 0o777)
+    # Retention lives here, not in the Makefile, so it holds for every entry
+    # point — a pytest row, `make e2e-container`, a hand-driven `run_row`. The
+    # bundle being written is passed as `protect` because it already exists by
+    # this line and would otherwise be its own sweep's oldest candidate whenever
+    # the directory was empty before it.
+    prune_runs(runs_root or RUNS, protect=run_root)
 
     argv = build_run_argv(row, out_dir, posture, image)
     (out_dir / "run-command.txt").write_text(

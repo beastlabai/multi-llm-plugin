@@ -56,7 +56,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-container-host-discovery e2e-container-host-invocation \
         e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
-        e2e-clean
+        e2e-clean e2e-prune
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -71,6 +71,7 @@ help:
 	@echo "  make e2e-version-delta            print the pinned → installed versions of the @latest image"
 	@echo "  make e2e-lock-update              move the pins the @latest image proves moved, then prove it"
 	@echo "  make e2e-verify-record REC=<path> re-hash a runs/ bundle against a committed record"
+	@echo "  make e2e-prune [KEEP=n]           keep the newest n runs/ bundles, delete the rest"
 	@echo "  make e2e-clean                    prune the ephemeral runs/ bundles"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
@@ -437,6 +438,24 @@ e2e-verify-record:
 
 # runs/ is the raw evidence bundle: ephemeral, gitignored, safe to delete at any
 # time. The durable provenance lives in the tracked records/ beside it.
+#
+# Gitignored is not the same as absent, and that distinction is the reason the
+# retention target below exists: nothing that copies a WORKING TREE consults
+# .gitignore. `codex plugin add` from a local-path marketplace and a local-path
+# plugin install both take the directory as it stands, so an uncapped runs/ is a
+# distribution problem and not merely a disk one. It reached 1.5 GB here against
+# 18 MB of tracked files before anyone measured it.
+#
+# The lane prunes itself on every row (harness.prune_runs, MLLM_E2E_RUNS_KEEP);
+# this target is the same sweep on demand, for a checkout that predates it.
+KEEP ?= 8
+e2e-prune:
+	uv run --project skills/multi-llm -- python -c \
+	  'import sys; sys.path.insert(0, "skills/multi-llm"); \
+	   from tests.container.harness import prune_runs; \
+	   r = prune_runs(keep=$(KEEP)); \
+	   print(f"pruned {len(r)} bundle(s), kept the newest $(KEEP) (records/ untouched)")'
+
 e2e-clean:
 	rm -rf $(CONTAINER_DIR)/runs/*/
 	@echo "pruned $(CONTAINER_DIR)/runs/ (records/ untouched)"

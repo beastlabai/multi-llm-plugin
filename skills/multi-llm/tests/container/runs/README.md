@@ -36,9 +36,30 @@ the record still stands on its own and the tool reports the bundle as *missing*
 rather than as *mismatched* — which is the honest answer, since deleting this
 directory is a supported thing to do.
 
-## Safe to delete
+## Capped, and safe to delete
 
-Any time. `make e2e-clean` does it for you and leaves `records/` untouched.
+The lane prunes itself: `harness.prune_runs` runs as each bundle directory is
+created and keeps the newest **8**, protecting the bundle being written.
+`MLLM_E2E_RUNS_KEEP` overrides the number and `0` turns the sweep off.
+`make e2e-prune KEEP=n` is the same sweep on demand, for a checkout that predates
+it. Both are shape-aware: only `<utc>[-<suffix>]/` directories are candidates, so
+this README, `lock-update/` and `surface/` stay. `make e2e-clean` is still the
+blunt instrument — `rm -rf runs/*/`, which takes those with it — and both leave
+`records/` untouched.
+
+**Why a cap and not just an ignore rule.** `runs/` is gitignored, and that was
+treated as the whole answer until it wasn't: nothing that copies a *working tree*
+consults `.gitignore`. `codex plugin add` against a local-path marketplace and a
+local-path plugin install both take the directory as it stands, so an uncapped
+`runs/` is a distribution problem before it is a disk one — it reached **1.2 GB
+here, in a repo with 18 MB of tracked files**, and the advertised install would
+have copied every byte of it. The build context is a separate defence and already
+holds (`.dockerignore` re-excludes `runs/**` from inside an allowlisted tree);
+the cap is what protects the routes that have no context file to read.
+
+A pruned bundle costs nothing a record needed: `make e2e-verify-record` reports
+**MISSING** and exits 0, saying the record stands on its own, rather than reading
+the absence as a mismatch.
 
 One consequence worth knowing: **`test_container_argv.py` grades what is in here**.
 It grades the bundles *its own invocation* produced — the run roots
