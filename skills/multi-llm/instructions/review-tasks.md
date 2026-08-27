@@ -58,7 +58,7 @@ When items have `needs-human-decision` status, **ask the user** how to proceed. 
 Before reviewing tasks, verify that `generate-tasks` has been completed:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prereq --plan-file "$PLAN_PATH" --mode review-tasks
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prereq --plan-file "$PLAN_PATH" --mode review-tasks
 ```
 
 Parse the JSON output (stdout is always pure JSON; the human-readable
@@ -121,7 +121,7 @@ Check for existing output to avoid expensive duplicate runs. Follow the detectio
 A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
 
 ```bash
-PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
+PYTHONUNBUFFERED=1 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --models <selected> \
   > "{plan}/review-tasks/orchestrator-run.log" 2>&1
 ```
@@ -152,7 +152,7 @@ After the background task completes, check the log file `{plan}/review-tasks/orc
 
 The reaggregation command for this mode is:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --reaggregate
 ```
 
@@ -190,7 +190,7 @@ If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
 1. Read `validation_tasks.json` once from `{plan}/review-tasks/`
 2. Count the number of batches as `{total_batches}` and mark the phase start:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "review-tasks" --total-batches {total_batches}
    ```
 3. Choose a strategy:
@@ -211,7 +211,7 @@ Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
 After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-tasks \
   --plan-file "$PLAN_PATH" --reaggregate
 ```
 
@@ -227,7 +227,7 @@ Report following `references/summary-format.md`, including all generated files i
 
 **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
   --state-file "$STATE_FILE" --phase "review-tasks" \
   --label "Validation batch {N}" --subagent-type "general-purpose" \
   --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -237,13 +237,13 @@ Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent
 
 After all batches and reaggregation finish, mark the phase finish:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 Optionally generate and include resource usage report:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report --state-file "$STATE_FILE" --phase "review-tasks"
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report --state-file "$STATE_FILE" --phase "review-tasks"
 ```
 
 #### High-Volume Results (>25 groups)

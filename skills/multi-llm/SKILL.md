@@ -65,7 +65,7 @@ usage hint from `argument-hint` and stop. `--init` takes no plan path.
 ## 4. Load the mode's core instructions, then execute them step by step
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode>
+uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode>
 ```
 
 This prints the core with every skill-dir placeholder already substituted. Reading
@@ -87,7 +87,7 @@ concrete resolution here, so nothing is left to decide mid-run:
 Every mode is this single command, with `--host claude-code` baked in:
 
 ```bash
-uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host claude-code [flags…]
+uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host claude-code [flags…]
 ```
 
 Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete,

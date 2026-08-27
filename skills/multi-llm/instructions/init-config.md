@@ -61,7 +61,7 @@ any host, a plain terminal, or CI.
    already substituted, so run it as written:
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" init [--dir PATH] [--force] [--gitignore] [--template-only]
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" init [--dir PATH] [--force] [--gitignore] [--template-only]
    ```
 
 3. **Report the result.** Print the path the script wrote and its git-tracking

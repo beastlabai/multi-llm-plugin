@@ -88,7 +88,7 @@ the dispatcher serves the phase's instruction file with every skill-dir
 placeholder already substituted, so nothing is left for you to resolve:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util instructions <mode>
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util instructions <mode>
 ```
 
 `<mode>` is the phase's mode word (`review-plan`, `apply-suggestions`,
@@ -113,12 +113,12 @@ pre-substituted and the file on disk is not.
 Load the `review-plan` core and execute it.
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --models <selected>
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the orchestrator instead of `--models`:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --quick
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --quick
 ```
 
 Wait for completion, then proceed to Phase 2.
@@ -131,7 +131,7 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 1. Run the consolidation orchestrator:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
    ```
 
 2. Handle subagent batches using the same Strategy A/B logic from review-plan instructions:
@@ -144,7 +144,7 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 
 3. Run reaggregation:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
    ```
 
 4. Present consolidated report paths to user:
@@ -159,12 +159,12 @@ After Phase 1 completes (including any validation and reaggregation), check the 
 Load the `apply-suggestions` core and execute it.
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH"
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended (Claude judges every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase applies validated suggestions sequentially:
@@ -251,12 +251,12 @@ recorded skipped (`reason: Skipped: skipped (no findings)`), and Phase 4 follows
 **(c) Review-tasks produced findings**: the phase runs —
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm
 ```
 
 If `--yes` (or `--non-interactive`) was specified, also append `--claude-decide` so any `needs-human-decision` task suggestions are judged by Claude rather than prompted:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm --claude-decide
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm --claude-decide
 ```
 
 This phase:
@@ -273,7 +273,7 @@ Load the `apply-task-suggestions` core and follow it to process batches, generat
 Load the `implement` core and execute it.
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH"
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH"
 ```
 
 Wait for completion, then proceed to Phase 5.
@@ -283,12 +283,12 @@ Wait for completion, then proceed to Phase 5.
 Load the `review-code` core and execute it.
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --models <selected>
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --models <selected>
 ```
 
 If `--quick` was specified, pass `--quick` to the code review orchestrator:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --quick
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --quick
 ```
 
 Use the **same models resolved in Phase 1** (Critical Rule 4). Under `--yes`, resolve models the same non-interactive way as Phase 1 (never prompt). This phase only *reviews* the code and produces `{plan}/code-review/` outputs — the fixes are applied in Phase 6.
@@ -307,12 +307,12 @@ through the same `--skip --reason` state path, and the report follows.
 **Otherwise, run the apply-code-fixes orchestrator:**
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH"
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH"
 ```
 
 If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --claude-decide --no-confirm
 ```
 
 This phase:
@@ -384,7 +384,7 @@ run's own output, and `MULTI_LLM_RESULT.next` is copied verbatim:
 
    Generate combined resource usage:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --all-phases
    ```
    Include the output (if non-empty) after "### All Output Files".

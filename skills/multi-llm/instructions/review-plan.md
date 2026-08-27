@@ -149,7 +149,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
+   PYTHONUNBUFFERED=1 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" --models <selected> \
      > "{plan}/review-plan/orchestrator-run.log" 2>&1
    ```
@@ -191,7 +191,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    The reaggregation command for this mode is:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" \
      --reaggregate
    ```
@@ -231,7 +231,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` once from `{plan}/review-plan/`
    2. Count the number of batches as `{total_batches}` and mark the phase start before spawning the first wave:
       ```bash
-      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-plan" --total-batches {total_batches}
       ```
       Validation runs in parallel waves — wall-clock ETA reflects actual elapsed time, while per-batch duration would overstate it. The `record` step below picks `min(per-item, wall-clock)` automatically.
@@ -253,7 +253,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file "$PLAN_PATH" --reaggregate
    ```
 
@@ -269,7 +269,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include `--batch-index` (cumulative across waves: 1..N) and `--total-batches`:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "review-plan" \
      --label "Validation batch {N}" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -279,7 +279,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After all batches and reaggregation complete, mark the phase finish (only if `start` was called):
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-plan"
    ```
 
@@ -304,7 +304,7 @@ Items with `needs-human-decision` status are included in the report for the user
    **a) Run the consolidation orchestrator:**
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --consolidate
    ```
 
    **b) Handle subagent spawning for consolidation batches:**
@@ -317,14 +317,14 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`) — every task in its `batches` array carries a complete `prompt`
    2. Count the number of batches as `{total_batches}` and mark the consolidation phase start:
       ```bash
-      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" --total-batches {total_batches}
       ```
    3. For each task in the file, run `task.prompt` as a subagent — the filled `consolidate_suggestions.txt` template and that batch's group records are already inside it
    4. Write the JSON each subagent returns to that task's `output_path` (`consolidation_batch_N.json` in the phase directory)
    5. After each batch completes, record metrics with cumulative `--batch-index`:
       ```bash
-      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" \
         --label "Consolidation batch {N}" --subagent-type "general-purpose" \
         --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -338,12 +338,12 @@ Items with `needs-human-decision` status are included in the report for the user
    **c) Run reaggregation after all batches complete:**
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --reaggregate-consolidation
    ```
 
    After reaggregation, mark the consolidation phase finish:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-plan-consolidation"
    ```
 
@@ -366,13 +366,13 @@ Agent:
    "Which models would you like to use for the review?" (multi-select)
    Options: auto, gpt-5.2, gemini-3-pro, grok, gemini-3-flash, kimi-k2
 2. User selects: gpt-5.2, gemini-3-pro
-3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
+3. Runs: uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
 4. Orchestrator outputs [VALIDATION_PENDING] marker
 5. Claude reads plans/my-feature/review-plan/validation_tasks.json
 6. For each task: Claude runs task.prompt as a subagent
 7. Claude writes each subagent's JSON reply to that task's output_path
 8. Claude runs reaggregation:
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \
      --plan-file plans/my-feature.md --reaggregate
 9. Claude reports all output files when complete
 ```

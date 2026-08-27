@@ -20,7 +20,10 @@ command (``multi_llm.py util instructions <mode>``) before an agent ever reads i
 never by the reader. The classes below enforce the six rules that keep that true:
 
 1. *Site inventory* — every ``{SKILL_DIR}`` occurrence sits inside the invariant
-   ``uv run --project … multi_llm.py`` prefix; an occurrence anywhere else fails.
+   ``uv run {UV_RUN_FLAGS} --project … multi_llm.py`` prefix; an occurrence
+   anywhere else fails. The flag token is part of that prefix, so a command
+   hand-typed without it is a rule-1 failure rather than a dispatch that quietly
+   syncs the dev group.
 2. *Corpus completeness* — a checked-in per-file manifest, asserted exhaustive
    over the corpus in **both** directions, recording the expected occurrence count
    per file so a regression that reintroduces a second substitution site is a
@@ -73,6 +76,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import cli_common  # noqa: E402
+from utils import unattended  # noqa: E402
 
 
 def _scanned_files():
@@ -215,6 +219,14 @@ PLACEHOLDER_MANIFEST = {
     # the budget on a message an agent reads once.
     "hosts/codex/shim.md.tmpl": (0, 6),
     "hosts/opencode/shim.md.tmpl": (0, 6),
+    # The npm plugin's command body: a one-line delegation to the `multi_llm`
+    # tool, rendered through the same `render()` as any shim but from its own
+    # authored template. **Zero of both spellings, and that is the assertion**,
+    # not an accident: the flags are code in the plugin now, and a second
+    # spelling of them in prose is a template for reconstructing the shell route
+    # the tool exists to replace. Nothing here names a path, so there is nothing
+    # for a skill-dir token to sit inside.
+    "hosts/opencode/plugin-command.md.tmpl": (0, 0),
     # Generated from hosts/capabilities.yaml (D5b). Carries host tool names by
     # design — it is human documentation of the matrix — and therefore no
     # skill-dir placeholder of either spelling.
@@ -248,8 +260,15 @@ CLAUDE_SHIM = "SKILL.md"
 FIXTURE_SKILL_DIR = "/tmp/multi llm fixture/skill dir"
 
 #: The invariant prefix a ``{SKILL_DIR}`` occurrence is allowed to sit inside.
+#:
+#: ``{UV_RUN_FLAGS}`` is inside it, not optional beside it: the corpus is verbatim
+#: model-facing runbook text, so a command written ``uv run --project …`` *is* a
+#: dispatch without ``--frozen --no-dev`` — which syncs the whole dev group on a
+#: first run and fails outright offline. Requiring the token here is what makes a
+#: reintroduced bare prefix a rule-1 failure.
 INVARIANT_PREFIX_RE = re.compile(
-    r"uv run --project \"?\{SKILL_DIR\}\"? -- python \"?\{SKILL_DIR\}/multi_llm\.py\"?"
+    r"uv run \{UV_RUN_FLAGS\} --project \"?\{SKILL_DIR\}\"? -- "
+    r"python \"?\{SKILL_DIR\}/multi_llm\.py\"?"
 )
 
 UV_COMMAND_RE = re.compile(r"^(PYTHONUNBUFFERED=1\s+)?uv\s+run\b")
@@ -438,7 +457,8 @@ class TestPlaceholderSites:
                 offenders.append((line_no, line.strip()))
         assert not offenders, (
             f"{rel}: {{SKILL_DIR}} outside the invariant "
-            "`uv run --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py` "
+            "`uv run {UV_RUN_FLAGS} --project {SKILL_DIR} -- python "
+            "{SKILL_DIR}/multi_llm.py` "
             "prefix. The token belongs nowhere else — not in prompts, not in "
             "task JSON, not in printed follow-ups:\n"
             + "\n".join(f"  line {ln}: {txt}" for ln, txt in offenders)
@@ -461,6 +481,151 @@ class TestRenderAndParse:
         rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
         for line_no, command in _command_units(rendered):
             _assert_command_is_clean(f"{rel}:{line_no}", command, FIXTURE_SKILL_DIR)
+
+
+class TestUvFlagsComeFromOneOwner:
+    """The corpus dispatches with the same ``uv run`` flags as everything else.
+
+    ``instructions/*.md`` and the shim templates are **verbatim** model-facing
+    runbook text on the still-supported file route, so a command typed there
+    without ``--frozen --no-dev`` is a real dispatch that syncs the dev group (17
+    packages, measured) and fails outright in any offline posture. They therefore
+    carry ``{UV_RUN_FLAGS}``, rendered by ``render_instruction_text`` from
+    ``unattended.uv_run_args`` — the single owner ``dispatcher_prefix()`` and
+    ``detach.build_child_command()`` already read.
+
+    ``SKILL.md`` cannot carry the *token*: it is the one shim nobody renders (the
+    host expands ``${CLAUDE_SKILL_DIR}`` itself at load time), so ``{UV_RUN_FLAGS}``
+    there would reach an agent unsubstituted and be typed literally. It is **not**
+    outside the rule, though — it is the Claude Code dispatch path, the one the
+    README prescribes, so leaving it flagless is exactly the first-run dev-group
+    sync in the host that runs most. It therefore spells the flags out, and
+    :class:`TestTheClaudeShimSpellsTheFlagsOut` below holds that second spelling to
+    the same owner so it cannot drift.
+    """
+
+    #: The corpus files whose commands go through ``render_instruction_text``.
+    RENDERED = [
+        rel for rel in sorted(PLACEHOLDER_MANIFEST)
+        if rel != CLAUDE_SHIM
+        and "{SKILL_DIR}" in (SKILL_ROOT / rel).read_text(encoding="utf-8")
+    ]
+
+    def test_the_rendered_corpus_is_not_vacuous(self):
+        assert len(self.RENDERED) >= 10, self.RENDERED
+
+    @pytest.mark.parametrize("rel", RENDERED)
+    def test_every_command_carries_the_flag_list(self, rel):
+        source = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
+        flags = list(unattended.uv_run_args())
+        for line_no, command in _command_units(rendered):
+            argv = shlex.split(command)
+            uv_side = argv[:argv.index("--")] if "--" in argv else argv
+            missing = [flag for flag in flags if flag not in uv_side]
+            assert not missing, (
+                f"{rel}:{line_no}: rendered command dispatches without "
+                f"{missing} — an agent following it recreates the dev-group "
+                f"sync the flag list exists to remove:\n  {command[:200]}"
+            )
+
+    @pytest.mark.parametrize("rel", RENDERED)
+    def test_the_rendered_prefix_is_the_dispatcher_prefix(self, rel):
+        """Not merely *some* flags: the argv Python composes, element for element.
+
+        Compared after ``shlex.split`` rather than as bytes, because the two
+        spellings quote differently on purpose — the corpus writes ``"…"`` for an
+        agent to copy, ``shlex.quote`` writes ``'…'`` — and the property is the
+        argument vector, not the quoting style.
+        """
+        source = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
+        expected = shlex.split(cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR)))
+        for line_no, command in _command_units(rendered):
+            argv = shlex.split(command)
+            if argv and argv[0] == "PYTHONUNBUFFERED=1":
+                argv = argv[1:]
+            assert argv[:len(expected)] == expected, (
+                f"{rel}:{line_no}: the runbook prefix and dispatcher_prefix() "
+                f"disagree.\n  expected: {expected}\n  got:      "
+                f"{argv[:len(expected)]}"
+            )
+
+    def test_the_flags_are_never_hand_typed(self):
+        """One owner means the corpus spells the token, never the flags."""
+        offenders = []
+        for rel in self.RENDERED:
+            text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if UV_COMMAND_RE.match(re.sub(r"^[-*+]\s+", "", line.strip())) and (
+                    "{UV_RUN_FLAGS}" not in line
+                ):
+                    offenders.append(f"{rel}:{line_no}: {line.strip()[:120]}")
+        assert not offenders, (
+            "a `uv run` command in the corpus that does not render its flags "
+            "from unattended.uv_run_args(); use the {UV_RUN_FLAGS} token so a "
+            "change of flags cannot leave the runbook text behind:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_token_tracks_the_owner(self, monkeypatch):
+        """Rendered from the owner at read time, not baked at authoring time."""
+        monkeypatch.setenv(unattended.UV_RUN_ARGS_ENV, "--no-sync")
+        rendered = cli_common.render_instruction_text(
+            'uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}"', FIXTURE_SKILL_DIR
+        )
+        assert rendered == f'uv run --no-sync --project "{FIXTURE_SKILL_DIR}"'
+
+
+class TestTheClaudeShimSpellsTheFlagsOut:
+    """The one file that must hand-type the flags, held to the owner anyway.
+
+    ``SKILL.md`` is read raw by Claude Code, so it cannot carry ``{UV_RUN_FLAGS}``
+    — and it is a dispatch path, not documentation, so it cannot go flagless
+    either: an agent types what is written there verbatim, and ``uv run
+    --project`` is the 17-package first-run sync in the host that runs most. The
+    flags are therefore literal, and asserted here against
+    ``unattended.uv_run_args()`` element for element, so a change to the list is a
+    failure here rather than a silently stale second spelling.
+
+    The one thing the literal spelling cannot follow is ``MULTI_LLM_UV_RUN_ARGS``:
+    these two commands are pinned to the default list. That is confined to the two
+    shim-level commands — the core the shim loads at step 4 is rendered and does
+    honour the override — so the env var is unset here rather than worked around.
+    """
+
+    SOURCE = (SKILL_ROOT / CLAUDE_SHIM).read_text(encoding="utf-8")
+
+    def test_the_shim_carries_commands_to_assert(self):
+        units = list(_command_units(self.SOURCE))
+        assert len(units) >= 2, units
+
+    def test_the_token_would_not_survive_here(self):
+        """Why this file hand-types: nothing renders it before an agent reads it."""
+        assert "{UV_RUN_FLAGS}" not in self.SOURCE, (
+            f"{CLAUDE_SHIM} is read raw by the host, so the token would reach an "
+            "agent unsubstituted; spell the flags and let this class hold them to "
+            "unattended.uv_run_args()"
+        )
+
+    def test_every_command_is_the_dispatcher_prefix(self, monkeypatch):
+        monkeypatch.delenv(unattended.UV_RUN_ARGS_ENV, raising=False)
+        # The host expands ${CLAUDE_SKILL_DIR}; render_instruction_text spells the
+        # same substitution, which is what lets the comparison be the whole prefix
+        # (flags *and* paths) rather than the flags alone.
+        rendered = cli_common.render_instruction_text(self.SOURCE, FIXTURE_SKILL_DIR)
+        expected = shlex.split(cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR)))
+        for line_no, command in _command_units(rendered):
+            argv = shlex.split(command)
+            if argv and argv[0] == "PYTHONUNBUFFERED=1":
+                argv = argv[1:]
+            assert argv[:len(expected)] == expected, (
+                f"{CLAUDE_SHIM}:{line_no}: the hand-typed prefix and "
+                f"dispatcher_prefix() disagree. Retype the flags in "
+                f"{CLAUDE_SHIM} — it is read raw, so it cannot track the owner "
+                f"on its own.\n  expected: {expected}\n  got:      "
+                f"{argv[:len(expected)]}"
+            )
 
 
 class TestServedCoreIsTokenFree:

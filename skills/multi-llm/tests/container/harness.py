@@ -64,6 +64,16 @@ _RUN_BUNDLE_RE = re.compile(r"^\d{8}T\d{6}Z(?:-[\w.-]+)?$")
 #: tracked files, and a plugin install would have copied all of it. `0` disables
 #: the sweep; `MLLM_E2E_RUNS_KEEP` overrides it.
 RUNS_KEEP_DEFAULT = 8
+RECORD_SCHEMA = RECORDS / "record.schema.json"
+#: Written by `verify_versions.py` in the final build layer: what the image really
+#: installed, as opposed to what `cli-versions.lock` asked for. It is the only
+#: honest source for a row's `cli_version` under `MLLM_PIN_MODE=latest`.
+IMAGE_VERSION_REPORT = "/opt/mllm/lock/cli-versions.installed.json"
+#: `hosts/capabilities.yaml`, whose `provenance` block is what a green host row
+#: promotes. Read here, never written: C10 prints promotions and a human commits
+#: them.
+CAPABILITIES = HERE.parents[1] / "hosts" / "capabilities.yaml"
+DEFAULT_IMAGE = os.environ.get("MLLM_E2E_IMAGE", "mllm-e2e:local")
 
 
 def prune_runs(runs_root: Path | None = None, keep: int | None = None,
@@ -103,16 +113,6 @@ def prune_runs(runs_root: Path | None = None, keep: int | None = None,
             continue
         removed.append(path)
     return removed
-RECORD_SCHEMA = RECORDS / "record.schema.json"
-#: Written by `verify_versions.py` in the final build layer: what the image really
-#: installed, as opposed to what `cli-versions.lock` asked for. It is the only
-#: honest source for a row's `cli_version` under `MLLM_PIN_MODE=latest`.
-IMAGE_VERSION_REPORT = "/opt/mllm/lock/cli-versions.installed.json"
-#: `hosts/capabilities.yaml`, whose `provenance` block is what a green host row
-#: promotes. Read here, never written: C10 prints promotions and a human commits
-#: them.
-CAPABILITIES = HERE.parents[1] / "hosts" / "capabilities.yaml"
-DEFAULT_IMAGE = os.environ.get("MLLM_E2E_IMAGE", "mllm-e2e:local")
 
 
 def load_posture() -> dict:
@@ -182,6 +182,17 @@ class Row:
     #: by construction — what is under test is argument delivery, not model
     #: output. The verdict lands in the bundle as `invocation.json`.
     documented_invocation: bool = False
+    #: Which install route this row exercises: ``file`` (a shim ``install-host``
+    #: wrote) or ``package`` (a distribution the host's own installer resolved).
+    #:
+    #: **Promotion is keyed on this**, and without it the two routes would credit
+    #: each other's evidence. A ``package`` row writes no shim at all, yet under a
+    #: route-blind field set it would propose promotions for ``shim``,
+    #: ``install_paths``, ``arguments`` and ``reload`` — describing a file at a
+    #: path that row never touched. That is the same class of false promotion the
+    #: ``documented_invocation`` carve-out below was added to stop after a refused
+    #: command printed five of them.
+    route: str = "file"
 
 
 @dataclass
@@ -516,6 +527,11 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
         argv += ["--mock-runner", row.mock_runner]
     if row.dry_run_host:
         argv += ["--dry-run-host"]
+    if row.route != "file":
+        # Passed only when it is not the default, so every existing row's argv —
+        # and therefore every existing row's rendered host config — stays
+        # byte-identical.
+        argv += ["--route", row.route]
     if row.documented_invocation:
         argv += ["--documented-invocation"]
     if row.command:
@@ -1166,6 +1182,11 @@ def row_record(row: Row, result: RowResult, outcome: str | None = None,
                                  if call.get("unmatched")),
         "credential_mode": credential_mode(row, result),
     }
+    if row.route != "file":
+        # Written only when it is not the default, so every existing record
+        # stays byte-identical: a column that appeared on rows nothing changed
+        # would make a route-blind run look like a route-aware one.
+        entry["route"] = row.route
     recorded = write_outcomes(result)
     for product_word, schema_word in WRITE_OUTCOME_SEVERITY:
         if product_word in recorded:
@@ -1296,6 +1317,25 @@ UNGRADED_REASON = (
 )
 
 
+def _behavioural_fields(row: Row, result: RowResult) -> set[str]:
+    """The route-neutral half: what the host DID, not how it was installed.
+
+    Both halves of each rule, because either alone is the wrong claim:
+    ``--detach`` typed with no terminal worker record is a launcher that returned
+    over a worker nobody watched, and a terminal record on a row that never asked
+    to detach says nothing about the host's detach mechanism.
+    """
+    fields: set[str] = set()
+    typed = declared_command(row)
+    if "--detach" in typed and any(
+            (state or {}).get("state") == "done"
+            for state in result.run_states.values()):
+        fields.add("detach")
+    if "--exec-subagents" in typed:
+        fields.add("subagents")
+    return fields
+
+
 def promotable_fields(row: Row, result: RowResult) -> set[str]:
     """Which `capabilities.yaml` fields THIS row's artifacts are evidence for.
 
@@ -1310,6 +1350,22 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
     if row.lane != "host" or not row.host:
         return set()
     fields: set[str] = set()
+    if row.route == "package":
+        # A package row promotes `package` plus the route-NEUTRAL behavioural
+        # cells, and never the four file-route ones. The behavioural cells are
+        # genuinely neutral — `detach`, `subagents` and `multi_turn` are things
+        # the host does once the skill is reachable, and how it became reachable
+        # does not change them — while `shim`, `install_paths`, `arguments` and
+        # `reload` are claims about a FILE this row never wrote.
+        #
+        # `package` itself needs the same two-part evidence a receipt gives the
+        # file route: the payload was found and the dispatcher really ran.
+        if result.receipts:
+            fields.add("package")
+        if len(result.receipts) >= 2:
+            fields.add("multi_turn")
+        fields |= _behavioural_fields(row, result)
+        return fields
     if row.documented_invocation:
         # THE ONE ROW WHOSE RECEIPTS ARE NOT THE HOST'S. Its only dispatcher
         # invocation is the rig's own `install-host`, which `dispatch()` runs
@@ -1336,17 +1392,7 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
         fields |= {"shim", "install_paths", "arguments", "reload"}
     if len(result.receipts) >= 2:
         fields.add("multi_turn")
-    typed = declared_command(row)
-    # Both halves, because either alone is the wrong claim: `--detach` typed with
-    # no terminal worker record is a launcher that returned over a worker nobody
-    # watched, and a terminal record on a row that never asked to detach says
-    # nothing about the host's detach mechanism.
-    if "--detach" in typed and any(
-            (state or {}).get("state") == "done"
-            for state in result.run_states.values()):
-        fields.add("detach")
-    if "--exec-subagents" in typed:
-        fields.add("subagents")
+    fields |= _behavioural_fields(row, result)
     return fields
 
 

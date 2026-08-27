@@ -16,14 +16,38 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 try:
+    from .prior_changes import entry_id, stable_key
     from .subagent_tasks import subagent_type_for_role
 except ImportError:
+    from utils.prior_changes import entry_id, stable_key
     from utils.subagent_tasks import subagent_type_for_role
 
 
 # Configuration constants
 MAX_FIXES_PER_BATCH = 3  # Hard limit to prevent context overload
 MAX_DESCRIPTION_CHARS = 3000  # Total description length limit per batch
+
+
+def fix_member_ids(fixes: List[Dict[str, Any]]) -> List[str]:
+    """The batch's fixes as stable member ids, in order.
+
+    The one spelling of "which fixes is this batch made of": it is what
+    ``utils/write_phase_bridge`` puts in a write task's ``expected_ids`` and what
+    both invokers digest into :func:`utils.prior_changes.entry_id`. Two batches on
+    the same file are distinguished by nothing else, so this cannot be derived
+    per-caller.
+
+    A fix carrying none of ``id``/``group_id``/``title`` falls back to its
+    position *within* its own batch, which is the one input that does not
+    distinguish two same-sized batches on one file. Real fixes come from grouped
+    review issues and carry a 16-char content-hash group id, so the fallback is a
+    degenerate-input guard; widening it would change ``expected_ids``, which the
+    D3g verification matches against what the runner reports.
+    """
+    return [
+        stable_key([fix.get("id"), fix.get("group_id"), fix.get("title")], f"f{n}")
+        for n, fix in enumerate(fixes)
+    ]
 
 
 @dataclass
@@ -92,11 +116,28 @@ class CodeFixBatch:
         else:
             self.batch_type = "mixed"
 
+    @property
+    def prior_changes_id(self) -> str:
+        """The stable, per-batch ``--id`` for the prior-changes append.
+
+        NOT ``file_key``: the batcher emits many batches per file (three fixes a
+        batch, plus one batch per security/HIGH fix), and ``prior_changes.append``
+        is idempotent on ``(id, phase)`` — so a file-keyed id records the first
+        batch on that file and silently drops every later one. Computed here so a
+        native invoker reads it off the serialized batch instead of picking a key,
+        and byte-identical to what ``utils/write_phase_bridge`` derives for the
+        same batch.
+        """
+        return entry_id(
+            self.file_key, fix_member_ids(self.fixes), fallback="batch"
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert batch to dictionary for JSON serialization."""
         return {
             "fixes": self.fixes,
             "file_key": self.file_key,
+            "prior_changes_id": self.prior_changes_id,
             "batch_type": self.batch_type,
             "executor_role": self.executor_role,
             "subagent_type": self.subagent_type,

@@ -12,10 +12,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.prior_changes import (
     DEFAULT_TEXT,
+    ENTRY_ID_DIGEST_CHARS,
     FILENAME,
     MAX_CHARS,
     _jsonl_path,
     _load_entries,
+    append,
+    entries as read_entries,
+    entry_id,
+    stable_key,
 )
 
 UTIL_PATH = str(Path(__file__).parent.parent / "utils" / "prior_changes.py")
@@ -483,3 +488,91 @@ class TestPriorChangesEdgeCases:
         assert len(entries) == 1
         assert entries[0]["summary"] == summary_long
         assert len(entries[0]["summary"]) == 500
+
+
+class TestEntryId:
+    """The id `append` is keyed on: unique per batch AND stable across a redispatch.
+
+    Both halves fail silently when they are wrong, in opposite directions — a
+    colliding id DROPS an entry (append is idempotent on `(id, phase)`, so the
+    second batch under a shared key is skipped at exit 0), an unstable id DOUBLES
+    one. Which is why the id is a content key plus a digest of the batch's own
+    members, and never a loop index.
+    """
+
+    def test_the_key_alone_is_not_the_id(self) -> None:
+        assert entry_id("src/a.py", ["i1"], fallback="b") != "src/a.py"
+        assert entry_id("src/a.py", ["i1"], fallback="b").startswith("src/a.py#")
+
+    def test_batches_sharing_a_key_get_different_ids(self) -> None:
+        first = entry_id("src/a.py", ["i1", "i2", "i3"], fallback="batch-0")
+        second = entry_id("src/a.py", ["i4", "i5", "i6"], fallback="batch-1")
+        assert first != second
+
+    def test_the_same_members_always_produce_the_same_id(self) -> None:
+        assert entry_id("s", ["a", "b"], fallback="x") == entry_id(
+            "s", ["a", "b"], fallback="y"
+        )
+
+    def test_member_order_is_part_of_the_identity(self) -> None:
+        assert entry_id("s", ["a", "b"], fallback="x") != entry_id(
+            "s", ["b", "a"], fallback="x"
+        )
+
+    def test_a_keyless_batch_still_gets_a_content_id(self) -> None:
+        """Both invokers must spell this the same, so the base is a constant."""
+        assert entry_id("", ["a"], fallback="batch-7") == entry_id(
+            "   ", ["a"], fallback="batch-9"
+        )
+        assert entry_id("", ["a"], fallback="batch-7").startswith("batch#")
+
+    def test_the_fallback_is_only_for_a_batch_with_no_members(self) -> None:
+        assert entry_id("", [], fallback="batch-3") == "batch-3"
+        assert entry_id("", ["", "  ", None], fallback="batch-3") == "batch-3"
+        assert entry_id("sec", [], fallback="batch-3") == "sec"
+
+    def test_the_digest_is_the_declared_width(self) -> None:
+        _, _, digest = entry_id("k", ["a"], fallback="x").partition("#")
+        assert len(digest) == ENTRY_ID_DIGEST_CHARS
+        assert all(c in "0123456789abcdef" for c in digest)
+
+    def test_stable_key_takes_the_first_non_empty_candidate(self) -> None:
+        assert stable_key([None, "", "  ", "g1", "id"], "f0") == "g1"
+        assert stable_key([None, ""], "f0") == "f0"
+
+    def test_every_batch_on_one_key_lands_in_the_log(self, tmp_path: Path) -> None:
+        """The user-visible failure, at the level `append` sees it.
+
+        Nineteen batches on one file key: with the file key as the id exactly one
+        entry survives, so every batch after the first reads a context that
+        pretends its predecessors never ran.
+        """
+        out = str(tmp_path)
+        batches = [[f"fix-{n}-{k}" for k in range(3)] for n in range(19)]
+
+        collided = sum(
+            append(out, "src/index.mjs", "apply-fixes", f"batch {n}")
+            for n, _ in enumerate(batches)
+        )
+        assert collided == 1  # the bug, pinned
+        assert len(read_entries(out)) == 1
+
+        keyed = sum(
+            append(
+                out,
+                entry_id("src/index.mjs", members, fallback=f"batch-{n}"),
+                "apply-fixes",
+                f"batch {n}",
+            )
+            for n, members in enumerate(batches)
+        )
+        assert keyed == 19
+        assert len(read_entries(out)) == 20  # the collided one plus all nineteen
+
+    def test_a_redispatched_batch_is_still_recorded_once(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        members = ["a", "b"]
+        eid = entry_id("sec", members, fallback="batch-0")
+        assert append(out, eid, "apply-suggestions", "first") is True
+        assert append(out, eid, "apply-suggestions", "again") is False
+        assert len(read_entries(out)) == 1

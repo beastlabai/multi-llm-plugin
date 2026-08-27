@@ -12,7 +12,7 @@ multi-llm ships as a Claude Code plugin, and it runs unchanged inside `codex` an
 
 ```bash
 # from anywhere; SKILL is this skill tree on disk
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host <host> [--global|--project]
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host <host> [--global|--project]
 ```
 
 `SKILL` is either a git checkout of this repository or the plugin install `claude plugin list --json` reports. Set it once — the first of these three that applies to you, not all three. On Windows the shell must be **Git Bash** (see [Prerequisites](../README.md#prerequisites)):
@@ -39,8 +39,8 @@ SKILL=$(dirname "$(ls -t ~/.claude/plugins/cache/beastlabai/multi-llm/*/skills/m
 # Then install, gated on SKILL: an unresolved SKILL is empty (2) or the current directory (3),
 # and either would run install-host against the wrong tree.
 if [ -f "$SKILL/multi_llm.py" ]; then
-  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex      # add --project to scope it to one repo
-  uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode   # add --check to verify an install
+  uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex      # add --project to scope it to one repo
+  uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode   # add --check to verify an install
 else
   echo "no multi-llm skill tree at '$SKILL' - install the plugin, or set SKILL=<checkout>/skills/multi-llm" >&2
 fi
@@ -53,9 +53,9 @@ It writes a **rendered copy** — never a symlink or junction, so nothing here n
 **`codex`**
 
 ```bash
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex            # machine-wide
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex --project  # just this repository
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex --check    # verify an install
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex            # machine-wide
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex --project  # just this repository
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host codex --check    # verify an install
 ```
 
 Writes `$HOME/.codex/skills/multi-llm/SKILL.md` (`--project`: `.codex/skills/multi-llm/SKILL.md`), then start a new codex session afterwards (it enumerates its commands/skills at session start). Invoke it by name rather than as a slash command — `Use the multi-llm skill with exactly these arguments: <the same arguments the Claude Code skill takes>`. Codex installs this shim as a **skill**, which is model-invoked rather than typed: its composer answers `/multi-llm` with `Unrecognized command`. Unattended is the default on every host but Claude Code, so `--yes` is baked in.
@@ -68,9 +68,9 @@ Use the multi-llm skill with exactly these arguments: --review-code plans/my-fea
 **`opencode`**
 
 ```bash
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode            # machine-wide
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode --project  # just this repository
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode --check    # verify an install
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode            # machine-wide
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode --project  # just this repository
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host opencode --check    # verify an install
 ```
 
 Writes `$XDG_CONFIG_HOME/opencode/commands/multi-llm.md` (whose `$XDG_CONFIG_HOME` falls back to `~/.config` when unset) (`--project`: `.opencode/commands/multi-llm.md`), then start a new opencode session afterwards (it enumerates its commands/skills at session start). Invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`. Unattended is the default on every host but Claude Code, so `--yes` is baked in.
@@ -82,11 +82,23 @@ Headless, the argument list needs the host's own separator: `opencode run --comm
 /multi-llm --review-code plans/my-feature.md
 ```
 
+**`opencode` — install via npm (not yet published)** — documented
+
+A second route on `opencode`, and the one this documentation will recommend once it is published. **No published install has been verified yet**, so a config entry naming this spec resolves to nothing today — and on this host that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Until then, use the `install-host` route above, or build and install the tarball locally.
+
+Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
+
+```json
+{ "plugin": ["opencode-multi-llm@0.1.0"] }
+```
+
+Needs opencode 1.18.18 or newer. Upgrading is bumping the pin and restarting: the cache key is the literal spec string and the installer early-returns when the package directory already exists, so an **unpinned** entry resolves once and never again. It provides a slash command and a model-callable tool, and you invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly.
+
 ## What differs from Claude Code
 
 Three differences worth knowing on these hosts:
 
-- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. Pass `--interactive` to opt back into a rendered gate.
+- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. On the `install-host` file route, `--interactive` opts back into a rendered gate. The package route on `opencode` refuses `--interactive` and `-i` instead — it spawns the dispatcher with nothing on its stdin, so the model picker they force could not prompt — and asks you to choose non-interactively: `--models "provider:model,…"` or `--quick`, or `defaults.models` in `providers.yaml`.
 - **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on `codex` and `opencode:opencode/sonnet` on `opencode` — not a Claude subagent.
 - **Headless `opencode` needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
 
@@ -115,8 +127,8 @@ One row per host **and scope**, not one path per host. `install-host` writes onl
 A plugin update **changes the skill directory path** — the Claude plugin cache is keyed by commit hash — so every installed shim's baked prefix goes stale. That is the common case, not an edge case, and it is one command:
 
 ```bash
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host --check --all   # what moved
-uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host --all           # re-render every installed shim
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host --check --all   # what moved
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host --all           # re-render every installed shim
 ```
 
 Repair is always re-render, never in-place patching, and a re-install with nothing changed is byte-identical and does nothing. A shim you edited by hand is **never** overwritten silently: the install stops and names the file, and `--force` keeps your version as `<shim>.local.bak`. The inverse is `uninstall-host <host> [--global|--project|--all] [--dry-run]`, which removes only files carrying our `multi_llm_shim` block — identified by that block, never by filename.

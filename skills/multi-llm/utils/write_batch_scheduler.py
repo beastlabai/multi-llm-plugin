@@ -67,6 +67,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         ResultRejected,
         TaskOutcome,
         _atomic_write_json,
+        _host_ceiling,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -121,6 +122,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         ResultRejected,
         TaskOutcome,
         _atomic_write_json,
+        _host_ceiling,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -457,6 +459,12 @@ class WriteBatchScheduler:
         state: A ``StateManager``, for task statuses, override records and the
             phase-completed marker. Optional only so a unit test can drive the loop
             without one; a real phase always has one.
+        host_max: The host's ``max_concurrent_subagents``. ``None`` means "look it
+            up from ``hosts/capabilities.yaml`` for the host this invocation
+            declared" (D5b) — the same seam, with the same meaning, as
+            ``subagent_executor.effective_ceiling``'s parameter of the same name.
+            No orchestrator passes it; a caller that already knows the number
+            still may.
         respond: When given, the **simulated native invoker** runs instead of a
             subprocess: ``(task, dispatched_prompt) -> result JSON``. Same
             containment, same classification, same prior-changes append — which is
@@ -506,7 +514,16 @@ class WriteBatchScheduler:
         self.plan_file = plan_file
         self.summary_file = summary_file
         self.summary_file_relative = summary_file_relative
-        self.host_max = host_max
+        # `host_max=None` means *look it up*, exactly as it does for the read
+        # path's `subagent_executor.effective_ceiling` — never "this phase has no
+        # host leg". Reading it as the latter cost the write half its host leg
+        # outright: no orchestrator passes `host_max` (both construction sites are
+        # keyword-complete without it), so `write_ceiling`'s host branch never
+        # ran on a real invocation and every write batch report recorded a null
+        # where the read half records a number. Resolved here rather than
+        # per-call so `write_ceiling`, the batch report and the dry-run record
+        # cannot disagree about which number bound the phase.
+        self.host_max = _host_ceiling() if host_max is None else host_max
         self.forced_runner = runner
         self.resume = resume
         self.dry_run = dry_run
@@ -574,7 +591,10 @@ class WriteBatchScheduler:
         The provider leg is not optional: raising the driver key above a
         provider's cap would otherwise over-subscribe it on the parallelizable
         implement/code-fix batches, which is exactly the ceiling the user did not
-        set and cannot see.
+        set and cannot see. Neither is the host leg, and it reaches here through
+        ``__init__``'s lookup rather than through a caller: ``self.host_max`` is
+        ``None`` only when the capability data could not be read at all, the same
+        partial-install case ``_host_ceiling`` bounds nothing over.
         """
         configured = get_max_concurrent_write_subagents(anchor=self.anchor)
         candidates = [configured]

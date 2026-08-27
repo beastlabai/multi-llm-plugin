@@ -63,6 +63,48 @@ VERB_WORDING: Dict[str, str] = {
 #: only ``generate`` cannot stand in for a subagent (D3e).
 EXECUTOR_PROFILES: Tuple[str, ...] = ("agent-readonly", "agent-write")
 
+#: Every key a consumer indexes on a host entry **without** a ``.get`` fallback —
+#: here, in ``utils/host_install.py``, in ``hosts/render_capabilities.py`` and in
+#: the executor. It is the schema's own ``definitions.host.required`` list, minus
+#: nothing: ``schemas/host_capabilities.schema.json`` requires every field except
+#: ``shim_max_lines`` and ``headless_invocation``, both of which govern a lint or
+#: a generated document rather than a dispatch. Restated here as a plain tuple
+#: because :func:`load` must not need ``jsonschema`` — a dev-only extra — nor a
+#: second file present to give a clean error; ``tests/test_host_capabilities.py``
+#: asserts the two lists still agree, so the drift is caught at test time and the
+#: runtime dependency surface stays at ``pyyaml``.
+REQUIRED_HOST_KEYS: Tuple[str, ...] = (
+    "arguments",
+    "ask",
+    "default_subagent_runner",
+    "detach",
+    "env_guards",
+    "install_paths",
+    "installable",
+    "invocation",
+    "max_concurrent_subagents",
+    "multi_turn",
+    "native_tool",
+    "nested_exec",
+    "provenance",
+    "reload",
+    "runners",
+    "shim",
+    "subagent_tiers",
+    "subagents",
+    "timeout_ceiling_s",
+    "timeout_override",
+)
+
+#: The repair line every structural complaint ends on. The data ships *inside* the
+#: skill, so a document that fails these checks is not something a user edited
+#: into a bad state — it is a partial or corrupt install.
+_CORRUPT_INSTALL = (
+    "       The capability data ships with the skill and is not user config, so a "
+    "malformed\n"
+    "       one means a partial or corrupt install; reinstall the skill."
+)
+
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -75,7 +117,23 @@ class UnknownHost(NeedsHuman):
 # ---------------------------------------------------------------------------
 
 def load(base: Optional[str] = None) -> Dict[str, Any]:
-    """The parsed capability document, cached per base directory."""
+    """The parsed capability document, cached per base directory and shape-checked.
+
+    The check is deliberately structural rather than a schema validation: it
+    asserts the document is a mapping, that ``hosts`` holds at least one entry,
+    and that each entry carries every key in :data:`REQUIRED_HOST_KEYS` — the keys
+    consumers index directly. ``schemas/host_capabilities.schema.json`` stays the
+    full contract and is enforced by CI; what this adds is a *runtime* floor, so a
+    malformed file is one ``NeedsHuman`` naming the file and the missing key at
+    load rather than a ``KeyError('max_concurrent_subagents')`` surfacing from
+    somewhere mid-dispatch, minutes into a fan-out, with nothing on it to say
+    which file was wrong. Running it here rather than in :func:`entry` also means
+    a broken *sibling* host is caught by the run that never names it.
+
+    It runs once per base directory: the cache is populated only after the checks
+    pass, so ``status`` keeps paying a parse and a handful of set operations
+    exactly once and every later call is a dict lookup.
+    """
     root = str(base) if base else str(skill_dir())
     cached = _CACHE.get(root)
     if cached is not None:
@@ -92,8 +150,55 @@ def load(base: Optional[str] = None) -> Dict[str, Any]:
             f"       ({exc})\n"
             "       The install looks corrupt or partial; reinstall the skill."
         ) from exc
+    except yaml.YAMLError as exc:
+        # Without this the parser's own exception escapes as an unhandled crash
+        # (exit 1, a traceback) rather than as this project's "needs a human"
+        # exit 3 — and the traceback names the parser, not the install.
+        raise NeedsHuman(
+            f"ERROR: host capability data is not valid YAML: {path}\n"
+            f"       ({exc})\n"
+            f"{_CORRUPT_INSTALL}"
+        ) from exc
+    _validate_document(document, path)
     _CACHE[root] = document
     return document
+
+
+def _validate_document(document: Any, path: str) -> None:
+    """The runtime floor :func:`load` applies. Raises ``NeedsHuman`` or returns."""
+    if not isinstance(document, dict):
+        raise NeedsHuman(
+            f"ERROR: host capability data is not a mapping: {path}\n"
+            f"       (parsed as {type(document).__name__})\n"
+            f"{_CORRUPT_INSTALL}"
+        )
+    hosts = document.get("hosts")
+    if not isinstance(hosts, dict) or not hosts:
+        raise NeedsHuman(
+            f"ERROR: host capability data declares no hosts: {path}\n"
+            "       `hosts:` must be a mapping of at least one host id to its "
+            "capability entry.\n"
+            f"{_CORRUPT_INSTALL}"
+        )
+    for host_id, host in sorted(hosts.items()):
+        if not isinstance(host, dict):
+            raise NeedsHuman(
+                f"ERROR: host capability entry '{host_id}' is not a mapping: "
+                f"{path}\n"
+                f"       (parsed as {type(host).__name__})\n"
+                f"{_CORRUPT_INSTALL}"
+            )
+        missing = [key for key in REQUIRED_HOST_KEYS if key not in host]
+        if missing:
+            raise NeedsHuman(
+                f"ERROR: host capability entry '{host_id}' is incomplete: {path}\n"
+                f"       Missing: {', '.join(missing)}\n"
+                "       Every capability is required — an absent one would be a "
+                "silent guess about\n"
+                "       what this host can do, which is the whole reason the data "
+                "exists.\n"
+                f"{_CORRUPT_INSTALL}"
+            )
 
 
 def clear_cache() -> None:

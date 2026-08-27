@@ -140,7 +140,7 @@ There are unapplied suggestions from plan review. Parse the JSON that follows th
      ```
      **Do NOT** proceed further. Stop execution after displaying this message.
 
-   - **"Skip suggestions, proceed"**: Run `uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
+   - **"Skip suggestions, proceed"**: Run `uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --skip`, then re-run implement orchestrator (this is lightweight — no context bloat)
    - **"Cancel"**: Stop and inform user
 
 #### If output contains `[TASKS_MISSING]`:
@@ -195,7 +195,7 @@ Handle the response:
   ```
   **Do NOT** proceed further. Stop execution after displaying this message.
 
-- **"Skip, proceed to implement"** (default): Run `uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --skip` to mark the phase as skipped, then continue with implementation.
+- **"Skip, proceed to implement"** (default): Run `uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --skip` to mark the phase as skipped, then continue with implementation.
 
 - **"Cancel"**: Stop and inform user.
 
@@ -218,7 +218,7 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
    If the command fails or `$PROJECT_ROOT` is empty, STOP with the error: "multi-llm requires running inside a git repository." Never fall back to a relative path or `$PWD`.
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH" [--resume]
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file "$PLAN_PATH" [--resume]
    ```
    Do NOT pass `--output` — the orchestrator computes the workspace default itself: `$PROJECT_ROOT/.multi-llm/tmp/implementation_tasks_{plan_stem}_{hash8}.json`, where `{plan_stem}` is the plan filename without extension and `{hash8}` is the first 8 hex characters of the SHA-256 of the repo-relative plan path. The hash makes the name deterministic AND unique per plan *path* (same-stem plans such as `plans/api/index.md` and `plans/ui/index.md` get distinct artifacts, so concurrent runs cannot clobber each other), while a re-run for the same plan simply overwrites the previous artifact — there is no cleanup step; the orchestrator writes `.multi-llm/tmp/.gitignore` containing `*` so the directory ignores itself, and the user may delete `.multi-llm/tmp/` at any time — the next run recreates it. The orchestrator prints the exact absolute path on its `Output file:` summary line — note that path for step 4; never reconstruct the filename or compute the hash yourself.
 
@@ -322,7 +322,7 @@ your host.
 
    Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
    ```
 
@@ -446,7 +446,7 @@ your host.
      ```
    - **Record metrics**: Run the metrics utility to store the subagent's metrics:
      ```bash
-     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
        --state-file "$STATE_FILE" --phase "implement" \
        --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -462,9 +462,9 @@ your host.
 7. **Finalize file tracking:**
    After all tasks complete (before generating summary), mark the phase finish and run finalization:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "implement"
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking --state-file "$STATE_FILE"
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking --state-file "$STATE_FILE"
    ```
    Where `$STATE_FILE` is the `state_file` path from the JSON output.
 
@@ -527,7 +527,7 @@ your host.
 
    Before writing the summary, generate the resource usage section:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "implement"
    ```
    Include the output (if non-empty) in the summary before "## Notes for Code Review".
@@ -545,7 +545,7 @@ your host.
    orchestrator printed them; the insertion is idempotent, so re-running it on an
    already-updated plan is a no-op:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
      --state-file "$STATE_FILE" --plan-file "$PLAN_FILE" \
      --summary-file-relative "$SUMMARY_FILE_RELATIVE"
    ```
@@ -569,7 +569,7 @@ User: <dispatcher> implement plans/my-feature.md
 
 Agent:
 1. Runs: PROJECT_ROOT="$(git rev-parse --show-toplevel)" (prerequisite check)
-   then: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file plans/my-feature.md
+   then: uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" implement --plan-file plans/my-feature.md
 2. Orchestrator outputs:
    - Output file: {PROJECT_ROOT}/.multi-llm/tmp/implementation_tasks_my-feature_1a2b3c4d.json (5 tasks in 3 batches; the _1a2b3c4d suffix is the orchestrator-computed hash of the repo-relative plan path)
    - State file: plans/my-feature/state.json

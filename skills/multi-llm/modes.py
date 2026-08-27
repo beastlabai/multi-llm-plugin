@@ -304,6 +304,45 @@ def alias_expansion(word: str) -> str:
     return f"{target} {extra}".rstrip()
 
 
+#: The mode a bare argument text resolves to when it carries no mode flag.
+#: **The single owner of "no mode flag means review-plan".** That sentence used
+#: to be prose in two hand-written places (``SKILL.md`` and
+#: ``hosts/opencode/shim.md.tmpl``) with no constant behind either, held together
+#: only by ``tests/test_shim_correctness.py``. The npm plugin route would have
+#: made a third copy inside a tool description, so the rule became a constant and
+#: every surface now renders from it: ``dist/cli-surface.json`` (what the
+#: model-facing tool definition is assembled from), and both places every shim
+#: template states it — its step-2 prose and its worked example — through
+#: ``cli_common.DEFAULT_MODE_TOKEN``.
+#:
+#: One surface cannot render, and is pinned instead: Claude Code's ``SKILL.md`` is
+#: ``installable: false`` and is read by the host verbatim (it expands
+#: ``${CLAUDE_SKILL_DIR}`` itself at load time), so nothing substitutes a token
+#: there. Its two sentences are literals held to this constant by
+#: ``test_default_mode_has_one_owner``, which asserts all three surfaces together
+#: — the guard is what makes the claim above a property rather than an intention.
+DEFAULT_MODE = "review-plan"
+
+
+#: The one authored sentence in the OpenCode plugin's model-facing tool
+#: definition. It lives here rather than in JavaScript for the same reason the uv
+#: preflight message lives in ``hosts/uv-missing.txt``: the plugin holds no prose
+#: of its own, so everything it shows a model is generated from this tree
+#: (D7.2). Everything *else* in that definition — the mode lines, the argument
+#: descriptions, the reserved-flag rules — is derived from the table above, so
+#: this is the only string a human writes.
+#:
+#: It carries the one thing no generated line can: that the tool is the *only*
+#: way to run multi-llm on that host, and that its dispatcher must not be reached
+#: through ``bash``.
+TOOL_DESCRIPTION_LEDE = (
+    "Run a multi-LLM workflow over a plan file. This tool is the only supported "
+    "way to run multi-llm on this host: never invoke multi_llm.py, uv run or any "
+    "dispatcher command through bash, because the flags this host requires are "
+    "appended here and a shell invocation reaches none of them."
+)
+
+
 # The `util` namespace is a mode word for routing purposes but is deliberately
 # *not* a mode: it is excluded from `--help`'s mode list and from
 # `argument-hint`, and is never rendered into a MULTI_LLM_RESULT.next value.

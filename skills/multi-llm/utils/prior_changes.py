@@ -6,11 +6,13 @@ Storage: {output-dir}/prior_changes.jsonl
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Sequence
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -23,6 +25,77 @@ FILENAME = "prior_changes.jsonl"
 DEFAULT_TAIL = 15
 MAX_CHARS = 2000
 DEFAULT_TEXT = "(none — this is the first batch)"
+
+#: Hex digits kept from the member-id digest in :func:`entry_id`. Eight is the
+#: same width the state manager's group ids are truncated to for display, and it
+#: is far wider than the handful of batches one phase ever produces.
+ENTRY_ID_DIGEST_CHARS = 8
+
+#: What :func:`entry_id` uses as the base when a batch carries no content key of
+#: its own, so the two invokers (the Python bridge and a native agent reading the
+#: serialized batch) still spell the same id.
+ENTRY_ID_KEYLESS_BASE = "batch"
+
+
+def stable_key(candidates: Sequence[Any], fallback: str) -> str:
+    """The first non-empty candidate, else *fallback*. Never a loop index.
+
+    The content-key primitive :func:`entry_id` is built on, and the one the write
+    bridge and the batchers both spell their member ids with — it lives here so
+    the id semantics have exactly one owner.
+    """
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return fallback
+
+
+def _short_digest(member_ids: Sequence[str]) -> str:
+    """A stable short digest of an ordered member-id list."""
+    payload = "\n".join(member_ids).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:ENTRY_ID_DIGEST_CHARS]
+
+
+def entry_id(key: str, member_ids: Sequence[str], *, fallback: str) -> str:
+    """The ``--id`` for one batch: ``{key}#{digest of member_ids}``.
+
+    The id handed to :func:`append` has to be **both** unique per batch and
+    stable across a re-dispatch, and getting either half wrong fails silently:
+
+    * a **colliding** id silently DROPS an entry. ``append`` is idempotent on
+      ``(id, phase)``, so the second batch that presents an id an earlier batch
+      already used is skipped with a `Notice:` on stderr and exit 0 — and every
+      later batch then reads a prior-changes context missing its predecessors,
+      which is the whole signal the step exists to provide. This is not
+      hypothetical: the batchers emit **many** batches per file key and per
+      section key (``MAX_FIXES_PER_BATCH``, the char caps, and the one-per-batch
+      isolation of security/HIGH fixes), so keying on the bare file/section key
+      records only the first batch of each.
+    * an **unstable** id silently DOUBLES one — that is the failure ``append``'s
+      idempotency exists to prevent, and it is why the digest is taken over a
+      stable *content* key (the batch's own member ids) rather than over a loop
+      index, which moves the moment a resumed run re-materializes a different
+      subset of batches.
+
+    Args:
+        key: The batch's content key (``file_key``/``section_key``). May be empty.
+        member_ids: The batch's member ids, in order — the same list the write
+            task carries as ``expected_ids``, so both invokers digest the same
+            bytes and derive the same id for the same batch.
+        fallback: Used only when *member_ids* is empty, i.e. when there is no
+            content to digest at all. The batchers never emit an empty batch, so
+            this is a degenerate-input guard rather than a live path.
+
+    Returns:
+        ``"{key}#{digest}"``, or ``"batch#{digest}"`` for a batch with no key,
+        or *fallback*/*key* when there are no member ids to digest.
+    """
+    ids = [text for text in (str(m or "").strip() for m in member_ids) if text]
+    base = str(key or "").strip()
+    if not ids:
+        return base or fallback
+    return f"{base or ENTRY_ID_KEYLESS_BASE}#{_short_digest(ids)}"
 
 
 def _jsonl_path(output_dir: str) -> Path:
@@ -88,7 +161,10 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
     The in-process half of ``append``, for the same reason :func:`render` exists.
     Idempotent on ``(id, phase)`` — which is why the write task carries a stable
     ``prior_changes_id`` rather than a loop index: a re-dispatched batch must not
-    double its own summary into the context every later batch reads.
+    double its own summary into the context every later batch reads. The other
+    half of that contract is :func:`entry_id`, which is what makes the id unique
+    per batch: idempotency on a key two different batches share is a *dropped*
+    entry, silently, at exit 0.
     """
     path = _jsonl_path(output_dir)
     entries = _load_entries(path)

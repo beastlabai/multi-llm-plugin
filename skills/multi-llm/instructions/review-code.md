@@ -169,7 +169,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    A fan-out review over many models routinely outlives any single shell command a host is willing to wait for, so **run detached**, redirecting stdout+stderr to a log file in the phase dir and setting `PYTHONUNBUFFERED=1`:
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
+   PYTHONUNBUFFERED=1 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --models <selected> [--base-ref REF] [--apply-fixes] \
      > "{plan}/code-review/orchestrator-run.log" 2>&1
    ```
@@ -191,7 +191,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    The reaggregation command for this mode is:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" \
      --reaggregate
    ```
@@ -226,7 +226,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each validation subagent. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Validation batch {N}" --subagent-type "agent" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -242,7 +242,7 @@ Items with `needs-human-decision` status are included in the report for the user
    1. Read `validation_tasks.json` once from `{plan}/code-review/`
    2. Count the number of batches as `{total_batches}` and mark the phase start:
       ```bash
-      uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-code-batches" --total-batches {total_batches}
       ```
    3. Choose a strategy:
@@ -263,13 +263,13 @@ Items with `needs-human-decision` status are included in the report for the user
 
    After validation completes, rebuild the reaggregation command from `reaggregate_mode` + `plan_file` in validation_tasks.json — the file stores that durable pair rather than a resolved command, so a skill dir that moved with a plugin update cannot leave a dead path behind:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --reaggregate
    ```
 
    After reaggregation, mark the validation phase finish (only if `start` was called above):
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-code-batches"
    ```
 
@@ -281,7 +281,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    Before the fix loop, mark the phase start where `{total_fixes}` is the number of fix tasks:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "review-code-fixes" --total-batches {total_fixes}
    ```
 
@@ -314,7 +314,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Record metrics** for each fix subagent:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "code-review" \
      --label "Fix: {task_title}" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -324,7 +324,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    d. After all fixes are attempted, mark the phase finish:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
      --state-file "$STATE_FILE" --phase "review-code-fixes"
    ```
 
@@ -384,7 +384,7 @@ After spawning subagents to apply fixes:
 
    Generate resource usage:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "code-review"
    ```
    Include the output (if non-empty) in the results report.
@@ -411,7 +411,7 @@ Agent:
    "Which models would you like to use for the code review?" (multi-select)
    Options: auto, gpt-5.2, gemini-3-pro, grok, gemini-3-flash, kimi-k2
 2. User selects: gpt-5.2
-3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gpt-5.2
+3. Runs: uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gpt-5.2
 4. Claude reports review findings and output files
 ```
 
@@ -423,7 +423,7 @@ User: /multi-llm:multi-llm --review-code --apply-fixes plans/my-feature.md
 Agent:
 1. No models in args, so the agent asks the user to select models
 2. User selects: gemini-3-pro
-3. Runs: uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gemini-3-pro --apply-fixes
+3. Runs: uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file plans/my-feature.md --models gemini-3-pro --apply-fixes
 4. Orchestrator outputs:
    - my-feature_code_review.md (report)
    - my-feature_fix_tasks.json (3 valid issues to fix)

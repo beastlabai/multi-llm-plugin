@@ -13,9 +13,15 @@ This module is that one conversion, in one place, so:
 
 * the same declared file set drives the disjointness admission, the write policy
   and the snapshot for every phase (rather than each orchestrator deciding);
-* ``prior_changes_id`` is derived from a **stable content key** (section key, file
-  key, task id) and never from the loop index, which is what makes the
-  prior-changes append idempotent across a re-dispatch;
+* ``prior_changes_id`` is derived from a **stable content key** (section key,
+  file key, task id) and never from the loop index, which is what makes the
+  prior-changes append idempotent across a re-dispatch — and, for the three
+  batched phases, the key alone is not enough: many batches share one file key or
+  section key, so the id is that key plus a digest of the batch's own member ids
+  (:func:`utils.prior_changes.entry_id`), unique per batch and stable across a
+  re-dispatch of the same batch. It is the identical id the batchers serialize
+  into their ``to_dict()``, so a native invoker and this bridge append under the
+  same key;
 * adding a write phase is a row in :data:`_ADAPTERS`, not a fifth hand-rolled
   materializer.
 
@@ -29,6 +35,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .code_fix_batcher import fix_member_ids
+    from .prior_changes import entry_id, stable_key
+    from .suggestion_batcher import suggestion_member_ids
     from .subagent_tasks import (
         PHASE_BY_WRITE_KIND,
         build_inputs,
@@ -37,6 +46,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         write_task_file,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.code_fix_batcher import fix_member_ids
+    from utils.prior_changes import entry_id, stable_key
+    from utils.suggestion_batcher import suggestion_member_ids
     from utils.subagent_tasks import (
         PHASE_BY_WRITE_KIND,
         build_inputs,
@@ -58,13 +70,10 @@ __all__ = [
 WRITE_TASK_FILENAME = "write_tasks.json"
 
 
-def _stable_key(candidates: Sequence[Any], fallback: str) -> str:
-    """The first non-empty candidate, else ``fallback``. Never the loop index."""
-    for candidate in candidates:
-        text = str(candidate or "").strip()
-        if text:
-            return text
-    return fallback
+#: The first non-empty candidate, else the fallback. Never the loop index.
+#: Owned by :mod:`utils.prior_changes` (with :func:`entry_id`, which is built on
+#: it) so the bridge and the batchers cannot spell a content key two ways.
+_stable_key = stable_key
 
 
 def _apply_suggestions_task(
@@ -73,6 +82,7 @@ def _apply_suggestions_task(
     """apply-suggestions: one shared artifact (the plan), sequential by invariant."""
     suggestions = batch.get("suggestions") or []
     section = _stable_key([batch.get("section_key")], f"batch-{index}")
+    member_ids = suggestion_member_ids(suggestions)
     return dict(
         task_id=f"apply-batch-{index}",
         prompt=str(batch.get("prompt") or ""),
@@ -80,11 +90,14 @@ def _apply_suggestions_task(
         # The plan file is THE artifact: it is what gets snapshotted and what the
         # byte comparison decides on.
         declared_files=[context["plan_file"]],
-        expected_ids=[
-            _stable_key([s.get("group_id"), s.get("id"), s.get("title")], f"s{n}")
-            for n, s in enumerate(suggestions)
-        ],
-        prior_changes_id=section,
+        expected_ids=member_ids,
+        # The RAW section key, not `section`: one section spills into several
+        # batches under the same key (batch size, char cap), so the members are
+        # what tells them apart — see `prior_changes.entry_id`.
+        prior_changes_id=entry_id(
+            str(batch.get("section_key") or ""), member_ids,
+            fallback=f"batch-{index}",
+        ),
         can_parallelize=False,
         task_title=f"apply {len(suggestions)} suggestion(s) to {section}",
         extra={"section_key": section},
@@ -97,17 +110,19 @@ def _apply_task_suggestions_task(
     """apply-task-suggestions: same shape, but the artifact is the tasks file."""
     suggestions = batch.get("suggestions") or []
     section = _stable_key([batch.get("section_key")], f"batch-{index}")
+    member_ids = suggestion_member_ids(suggestions)
     artifact = context.get("tasks_file") or context["plan_file"]
     return dict(
         task_id=f"apply-task-batch-{index}",
         prompt=str(batch.get("prompt") or ""),
         batch_index=index,
         declared_files=[artifact],
-        expected_ids=[
-            _stable_key([s.get("group_id"), s.get("id"), s.get("title")], f"s{n}")
-            for n, s in enumerate(suggestions)
-        ],
-        prior_changes_id=section,
+        expected_ids=member_ids,
+        # The RAW section key, for the same reason as apply-suggestions above.
+        prior_changes_id=entry_id(
+            str(batch.get("section_key") or ""), member_ids,
+            fallback=f"batch-{index}",
+        ),
         can_parallelize=False,
         task_title=f"apply {len(suggestions)} task suggestion(s) to {section}",
         extra={"section_key": section},
@@ -120,22 +135,29 @@ def _apply_code_fixes_task(
     """apply-code-fixes: partitioned by ``file_key``, so batches CAN parallelize.
 
     ``can_parallelize`` is set from the partitioning the batcher already performs
-    (one file per batch), but it is only a *permission*: the scheduler still needs
-    ``driver.max_concurrent_write_subagents > 1`` and the dispatch-time
+    — one file per batch, but **many batches per file**: `MAX_FIXES_PER_BATCH`
+    caps a batch at three fixes, the description cap can close one sooner, and
+    every security/HIGH fix is isolated in a batch of its own. So the file key
+    identifies the *partition*, never the batch (which is why `prior_changes_id`
+    digests the members below), and it is only a *permission*: the scheduler still
+    needs ``driver.max_concurrent_write_subagents > 1`` and the dispatch-time
     pairwise-disjoint check to agree before two of them run together.
     """
     fixes = batch.get("fixes") or []
     file_key = _stable_key([batch.get("file_key")], f"batch-{index}")
+    member_ids = fix_member_ids(fixes)
     return dict(
         task_id=f"apply-fix-batch-{index}",
         prompt=str(batch.get("prompt") or ""),
         batch_index=index,
         declared_files=[file_key],
-        expected_ids=[
-            _stable_key([f.get("id"), f.get("group_id"), f.get("title")], f"f{n}")
-            for n, f in enumerate(fixes)
-        ],
-        prior_changes_id=file_key,
+        expected_ids=member_ids,
+        # The RAW file key: 19 of one real run's 44 batches shared one file, and
+        # a file-keyed id recorded only the first of them.
+        prior_changes_id=entry_id(
+            str(batch.get("file_key") or ""), member_ids,
+            fallback=f"batch-{index}",
+        ),
         can_parallelize=bool(batch.get("file_key")),
         task_title=f"apply {len(fixes)} fix(es) to {file_key}",
         executor_role=str(batch.get("executor_role") or "agent"),

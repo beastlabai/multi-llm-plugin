@@ -81,3 +81,26 @@ skills/multi-llm/tests/container/runs/*
 # Personal scratch kept beside the checkout, not a repo artifact. Anchored, so a
 # `note.md` that a subdirectory ever means to track is unaffected.
 /note.md
+
+# The opencode npm package's build artifacts. All three are produced by
+# packaging/opencode/build.py, and a staged 4.1 MB skill copy committed by
+# accident is a silent second source of truth for the very tree the
+# single-source rules exist to keep single.
+#
+# KEEP THESE HOST-ANCHORED, and never "tidy" them into `packaging/*/skills/` or
+# `packaging/**`. A sibling packaging plan takes the opposite decision on
+# purpose — its payload is CHECKED IN and byte-compared against a fresh build —
+# so a generalised rule would silently untrack that plan's entire product.
+packaging/opencode/dist/
+packaging/opencode/skills/
+packaging/opencode/*.tgz
+# LICENSE is COPIED in by the build (never symlinked — a symlink inside an npm
+# tarball is a portability hazard), so committing it would put a second copy of
+# the root licence under version control, free to drift from the one that
+# governs. README.md beside it is the opposite case and stays tracked: it is the
+# npm landing page, authored, and not the repo README.
+packaging/opencode/LICENSE
+
+# The pre-publish gate's stamp. Safe host-agnostically: no packaging route ever
+# commits one, because a stamp attests to the machine that wrote it.
+packaging/*/.package-check.stamp

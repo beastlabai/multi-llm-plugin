@@ -321,6 +321,63 @@ changes:
       recorded specs and the honest "the fan-out finished" state, and nothing
       reads a `grouping_complete` from this phase.
 
+  # ---------------------------------------------------------------------------
+  # The prior-changes id is now serialized WITH the batch.
+  #
+  # `prior_changes.append` is idempotent on `(id, phase)` — deliberately, so a
+  # re-dispatched batch cannot double its summary. The id it was handed was not
+  # unique per batch: the native path was told to pass `batch.file_key` /
+  # `batch.section_key`, and both batchers emit MANY batches under one such key
+  # (three fixes a batch, the char caps, one batch per security/HIGH fix; a
+  # section that overflows starts a new batch under the same key). Every batch
+  # after the first on a key was therefore skipped with a `Notice:` on stderr and
+  # exit 0, and each later batch read a prior-changes context missing its own
+  # predecessors — the exact "don't redo work" signal the step exists to provide.
+  #
+  # Both batchers' `to_dict()` now carry `prior_changes_id`, computed once in
+  # Python by `prior_changes.entry_id(key, member_ids)` — the content key plus a
+  # digest of the batch's own member ids, so it is unique per batch AND identical
+  # when the same batch is re-materialized (an unstable id would DOUBLE an entry,
+  # which is the failure the idempotency exists to prevent). It is byte-identical
+  # to what `utils/write_phase_bridge` derives for the same batch, so the native
+  # invoker and the Python executor append under the same key.
+  #
+  # The diff is therefore one ADDED key per serialized batch, and nothing else:
+  # no existing value moves, and this fixture's apply-fixes batches carry an empty
+  # `file_key`, which is why they read `batch#<digest>` rather than `<key>#<digest>`.
+  # Pointers are leaf-exact, per the block above: a pointer at `…/batches` would
+  # also excuse a changed batch count or a changed fix, which is what this guard
+  # exists to catch.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-fixes); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-fixes); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-fixes); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/0/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-suggestions); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/1/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-suggestions); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/2/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-suggestions); the key
+      is added, nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/3/prior_changes_id
+    rationale: >
+      The batch now serializes its own prior-changes `--id` (apply-suggestions); the key
+      is added, nothing existing changed. See the block comment above.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

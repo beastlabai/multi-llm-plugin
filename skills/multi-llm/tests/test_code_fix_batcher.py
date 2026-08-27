@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.code_fix_batcher import (
     CodeFixBatch,
+    fix_member_ids,
     determine_subagent_type,
     get_line_start,
     is_high_risk_fix,
@@ -379,6 +380,48 @@ class TestIsHighRiskFix:
         """Test None values don't cause errors."""
         fix = {"type": None, "importance": None}
         assert is_high_risk_fix(fix) is False
+
+
+class TestPriorChangesId:
+    """The batch's own `--id` for the prior-changes log (`to_dict`, native path).
+
+    A file key is not a batch identity — this batcher emits many batches per
+    file — and `prior_changes.append` is idempotent on `(id, phase)`, so a
+    file-keyed id records the first batch on a file and silently drops the rest.
+    """
+
+    def test_many_batches_on_one_file_get_distinct_ids(self):
+        fixes = [
+            make_fix(title=f"Issue {n}", description=f"fix number {n}")
+            for n in range(9)
+        ]
+        batches = batch_code_fixes(fixes)
+
+        assert len(batches) > 1
+        assert all(b.file_key == "src/main.py" for b in batches)
+        ids = [b.to_dict()["prior_changes_id"] for b in batches]
+        assert len(set(ids)) == len(batches), ids
+        assert all(i.startswith("src/main.py#") for i in ids)
+
+    def test_the_id_is_stable_for_the_same_batch(self):
+        fixes = [
+            make_fix(title=f"Issue {n}", description=f"fix number {n}")
+            for n in range(9)
+        ]
+        first = [b.to_dict()["prior_changes_id"] for b in batch_code_fixes(fixes)]
+        second = [b.to_dict()["prior_changes_id"] for b in batch_code_fixes(fixes)]
+        assert first == second
+
+    def test_member_ids_prefer_the_fix_identity(self):
+        assert fix_member_ids([{"id": "i1", "group_id": "g1", "title": "t"}]) == ["i1"]
+        assert fix_member_ids([{"group_id": "g1", "title": "t"}]) == ["g1"]
+        assert fix_member_ids([{}]) == ["f0"]
+
+    def test_an_empty_batch_falls_back_rather_than_raising(self):
+        assert CodeFixBatch(file_key="src/a.py").to_dict()["prior_changes_id"] == (
+            "src/a.py"
+        )
+        assert CodeFixBatch().to_dict()["prior_changes_id"] == "batch"
 
 
 class TestBatchCodeFixes:

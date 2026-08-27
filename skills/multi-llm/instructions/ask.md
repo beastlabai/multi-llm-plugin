@@ -75,7 +75,7 @@ with the offending token named.
    budget. Copy the user's quoted question through verbatim:
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" [--models ...]
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" [--models ...]
    ```
 
    Three rules govern that one line:
@@ -105,7 +105,7 @@ with the offending token named.
    both.
 
    ```bash
-   PYTHONUNBUFFERED=1 uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" \
+   PYTHONUNBUFFERED=1 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" ask "$PLAN_PATH" "$RAW_QUESTION" \
      [--models ...] --detach
    ```
 
@@ -119,7 +119,7 @@ with the offending token named.
    it needs neither.
 
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase ask --view run --wait
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase ask --view run --wait
    ```
 
    **Resume**: re-invoking the identical question with `--force` RESUMES (keeps

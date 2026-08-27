@@ -1,0 +1,182 @@
+# Publish `opencode-multi-llm` to npm, with provenance.
+#
+# WHY TRUSTED PUBLISHING. Publishing through npm's OIDC trusted publisher means
+# no long-lived `NPM_TOKEN` secret ever exists in this repository, and it is what
+# makes `--provenance` work at all.
+#
+# WHY THE FIRST RELEASE IS PROBABLY NOT THIS WORKFLOW. A trusted publisher is
+# configured **on an existing npm package**, and npm has no PyPI-style pending
+# publisher, so a package that has never been published cannot have one attached.
+# The first publish is therefore a local `npm publish --access public` from the
+# maintainer's machine, with CI taking over from the second release. That
+# ordering works either way, which is why it is the assumed one. Re-check it at
+# the pre-publish gate: if npm ships first-publish OIDC before this runs, the
+# local step collapses into a single CI publish.
+#
+# FOUR SAFEGUARDS, and a tag-push workflow without them will happily try to
+# publish on a tag that has nothing to do with this package.
+
+name: publish opencode plugin
+
+on:
+  push:
+    # 1. A TAG PATTERN OF ITS OWN. This repository's tags are not reserved for
+    #    the npm package, so a `v*` or unfiltered trigger would make every
+    #    unrelated tag attempt a publish — and the first thing it would hit is
+    #    npm's OIDC error rather than a clear refusal.
+    tags:
+      - 'opencode-v*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # ACTIONS PINNED BY COMMIT SHA, NOT BY TAG. This job holds `id-token:
+      # write` and ends in `npm publish --provenance`, so whatever these three
+      # actions run is what signs the release. `@v4`/`@v5` are mutable refs the
+      # action owner can move at any time, which makes a retag the one remaining
+      # way to change what gets signed without changing anything in this
+      # repository — the same reason safeguard 3 below refuses `npm@latest`.
+      #
+      # The trailing comment is the human-readable tag each SHA was resolved
+      # from; it is a label, not a constraint, so bump the SHA and the comment
+      # together and never the comment alone.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The staging step refuses a dirty tree and needs history to say so.
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 3. A PINNED npm, NOT `latest`. OIDC support landed in the 11.5.x line, so
+      #    treat >= 11.5.1 as the floor to CONFIRM at implementation time rather
+      #    than as a measured fact — and record the version actually verified to
+      #    publish with OIDC here, the way every other tool in this repository is
+      #    pinned. `latest` is the bare-`@version` install the supply-chain rule
+      #    exists to forbid, and an npm too old for OIDC fails *at publish time*,
+      #    on a tag, which is the most expensive place to discover it.
+      #
+      #    UNVERIFIED: no publish has been run through this workflow yet. Confirm
+      #    the floor and replace this pin with the version that worked before the
+      #    second release relies on it.
+      - name: Install a pinned npm
+        run: npm install -g npm@11.5.1
+
+      # 2. TAG EQUALS VERSION, ASSERTED, NOT ASSUMED. Without this,
+      #    `opencode-v1.0.1` on a tree still carrying 1.0.0 republishes nothing
+      #    and reports success — or worse, publishes a number nobody meant. The
+      #    version field is already the one owner of the number and is already
+      #    asserted equal to the pinned spec in the generated docs; this closes
+      #    the one surface that test cannot see, the tag.
+      - name: Tag must equal package.json's version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#opencode-v}"
+          declared="$(node -p "require('./packaging/opencode/package.json').version")"
+          if [ "$tag" != "$declared" ]; then
+            echo "REFUSING: tag ${GITHUB_REF_NAME} says ${tag}, package.json says ${declared}." >&2
+            exit 1
+          fi
+          echo "tag and manifest agree on ${declared}"
+
+      # 4. THE GATE RUNS IN THIS JOB, IMMEDIATELY BEFORE `npm publish`. Not "it
+      #    ran on the PR": the tag can point at a different commit, and rows 7
+      #    and 9 never ran on the PR at all.
+      #
+      #    This job re-runs every row it can — the plain-CI and package rows,
+      #    then row 7 (a clean-$HOME tarball install, which needs the `opencode`
+      #    binary and network, both available here) and row 9 (the version must
+      #    be absent from the registry). Row 8, the offline container row, is the
+      #    one row this job cannot run: the runners have no Docker daemon. It is
+      #    a recorded local pre-publish step.
+      #
+      #    CI consumes no stamp. The stamp is a LOCAL mechanism, gitignored and
+      #    never uploaded, because a stamp from another machine attests to that
+      #    machine's rows rather than to this one's.
+      - name: Package gate (rows 1-6)
+        run: make opencode-package-check-ci
+
+      # Row 9: npm forbids republishing a version, so a botched release costs a
+      # number permanently. `npm view` is the probe — `E404` is the green answer,
+      # and it is also the correct green for a name that has never been published
+      # at all. Never `npm publish --dry-run`, which does not check this.
+      #
+      # THREE OUTCOMES, NOT TWO, and this is the whole reason the probe is not a
+      # bare `if npm view ...`. Exit 0 means the version is there: refuse. `E404`
+      # means it is not: proceed. Everything else — a network error, an E429, a
+      # registry outage, an expired auth token — is npm declining to answer, and
+      # every one of those also exits non-zero. Read as a two-way test they all
+      # come back "absent" and the job publishes on a probe that never ran, which
+      # is the failure this gate exists to prevent.
+      #
+      # So the probe asks npm for its error CODE rather than for its exit status.
+      # `--json` puts that code on stdout as `.error.code` — measured on npm 10
+      # and 11, for both a name that has never been published and a name whose
+      # requested version is missing — and anything that is not exactly `E404`
+      # refuses.
+      - name: Version must be absent from the registry (row 9)
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./packaging/opencode/package.json').name")"
+          version="$(node -p "require('./packaging/opencode/package.json').version")"
+
+          probe_status=0
+          probe_json="$(npm view "${name}@${version}" version --json 2>/dev/null)" || probe_status=$?
+
+          if [ "${probe_status}" -eq 0 ]; then
+            echo "REFUSING: ${name}@${version} is already on the registry. npm forbids republishing a version." >&2
+            exit 1
+          fi
+
+          # Not `grep E404` over the output: a substring match would also accept
+          # an unrelated message that happens to quote the code.
+          code="$(printf '%s' "${probe_json}" | node -e '
+            let raw = "";
+            process.stdin.on("data", (chunk) => { raw += chunk; });
+            process.stdin.on("end", () => {
+              let code = "";
+              try { code = JSON.parse(raw).error.code || ""; } catch { code = ""; }
+              process.stdout.write(String(code));
+            });
+          ')" || code=""
+
+          if [ "${code}" != "E404" ]; then
+            echo "REFUSING: could not determine whether ${name}@${version} is on the registry." >&2
+            echo "npm exited ${probe_status} reporting code '${code:-<none>}'; only E404 is a green answer." >&2
+            echo "This is an UNKNOWN, not an absence — re-run once the registry answers." >&2
+            if [ -n "${probe_json}" ]; then
+              printf '%s\n' "${probe_json}" >&2
+            fi
+            exit 1
+          fi
+
+          echo "${name}@${version} is not on the registry (E404)"
+
+      # Row 7: install the packed tarball into a clean $HOME and confirm a
+      # MUTATED KEY plus the tool id. Presence in `plugin[]` proves nothing —
+      # every failure on this route exits 0 with an empty log.
+      #
+      # NOT YET WIRED: this needs the `opencode` binary installed in the job and
+      # a scripted probe of `opencode debug config`. It is the one gate row this
+      # file declares but does not yet run, and it must be added before the
+      # second release depends on this workflow.
+      - name: Row 7 — clean-$HOME install probe
+        run: |
+          echo "NOT IMPLEMENTED: row 7 needs the opencode binary and a debug-config probe." >&2
+          echo "Until it is wired, run it locally and record the result before tagging." >&2
+          exit 1
+
+      # `npm publish` on the DIRECTORY, never a pre-built .tgz: measured,
+      # `npm publish <tarball>` runs no lifecycle scripts at all, so the
+      # `prepack` build backstop does not exist on that path.
+      - name: Publish
+        run: cd packaging/opencode && npm publish --provenance --access public

@@ -122,9 +122,22 @@ def dispatcher_prefix(base: Optional[Path] = None) -> str:
     This is the *one* substitution site a command needs: ``multi_llm.py``
     self-locates via ``__file__``, so the skill dir is needed only for
     ``uv run --project`` and the script path, and both live here.
+
+    The uv flags come from :func:`utils.unattended.uv_run_args`, the single
+    owner, rather than being spelled here — so a printed follow-up, a
+    ``MULTI_LLM_RESULT.next`` string and the detached worker's re-exec cannot
+    disagree about them. They used to: this prefix carried neither ``--frozen``
+    nor ``--no-dev``, so every command it rendered was one a user could paste and
+    have pull the whole dev group.
     """
     base = Path(base) if base is not None else skill_dir()
-    return f"uv run --project {_quote(base)} -- python {_quote(base / 'multi_llm.py')}"
+    # Imported here, not at module scope: ``unattended`` imports this module.
+    from .unattended import uv_run_args
+    flags = "".join(f" {flag}" for flag in uv_run_args())
+    return (
+        f"uv run{flags} --project {_quote(base)} -- "
+        f"python {_quote(base / 'multi_llm.py')}"
+    )
 
 
 def dispatcher_command(
@@ -224,18 +237,51 @@ _SKILL_DIR_TOKENS = (
     "{SKILL_DIR}",
 )
 
+#: The second template token the corpus carries: the ``uv run`` flag list.
+#:
+#: The commands in ``instructions/*.md`` and in each ``hosts/*/shim.md.tmpl`` are
+#: verbatim model-facing text on the file route, so a hand-typed ``uv run
+#: --project`` there is a *dispatch* that omits the flags — and ``--no-dev`` is
+#: the load-bearing one: without it a first run syncs the whole dev group (17
+#: packages measured against this tree) and every offline posture fails on a
+#: package it never needed. Rendering the flags from the one owner,
+#: :func:`utils.unattended.uv_run_args`, is what stops the runbook text and
+#: :func:`dispatcher_prefix` from disagreeing about them.
+UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
+
+#: The third template token: the mode a bare argument text resolves to.
+#:
+#: "No mode flag means ``review-plan``" is a *rule*, and :data:`modes.DEFAULT_MODE`
+#: owns it. Every shim template states that rule twice — once in its step 2 prose
+#: and once in its worked examples — so without a token those are hand-typed
+#: copies that a change to the constant leaves behind. Rendering them here is what
+#: makes the constant's "every surface renders from it" true of the file route as
+#: well as of ``dist/cli-surface.json``.
+DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
+
 
 def render_instruction_text(text: str, base: Union[str, Path]) -> str:
-    """Substitute every skill-dir placeholder in instruction text.
+    """Substitute every template placeholder in instruction/shim text.
 
-    Pure so a test can render against a fixture skill dir containing a space.
-    Substituting at read time from the *running* skill dir is also why the served
-    core cannot go stale: there is no rendered copy to keep in sync.
+    Three tokens, one rule: ``{SKILL_DIR}`` (and its host-expanded spellings)
+    becomes *base*, :data:`UV_RUN_FLAGS_TOKEN` becomes the ``uv run`` flag list,
+    and :data:`DEFAULT_MODE_TOKEN` becomes ``modes.DEFAULT_MODE``. The skill dir
+    is an argument so a test can render against a fixture path containing a
+    space; the other two are read from their owners rather than passed, for the
+    same reason :func:`dispatcher_prefix` reads the flag list — a caller given
+    the chance to supply one is a caller that can supply a different one.
+    Substituting at read time from the *running* skill dir and the *running* flag
+    list is also why the served core cannot go stale: there is no rendered copy
+    to keep in sync.
     """
+    # Imported here, not at module scope: ``unattended`` imports this module.
+    from .unattended import uv_run_args
+
     rendered = text
     for token in _SKILL_DIR_TOKENS:
         rendered = rendered.replace(token, str(base))
-    return rendered
+    rendered = rendered.replace(UV_RUN_FLAGS_TOKEN, " ".join(uv_run_args()))
+    return rendered.replace(DEFAULT_MODE_TOKEN, _modes().DEFAULT_MODE)
 
 
 # ---------------------------------------------------------------------------

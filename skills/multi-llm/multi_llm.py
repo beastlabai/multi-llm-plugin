@@ -576,15 +576,24 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
     """
     if not args or args[0] in ("--help", "-h"):
         served = [m.name for m in mode_table.MODES if m.instruction_file]
-        print("usage: multi_llm.py util instructions <mode>")
+        print("usage: multi_llm.py util instructions <mode> [--host <id>]")
         print(f"modes with a core instruction file: {', '.join(served)}")
+        print(
+            "  --host <id>  append this host's three resolved capability-verb "
+            "sentences"
+        )
         return EXIT_OK
-    if len(args) > 1:
+    positional, host_id = _split_instructions_host(args)
+    if len(positional) > 1:
         raise DispatchError(
             "ERROR: `util instructions` takes exactly one mode word, got: "
-            + " ".join(args)
+            + " ".join(positional)
         )
-    word = args[0]
+    if not positional:
+        raise DispatchError(
+            "ERROR: `util instructions` needs a mode word before --host."
+        )
+    word = positional[0]
     mode = mode_table.resolve(word)
     if mode is None:
         raise DispatchError(_unknown_mode_message(word))
@@ -627,8 +636,73 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
     sys.stdout.write(
         render_instruction_text(path.read_text(encoding="utf-8"), skill_dir())
     )
+    if host_id is not None:
+        sys.stdout.write(_verb_section(host_id))
     ctx.add_artifact(path)
     return EXIT_OK
+
+
+#: Heading the ``--host`` verb block is served under. The core files name the
+#: three capability verbs abstractly and it has always been the *shim's* section 4
+#: that resolved them; a host with no prose left to carry that section — the
+#: OpenCode npm plugin, whose command body is one line — needs the resolution to
+#: arrive with the core instead. Same single owner either way:
+#: ``caps.verb_block()``.
+_VERB_HEADING = "## Capability verbs — how this host answers each one"
+
+
+def _verb_section(host_id: str) -> str:
+    """The three resolved verb sentences, as the section a shim used to carry."""
+    from utils import host_capabilities as caps
+
+    return (
+        f"\n{_VERB_HEADING}\n\n"
+        "The core above names three capability verbs and never a tool. These are "
+        "their one concrete resolution here, so nothing is left to decide "
+        f"mid-run:\n\n{caps.verb_block(host_id)}\n"
+    )
+
+
+def _split_instructions_host(
+    args: Sequence[str],
+) -> "tuple[list[str], Optional[str]]":
+    """Split ``util instructions`` argv into positionals and a ``--host`` value.
+
+    Hand-parsed rather than argparse'd because this command's whole contract is
+    that its stdout **is** the core text: an argparse error would print a usage
+    block a host may be piping straight into a prompt, and the surrounding
+    dispatcher already owns the exit-3 wording for a bad argument.
+    """
+    positional: list = []
+    host_id: Optional[str] = None
+    index = 0
+    while index < len(args):
+        token = args[index]
+        head, separator, inline = token.partition("=")
+        if head == "--host":
+            if separator:
+                value = inline
+            else:
+                index += 1
+                if index >= len(args):
+                    raise DispatchError(
+                        "ERROR: `util instructions --host` needs a host id."
+                    )
+                value = args[index]
+            if not value:
+                raise DispatchError(
+                    "ERROR: `util instructions --host` needs a host id."
+                )
+            host_id = value
+        elif token.startswith("-"):
+            raise DispatchError(
+                f"ERROR: `util instructions` does not take {token!r}. Its only "
+                "option is `--host <id>`."
+            )
+        else:
+            positional.append(token)
+        index += 1
+    return positional, host_id
 
 
 def _dispatch(argv: Sequence[str], ctx: ResultContext) -> int:
