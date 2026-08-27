@@ -72,8 +72,8 @@ elsewhere, so this module measured and named the correction rather than making i
 "Invoke it as /multi-llm …" sentence is gone, replaced by a required per-host
 `invocation:` field in `hosts/capabilities.yaml` — `verified` on both installable
 hosts, on the strength of this row — which the per-host quickstart renders in its
-place, and README's `### Codex and OpenCode` block now splits the two hosts by
-hand. The assertion below stays exactly as it was: it is what keeps that split
+place, and `docs/hosts.md` splits the two hosts' worked examples from that field.
+The assertion below stays exactly as it was: it is what keeps that split
 present, and it is what fails the day a host's verdict flips.
 
 ## Why the assertions are shaped like this
@@ -426,10 +426,8 @@ class TestTheDocumentsStateWhatEachHostActuallyTakes:
 
     This is the one assertion in the module that grades a **shipped artifact**
     rather than a run, and it is deliberately not silent about a host measured
-    `resolves: false`: README's `### Codex and OpenCode` block and the sentence
-    `render_capabilities.py` renders into every per-host quickstart in
-    `docs/hosts.md` both tell every reader of every installable host to type
-    `/multi-llm …`, and for codex that is measurably false.
+    `resolves: false`: `docs/hosts.md` (generated) and README.md both publish
+    `/multi-llm …` for OpenCode, and for codex that spelling is measurably false.
 
     It is graded here rather than in a plain-CI module because the measurement
     that justifies it lives here — but it reads only committed text, so it is
@@ -480,9 +478,9 @@ class TestTheDocumentsStateWhatEachHostActuallyTakes:
             f"is model-invoked rather than typed, so ask for it by name — "
             f"`{alternative}` — because the composer answers `/multi-llm` with "
             f"\"Unrecognized command\".\n"
-            f"  * README.md's `### Codex and OpenCode` block carries the same "
-            f"claim by hand (the `/multi-llm plans/my-feature.md` code block, and "
-            f"the `Invoke with …` line in Modes) and needs the same split.\n"
+            f"  * README.md still mentions `/multi-llm` for OpenCode (Modes) and "
+            f"must keep the same split: Codex is model-invoked, not a slash "
+            f"command.\n"
             f"  * this guard goes green again once EVERY page listed above "
             f"matches /{qualifier}/i — it grades the substance, not a sentence, "
             f"but it grades each page separately.\n"

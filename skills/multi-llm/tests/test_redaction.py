@@ -349,9 +349,15 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: looser: ``ENV_GIT_CREDENTIAL_HELPER_VAR = "MULTI_LLM_GIT_CREDENTIAL_HELPER"``
     #: has been in provider_registry.py since 2026-06-25, seven weeks before the
     #: measurement, in a tree that already had the 66 files that note counts. All
-    #: three are Python constant assignments — source, which is never a redaction
-    #: input. Recorded here so nobody re-derives them as a regression.
-    KNOWN_SOURCE_HITS = 3
+    #: three are Python constant assignments — source, which is never a
+    #: redaction input. A **fourth** joined them when the executor's
+    #: nested-exec reason codes were given a name:
+    #: ``"nested_exec_credentials": "nested_exec.credentials"`` maps a
+    #: refusal code to the capability field it reports about, and the only
+    #: thing credential-shaped in it is the word. Recorded here so nobody
+    #: re-derives any of them as a regression.
+    KNOWN_SOURCE_HITS = 4
+
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
         """Source is never a redaction input; this is a tripwire on looseness."""

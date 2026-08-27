@@ -57,6 +57,15 @@ The marketplace cache only refreshes when you explicitly ask it to - `/plugin ma
 
 This plugin also works with **Codex** and **OpenCode**. `install-host` writes a native entry point into either one: an OpenCode `/multi-llm` command, a Codex skill. Install, invocation, and host-specific differences are in **[docs/hosts.md](docs/hosts.md)**.
 
+**An npm route for OpenCode is built but not yet published.** `packaging/opencode/` produces `opencode-multi-llm`, which ships the skill tree inside the package and registers a model-callable `multi_llm` tool alongside the `/multi-llm` command — so there is no baked path to go stale and no `install-host --all` owed after an update. Until it is on npm, the way to run it is a local tarball:
+
+```bash
+make opencode-package                       # build, pack, sweep
+# then add the .tgz path to opencode.json's "plugin" list and restart
+```
+
+Use `install-host opencode` for now: an `opencode.json` entry naming the unpublished spec resolves to nothing, and on that host the failure is silent — the plugin stays listed, the exit code is 0, and the debug log is empty. `packaging/opencode/README.md` is the package's own documentation.
+
 ### Configure providers (required before first use)
 
 Edit [`skills/multi-llm/providers.yaml`](skills/multi-llm/providers.yaml) manually to match the code harnesses and models you want to use. The shipped file is a starting point only - keep the providers whose CLIs you have installed, remove the rest, and set `defaults.models` (and optionally `quick_models`) to the `provider:model` pairs you actually run. Without this step, default invocations will call harnesses or models you may not have configured. See [docs/providers.md](docs/providers.md) for the format and available keys.

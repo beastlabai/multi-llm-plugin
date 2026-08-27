@@ -16,6 +16,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+try:
+    from .prior_changes import entry_id, stable_key
+except ImportError:
+    from utils.prior_changes import entry_id, stable_key
+
 
 # Configuration constants
 MAX_SUGGESTIONS_PER_BATCH = 4  # Hard limit to prevent context overload
@@ -28,6 +33,26 @@ FILE_PATTERN = re.compile(
     r'(?:File|Path|Location):\s*([^\s,]+)',
     re.IGNORECASE
 )
+
+
+def suggestion_member_ids(suggestions: List[Dict[str, Any]]) -> List[str]:
+    """The batch's suggestions as stable member ids, in order.
+
+    Serves both suggestion phases (apply-suggestions and apply-task-suggestions
+    batch with this same class), and is the list
+    ``utils/write_phase_bridge`` carries as ``expected_ids`` and digests into
+    :func:`utils.prior_changes.entry_id`.
+
+    A suggestion carrying none of ``group_id``/``id``/``title`` falls back to its
+    position within its own batch — see the same note on
+    ``code_fix_batcher.fix_member_ids``.
+    """
+    return [
+        stable_key(
+            [s.get("group_id"), s.get("id"), s.get("title")], f"s{n}"
+        )
+        for n, s in enumerate(suggestions)
+    ]
 
 
 @dataclass
@@ -82,11 +107,29 @@ class SuggestionBatch:
         else:
             self.batch_type = "mixed"
 
+    @property
+    def prior_changes_id(self) -> str:
+        """The stable, per-batch ``--id`` for the prior-changes append.
+
+        NOT ``section_key``: a section that overflows the batch size or the char
+        cap starts a NEW batch under the SAME key, and ``prior_changes.append`` is
+        idempotent on ``(id, phase)`` — so a section-keyed id records the first
+        batch of that section and silently drops the rest. Computed here so a
+        native invoker reads it off the serialized batch instead of picking a key,
+        and byte-identical to what ``utils/write_phase_bridge`` derives for the
+        same batch.
+        """
+        return entry_id(
+            self.section_key, suggestion_member_ids(self.suggestions),
+            fallback="batch",
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert batch to dictionary for JSON serialization."""
         return {
             "suggestions": self.suggestions,
             "section_key": self.section_key,
+            "prior_changes_id": self.prior_changes_id,
             "batch_type": self.batch_type,
             "suggestion_count": self.size,
             "total_chars": self.total_chars,

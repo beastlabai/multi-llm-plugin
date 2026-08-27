@@ -48,6 +48,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 from utils import host_capabilities as caps  # noqa: E402
 from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
+from utils.unattended import uv_run_args  # noqa: E402
 
 #: Where the rendered document lands. A ``references/*.md`` file, and therefore
 #: exempt from the host-neutrality lint: naming host tools is its whole job.
@@ -261,6 +262,177 @@ def _install_path_cell(paths: List[str]) -> str:
     return ", ".join(f"`{p}`" for p in paths) if paths else "—"
 
 
+def _shell_dispatcher() -> str:
+    """The dispatcher command **as this page teaches it**, flags included.
+
+    ``$SKILL`` stays a shell variable — the reader sets it themselves a block
+    up, which is why :func:`utils.cli_common.dispatcher_prefix` (it resolves and
+    quotes a real skill dir) cannot be called here. The *flags* still come from
+    the one owner, :func:`utils.unattended.uv_run_args`, rather than being
+    hand-typed a second time: spelled by hand this page shipped a bare
+    ``uv run --project``, so the first command a new user ran was the one
+    command in the project that omitted ``--no-dev`` and performed the whole
+    dev-group sync.
+    """
+    flags = "".join(f" {flag}" for flag in uv_run_args())
+    return f'uv run{flags} --project "$SKILL" -- python "$SKILL/multi_llm.py"'
+
+
+#: How each registry's install is spelled, and what "upgrading" means on it.
+#: Keyed by the `package.registry` discriminator rather than by host id, so a
+#: second host on the same registry inherits the wording and a second registry
+#: is one row rather than a branch.
+_REGISTRY_FORMS: Dict[str, Dict[str, str]] = {
+    "npm": {
+        "config": (
+            'Add it to the host config (`~/.config/{host}/{host}.json`) and '
+            "restart:"
+        ),
+        "fence": '{{ "{config_key}": ["{spec}"] }}',
+        "language": "json",
+    },
+    "codex-marketplace": {
+        "config": "Install it from the marketplace:",
+        "fence": "{host} plugin add {marketplace} {name}",
+        "language": "bash",
+    },
+}
+
+#: What ``update`` means, in words, per enum value.
+_UPDATE_FORMS: Dict[str, str] = {
+    "pinned-spec": (
+        "Upgrading is bumping the pin and restarting: the cache key is the "
+        "literal spec string and the installer early-returns when the package "
+        "directory already exists, so an **unpinned** entry resolves once and "
+        "never again"
+    ),
+    "reinstall": "Upgrading is re-running the install command",
+    "range": "The host re-resolves the declared range on its own",
+}
+
+
+def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
+    """The "Install via <registry>" paragraph, or nothing.
+
+    **Its wording is a function of the provenance row**, which is what keeps the
+    pre- and post-publish documentation one generated paragraph rather than two
+    hand-written ones. At ``documented`` it names the route and says plainly
+    that no published install has been verified; at ``verified`` the same
+    paragraph reads as the recommended install. Flipping it is a provenance edit
+    and a re-render, never a prose rewrite — and the two generated pages are
+    byte-compared, so a hand edit is a CI failure.
+    """
+    package = host.get("package")
+    if not package:
+        return []
+
+    registry = package["registry"]
+    form = _REGISTRY_FORMS.get(registry)
+    if form is None:
+        raise SystemExit(
+            f"host '{host_id}' declares registry '{registry}', which this "
+            "renderer has no form for. Add a row to _REGISTRY_FORMS rather than "
+            "letting the paragraph render empty."
+        )
+    provenance = host["provenance"].get("package", "unknown")
+    spec = package["name"]
+    if package.get("version"):
+        spec = f"{spec}@{package['version']}"
+
+    verified = provenance == "verified"
+    lines = [
+        f"**`{host_id}` — install via {registry}"
+        + ("" if verified else " (not yet published)")
+        + f"** — {provenance}",
+        "",
+    ]
+    if verified:
+        lines.append(
+            f"The recommended route on `{host_id}`: one config edit, no shell "
+            "bootstrap, and no baked path that goes stale on an update — the "
+            "plugin resolves its own location at every startup."
+        )
+    else:
+        lines.append(
+            f"A second route on `{host_id}`, and the one this documentation "
+            "will recommend once it is published. **No published install has "
+            "been verified yet**, so a config entry naming this spec resolves "
+            "to nothing today — and on this host that failure is silent: the "
+            "plugin stays listed, the exit code is 0, and the debug log is "
+            "empty. Until then, use the `install-host` route above, or build "
+            "and install the tarball locally."
+        )
+    lines += [
+        "",
+        form["config"].format(host=host_id),
+        "",
+        f"```{form['language']}",
+        form["fence"].format(
+            config_key=package["config_key"],
+            spec=spec,
+            host=host_id,
+            name=package["name"],
+            marketplace=package.get("marketplace", ""),
+        ),
+        "```",
+        "",
+        f"Needs {host_id} {package['min_host_version']} or newer. "
+        + _UPDATE_FORMS[package["update"]]
+        + f". It provides {_provides_sentence(package['provides'])}, and you "
+        f"invoke it {package['invocation']}",
+        "",
+    ]
+    # No worked-example fence of its own. The per-host block this paragraph is
+    # appended to has already rendered one from this same `provides`, and a
+    # second byte-identical copy one paragraph later reads as a *different*
+    # example that happens to coincide. The half of `provides` the fence cannot
+    # show — a model-callable tool has no typed spelling — is named in the
+    # invocation sentence above instead.
+    return lines
+
+
+def _provides_sentence(provides: Sequence[str]) -> str:
+    """``provides`` as prose, in the declared order."""
+    spelled = {
+        "command": "a slash command",
+        "skill": "a skill",
+        "tool": "a model-callable tool",
+    }
+    items = [spelled[item] for item in provides]
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _worked_examples(provides: Sequence[str]) -> List[str]:
+    """The fence style, **selected from ``provides``** rather than sniffed.
+
+    This used to be a substring test over the invocation prose — `startswith("as
+    `/")` for the slash form, `"skill" in ...` otherwise — which made the fence a
+    function of how a sentence happened to be phrased. ``provides`` is data that
+    says which it is.
+    """
+    if "command" in provides:
+        return [
+            "```text",
+            "/multi-llm plans/my-feature.md",
+            "/multi-llm --review-code plans/my-feature.md",
+            "```",
+            "",
+        ]
+    if "skill" in provides:
+        return [
+            "```text",
+            "Use the multi-llm skill with exactly these arguments: "
+            "plans/my-feature.md",
+            "Use the multi-llm skill with exactly these arguments: "
+            "--review-code plans/my-feature.md",
+            "```",
+            "",
+        ]
+    return []
+
+
 def _reload_sentence(host_id: str, host: Dict[str, Any]) -> str:
     value = str(host["reload"])
     if value == "none":
@@ -320,6 +492,8 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
     """The `docs/hosts.md` block, generated from the same data as everything else."""
     hosts = caps.load(base).get("hosts", {})
     installable = [h for h in sorted(hosts) if hosts[h]["installable"]]
+    # Every `uv run …` line on this page is this one string plus its arguments.
+    dispatch = _shell_dispatcher()
     lines: List[str] = [
         "# Hosting multi-llm in other harnesses",
         "",
@@ -333,14 +507,53 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
         "",
         "```bash",
         "# from anywhere; SKILL is this skill tree on disk",
-        'uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host '
-        "<host> [--global|--project]",
+        f"{dispatch} install-host <host> [--global|--project]",
         "```",
         "",
         "`SKILL` is either a git checkout of this repository or the plugin "
-        "install `claude plugin list --json` reports; the README's "
-        "[Codex and OpenCode](../README.md#codex-and-opencode) block resolves "
-        "it, with a `jq`-free fallback for machines without a JSON parser.",
+        "install `claude plugin list --json` reports. Set it once — the first of "
+        "these three that applies to you, not all three. On Windows the shell "
+        "must be **Git Bash** (see [Prerequisites](../README.md#prerequisites)):",
+        "",
+        "```bash",
+        "# Set SKILL once - the first of these three that applies to you, not all three.",
+        "",
+        "# 1. You cloned this repository:",
+        "SKILL=<checkout>/skills/multi-llm",
+        "",
+        "# 2. You installed the plugin: ask Claude Code where it put it (needs `jq`). Installs of the",
+        "#    same plugin coexist per project and per version, and versions older than the dispatcher",
+        "#    are still in the cache - so prefer enabled and most-recently-updated, then take the first",
+        "#    that actually carries multi_llm.py:",
+        "SKILL=$(claude plugin list --json \\",
+        "  | jq -r 'map(select(.id == \"multi-llm@beastlabai\")) | "
+        "sort_by([.enabled, .lastUpdated]) | reverse | .[].installPath' \\",
+        "  | while IFS= read -r p; do [ -f \"$p/skills/multi-llm/multi_llm.py\" ] "
+        "&& { echo \"$p/skills/multi-llm\"; break; }; done)",
+        "",
+        "# 3. Same, but no `jq` on this machine: glob the cache, whose path changes on every update.",
+        "#    The marketplace segment is pinned to the one `/plugin install` used in the README - change it if",
+        "#    you installed from a fork:",
+        "SKILL=$(dirname \"$(ls -t ~/.claude/plugins/cache/beastlabai/multi-llm"
+        "/*/skills/multi-llm/multi_llm.py | head -1)\")",
+        "",
+        "# Then install, gated on SKILL: an unresolved SKILL is empty (2) or the current directory (3),",
+        "# and either would run install-host against the wrong tree.",
+        "if [ -f \"$SKILL/multi_llm.py\" ]; then",
+    ]
+    for host_id in installable:
+        extra = (
+            "      # add --project to scope it to one repo"
+            if host_id == installable[0]
+            else "   # add --check to verify an install"
+        )
+        lines.append(f"  {dispatch} install-host {host_id}{extra}")
+    lines += [
+        "else",
+        "  echo \"no multi-llm skill tree at '$SKILL' - install the plugin, or "
+        "set SKILL=<checkout>/skills/multi-llm\" >&2",
+        "fi",
+        "```",
         "",
         "It writes a **rendered copy** — never a symlink or junction, so nothing "
         "here needs symlink privileges on Windows — atomically, then verifies what "
@@ -359,12 +572,9 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
             f"**`{host_id}`**",
             "",
             "```bash",
-            f"uv run --project \"$SKILL\" -- python \"$SKILL/multi_llm.py\" "
-            f"install-host {host_id}            # machine-wide",
-            f"uv run --project \"$SKILL\" -- python \"$SKILL/multi_llm.py\" "
-            f"install-host {host_id} --project  # just this repository",
-            f"uv run --project \"$SKILL\" -- python \"$SKILL/multi_llm.py\" "
-            f"install-host {host_id} --check    # verify an install",
+            f"{dispatch} install-host {host_id}            # machine-wide",
+            f"{dispatch} install-host {host_id} --project  # just this repository",
+            f"{dispatch} install-host {host_id} --check    # verify an install",
             "```",
             "",
             f"Writes `{host['install_paths']['global'][0]}/"
@@ -393,7 +603,66 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
                 f"`{host['headless_invocation']}`.",
                 "",
             ]
-    lines += [
+        # Worked examples moved from the README: the same arguments the Claude
+        # Code skill takes, in the spelling this host actually accepts. The
+        # fence style comes from `provides` on the package block where one
+        # exists, and otherwise from the invocation prose, which is what the
+        # file-only hosts still have to go on.
+        package = host.get("package")
+        if package:
+            lines += _worked_examples(package["provides"])
+        elif host["invocation"].lstrip().startswith("as `/"):
+            lines += _worked_examples(["command"])
+        elif "skill" in host["invocation"].lower():
+            lines += _worked_examples(["skill"])
+
+        # And, where a package route exists, how to install it that way.
+        lines += _package_section(host_id, host)
+    runner_clause = " and ".join(
+        f"`{hosts[h]['default_subagent_runner']}` on `{h}`" for h in installable
+    ) or "the host's default runner"
+    # `--interactive` is a *file-route* affordance, and saying so is the whole
+    # point of this clause: on a package route the plugin refuses `--interactive`
+    # and `-i` before it spawns anything (nothing is on the dispatcher's stdin
+    # there, so the picker they force could not prompt), and a reader who
+    # arrived through that route would otherwise be handed the one instruction
+    # that cannot work for them. Derived from the data, so it disappears on a
+    # tree whose hosts declare no package rather than becoming a stale caveat.
+    packaged = [h for h in installable if hosts[h].get("package")]
+    opt_back = (
+        " Pass `--interactive` to opt back into a rendered gate."
+        if not packaged
+        else (
+            " On the `install-host` file route, `--interactive` opts back into "
+            "a rendered gate. The package route on "
+            f"{_installable_prose(packaged)} refuses `--interactive` and `-i` "
+            "instead — it spawns the dispatcher with nothing on its stdin, so "
+            "the model picker they force could not prompt — and asks you to "
+            "choose non-interactively: `--models \"provider:model,…\"` or "
+            "`--quick`, or `defaults.models` in `providers.yaml`."
+        )
+    )
+    differ: List[str] = [
+        "## What differs from Claude Code",
+        "",
+        "Three differences worth knowing on these hosts:",
+        "",
+        "- **Unattended is the default.** Claude Code is the only host with a "
+        "structured question tool, so the shim bakes in `--yes`: every gate "
+        "resolves from config and flags instead of prompting you." + opt_back,
+        "- **Subagents are dispatched through a provider CLI** rather than a "
+        "native task tool, so the default runner is "
+        f"{runner_clause} — not a Claude subagent.",
+    ]
+    for host_id in installable:
+        headless = hosts[host_id].get("headless_invocation")
+        if headless:
+            differ.append(
+                f"- **Headless `{host_id}` needs its own separator:** "
+                f"`{headless}`."
+            )
+    lines += differ + [
+        "",
         "## Capability matrix",
         "",
         "Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data "
@@ -465,10 +734,9 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
         "command:",
         "",
         "```bash",
-        'uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host '
-        "--check --all   # what moved",
-        'uv run --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host '
-        "--all           # re-render every installed shim",
+        f"{dispatch} install-host --check --all   # what moved",
+        f"{dispatch} install-host --all           # re-render every installed "
+        "shim",
         "```",
         "",
         "Repair is always re-render, never in-place patching, and a re-install with "

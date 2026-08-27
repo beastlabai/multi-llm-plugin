@@ -25,9 +25,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import implement_orchestrator  # noqa: E402
+from utils import prior_changes  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_safety  # noqa: E402
+from utils.code_fix_batcher import batch_code_fixes  # noqa: E402
+from utils.suggestion_batcher import group_suggestions_for_subagents  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
     materialize_write_tasks,
@@ -359,7 +362,12 @@ class TestBridge:
         assert [t["output_name"] for t in tasks] == [
             "apply_batch_0.json", "apply_batch_1.json",
         ]
-        assert [t["prior_changes_id"] for t in tasks] == ["step_1", "step_2"]
+        # `{section_key}#{digest of the batch's member ids}` — the section key
+        # alone is NOT a batch identity (one section spills into several batches),
+        # and `prior_changes.append` is idempotent on `(id, phase)`.
+        assert [t["prior_changes_id"] for t in tasks] == [
+            "step_1#ba7816bf", "step_2#cb8379ac",
+        ]
         assert all(t["declared_files"] == [str(repo.plan.resolve())] for t in tasks)
         assert [t["expected_ids"] for t in tasks] == [["abc"], ["def"]]
         assert all(t["can_parallelize"] is False for t in tasks)
@@ -377,7 +385,11 @@ class TestBridge:
             phase_dir=str(repo.root / "phase"),
             plan_file=str(repo.plan),
         )
-        assert [t["prior_changes_id"] for t in tasks] == ["src/a.py", "src/b.py"]
+        # `{file_key}#{digest of the batch's member ids}`: the file key names the
+        # partition, never the batch — see TestPriorChangesIdsAreUniquePerBatch.
+        assert [t["prior_changes_id"] for t in tasks] == [
+            "src/a.py#4cd9b767", "src/b.py#420fce31",
+        ]
         assert [t["declared_files"] for t in tasks] == [["src/a.py"], ["src/b.py"]]
         assert all(t["can_parallelize"] is True for t in tasks)
 
@@ -424,6 +436,164 @@ class TestBridge:
         assert tasks[0]["subagent_type"] == "human"
 
 
+class TestPriorChangesIdsAreUniquePerBatch:
+    """The regression: many batches per key, one prior-changes entry each.
+
+    ``prior_changes.append`` is idempotent on ``(id, phase)`` — deliberately, so a
+    re-dispatched batch cannot double its summary. Keying that id on the bare
+    ``file_key``/``section_key`` therefore *drops* every batch after the first on
+    the same file or section, silently and at exit 0, leaving each later batch to
+    read a prior-changes context missing its own predecessors. Both batchers
+    routinely emit several batches per key (``MAX_FIXES_PER_BATCH`` is 3, the char
+    caps close a batch sooner, and each security/HIGH fix is isolated), so this is
+    the normal case, not an edge one.
+    """
+
+    @staticmethod
+    def _fix_batches(count, file_key="packaging/opencode/src/index.mjs"):
+        return [
+            {"prompt": "p {prior_changes_context}", "file_key": file_key,
+             "fixes": [{"id": f"fix-{n}-{k}"} for k in range(3)]}
+            for n in range(count)
+        ]
+
+    @staticmethod
+    def _suggestion_batches(count, section_key="step_3"):
+        return [
+            {"prompt": "p {prior_changes_context}", "section_key": section_key,
+             "suggestions": [{"group_id": f"g-{n}-{k}"} for k in range(2)]}
+            for n in range(count)
+        ]
+
+    def _materialize(self, repo, kind, batches, sub="phase"):
+        return materialize_write_tasks(
+            kind=kind, batches=batches,
+            phase_dir=str(repo.root / sub), plan_file=str(repo.plan),
+        )
+
+    def test_many_code_fix_batches_on_one_file_get_distinct_ids(self, repo):
+        tasks = self._materialize(repo, "apply_code_fixes", self._fix_batches(19))
+        ids = [t["prior_changes_id"] for t in tasks]
+        assert len(set(ids)) == 19, ids
+        assert all(i.startswith("packaging/opencode/src/index.mjs#") for i in ids)
+
+    @pytest.mark.parametrize("kind", ["apply_suggestions", "apply_task_suggestions"])
+    def test_many_suggestion_batches_in_one_section_get_distinct_ids(self, repo, kind):
+        tasks = self._materialize(repo, kind, self._suggestion_batches(7))
+        ids = [t["prior_changes_id"] for t in tasks]
+        assert len(set(ids)) == 7, ids
+        assert all(i.startswith("step_3#") for i in ids)
+
+    def test_the_ids_are_stable_across_a_re_materialization(self, repo):
+        """Unique is only half of it: an unstable id DOUBLES an entry instead."""
+        batches = self._fix_batches(5)
+        first = self._materialize(repo, "apply_code_fixes", batches, sub="a")
+        second = self._materialize(repo, "apply_code_fixes", list(batches), sub="b")
+        assert [t["prior_changes_id"] for t in first] == [
+            t["prior_changes_id"] for t in second
+        ]
+
+    def test_a_resumed_subset_keeps_each_batch_s_own_id(self, repo):
+        """A re-dispatch of batches 3..5 alone must not renumber them.
+
+        This is what a loop-index id gets wrong: the surviving batches would take
+        the ids of the ones that already ran, and every summary would land on an
+        `(id, phase)` pair already in the log — dropped, again silently.
+        """
+        batches = self._fix_batches(6)
+        full = self._materialize(repo, "apply_code_fixes", batches, sub="full")
+        tail = self._materialize(repo, "apply_code_fixes", batches[3:], sub="tail")
+        assert [t["prior_changes_id"] for t in tail] == [
+            t["prior_changes_id"] for t in full[3:]
+        ]
+
+    def test_every_batch_on_one_file_is_recorded_in_the_log(self, repo, tmp_path):
+        """The user-visible bug: 19 batches, 19 entries — not 1.
+
+        Asserts the entry *count* through the real `prior_changes.append`, because
+        distinct ids are only the mechanism; the log is the artifact every later
+        batch reads.
+        """
+        tasks = self._materialize(repo, "apply_code_fixes", self._fix_batches(19))
+        out_dir = str(tmp_path / "out")
+        written = [
+            prior_changes.append(
+                out_dir, task["prior_changes_id"], "apply-fixes",
+                f"batch {n} applied",
+            )
+            for n, task in enumerate(tasks)
+        ]
+        assert all(written)
+        assert len(prior_changes.entries(out_dir)) == 19
+
+    def test_a_redispatched_batch_still_appends_only_once(self, repo, tmp_path):
+        """The idempotency the ids must not break, asserted on the same log."""
+        tasks = self._materialize(repo, "apply_code_fixes", self._fix_batches(4))
+        out_dir = str(tmp_path / "out")
+        for task in tasks:
+            prior_changes.append(out_dir, task["prior_changes_id"], "apply-fixes", "s")
+        again = prior_changes.append(
+            out_dir, tasks[2]["prior_changes_id"], "apply-fixes", "s again"
+        )
+        assert again is False
+        assert len(prior_changes.entries(out_dir)) == 4
+
+    def test_the_native_batch_dict_carries_the_bridge_s_own_id(self, repo):
+        """Both invokers, one id — computed once in Python, read off the batch.
+
+        The native path (an agent following `instructions/apply-code-fixes.md`)
+        passes `batch.prior_changes_id` to `util prior-changes append`; the Python
+        path materializes a write task. They must be the same string or a run that
+        switched invokers mid-phase would append the same batch twice.
+        """
+        fixes = [
+            {"id": f"i{n}", "file": "src/api.ts", "description": "d" * 40,
+             "type": "bug", "importance": "MEDIUM"}
+            for n in range(7)
+        ]
+        batches = batch_code_fixes(fixes)
+        assert len(batches) > 1, "fixture must span more than one batch per file"
+        serialized = [
+            {**b.to_dict(), "prompt": "p {prior_changes_context}"} for b in batches
+        ]
+        tasks = self._materialize(repo, "apply_code_fixes", serialized)
+        assert [b["prior_changes_id"] for b in serialized] == [
+            t["prior_changes_id"] for t in tasks
+        ]
+        assert len({t["prior_changes_id"] for t in tasks}) == len(tasks)
+
+    def test_the_native_suggestion_batch_carries_the_bridge_s_own_id(self, repo):
+        """The same equivalence for the two suggestion phases' shared batcher."""
+        suggestions = [
+            {"group_id": f"g{n}", "reference": "### Step 3: Do it",
+             "description": "d" * 40, "type": "modification",
+             "importance": "MEDIUM"}
+            for n in range(9)
+        ]
+        batches = group_suggestions_for_subagents(suggestions)
+        assert len(batches) > 1, "fixture must span more than one batch per section"
+        serialized = [
+            {**b.to_dict(), "prompt": "p {prior_changes_context}"} for b in batches
+        ]
+        for kind in ("apply_suggestions", "apply_task_suggestions"):
+            tasks = self._materialize(repo, kind, serialized, sub=f"phase-{kind}")
+            assert [b["prior_changes_id"] for b in serialized] == [
+                t["prior_changes_id"] for t in tasks
+            ]
+
+    def test_implement_still_keys_on_the_task_id(self, repo):
+        """Untouched: one materialized task per decomposed task, already unique."""
+        tasks = materialize_write_tasks(
+            kind="implement",
+            batches=[{"batch_index": 0, "can_parallelize": False, "tasks": [
+                {"id": "T001", "prompt": "a", "files_to_create": ["src/a.py"]},
+                {"id": "T002", "prompt": "b", "files_to_create": ["src/b.py"]},
+            ]}],
+            phase_dir=str(repo.root / "phase"), plan_file=str(repo.plan),
+        )
+        assert [t["prior_changes_id"] for t in tasks] == ["T001", "T002"]
+
+
 class TestUtilRouting:
     """`restore-batch` is reachable through the one entry point."""
 
@@ -454,12 +624,24 @@ import sys
 
 argv = sys.argv[1:]
 assert argv[0] == "run", argv
-assert argv[1] == "--project", argv
-assert os.path.isdir(argv[2]), argv
-assert argv[3] == "--", argv
-assert argv[4] == "python", argv
-assert argv[5].endswith("multi_llm.py"), argv
-os.execv(sys.executable, [sys.executable, *argv[5:]])
+# The uv flags sit between `run` and `--project`, and the worker must carry the
+# same ones the launcher did. `--no-dev` is the load-bearing half: without it
+# `uv run` syncs the dev group, so a careful launch would hand off to a child
+# that pulled 17 packages -- or failed outright offline -- with the failure
+# moving out of the launcher and into a log.
+flags = []
+index = 1
+while index < len(argv) and argv[index] != "--project":
+    flags.append(argv[index])
+    index += 1
+assert "--frozen" in flags, argv
+assert "--no-dev" in flags, argv
+assert argv[index] == "--project", argv
+assert os.path.isdir(argv[index + 1]), argv
+assert argv[index + 2] == "--", argv
+assert argv[index + 3] == "python", argv
+assert argv[index + 4].endswith("multi_llm.py"), argv
+os.execv(sys.executable, [sys.executable, *argv[index + 4:]])
 '''
 
 

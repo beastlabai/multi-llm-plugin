@@ -296,6 +296,42 @@ hosts:
     # is rendered separately, because `--command` is what resolves the shim
     # there, not this spelling.
     invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`."
+    # A second, recommended install route — NOT a second host. `reload`,
+    # `subagents`, `ask`, `detach`, `max_concurrent_subagents` and
+    # `timeout_ceiling_s` are properties of this harness, not of how the skill
+    # got installed, so an `opencode-plugin` host id would duplicate every one
+    # of them and split the matrix.
+    #
+    # What it buys over the file shim: the plugin computes the skill dir from
+    # its own on-disk location at every startup, so there is no baked absolute
+    # prefix to go stale and no `install-host --all` owed after an update. The
+    # baked flags stop being prose a model may improvise past and become code
+    # the plugin appends.
+    #
+    # `update: pinned-spec` is not a preference. The npm cache key is the
+    # literal spec string and the installer early-returns whenever the package
+    # directory already exists, so an unpinned entry resolves ONCE and never
+    # again — bumping the pin is the only clean upgrade, and there is no
+    # `opencode plugin update` command.
+    #
+    # `version` is a COPY. The number is owned by
+    # `skills/multi-llm/pyproject.toml` — which ships *inside* the tarball, so a
+    # package declaring a different one would ship a payload that disagrees with
+    # it — and `test_version_source_is_singular` asserts the chain.
+    package:
+      registry: npm
+      name: opencode-multi-llm
+      version: "0.1.0"
+      config_key: plugin
+      provides: [command, tool]
+      min_host_version: "1.18.18"   # the lowest version actually RUN, not the
+                                    # lowest that might work: `engines` is a hard
+                                    # gate, and a floor asserted from an
+                                    # assumption either admits a version that
+                                    # then fails somewhere less legible or gets
+                                    # defended by a claim no evidence backs.
+      update: pinned-spec
+      invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly."
     multi_turn: true                 # measured: its agent takes further tool
                                      # turns inside one `opencode run` and acts
                                      # on what they printed — see the promotion
@@ -348,6 +384,12 @@ hosts:
       reload: verified
       arguments: verified
       headless_invocation: verified
+      # `documented` until a real registry install is observed. Nothing is on a
+      # registry yet, so every claim here is host docs plus a local build — and
+      # the generated "Install via npm" paragraph is written to say exactly
+      # that. Promoting this to `verified` and re-rendering is what turns the
+      # same paragraph into a recommendation.
+      package: documented
       invocation: verified
       multi_turn: verified
       subagents: documented

@@ -1,0 +1,24 @@
+{
+  "name": "opencode-multi-llm",
+  "version": "0.1.0",
+  "description": "Run multi-LLM plan reviews, task generation and code reviews from inside OpenCode",
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./server": "./dist/index.mjs"
+  },
+  "files": ["dist", "skills", "README.md", "LICENSE"],
+  "engines": {
+    "opencode": ">=1.18.18 <2.0.0"
+  },
+  "keywords": ["opencode-plugin", "opencode", "multi-llm", "code-review"],
+  "license": "MIT",
+  "repository": "https://github.com/beastlabai/multi-llm-plugin",
+  "scripts": {
+    "prepack": "uv run --project ../../skills/multi-llm -- python build.py"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.23"
+  }
+}

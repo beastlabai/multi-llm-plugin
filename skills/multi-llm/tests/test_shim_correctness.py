@@ -57,11 +57,19 @@ DEFAULT_SHIM_MAX_LINES = 100
 #: Fixture skill dir with a space in every segment that can carry one.
 FIXTURE_SKILL_DIR = "/tmp/multi llm fixture/skill dir"
 
-#: Every spelling of a skill-dir placeholder that must not survive rendering.
+#: Every template token that must not survive rendering — the skill-dir
+#: spellings, the verb slots, the uv flag list (which a shim carries as
+#: ``{UV_RUN_FLAGS}`` so its dispatcher cannot disagree with
+#: ``dispatcher_prefix()`` about ``--frozen --no-dev``), and the default mode
+#: (``{DEFAULT_MODE}``, rendered from ``modes.DEFAULT_MODE``).
 PLACEHOLDERS = ("{SKILL_DIR}", "${SKILL_DIR}", "$SKILL_DIR", "$ARGUMENTS",
+                "{UV_RUN_FLAGS}", "{DEFAULT_MODE}",
                 "{{spawn_subagents}}", "{{ask_user}}", "{{run_detached}}")
 
 UV_COMMAND_RE = re.compile(r"^(PYTHONUNBUFFERED=1\s+)?uv\s+run\b")
+
+#: A rendered dispatcher command, flags and all: `uv run [flags…] --project`.
+DISPATCH_RE = re.compile(r"uv run (?:--\S+ )*--project")
 
 
 def _shipped_shims():
@@ -279,8 +287,10 @@ class TestShim:
                 tok for tok in leading
                 if mode_table.resolve(tok.lstrip("-")) is not None
             ]
-            # No mode flag means review-plan (the documented default).
-            words = [tok.lstrip("-") for tok in mode_flags] or ["review-plan"]
+            # No mode flag means the documented default, read from its owner
+            # rather than re-typed here (`modes.DEFAULT_MODE`).
+            words = ([tok.lstrip("-") for tok in mode_flags]
+                     or [mode_table.DEFAULT_MODE])
             for word in words:
                 assert mode_table.resolve(word) is not None, (example, word)
             positionals = [tok for tok in argv if not tok.startswith("--")]
@@ -319,11 +329,12 @@ class TestShim:
         rendered = _rendered(host_id, path)
         probe = rendered.find("command -v uv")
         assert probe >= 0, f"{path.name} carries no uv probe"
-        first_run = min(
-            (rendered.find(marker) for marker in ("uv run --project",)
-             if rendered.find(marker) >= 0),
-            default=-1,
-        )
+        # Matched as a pattern, not as the literal `uv run --project`: the
+        # rendered dispatcher carries the uv flag list between the two
+        # (`uv run --frozen --no-dev --project …`), from the one owner
+        # `unattended.uv_run_args`.
+        dispatch = DISPATCH_RE.search(rendered)
+        first_run = dispatch.start() if dispatch else -1
         assert first_run >= 0
         assert probe < first_run, (
             f"{path.name}: the uv probe must come before the first `uv run`, or a "

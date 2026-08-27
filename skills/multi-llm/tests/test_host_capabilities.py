@@ -136,12 +136,22 @@ class TestSchema:
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(broken, schema)
 
-    #: The only keys allowed to be absent. Both govern a lint or generated
+    #: The only keys allowed to be absent. Each governs a lint or generated
     #: documentation and **never** a dispatch decision — that is the whole
     #: admission test, because a defaulted *capability* is the silent guess the
     #: schema exists to remove. Anything that could change what runs must be
     #: required, so its absence is a validation error rather than a guess.
-    OPTIONAL_KEYS = {"shim_max_lines", "headless_invocation"}
+    #:
+    #: ``package`` passes the test, and the reasoning is worth keeping because
+    #: it is the first entry that describes something *outside* the harness. It
+    #: says how the skill is distributed to a host, not what the host can do, so
+    #: it is optional for a plain reason: most hosts have no package route, and
+    #: requiring it would force a dummy block into every one of them. It governs
+    #: the generated "Install via" paragraph and ``--check``'s route-detection
+    #: note; **no consumer branches on it to decide what runs**, which is what
+    #: keeps it on the admissible side of the line. The moment something does,
+    #: it stops being an optional key.
+    OPTIONAL_KEYS = {"shim_max_lines", "headless_invocation", "package"}
 
     def test_only_lint_and_doc_keys_are_optional(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -168,12 +178,102 @@ class TestSchema:
                 "for its values"
             )
 
+    def test_the_runtime_floor_is_the_schemas_own_required_list(self):
+        """`REQUIRED_HOST_KEYS` is a restatement, not a second opinion.
+
+        `load` cannot use the schema: `jsonschema` is a dev-only extra and there
+        is an active plan to ship a dependency-free package, so the runtime floor
+        is a plain tuple. That only stays honest while this assertion holds — the
+        tuple is allowed to be exactly the schema's `required` list, never a
+        hand-curated subset that quietly stops covering a new key.
+        """
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert set(caps.REQUIRED_HOST_KEYS) == set(
+            schema["definitions"]["host"]["required"]
+        ), (
+            "utils/host_capabilities.REQUIRED_HOST_KEYS drifted from "
+            "schemas/host_capabilities.schema.json. Add the new required key to "
+            "the tuple; the runtime floor is what turns a malformed install into "
+            "one actionable error instead of a KeyError mid-dispatch."
+        )
+
     def test_every_optional_key_is_provenance_tracked(self):
         """Optional does not mean unattributed."""
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         prov = schema["definitions"]["host"]["properties"]["provenance"]["properties"]
         for key in self.OPTIONAL_KEYS:
             assert key in prov, f"optional key '{key}' has no provenance slot"
+
+
+class TestLoadRefusesAMalformedDocument:
+    """The schema is CI's guard; this is the one that fires in the field.
+
+    A user never edits `hosts/capabilities.yaml` — it ships inside the skill — so
+    every way it can be wrong is a partial or corrupt install, and each one used
+    to surface as a raw exception from wherever a consumer happened to index
+    first: a `yaml.ParserError` traceback, an `AttributeError` on a list, or a
+    bare `KeyError('max_concurrent_subagents')` minutes into a fan-out with
+    nothing on it naming the file. All four are now one `NeedsHuman` (exit 3) at
+    load, naming the file and what is wrong with it.
+    """
+
+    @staticmethod
+    def _load(tmp_path, text):
+        (tmp_path / "hosts").mkdir(exist_ok=True)
+        (tmp_path / caps.CAPABILITIES_FILE).write_text(text, encoding="utf-8")
+        caps.clear_cache()
+        return caps.load(base=str(tmp_path))
+
+    def test_a_file_that_is_not_yaml_names_the_file(self, tmp_path):
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            self._load(tmp_path, "hosts: [\n  broken")
+        assert "not valid YAML" in str(excinfo.value)
+        assert str(tmp_path / caps.CAPABILITIES_FILE) in str(excinfo.value)
+
+    def test_a_document_that_is_not_a_mapping_is_refused(self, tmp_path):
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            self._load(tmp_path, "- a\n- b\n")
+        assert "not a mapping" in str(excinfo.value)
+
+    def test_a_document_with_no_hosts_is_refused(self, tmp_path):
+        """Otherwise `entry()` reports `Known hosts: ` and blames the caller."""
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            self._load(tmp_path, "version: 1\n")
+        assert "declares no hosts" in str(excinfo.value)
+
+    def test_an_incomplete_entry_names_the_file_and_the_missing_key(
+        self, tmp_path
+    ):
+        document = json.loads(json.dumps(DOCUMENT))
+        del document["hosts"]["opencode"]["max_concurrent_subagents"]
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            self._load(tmp_path, yaml.safe_dump(document, sort_keys=True))
+        message = str(excinfo.value)
+        assert "opencode" in message
+        assert "max_concurrent_subagents" in message
+        assert str(tmp_path / caps.CAPABILITIES_FILE) in message
+
+    def test_a_broken_sibling_is_caught_by_a_run_that_never_names_it(
+        self, tmp_path
+    ):
+        """The check belongs in `load`, not in `entry`.
+
+        A dispatch on `claude-code` reads no opencode key, so an entry-scoped
+        check would let a corrupt install run until something happened to touch
+        the broken host — which on this data means `install-host --all` or the
+        renderer, both of which run long after the install that broke it.
+        """
+        document = json.loads(json.dumps(DOCUMENT))
+        del document["hosts"]["opencode"]["detach"]
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            self._load(tmp_path, yaml.safe_dump(document, sort_keys=True))
+        assert "opencode" in str(excinfo.value)
+        assert "detach" in str(excinfo.value)
+
+    def test_the_shipped_document_still_loads(self, tmp_path):
+        """The floor is a floor: the real data passes it unchanged."""
+        caps.clear_cache()
+        assert caps.load()["hosts"], "the shipped capability data must load"
 
 
 @pytest.mark.parametrize("host_id", HOST_IDS)
@@ -708,6 +808,61 @@ class TestCeilingUsesTheData:
 
         record = executor.effective_ceiling([], host_max=2)
         assert record["host_max_concurrent_subagents"] == 2
+
+    def test_the_host_leg_follows_the_argv_a_shim_baked_in(
+        self, monkeypatch, tmp_path
+    ):
+        """`--host` is the *primary* leg of `resolve_host_id`, not the env var.
+
+        A rendered shim declares its host by baking `--host <id>` into the
+        dispatcher line and sets no environment variable at all, so a run on any
+        host but the reference one reaches `_host_ceiling` with `$MULTI_LLM_HOST`
+        unset. Reading the env alone answered `claude-code`'s 10 on every one of
+        them: an opencode host-lane run recorded
+        `host_max_concurrent_subagents: 10` against an entry that declares 4.
+        """
+        from utils import subagent_executor as executor
+
+        monkeypatch.delenv(caps.HOST_ENV, raising=False)
+        monkeypatch.setattr(sys, "argv", [
+            "multi_llm.py", "review-plan", str(tmp_path / "plan.md"),
+            "--host", "opencode", "--exec-subagents", "--yes",
+        ])
+        assert HOSTS["opencode"]["max_concurrent_subagents"] != (
+            HOSTS[caps.DEFAULT_HOST]["max_concurrent_subagents"]
+        ), "this regression is only observable while the two entries differ"
+        record = executor.effective_ceiling([])
+        assert record["host_max_concurrent_subagents"] == (
+            HOSTS["opencode"]["max_concurrent_subagents"]
+        )
+
+    def test_the_write_scheduler_takes_the_same_host_leg(
+        self, monkeypatch, tmp_path
+    ):
+        """No orchestrator passes `host_max`, so `None` has to mean *look it up*.
+
+        Read as "this phase has no host leg" it silently deleted the leg from
+        every real write run — both construction sites
+        (`implement_orchestrator`, `apply_orchestrator_base`) are keyword-complete
+        without it — and left the batch report recording a null where the read
+        half records a number.
+        """
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        monkeypatch.delenv(caps.HOST_ENV, raising=False)
+        monkeypatch.setattr(sys, "argv", [
+            "multi_llm.py", "implement", str(tmp_path / "plan.md"),
+            "--host", "opencode", "--exec-subagents", "--yes",
+        ])
+        scheduler = WriteBatchScheduler(
+            tasks=[],
+            phase_dir=str(tmp_path),
+            kind="implement",
+            output_dir=str(tmp_path),
+            repo_root=str(tmp_path),
+            log=lambda line: None,
+        )
+        assert scheduler.host_max == HOSTS["opencode"]["max_concurrent_subagents"]
 
     def test_unreadable_data_bounds_nothing_rather_than_failing(self, monkeypatch):
         from utils import subagent_executor as executor

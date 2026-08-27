@@ -806,6 +806,23 @@ _REASON_EXPLANATION = {
     ),
 }
 
+#: The four ``nested_exec`` refusal codes, mapped to the capability field each
+#: one is a verdict about.
+#:
+#: These are *structured* refusals rather than crashes, and the mapping exists
+#: because their consumers are not all Python. The OpenCode plugin surfaces each
+#: one as a named tool error carrying the reason code **and the field it came
+#: from**, so a model is told which capability said no rather than handed a bare
+#: non-zero exit — and it reads that pairing from generated data rather than
+#: re-deriving it in JavaScript.
+NESTED_EXEC_FIELDS: Dict[str, str] = {
+    "nested_exec_denied": "nested_exec",
+    "nested_exec_spawn": "nested_exec.spawn",
+    "nested_exec_network": "nested_exec.network",
+    "nested_exec_credentials": "nested_exec.credentials",
+}
+
+
 #: Substrings that identify a *host-side egress* failure in a nested probe's
 #: streams (D3c ``nested_exec.network``). Deliberately narrower than the adapters'
 #: own classifier sets: these are matched only on a throwaway probe whose entire
@@ -1536,6 +1553,15 @@ def _host_env_guards() -> Tuple[List[str], List[str]]:
 def _host_ceiling() -> Optional[int]:
     """This host's ``max_concurrent_subagents``, or ``None`` if it cannot be read.
 
+    ``sys.argv[1:]`` is passed for the same reason :func:`_host_env_guards` and
+    :func:`_host_nested_exec` pass it: a shim declares its host by baking
+    ``--host <id>`` into the dispatcher line, and ``$MULTI_LLM_HOST`` is only the
+    *fallback* for a host that calls ``multi_llm.py`` directly (D5b). Reading the
+    env alone made every argv-declared host answer the reference host's ceiling —
+    an ``opencode`` run recorded ``host_max_concurrent_subagents: 10`` against an
+    entry that declares 4 — so the one leg of D3i's minimum that is a fact about
+    the host was silently the wrong host's.
+
     Deliberately non-fatal: the ceiling is a *bound*, and a partial install that
     cannot answer must not turn a dispatch into a hard failure — the driver and
     provider legs of the minimum still apply.
@@ -1548,7 +1574,7 @@ def _host_ceiling() -> Optional[int]:
         except ImportError:
             return None
     try:
-        return caps.max_concurrent_subagents(caps.resolve_host_id())
+        return caps.max_concurrent_subagents(caps.resolve_host_id(sys.argv[1:]))
     except Exception:  # pragma: no cover - unknown host / missing data
         return None
 

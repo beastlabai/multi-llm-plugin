@@ -17,7 +17,12 @@ What is asserted:
   (``tests/test_shim_correctness.py``), run over the *installed file* — so the
   installer's notion of a valid shim cannot drift from CI's;
 * ``--check``'s five assertions, each failing on its own, including the uv-absent
-  path with a stubbed probe;
+  path with a stubbed probe — and both halves of row 4, the ``shim_version``
+  counter and the ``template_sha256`` the header has always recorded, in that
+  order of precedence;
+* every shipped ``hosts/*/shim.md.tmpl`` pinned to its digest, so a template edit
+  arrives as a failing test naming the file rather than as a fleet of installed
+  shims that quietly stopped matching it;
 * idempotency (a second run is byte-identical and writes nothing), local-edit
   refusal and ``--force``'s ``.local.bak``, rollback (previous bytes restored, or
   no file left behind), a foreign host id refused, precedence reporting;
@@ -33,11 +38,13 @@ What is asserted:
   block is byte-identical to a fresh render, a missing or marker-less
   ``docs/hosts.md`` is a ``--check`` failure rather than a skipped step, the
   opening sentence is the one composed from ``_installable_prose()`` at every
-  arity, and every host fact the README states *by hand* — host ids, one
+  arity, and every host fact the generated page states — host ids, one
   ``install-host <slug>`` line each, the printed shim paths, the reload
   instruction, the baked-in ``--yes``, the runner slugs and the headless
   separator — is compared against ``hosts/capabilities.yaml`` and, for the
-  paths, against a real ``install-host --project`` run.
+  paths, against a real ``install-host --project`` run. The README names the
+  installable hosts and links here; it does not keep a second copy of those
+  recipes.
 """
 
 import ast
@@ -375,6 +382,74 @@ class TestInstalledShimPassesTheShippedGuard:
 
 
 # ---------------------------------------------------------------------------
+# 1b. The template bodies are pinned, so a change to one is never silent
+# ---------------------------------------------------------------------------
+
+#: The ``SHIM_VERSION`` the digests below were recorded against, and each shipped
+#: template's sha256 at that moment. Pinned rather than computed, for the same
+#: reason `references/host-capabilities.md` is byte-compared against a fresh
+#: render: a guard that derives its expectation from the file it is guarding
+#: asserts nothing. A template edit therefore lands as a failing test naming the
+#: file, which is where the author is asked whether the edit also moved the
+#: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
+PINNED_SHIM_VERSION = 2
+
+PINNED_TEMPLATE_SHA256 = {
+    "codex":
+        "b5e19d827be393ab0d3fba4499e4c5cb5545737f40b2d3c03bc243ab9b21a6f9",
+    "opencode":
+        "b31a8d1324224883206a021cf8c28269b149d5b8e718affd7836c61f51aba790",
+}
+
+
+class TestTemplateBodiesArePinnedToTheirGeneration:
+    """A shipped template's bytes are part of the install contract (D7b).
+
+    Two things depend on them and neither can see an edit on its own.
+    ``--check`` row 4 compares the ``template_sha256`` a shim recorded when it was
+    written against the template on disk, so every template edit silently
+    invalidates every shim already installed from it — a fact worth landing on the
+    author's terminal rather than on a user's. And ``SHIM_VERSION`` is the
+    hand-maintained half of that row: it is one integer for **every** host, moved
+    by a change to the rendered shape, and it is the only signal for the changes a
+    template digest cannot see (a snippet, a verb sentence, `render` itself). It
+    has been missed before — the ``--exec-subagents`` that OpenCode's dispatcher
+    line gained left the counter at 1 — which is what this pin exists to stop.
+    """
+
+    def test_the_pin_covers_exactly_the_installable_hosts(self):
+        assert sorted(PINNED_TEMPLATE_SHA256) == INSTALLABLE, (
+            "a host shipping a shim template must pin its digest here: add the "
+            f"missing entry to PINNED_TEMPLATE_SHA256 in {Path(__file__).name}."
+        )
+
+    @pytest.mark.parametrize("host_id", INSTALLABLE)
+    def test_the_template_still_hashes_to_its_pinned_digest(self, host_id):
+        template = hi.template_path(host_id)
+        actual = hi._sha256(template.read_text(encoding="utf-8"))
+        relative = template.relative_to(SKILL_ROOT)
+        assert actual == PINNED_TEMPLATE_SHA256[host_id], (
+            f"you changed {relative}. Every shim already installed from it now "
+            f"fails `install-host {host_id} --check` row 4, which is correct and "
+            "intended — this test is the notice, not the objection. Do two "
+            f"things: (1) if the edit changed the rendered *shape* (a new step, a "
+            "new slot, a changed command form), bump SHIM_VERSION in "
+            "utils/host_install.py and PINNED_SHIM_VERSION here to the same "
+            f"number; (2) set PINNED_TEMPLATE_SHA256['{host_id}'] in "
+            f"{Path(__file__).name} to {actual}."
+        )
+
+    def test_the_pinned_generation_is_the_shipped_one(self):
+        assert PINNED_SHIM_VERSION == hi.SHIM_VERSION, (
+            f"SHIM_VERSION moved to {hi.SHIM_VERSION} without this block being "
+            "revisited. Re-read every digest above against the templates as they "
+            f"stand and set PINNED_SHIM_VERSION to {hi.SHIM_VERSION}: the pin is "
+            "a statement about which template bodies belong to which generation, "
+            "so a bump that leaves it behind makes it a statement about neither."
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. --check: five assertions, and how each one fails
 # ---------------------------------------------------------------------------
 
@@ -474,6 +549,101 @@ class TestCheckAssertions:
         )
         row = check(self.HOST, skill, env, project).row(hi.ROW_GENERATION)
         assert not row.ok and hi.HEADER_KEY in row.detail
+
+    def test_row_four_names_the_template_a_pristine_shim_came_from(
+        self, skill, env, project, ready
+    ):
+        install(self.HOST, skill, env, project)
+        row = check(self.HOST, skill, env, project).row(hi.ROW_GENERATION)
+        assert row.ok
+        assert "current template" in row.detail, row.detail
+
+    def test_row_four_fails_when_the_template_body_has_moved(
+        self, skill, env, project, ready
+    ):
+        """The shim is untouched; the template it was rendered from is not.
+
+        This is the shape the defect really had: `with_header` has recorded a
+        `template_sha256` since D7 and nothing read it, so a shim rendered from a
+        superseded body kept its valid shape, its honest body hash and a
+        `shim_version` that had never moved — and reported "generation current"
+        while missing whatever the template edit had added.
+        """
+        install(self.HOST, skill, env, project)
+        template = hi.template_path(self.HOST, str(skill))
+        template.write_text(
+            template.read_text(encoding="utf-8") + "\nA later revision.\n",
+            encoding="utf-8",
+        )
+        result = check(self.HOST, skill, env, project)
+        row = result.row(hi.ROW_GENERATION)
+        assert not row.ok, row.detail
+        assert "superseded" in row.detail and "template body has changed" in row.detail
+        assert str(caps.entry(self.HOST, str(skill))["shim"]["template"]) in row.detail
+        assert "install-host" in row.fix
+        # Only row 4: the file on disk is still a byte-valid shim of ours, which
+        # is exactly why no other row could have caught this.
+        assert [r.number for r in result.failures] == [hi.ROW_GENERATION]
+
+    def test_row_four_fails_a_header_that_records_no_template_digest(
+        self, skill, env, project, ready
+    ):
+        """A missing field is its own failure, not an older generation.
+
+        `shim_version` has never left 1, so "this predates the field" is not a
+        reading `--check` can fall back on: every install-host that has shipped
+        writes `template_sha256`, and a header without one was hand-assembled or
+        truncated. Treating it as absent-therefore-fine would pass precisely the
+        file nothing else can vouch for.
+        """
+        install(self.HOST, skill, env, project)
+        path = target(self.HOST, skill, env, project)
+        stripped = re.sub(
+            r', "template_sha256": "[0-9a-f]+"', "",
+            path.read_text(encoding="utf-8"), count=1,
+        )
+        assert "template_sha256" not in stripped
+        path.write_text(stripped, encoding="utf-8")
+        row = check(self.HOST, skill, env, project).row(hi.ROW_GENERATION)
+        assert not row.ok
+        assert "records no template_sha256" in row.detail, row.detail
+        assert "install-host" in row.fix
+
+    def test_row_four_reports_the_coarser_generation_first(
+        self, skill, env, project, ready
+    ):
+        """Both stale: the `shim_version` miss is the message, not the digest.
+
+        A shim from an older multi-llm was rendered by an older *renderer* too, so
+        its template digest is stale as a consequence rather than as the finding.
+        Naming the consequence would send the reader at the template.
+        """
+        install(self.HOST, skill, env, project)
+        path = target(self.HOST, skill, env, project)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                f'"shim_version": {hi.SHIM_VERSION}', '"shim_version": 0'
+            ),
+            encoding="utf-8",
+        )
+        template = hi.template_path(self.HOST, str(skill))
+        template.write_text(
+            template.read_text(encoding="utf-8") + "\nA later revision.\n",
+            encoding="utf-8",
+        )
+        row = check(self.HOST, skill, env, project).row(hi.ROW_GENERATION)
+        assert not row.ok
+        assert "older multi-llm" in row.detail and "superseded" not in row.detail
+
+    def test_a_host_with_no_template_has_no_template_to_have_moved(self, skill):
+        """`shim.template: null` is a legitimate empty, never a stale render.
+
+        The reference host's shim is the plugin's own SKILL.md, which nobody
+        renders — `_template_sha` returns "" for it, and a digest comparison
+        against "" would fail the one host that cannot have one.
+        """
+        assert hi._template_sha("claude-code", str(skill)) == ""
+        assert hi._template_problem("claude-code", {}, str(skill)) == ""
 
     def test_row_five_fails_with_the_single_sourced_uv_text(
         self, skill, env, project, monkeypatch, capsys
@@ -1290,6 +1460,11 @@ def readme_body() -> str:
     return readme_path().read_text(encoding="utf-8")
 
 
+def host_doc_body() -> str:
+    """The generated host-install page, where the `$SKILL` recipes now live."""
+    return renderer.host_doc_path().read_text(encoding="utf-8")
+
+
 def readme_section(body: str, heading: str) -> str:
     """One ``##`` section of the README, its heading line included."""
     lines = body.splitlines()
@@ -1393,6 +1568,11 @@ class TestPackagingAndDocs:
         body = readme_body()
         assert renderer.HOST_DOC.replace(os.sep, "/") in body
         assert renderer.HOST_DOC_BEGIN not in body
+        # The $SKILL recipes moved with the rest of the install page; a second
+        # copy on the front page is the hand-maintained drift this guard exists
+        # to prevent.
+        assert "SKILL=$(claude plugin list" not in body
+        assert "SKILL=$(dirname" not in body
 
     def test_the_readme_is_still_found_when_the_host_doc_moves_a_level_down(
         self, monkeypatch
@@ -1582,9 +1762,9 @@ class TestTheHostDocFlag:
 
 
 class TestThePublishedSkillOneLiner:
-    """Every `$SKILL` route the README publishes, asserted as a shape.
+    """Every `$SKILL` route the host-install page publishes, asserted as a shape.
 
-    None of this is covered by the sanity check the README prints beside them:
+    None of this is covered by the sanity check the page prints beside them:
     that gates on the *resolved* `$SKILL`, so a glob that terminates on a
     directory, or one that matched some other marketplace's plugin, passes it.
     Measured on a real machine, four cache copies of this plugin existed and
@@ -1611,7 +1791,7 @@ class TestThePublishedSkillOneLiner:
     """
 
     def section(self) -> str:
-        return readme_section(readme_body(), "## Installation")
+        return host_doc_body()
 
     def skill_routes(self) -> list:
         """Every published `SKILL=` assignment, line continuations folded in."""
@@ -1648,8 +1828,8 @@ class TestThePublishedSkillOneLiner:
             route for route in self.skill_routes() if "claude plugin list" in route
         ]
         assert len(asking) == 1, (
-            "the README publishes exactly one `claude plugin list` route; found "
-            f"{len(asking)}"
+            "the host-install page publishes exactly one `claude plugin list` "
+            f"route; found {len(asking)}"
         )
         return asking[0]
 
@@ -1704,7 +1884,7 @@ class TestThePublishedSkillOneLiner:
         assert ".installPath" in query, (
             "the query no longer reads the reported `installPath`; rebuilding "
             "the path out of `id` and `version` puts the cache layout back "
-            "into the README, which is what the glob below already does"
+            "into the host-install page, which is what the glob below already does"
         )
         assert "plugins/cache" not in query, (
             "the supported route hard-codes the plugin cache layout, so it "
@@ -1773,7 +1953,7 @@ class TestThePublishedSkillOneLiner:
         section = self.section()
         assert "jq" in section, (
             "the supported query's `jq` dependency is not named anywhere in "
-            "the Installation section; a reader without it gets `jq: command "
+            "the host-install page; a reader without it gets `jq: command "
             "not found` and an empty $SKILL with no idea what to do next"
         )
         parser_free = [
@@ -1805,15 +1985,14 @@ class TestThePublishedSkillOneLiner:
 
 
 class TestTheReadmeStatesEveryInstallableHostsFacts:
-    """D8 extended: the front page's hand-written host facts, tied to the data.
+    """D8 extended: the front page names the hosts; the generated page has the facts.
 
-    `_installable_prose()` keeps the *generated* page honest, but the strings a
-    new reader actually meets are hand-written on the README — the pointer
-    paragraph, the install heading, the `install-host` command lines, the
-    printed shim paths, the reload instruction, the unattended default, the
-    runner slugs and the headless separator. A fourth `installable: true` host
-    would join `docs/hosts.md` automatically and none of those, which is the
-    exact staleness D4 exists to prevent, one document to the left.
+    `_installable_prose()` keeps the *generated* page's opening honest. The
+    README still has to name every installable host (the pointer paragraph and
+    the Installation heading) or a new reader never reaches `docs/hosts.md`.
+    The install recipes themselves — `install-host <slug>`, shim paths, reload,
+    `--yes`, runner slugs, the headless separator — live on that generated
+    page, so a fourth `installable: true` host joins them from the data.
 
     Six comparisons against loaded YAML — one per row of D8's table — and no
     prose frozen around them.
@@ -1821,6 +2000,9 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
 
     def section(self) -> str:
         return readme_section(readme_body(), "## Installation")
+
+    def host_doc(self) -> str:
+        return host_doc_body()
 
     # Row 1: the host ids.
     def test_the_pointer_paragraph_and_the_heading_name_every_installable_host(
@@ -1853,29 +2035,29 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
             f"installable host {INSTALLABLE}; the headings are {headings}"
         )
 
-    # Row 2: one `install-host <slug>` line per host — count *and* slug.
+    # Row 2: `install-host <slug>` for every installable host, no extras.
     def test_one_install_host_command_line_per_installable_host(self):
         slugs = re.findall(
-            r'multi_llm\.py" install-host ([a-z][\w-]*)', self.section()
+            r'multi_llm\.py" install-host ([a-z][\w-]*)', self.host_doc()
         )
-        assert sorted(slugs) == sorted(INSTALLABLE), (
-            "the Installation section runs `install-host <slug>` once per "
+        assert set(slugs) == set(INSTALLABLE), (
+            "the host-install page runs `install-host <slug>` for each "
             f"installable host: capabilities.yaml declares {sorted(INSTALLABLE)}, "
-            f"the README runs {sorted(slugs)}"
+            f"the page runs {sorted(set(slugs))}"
         )
 
     # Row 3: the printed shim paths, from `install_paths` + `shim.installed`.
     def test_the_printed_shim_paths_are_the_preferred_ones(self):
-        section = self.section()
+        section = self.host_doc()
         for host_id in INSTALLABLE:
             entry = caps.entry(host_id)
             filename = os.path.basename(entry["shim"]["installed"])
             for scope in ("global", "project"):
                 preferred = f"{entry['install_paths'][scope][0]}/{filename}"
                 assert mentions(section, preferred), (
-                    f"the README does not print {host_id}'s {scope} shim path "
-                    f"{preferred} — install_paths.{scope}[0] joined with "
-                    "shim.installed is the file install-host writes"
+                    f"the host-install page does not print {host_id}'s {scope} "
+                    f"shim path {preferred} — install_paths.{scope}[0] joined "
+                    "with shim.installed is the file install-host writes"
                 )
 
     def test_a_later_install_path_may_only_appear_as_a_fallback(self):
@@ -1887,7 +2069,7 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
         that their shim landed somewhere it did not, and left them unable to
         find the install ``--check`` reports as present (D5).
         """
-        section = self.section()
+        section = self.host_doc()
         for host_id in INSTALLABLE:
             entry = caps.entry(host_id)
             filename = os.path.basename(entry["shim"]["installed"])
@@ -1899,8 +2081,8 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
                         assert "fall" in line.lower(), (
                             f"{host_id}'s {spelling} is a later install_paths."
                             "global entry — the unset-$XDG_CONFIG_HOME fallback "
-                            "— and the README states it as the destination "
-                            "install-host writes"
+                            "— and the host-install page states it as the "
+                            "destination install-host writes"
                         )
 
     @pytest.mark.parametrize("host_id", INSTALLABLE)
@@ -1909,7 +2091,7 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
     ):
         """The one row with a second source of truth: the artifact itself.
 
-        Reading ``install_paths`` on both sides would only prove the README and
+        Reading ``install_paths`` on both sides would only prove the page and
         the YAML agree with each other; this proves both agree with what the
         installer put on disk, so a renderer that stopped honouring
         ``install_paths`` fails here too.
@@ -1917,37 +2099,38 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
         install(host_id, skill, env, project, scope=hi.SCOPE_PROJECT)
         written = target(host_id, skill, env, project, hi.SCOPE_PROJECT)
         relative = written.relative_to(project).as_posix()
-        assert mentions(self.section(), relative), (
-            f"install-host --project wrote {relative}; the README's "
-            "Installation section prints some other path"
+        assert mentions(self.host_doc(), relative), (
+            f"install-host --project wrote {relative}; the host-install page "
+            "prints some other path"
         )
 
-    # Row 4: "start a new session" ← `reload`.
+    # Row 4: "start a new <host> session" ← `reload`.
     def test_the_reload_instruction_matches_the_reload_field(self):
         wording = {
-            "new-session": "start a new session",
+            "new-session": "start a new {host} session",
             "restart": "restart",
             "none": "no reload step",
         }
-        section = self.section().lower()
+        section = self.host_doc().lower()
         for host_id in INSTALLABLE:
             value = caps.entry(host_id)["reload"]
             assert value in wording, (
-                f"{host_id} declares reload: {value}, which the README has no "
-                "sentence for — state it where the install is, per D5"
+                f"{host_id} declares reload: {value}, which the host-install "
+                "page has no sentence for — state it where the install is, per D5"
             )
-            assert wording[value] in section, (
-                f"{host_id} is reload: {value}, and the README's Installation "
-                f"section never tells the reader to {wording[value]!r}"
+            expected = wording[value].format(host=host_id)
+            assert expected in section, (
+                f"{host_id} is reload: {value}, and the host-install page "
+                f"never tells the reader to {expected!r}"
             )
 
     # Row 5: the baked-in `--yes` claim ← `ask`.
     def test_the_baked_in_yes_claim_tracks_the_ask_field(self):
-        section = self.section()
+        section = self.host_doc()
         for host_id in INSTALLABLE:
             assert caps.entry(host_id)["ask"] != "structured", (
                 f"{host_id} now declares a structured question tool, so the "
-                "README's 'the shim bakes in --yes' bullet is false: unattended "
+                "page's 'the shim bakes in --yes' bullet is false: unattended "
                 "is no longer the default there, and the bullet has to be "
                 "rewritten rather than merely re-read"
             )
@@ -1957,24 +2140,23 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
             if caps.entry(host_id)["ask"] == "structured":
                 assert host_id.replace("-", " ") in section.lower(), (
                     f"{host_id} is the host that bullet excepts, and the "
-                    "README never names it"
+                    "host-install page never names it"
                 )
 
     # Row 6: runner slug and headless separator ← the data, where declared.
     def test_the_runner_slugs_and_the_headless_separator_come_from_the_data(self):
-        section = self.section()
+        section = self.host_doc()
         for host_id in INSTALLABLE:
             entry = caps.entry(host_id)
             runner = entry["default_subagent_runner"]
             assert f"`{runner}`" in section, (
-                f"{host_id}'s default_subagent_runner is {runner}; the README's "
-                "Installation section names a different one"
+                f"{host_id}'s default_subagent_runner is {runner}; the "
+                "host-install page names a different one"
             )
             headless = entry.get("headless_invocation")
             if headless:
                 assert headless in section, (
                     f"{host_id} declares a headless_invocation ({headless}) "
                     "because the obvious headless form fails confusingly rather "
-                    "than loudly; the README's Installation section has to "
-                    "carry it verbatim"
+                    "than loudly; the host-install page has to carry it verbatim"
                 )

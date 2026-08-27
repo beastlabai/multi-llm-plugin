@@ -38,6 +38,32 @@ PLATFORM ?= linux/amd64
 
 PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
 
+# --- The opencode npm package (packaging/opencode/) -------------------------- #
+# A different layer of npm from the container's pinned CLIs above: those are
+# `npm ci`-installed INTO the image, this one is a package we publish. They share
+# nothing but the word.
+OPENCODE_PKG   := packaging/opencode
+# `ALLOW_DIRTY=1` stages from a tree with uncommitted or untracked changes. The
+# build refuses one by default, and that default is correct: a build that ships
+# local state is a build nobody can reproduce, and npm makes the result immutable
+# the moment it is published. This exists so the gate is runnable *during*
+# development, and it is deliberately a named opt-in rather than a silent
+# fallback — `opencode-publish` re-runs the build with no such flag, so a dirty
+# publish is refused however this was invoked.
+# Exported rather than passed as a flag: `npm pack` invokes the manifest's
+# `prepack` hook with its own fixed command line, so a flag here cannot reach it.
+export MULTI_LLM_ALLOW_DIRTY := $(if $(ALLOW_DIRTY),1,)
+OPENCODE_DIRTY := $(if $(ALLOW_DIRTY),--allow-dirty,)
+OPENCODE_BUILD := uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py $(OPENCODE_DIRTY)
+OPENCODE_STAMP := $(OPENCODE_PKG)/.package-check.stamp
+# The package rows only. `$(PYTEST)` already names the whole tests directory, so
+# appending files to it would collect the entire suite *and* those files — which
+# is the `test` job's work, done a second time in a job that exists to grade the
+# tarball.
+PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
+    skills/multi-llm/tests/test_opencode_package.py \
+    skills/multi-llm/tests/test_uv_candidates.py
+
 # The whole-lane wall-clock cap (C1). Defaulted here, overridable on the command
 # line, and ENFORCED in the host-side driver (tests/container/harness.py's
 # MatrixBudget, claimed by run_row before every docker run and by the surface
@@ -56,7 +82,9 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-container-host-discovery e2e-container-host-invocation \
         e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
-        e2e-clean e2e-prune
+        e2e-clean e2e-prune \
+        opencode-package opencode-package-check-ci opencode-package-check \
+        opencode-publish
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -73,6 +101,13 @@ help:
 	@echo "  make e2e-verify-record REC=<path> re-hash a runs/ bundle against a committed record"
 	@echo "  make e2e-prune [KEEP=n]           keep the newest n runs/ bundles, delete the rest"
 	@echo "  make e2e-clean                    prune the ephemeral runs/ bundles"
+	@echo
+	@echo "OpenCode npm package (see $(OPENCODE_PKG)/README.md)"
+	@echo
+	@echo "  make opencode-package             build, pack, then sweep the tarball for secrets"
+	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
+	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
+	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
 # than a page of CLI errors.
@@ -459,3 +494,129 @@ e2e-prune:
 e2e-clean:
 	rm -rf $(CONTAINER_DIR)/runs/*/
 	@echo "pruned $(CONTAINER_DIR)/runs/ (records/ untouched)"
+
+
+# --------------------------------------------------------------------------- #
+# The OpenCode npm package.
+#
+# WHY THE BUILD AND THE PACK ARE SEPARATE. `build.py` stages deterministic
+# artifacts and stops; it never invokes npm. Packing and publishing are owned
+# here, so there is exactly one place each happens and a build cannot quietly
+# produce a second tarball nobody publishes. The tarball secret sweep is a
+# function `build.py` exposes and this file calls AFTER `npm pack`, because what
+# npm writes is what ships and a `prepack` hook runs too early to see a tarball.
+#
+# WHY EVERY RULE BELOW RUNS THE BUILD EXPLICITLY. The manifest's `prepack` hook
+# is a backstop for a bare `npm pack` someone types by hand; it does not fire
+# under `--ignore-scripts`. The explicit call is what makes the staged tree fresh
+# on every path. Running the build twice is harmless — it is deterministic and
+# idempotent — and `test_package_is_built_before_every_pack` asserts the ordering
+# rather than trusting this comment.
+# --------------------------------------------------------------------------- #
+
+opencode-package:
+	$(OPENCODE_BUILD)
+	cd $(OPENCODE_PKG) && npm pack
+	$(OPENCODE_BUILD) --scan-tarball $$(ls -t $(OPENCODE_PKG)/*.tgz | head -1)
+
+# Rows 1-6: everything that needs no Docker, no registry and no `opencode`
+# binary. This is what the PR package job runs. It writes NO stamp — a CI-tier
+# run can never authorize a publish.
+opencode-package-check-ci:
+	$(OPENCODE_BUILD)
+	cd $(OPENCODE_PKG) && npm pack --dry-run
+	MLLM_REQUIRE_PACKAGE_ROWS=1 $(PYTEST) -m "package and not container" -q
+	$(PACKAGE_PYTEST) -m "not live and not container and not package" -q
+	@echo "opencode-package-check-ci: rows 1-6 green (no stamp written)"
+
+# The full gate: the CI tier first, then the three rows that need a Docker
+# daemon, the `opencode` binary and network — 7, 8 and 9. On success it writes
+# the stamp.
+#
+# IT STAMPS ONLY WHAT IT RAN, and that is the whole contract. The stamp is what
+# authorizes `opencode-publish`, and npm makes a published version permanent, so
+# a stamp written after a SUBSET of the rows is an authorization nobody earned —
+# worse than no gate, because it reads like one. Two of the three rows are not
+# wired yet, and each REFUSES below, by name and by number, rather than being
+# quietly absent:
+#
+#   * ROW 8 needs a package-ROUTE container row. `-m container -k opencode`
+#     selects whatever opencode rows exist, and every one of them today is a
+#     file-shim row: green there says the shim works and says nothing at all
+#     about the published package. So the guard asks `host_matrix.yaml` for the
+#     row itself (the plugin row of the plan's Phase 4b), never the run for a
+#     count — a run of the wrong rows is not a smaller version of the right one.
+#   * ROW 7 needs a scripted clean-HOME install of the packed tarball, and its
+#     tool-id leg needs a real `opencode run`. The publishing workflow's own row
+#     7 step refuses for exactly this reason, so neither path can publish on a
+#     row that has never executed anywhere.
+#
+# ROW 9 IS HERE IN FULL: the version must be ABSENT from the registry, decided on
+# npm's error CODE rather than on its exit status. Three outcomes, not two — exit
+# 0 is "already published", `E404` is the green answer (and the right green for a
+# name never published at all), and a network failure, an E429, a registry outage
+# or an expired token also exit non-zero. Read as a two-way test those all come
+# back "absent" and the gate stamps on a probe that never answered. Never `npm
+# publish --dry-run`, which never contacts the registry at all. The publishing
+# job carries its own copy of this probe because it consumes no stamp (below):
+# the two tiers cannot share one run, only its reasoning.
+#
+# THE STAMP NEVER TRAVELS. It is gitignored and is never uploaded as a CI
+# artifact, because a stamp from another machine attests to that machine's rows,
+# not to this one's. CI does not consume stamps at all: the publishing job
+# re-runs the gate inline.
+opencode-package-check: opencode-package-check-ci
+	@command -v opencode >/dev/null 2>&1 || { \
+	  echo "make: the full gate needs the opencode binary (row 7); run opencode-package-check-ci instead"; exit 1; }
+	@command -v docker >/dev/null 2>&1 || { \
+	  echo "make: the full gate needs a Docker daemon (row 8); run opencode-package-check-ci instead"; exit 1; }
+	@uv run --project skills/multi-llm -- python -c \
+	  'import sys; sys.path.insert(0, "skills/multi-llm"); \
+	   from tests.container.harness import load_host_matrix; \
+	   rows = (load_host_matrix().get("opencode") or {}).get("rows") or []; \
+	   sys.exit(0 if any(r.get("route") == "package" for r in rows) else 1)' || { \
+	  echo "make: REFUSING (row 8): host_matrix.yaml declares no opencode row with" >&2; \
+	  echo "      'route: package', so the container rows below can only re-run the" >&2; \
+	  echo "      file-shim route. A green file-route run is no evidence about the" >&2; \
+	  echo "      published package, and this gate does not stamp rows it never ran." >&2; \
+	  echo "      Land the plugin row first (plan Phase 4b), then re-run this gate." >&2; \
+	  exit 1; }
+	$(MAKE) opencode-package
+	$(PYTEST) -m container -q -k opencode
+	@name="$$(node -p "require('./$(OPENCODE_PKG)/package.json').name")"; \
+	version="$$(node -p "require('./$(OPENCODE_PKG)/package.json').version")"; \
+	status=0; probe="$$(npm view "$$name@$$version" version --json 2>/dev/null)" || status=$$?; \
+	if [ "$$status" -eq 0 ]; then \
+	  echo "make: REFUSING (row 9): $$name@$$version is already on the registry, and" >&2; \
+	  echo "      npm forbids republishing a version. Bump $(OPENCODE_PKG)/package.json." >&2; \
+	  exit 1; \
+	fi; \
+	code="$$(printf '%s' "$$probe" | node -e 'let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { let code = ""; try { code = JSON.parse(raw).error.code || ""; } catch { code = ""; } process.stdout.write(String(code)); });')" || code=""; \
+	if [ "$$code" != "E404" ]; then \
+	  echo "make: REFUSING (row 9): could not determine whether $$name@$$version is on" >&2; \
+	  echo "      the registry. npm exited $$status reporting code '$${code:-<none>}';" >&2; \
+	  echo "      only E404 is a green answer. That is an UNKNOWN, not an absence —" >&2; \
+	  echo "      re-run once the registry answers." >&2; \
+	  exit 1; \
+	fi; \
+	echo "row 9: $$name@$$version is absent from the registry (E404)"
+	@echo "make: REFUSING (row 7): no clean-\$$HOME install probe is wired, so nothing" >&2; \
+	echo "      here has confirmed that the packed tarball resolves from a clean home" >&2; \
+	echo "      and mutates command[\"multi-llm\"] plus the multi_llm tool id — presence" >&2; \
+	echo "      in plugin[] proves nothing. Wire the probe here, or run the plan's A6" >&2; \
+	echo "      probe by hand and record it; until then this gate writes no stamp and" >&2; \
+	echo "      opencode-publish stays refused, which is the point." >&2; \
+	exit 1
+	$(OPENCODE_BUILD) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	@echo "opencode-package-check: full gate green; stamp written to $(OPENCODE_STAMP)"
+
+# Refuses BEFORE npm is invoked at all, on any of four conditions, each named
+# separately so "the gate is red" is never the same message as "you edited a file
+# since". The gate is worth nothing if the publish command can skip it.
+#
+# It publishes the DIRECTORY, never a pre-built .tgz: measured, `npm publish
+# <tarball>` runs no lifecycle scripts at all, so the `prepack` backstop does not
+# exist on that path.
+opencode-publish:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-stamp
+	cd $(OPENCODE_PKG) && npm publish --provenance --access public

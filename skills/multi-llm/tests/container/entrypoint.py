@@ -540,6 +540,87 @@ class Stub:
 # Row setup
 # --------------------------------------------------------------------------- #
 
+#: The substitution tokens a ``home_seed/<id>/`` template carries, and the reason
+#: a `--creds none` host row cannot copy one wholesale. Kept byte-identical to the
+#: keys of `wrapper.seed_invocation_root`'s `replacements` map — the code that
+#: binds them on the provider lane — by `tests/test_host_home_seed.py`, because a
+#: token added there and not here would be copied into the host's `$HOME` as a
+#: literal `{{…}}` string rather than skipped.
+SEED_TOKENS = ("{{base_url}}", "{{base_url_root}}", "{{stub_session_key}}",
+               "{{api_key_env}}", "{{model_name}}")
+
+
+def seed_host_home(host: str, home: Path) -> list[str]:
+    """Put the HOST's own ``$HOME`` in the posture a real machine is in, on the
+    one host-lane tier that had no wiring step at all (`--creds none`).
+
+    **`seed_homes()` is not the function that does this and never was.** It writes
+    ``/work/homes/<identity>``, which nothing reads as a ``$HOME`` except
+    `wrapper.seed_invocation_root`, and only for the provider subprocesses a
+    fan-out dispatches. The host process's ``$HOME`` is `Path.home()` —
+    ``/home/e2e``, which `posture.yaml` mounts **tmpfs**, so whatever the image
+    baked there is masked and the directory is EMPTY at row start. Both
+    credentialed tiers fill it (`wire_credentials`, `wire_fallback_credentials`)
+    and so does the documented-invocation probe (`wire_stub_host`); the plain
+    discovery tier was the fourth path and it filled nothing, which is why it ran
+    the host against a barer ``$HOME`` than any user will ever have.
+
+    What that costs is not hypothetical. `Dockerfile` step 9 bakes opencode's
+    cold-start tree — 3661 files, 59 MB of ``node_modules`` plus the models.dev
+    catalog — into ``home_seed/opencode/`` precisely because a first `opencode
+    run` otherwise npm-installs it, which `--network none` makes impossible rather
+    than slow. Under an unseeded ``$HOME`` the free tier never had one byte of it,
+    so nothing that needs that tree could ever have been measured here.
+
+    **A templated file is SKIPPED, never copied.** The seeds are value-free by
+    design: every credential and endpoint field is a ``{{token}}`` bound per exec
+    by the wrapper, or per run by `live_provider.py`. This tier has neither — no
+    exec id, no stub base URL bound to the host, no credential — so a copied
+    ``opencode.json`` would hand the host a provider whose ``baseURL`` is the
+    literal string ``{{base_url}}``, which is the same shadowing `wire_stub_host`
+    already refuses by name.
+
+    **And it matches the tokens, never a bare ``{{``.** Measured in this image:
+    six files inside opencode's own ``node_modules`` carry ``{{``
+    (``effect/dist/Graph.js``, ``effect/src/Graph.ts``, two ``httpApiScalar``
+    bundles, ``zod/src/v4/core/errors.ts``), none of them a seed template. A
+    brace-shaped heuristic would drop them out of the very tree this function
+    exists to deliver, silently and only in the offline posture.
+
+    Returns the skipped paths, seed-relative and sorted, so the row's log names
+    what it declined to place rather than leaving a gap to be inferred.
+    """
+    seed = RIG_DIR / "home_seed" / host
+    if not seed.is_dir():
+        log(f"host home {home}: nothing to seed — no {seed}")
+        return []
+
+    skipped: list[str] = []
+
+    def _skip_templated(directory, names: list[str]) -> set[str]:
+        ignored: set[str] = set()
+        for name in names:
+            path = Path(directory) / name
+            if not path.is_file():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if any(token.encode() in data for token in SEED_TOKENS):
+                ignored.add(name)
+                skipped.append(str(path.relative_to(seed)))
+        return ignored
+
+    home.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(seed, home, dirs_exist_ok=True, ignore=_skip_templated)
+    skipped.sort()
+    log(f"host home {home} seeded from {seed}"
+        + (f"; skipped {len(skipped)} templated file(s): {', '.join(skipped)}"
+           if skipped else ""))
+    return skipped
+
+
 def seed_homes(identities: list[str]) -> None:
     """One $HOME per CLI identity the row will run (C1a).
 
@@ -729,7 +810,7 @@ def substitute_placeholders(root: Path, mapping: dict[str, str]) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def stage_host(host: str, home: Path) -> int:
+def stage_host(host: str, home: Path, route: str = "file") -> int:
     """Make the skill discoverable by ``host`` (C6c), and verify it.
 
     This is NOT the same operation on all three hosts, which is the whole reason
@@ -740,7 +821,26 @@ def stage_host(host: str, home: Path) -> int:
     and this machine's prerequisites, and nothing at all about whether Claude Code
     can *find* the skill. Left implicit, every claude-code row would fail the
     discovery assertion behind a passing install step.
+
+    **And it is not the same operation on both ROUTES either**, which is why the
+    row's `route` reaches this far. A package row's staging is not a command at
+    all: it is the `plugin[]` declaration the caller has already written into the
+    host's own config, resolved against the payload the image pre-extracted. So
+    on that route this function installs nothing — see the guard below.
     """
+    if route == "package":
+        # NOTHING TO STAGE, and staging anyway is the bug rather than a
+        # belt-and-braces extra. `install-host <host> --global` writes the FILE
+        # shim, so a package row carrying one has the two command sources 4b.11
+        # forbids: on opencode the plugin's `config` hook then overwrites the
+        # file entry wholesale and silently, and the row would grade a command it
+        # did not install while crediting the file route's evidence to the
+        # package route's — the precise false promotion `Row.route` exists to
+        # stop.
+        log(f"route=package: no shim staged for {host} — the host's own config "
+            f"declares the plugin and the host's installer resolves the payload")
+        return 0
+
     env = dict(os.environ, HOME=str(home))
     if host == "claude-code":
         # Stage the WHOLE skill tree, never SKILL.md alone: every command in that
@@ -1404,7 +1504,8 @@ def pinned_model(entry: dict, row: dict | None = None) -> str:
     return row_pin.strip() or ((entry.get("model") or {}).get("slug") or "").strip()
 
 
-def wire_credentials(host: str, home: Path, key: str, slug: str) -> dict:
+def wire_credentials(host: str, home: Path, key: str, slug: str,
+                     route: str = "file") -> dict:
     """Per-host OpenRouter wiring, written into the tmpfs $HOME (C6a rule 3).
 
     Returns the environment overlay the HOST process needs. Nothing here touches
@@ -1470,7 +1571,7 @@ def wire_credentials(host: str, home: Path, key: str, slug: str) -> dict:
             shutil.copytree(seed, home, dirs_exist_ok=True)
         # ...but NOT its stub provider block: that file carries the provider
         # lane's `{{base_url}}` template and would shadow the host wiring.
-        _write_opencode_config(home, slug)
+        _write_opencode_config(home, slug, route)
         # The stored credential — the form `providers.yaml:116` documents
         # (`opencode auth login --provider openrouter --method api`), written
         # straight into the tmpfs $HOME and never into the repo.
@@ -1536,16 +1637,96 @@ def _codex_first_run_config() -> str:
     )
 
 
-def _write_opencode_config(home: Path, slug: str) -> None:
-    """opencode.json: the model declaration plus the permission gates."""
+def _opencode_package_spec() -> str | None:
+    """The npm spec this image's seed was warmed with, or ``None``.
+
+    Read from the capability data rather than typed here, so the runtime
+    declaration and the seeded cache directory name are the **same normalized
+    spec** — a mismatch is not an error on this host, it is a silent drop.
+
+    **The path insert is what makes that read possible at all.** This file runs as
+    ``/usr/bin/python3 /opt/mllm/rig/entrypoint.py`` with ``/work/sample-project``
+    as its cwd, so ``sys.path[0]`` is the *rig* directory and nothing on the path
+    is the skill: a bare ``from utils import ...`` raises ``ImportError`` every
+    time. The old blanket ``except`` then swallowed that into ``None`` and the
+    package row died on a SystemExit blaming an absent ``package:`` block that was
+    in fact sitting right there in ``hosts/capabilities.yaml`` — a misdirection
+    worth more than the two lines it costs to prevent. Same idiom as
+    ``wrapper.py``; the ``except`` stays only for a rig genuinely running outside
+    an installed skill, which is what ``ImportError`` alone names.
+    """
+    if str(SKILL_DIR) not in sys.path:
+        sys.path.insert(0, str(SKILL_DIR))
+    try:
+        from utils import host_capabilities as caps
+    except ImportError:  # pragma: no cover - the rig runs outside the skill too
+        return None
+    try:
+        package = caps.entry("opencode").get("package")
+    except Exception:  # pragma: no cover - unknown host
+        return None
+    if not package or package.get("registry") != "npm":
+        return None
+    version = package.get("version")
+    return f"{package['name']}@{version}" if version else package["name"]
+
+
+def _write_opencode_config(home: Path, slug: str,
+                           route: str = "file") -> None:
+    """opencode.json: the model declaration, the permission gates, and — on the
+    package row only — the plugin declaration.
+
+    **The plugin write is gated on the row, and the gating is the load-bearing
+    part.** This function serves *every* opencode row, so an unconditional
+    ``plugin[]`` would reach the file-shim rows this work measures against:
+    changing their provenance, invalidating the improvisation reading taken
+    beside them, and handing those rows **two command sources at once** (the
+    shim's file and the plugin's injected command). So the switch is the row's
+    own ``route`` field, and a guard pins that every other row's rendered config
+    stays byte-identical to what it was.
+
+    **And the runtime write is not optional on the package row.** The image's
+    warm-up step declares the plugin only to make the installer pre-extract it,
+    and deletes that config before the tree is folded into the seed — so the seed
+    carries the extracted package and *no declaration of it*. Without this write
+    the package lands in the cache at build time and is then never loaded, at
+    exit 0, with nothing in the logs.
+    """
     config_dir = home / ".config" / "opencode"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "opencode.json").write_text(json.dumps({
+    external: dict[str, str] = {
+        f"{SKILL_DIR}/**": "allow",
+        f"{SKILL_DIR}/*": "allow",
+    }
+    document: dict = {
         "$schema": "https://opencode.ai/config.json",
         # The model is declared under the built-in `openrouter` provider so a
         # slug the models.dev catalog does not name still resolves.
         "provider": {"openrouter": {"models": {slug: {"name": slug}}}},
-        "permission": {
+    }
+
+    if route == "package":
+        spec = _opencode_package_spec()
+        if not spec:
+            raise SystemExit(
+                "entrypoint: the plugin row needs opencode's package: block in "
+                "hosts/capabilities.yaml, and it is absent or not an npm route."
+            )
+        document["plugin"] = [spec]
+        # The package payload is read from the CACHE, not from /opt/mllm/skill,
+        # and `external_directory` matches the path opencode actually reads —
+        # not the path the bytes came from. Without these entries the payload
+        # matches only `"*": "deny"` and every read is auto-rejected, producing
+        # the documented signature (`! permission requested: external_directory
+        # … auto-rejecting`) and then a run that ends at exit 0 with no dispatch.
+        # A row that "passes" because the gate silently swallowed the read is the
+        # worst outcome available, which is why restaging the payload does not
+        # fix this on its own.
+        cache = home / ".cache" / "opencode"
+        external[f"{cache}/**"] = "allow"
+        external[f"{cache}/*"] = "allow"
+
+    document["permission"] = {
             "bash": "allow", "edit": "allow", "webfetch": "deny",
             # THE SKILL DIR IS AN "EXTERNAL DIRECTORY" TO THIS HOST, and that is
             # a separate gate from `bash`. MEASURED 2026-08-14: the review-plan
@@ -1558,17 +1739,17 @@ def _write_opencode_config(home: Path, slug: str) -> None:
             # instruction core legitimately tells an agent to read
             # `references/resume-detection.md`, so any mode that resumes hits
             # this; `ask` does not, which is why the cheapest row missed it.
-            "external_directory": {
-                f"{SKILL_DIR}/**": "allow",
-                f"{SKILL_DIR}/*": "allow",
-                "*": "deny",
-            },
-        },
-    }, indent=2), encoding="utf-8")
+            # `"*": "deny"` stays last and stays: the allow entries are
+            # additive, never a widening of the default.
+            "external_directory": {**external, "*": "deny"},
+    }
+    (config_dir / "opencode.json").write_text(
+        json.dumps(document, indent=2), encoding="utf-8"
+    )
 
 
-def wire_fallback_credentials(host: str, home: Path,
-                              slug: str) -> tuple[dict, list[Path]]:
+def wire_fallback_credentials(host: str, home: Path, slug: str,
+                              route: str = "file") -> tuple[dict, list[Path]]:
     """C6a's documented fallback: the host's OWN subscription / vendor auth.
 
     The default path injects one `OPENROUTER_API_KEY` and mounts nothing. This is
@@ -1615,7 +1796,7 @@ def wire_fallback_credentials(host: str, home: Path,
     elif host == "opencode":
         if seed.is_dir():
             shutil.copytree(seed, home, dirs_exist_ok=True)
-        _write_opencode_config(home, slug)
+        _write_opencode_config(home, slug, route)
 
     else:
         raise SystemExit(
@@ -2118,6 +2299,17 @@ def main(argv=None) -> int:
                         help="host lane: wire, stage and render the argv, then "
                              "stop before the host process — the whole "
                              "credentialed path at zero cost")
+    parser.add_argument("--route", choices=["file", "package"], default="file",
+                        help="host lane: which install route this row exercises. "
+                             "`file` stages a shim through install-host (the "
+                             "default, and what every row did before a package "
+                             "route existed); `package` declares the npm spec in "
+                             "the host's own config and lets the host's installer "
+                             "resolve the pre-seeded payload. It is NOT cosmetic: "
+                             "the two routes must not credit each other's "
+                             "evidence, so it is what keys capability promotion, "
+                             "and it also decides whether the rendered host "
+                             "config carries a `plugin[]` entry at all.")
     parser.add_argument("--documented-invocation", action="store_true",
                         help="host lane, --creds none: install the shim, start a "
                              "FRESH session with the host's own model pointed at "
@@ -2174,6 +2366,20 @@ def main(argv=None) -> int:
                 "asks whether an argument reaches the dispatcher, which the stub "
                 "answers for free; a credential here would buy nothing and spend "
                 "something.")
+        if args.route != "file":
+            # The probe is FILE-route by construction, and refusing is the only
+            # honest disposition. `wire_stub_host` rewrites the host's own config
+            # to point at the loopback stub, taking any `plugin[]` declaration
+            # with it, so a package row here would either type the published
+            # string at a host with no command at all — a fabricated "the
+            # documented spelling does not reach the dispatcher" — or, if the
+            # shim were staged anyway, credit the file route's evidence to the
+            # package route.
+            raise SystemExit(
+                f"entrypoint: --documented-invocation is a file-route probe and "
+                f"--route {args.route!r} was requested. It rewires the host at "
+                f"the stub, which drops the package route's own declaration, so "
+                f"whatever it recorded would be about the other route.")
         marker = f"mllm-invocation-{uuid.uuid4().hex[:8]}"
         cell = dict((_host_matrix().get(args.host) or {})
                     .get("documented_invocation") or {})
@@ -2234,7 +2440,8 @@ def main(argv=None) -> int:
                         json.dumps(census, indent=2, sort_keys=True),
                         encoding="utf-8")
                     overlay = wire_credentials(
-                        args.host, Path.home(), key, pinned_model(entry, row))
+                        args.host, Path.home(), key, pinned_model(entry, row),
+                        route=args.route)
 
                 elif args.creds == "fallback":
                     # The documented subscription / vendor-key path (C6a). It runs
@@ -2243,7 +2450,7 @@ def main(argv=None) -> int:
                     # common stage-and-launch flow below rather than having one.
                     slug = pinned_model(entry, row)
                     overlay, copied = wire_fallback_credentials(
-                        args.host, Path.home(), slug)
+                        args.host, Path.home(), slug, route=args.route)
                     secrets = fallback_secret_values(copied)
                     census = {
                         "host": args.host,
@@ -2278,7 +2485,48 @@ def main(argv=None) -> int:
                         json.dumps(census, indent=2, sort_keys=True),
                         encoding="utf-8")
 
-                code = stage_host(args.host, Path.home())
+                if args.creds == "none":
+                    # THE FREE TIER'S WIRING STEP, and the only one it has.
+                    # Both credentialed tiers reach `stage_host` through a
+                    # `wire_*` function that seeds `home_seed/<host>/` on its way
+                    # past; this tier reached it through nothing, so
+                    # `install-host --check`'s row 5 and `discovery_step` both
+                    # answered about an empty `$HOME`. Seeded HERE rather than
+                    # beside `discovery_step` for the reason the
+                    # documented-invocation branch already gives a few lines
+                    # further down: a half-wired `$HOME` makes the install check
+                    # answer about the wrong thing.
+                    seed_host_home(args.host, Path.home())
+
+                    if args.route == "package":
+                        # THE PACKAGE ROUTE'S WIRING STEP, and this tier is the
+                        # one that has to carry it. `route` reaches
+                        # `_write_opencode_config` only through `wire_credentials`
+                        # / `wire_fallback_credentials`, and neither of them runs
+                        # here — so the offline, model-free container row of
+                        # 4b.12, which is exactly this tier, got no `plugin[]`
+                        # entry and no cache `allow` entries. That is H1's silent
+                        # drop reproduced by the very row that exists to catch it:
+                        # the image pre-extracts the package, the host never loads
+                        # it, and the run ends at exit 0 with nothing in the logs.
+                        #
+                        # The slug is the row's ordinary pin. Nothing here calls a
+                        # model, so it buys no capability — it keeps the rendered
+                        # config the same shape the credentialed opencode rows
+                        # write, which is what makes the two comparable at all.
+                        if args.host != "opencode":
+                            raise SystemExit(
+                                f"entrypoint: --route package has no host config "
+                                f"writer for host {args.host!r}. Only opencode "
+                                f"declares a `package:` block today, and a row "
+                                f"that quietly wrote nothing would stage no "
+                                f"route and then grade one.")
+                        _write_opencode_config(
+                            Path.home(), pinned_model(entry, row), args.route)
+                        log(f"route=package: wrote {args.host}'s own config "
+                            f"with the plugin declared; no shim will be staged")
+
+                code = stage_host(args.host, Path.home(), args.route)
                 if code != 0:
                     log(f"stage step exited {code}")
                     return code
@@ -2376,7 +2624,10 @@ def main(argv=None) -> int:
                     overlay = wire_stub_host(
                         args.host, Path.home(),
                         f"http://127.0.0.1:{args.stub_port}/v1")
-                    code = stage_host(args.host, Path.home())
+                    # `args.route` is pinned to `file` for this probe by the
+                    # refusal at parse time; passed rather than defaulted so the
+                    # two staging calls cannot drift apart.
+                    code = stage_host(args.host, Path.home(), args.route)
                     if code != 0:
                         log(f"stage step exited {code}; not typing anything — a "
                             f"shim that was never installed cannot be invoked")

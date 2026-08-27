@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.suggestion_batcher import (
     SuggestionBatch,
+    suggestion_member_ids,
     normalize_section_reference,
     extract_section_order,
     are_types_compatible,
@@ -274,6 +275,59 @@ class TestSuggestionBatch:
         assert result["suggestion_count"] == 0
         assert result["total_chars"] == 0
         assert result["priority_score"] == 0.0
+
+
+class TestPriorChangesId:
+    """The batch's own `--id` for the prior-changes log (`to_dict`, native path).
+
+    A section that overflows the batch size or the char cap starts a NEW batch
+    under the SAME `section_key`, and `prior_changes.append` is idempotent on
+    `(id, phase)` — so a section-keyed id records the first batch of a section and
+    silently drops every later one.
+    """
+
+    def test_many_batches_in_one_section_get_distinct_ids(self):
+        suggestions = [
+            make_suggestion(title=f"Suggestion {n}",
+                            description=f"suggestion number {n}",
+                            reference="### Step 3: Do it")
+            for n in range(9)
+        ]
+        batches = group_suggestions_for_subagents(suggestions)
+
+        assert len(batches) > 1
+        assert all(b.section_key == "step_3" for b in batches)
+        ids = [b.to_dict()["prior_changes_id"] for b in batches]
+        assert len(set(ids)) == len(batches), ids
+        assert all(i.startswith("step_3#") for i in ids)
+
+    def test_the_id_is_stable_for_the_same_batch(self):
+        suggestions = [
+            make_suggestion(title=f"Suggestion {n}",
+                            description=f"suggestion number {n}",
+                            reference="### Step 3: Do it")
+            for n in range(9)
+        ]
+        first = [
+            b.to_dict()["prior_changes_id"]
+            for b in group_suggestions_for_subagents(suggestions)
+        ]
+        second = [
+            b.to_dict()["prior_changes_id"]
+            for b in group_suggestions_for_subagents(suggestions)
+        ]
+        assert first == second
+
+    def test_member_ids_prefer_the_group_identity(self):
+        assert suggestion_member_ids([{"group_id": "g1", "id": "i1"}]) == ["g1"]
+        assert suggestion_member_ids([{"id": "i1", "title": "t"}]) == ["i1"]
+        assert suggestion_member_ids([{}]) == ["s0"]
+
+    def test_an_empty_batch_falls_back_rather_than_raising(self):
+        assert SuggestionBatch(section_key="step_1").to_dict()[
+            "prior_changes_id"
+        ] == "step_1"
+        assert SuggestionBatch().to_dict()["prior_changes_id"] == "batch"
 
 
 class TestNormalizeSectionReference:

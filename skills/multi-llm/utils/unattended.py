@@ -772,6 +772,95 @@ UV_CANDIDATES: Tuple[str, ...] = (
 )
 
 
+#: The flags every multi-llm **dispatch** carries, and the single owner of them.
+#:
+#: A dispatch is any ``uv run`` that reaches ``multi_llm.py``: the four consumers
+#: named on :func:`uv_run_args` render them from here, and ``SKILL.md`` — the one
+#: shim the host reads raw, so no token in it would ever be substituted — spells
+#: them literally under a guard test that compares it back to this list. The
+#: maintainer invocations (``uv run --project skills/multi-llm -- pytest`` in the
+#: README and AGENTS.md) are deliberately outside that: they *want* the dev group,
+#: which is the whole point of ``--no-dev`` on the other path.
+#:
+#: ``--no-dev`` is the load-bearing half and it was missing for a long time.
+#: ``--frozen`` suppresses only the *lockfile staleness check*; it does not stop
+#: the sync, and ``uv run`` syncs the **dev** group by default. Measured against
+#: this repo's own tree: ``uv sync --frozen --dry-run`` would install 17 packages
+#: (ruff, pytest, jsonschema and the rest), while ``--frozen --no-dev`` installs
+#: one (pyyaml). So without ``--no-dev`` a user's first dispatch pulls the whole
+#: dev group, and every offline posture fails outright on a package it never
+#: needed.
+#:
+#: ``--frozen`` stays because it is what stops a dispatch rewriting the shipped
+#: ``uv.lock``.
+#:
+#: Baking ``--no-dev`` in is safe rather than merely cheap: measured on uv
+#: 0.11.28, ``uv sync --frozen --no-dev`` against a dev-synced environment would
+#: uninstall all 16 dev packages, but ``uv run --frozen --no-dev`` against that
+#: same environment leaves them in place and installs only what is missing. The
+#: guarantee holds exactly as long as nothing on these paths calls ``uv sync
+#: --no-dev``.
+DEFAULT_UV_RUN_ARGS: Tuple[str, ...] = ("--frozen", "--no-dev")
+
+#: Replaces :data:`DEFAULT_UV_RUN_ARGS` wholesale. **It never appends**, and that
+#: is what makes the offline value expressible at all: an appended ``--no-sync``
+#: would sit beside the very sync the setter is trying to suppress.
+#:
+#: Split on ASCII whitespace with no quote processing and no shell — no uv flag
+#: contains a space, which is why the plain split is sufficient rather than merely
+#: convenient. Unset, empty or whitespace-only means the default, so a stray
+#: ``export MULTI_LLM_UV_RUN_ARGS=`` cannot silently re-enable the dev-group sync.
+#:
+#: Because it replaces, it **can legitimately drop ``--no-dev``**. That is the
+#: setter's choice and the one documented way back into the 17-package first run.
+#:
+#: One precondition the documented offline value carries, because violating it is
+#: silent: ``--no-sync`` against a tree whose ``.venv`` was never built does not
+#: fail in uv. Measured on 0.11.28, uv *creates an empty environment and runs
+#: against it anyway* — no uv-level error, no "sync first" — and the dispatcher
+#: dies with ``ModuleNotFoundError: No module named 'yaml'`` at exit 1, with the
+#: empty ``.venv`` persisting so every later run repeats it. That is a different
+#: signature from the offline default's, which fails *inside* uv at the download
+#: step (``Network connectivity is disabled, but the requested data wasn't found
+#: in the cache``). So ``--no-sync`` is correct only against a venv something else
+#: already built — a container image, a pre-warmed lane — and never on a first run.
+UV_RUN_ARGS_ENV = "MULTI_LLM_UV_RUN_ARGS"
+
+
+def uv_run_args() -> Tuple[str, ...]:
+    """The flags to pass to ``uv run`` before ``--project``.
+
+    One owner for four consumers that used to disagree: the foreground launcher,
+    :func:`utils.cli_common.dispatcher_prefix` (which builds every printed
+    follow-up and every ``MULTI_LLM_RESULT.next``), :func:`utils.detach
+    .build_child_command` (the detached worker's re-exec) and
+    :func:`utils.cli_common.render_instruction_text` (the ``{UV_RUN_FLAGS}`` token
+    every command in ``instructions/*.md`` and in each ``hosts/*/shim.md.tmpl``
+    carries, so the file route's verbatim runbook text cannot dispatch with a
+    different flag list than Python does). Only the first was ever asserted, which
+    is how the worker came to re-exec with neither flag — so a careful
+    ``--detach``ed launch handed off to a child that recreated the 17-package sync
+    in a log where nobody would see it.
+
+    There is exactly one hand-typed spelling, and it is deliberate: Claude Code's
+    ``SKILL.md`` is read raw by the host (it expands ``${CLAUDE_SKILL_DIR}``
+    itself at load time), so a token there would reach an agent unsubstituted —
+    while leaving it flagless would put the first-run dev-group sync on the host
+    that runs most. ``tests/test_instruction_portability.py``'s
+    ``TestTheClaudeShimSpellsTheFlagsOut`` compares that spelling back to this
+    function, element for element, so the second copy cannot drift. Its one
+    limitation is that those two shim-level commands are pinned to the default
+    list — :data:`UV_RUN_ARGS_ENV` cannot reach text an agent types verbatim — and
+    the core the shim loads at step 4 *is* rendered, so it does honour the
+    override.
+    """
+    override = os.environ.get(UV_RUN_ARGS_ENV)
+    if override is None:
+        return DEFAULT_UV_RUN_ARGS
+    tokens = tuple(override.split())
+    return tokens or DEFAULT_UV_RUN_ARGS
+
+
 def find_uv() -> Optional[str]:
     """The absolute path of a usable ``uv``, or ``None``.
 

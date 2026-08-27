@@ -147,7 +147,7 @@ If not found, inform user to run `--review-tasks` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" [options]
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" [options]
 ```
 
 **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
@@ -198,7 +198,7 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which suggestions will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-task-suggestions
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-task-suggestions
 ```
 
 This prints a formatted summary with each suggestion's title and status. Display this output to the user before proceeding.
@@ -208,7 +208,7 @@ This prints a formatted summary with each suggestion's title and status. Display
 Read `{plan}/apply-task-suggestions/orchestrator_output.json`.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
-- `batches`: Array of batch objects, each with `prompt`, `section_key`, `suggestions`
+- `batches`: Array of batch objects, each with `prompt`, `section_key`, `prior_changes_id`, `suggestions`
 - `needs_human_review`: Items requiring human decision
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
@@ -219,7 +219,7 @@ Use the batch data already loaded in step 4. Do NOT use Bash/python to re-parse 
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
   --state-file "$STATE_FILE" --phase "apply-task-suggestions" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -271,7 +271,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
      --output-dir "{plan}/apply-task-suggestions"
    ```
    Capture stdout as `prior_changes_text`.
@@ -318,13 +318,19 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 8. **Append to prior changes (only after verification)** — This step runs **only** after step 6 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}/apply-task-suggestions" \
-     --id "{section_key}" --phase "apply-task-suggestions" --summary-stdin <<'SUMMARY_EOF'
+     --id "{batch.prior_changes_id}" --phase "apply-task-suggestions" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
    SUMMARY_EOF
    ```
-   The `--id` uses `batch.section_key` as the stable identifier. The `--phase` is `"apply-task-suggestions"`.
+   The `--id` is `batch.prior_changes_id` — read it off the batch, never construct one.
+   The batcher emits **many** batches for the same `section_key`, and `append` is idempotent
+   on `(id, phase)`: an id two batches share records the first and silently drops the
+   rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
+   context missing its predecessors. `prior_changes_id` is that key plus a digest of the
+   batch's own items — unique per batch, and identical if the same batch is re-dispatched.
+   Do **not** use the batch loop index. The `--phase` is `"apply-task-suggestions"`.
 
    For **clean failures**, use summary: `(batch failed — {compact reason}, verified no file changes)`
 
@@ -333,7 +339,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 9. **Log the result** - Track success/failure for the summary
 10. **Record metrics** — Run:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions" \
      --label "Batch {N} ({section_key})" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -345,7 +351,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "apply-task-suggestions"
 ```
 
@@ -420,14 +426,14 @@ Suggestions whose decision was offloaded to Claude — via `--claude-decide`, th
 
    Generate resource usage:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/review-tasks/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/review-tasks" \
      --state-file "$STATE_FILE" \
@@ -440,7 +446,7 @@ Suggestions whose decision was offloaded to Claude — via `--claude-decide`, th
 After the summary report is generated, mark the apply-task-suggestions phase as completed in state.json:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --mark-completed
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --mark-completed
 ```
 
 This ensures subsequent phases (e.g., `--implement`) recognize that task suggestions have been applied.
@@ -484,6 +490,7 @@ The orchestrator outputs JSON with batches:
         }
       ],
       "section_key": "task_t001_setup_db_schema",
+      "prior_changes_id": "task_t001_setup_db_schema#9ae4c73b",
       "batch_type": "mixed",
       "suggestion_count": 2,
       "priority_score": 5.0,
@@ -709,7 +716,7 @@ Suggestion N: Already addressed by prior changes - skipped
 To process suggestions one-at-a-time (legacy mode):
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-batch
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -727,12 +734,12 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions \
   --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions \
   --plan-file "$PLAN_PATH" \
   --fresh
 ```

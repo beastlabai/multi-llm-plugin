@@ -14,7 +14,7 @@
 Poll with that command, one call per turn:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan>" --view run --wait
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan>" --view run --wait
 ```
 
 Read the **exit code**, which is the loop condition — never the prose:

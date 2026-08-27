@@ -165,7 +165,7 @@ If not found, inform user to run `--review-code` first.
 ### 2. Run the Orchestrator
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" [options]
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" [options]
 ```
 
 **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself. Do NOT wrap it in `$(realpath ...)`: on Git for Windows, `realpath` emits a POSIX `/c/...` path that a native Windows Python process cannot use.
@@ -205,7 +205,7 @@ If NOT present, proceed to step 3.
 After the orchestrator completes, run the display script to show the user which fixes will be applied, skipped, need review, etc.:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-code-fixes
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util decisions --plan-file "$PLAN_PATH" --phase apply-code-fixes
 ```
 
 This prints a formatted summary with each fix's title and status. Display this output to the user before proceeding.
@@ -215,7 +215,7 @@ This prints a formatted summary with each fix's title and status. Display this o
 Read `{plan}/apply-fixes/orchestrator_output.json`.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
-- `batches`: Array of batch objects, each with `prompt`, `file_key`, `executor_role`, `fixes`
+- `batches`: Array of batch objects, each with `prompt`, `file_key`, `prior_changes_id`, `executor_role`, `fixes`
 - `needs_human_review`: Items requiring human decision
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
@@ -226,7 +226,7 @@ Use the batch data already loaded in step 4. Do NOT use Bash/python to re-parse 
 
 **Before the loop**, mark the phase start so ETA tracking has a wall-clock baseline. Run:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
   --state-file "$STATE_FILE" --phase "apply-code-fixes" --total-batches {total_batches}
 ```
 Where `{total_batches}` is the length of the `batches` array.
@@ -278,7 +278,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 1. **Read prior changes** — Run:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
      --output-dir "{plan}/apply-fixes"
    ```
    Capture stdout as `prior_changes_text`.
@@ -304,13 +304,19 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}/apply-fixes" \
-     --id "{file_key}" --phase "apply-fixes" --summary-stdin <<'SUMMARY_EOF'
+     --id "{batch.prior_changes_id}" --phase "apply-fixes" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
    SUMMARY_EOF
    ```
-   The `--id` uses `batch.file_key` as the stable identifier. The `--phase` is `"apply-fixes"`.
+   The `--id` is `batch.prior_changes_id` — read it off the batch, never construct one.
+   The batcher emits **many** batches for the same `file_key`, and `append` is idempotent
+   on `(id, phase)`: an id two batches share records the first and silently drops the
+   rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
+   context missing its predecessors. `prior_changes_id` is that key plus a digest of the
+   batch's own items — unique per batch, and identical if the same batch is re-dispatched.
+   Do **not** use the batch loop index. The `--phase` is `"apply-fixes"`.
 
    For **clean failures**, use summary: `(batch failed — {compact reason}, verified no file changes)`
 
@@ -319,7 +325,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 8. **Log the result** - Track success/failure for the summary
 9. **Record metrics** — Run:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
      --label "Batch {N} ({file_key})" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
@@ -331,7 +337,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 **After the loop completes**, mark the phase finish:
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
   --state-file "$STATE_FILE" --phase "apply-code-fixes"
 ```
 
@@ -426,14 +432,14 @@ Fixes whose decision was offloaded to Claude — via `--claude-decide`, the batc
 
    Generate resource usage:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics report \
      --state-file "$STATE_FILE" --phase "apply-code-fixes"
    ```
    Include the output (if non-empty) at the end of the summary report.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/code-review/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
-   uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util report \
      regenerate-decisions \
      --phase-dir "$(dirname "$STATE_FILE")/code-review" \
      --state-file "$STATE_FILE" \
@@ -469,7 +475,7 @@ See: [Applied Fixes Report](./my-feature/my-feature_applied_fixes.md)
 **Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.5, and step 7's verification run. Then mark the apply-code-fixes phase as completed in state.json:
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --mark-completed
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --mark-completed
 ```
 
 **Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.5), or an interrupted run. The phase must stay *incomplete* in those cases, because that record is what tells a later `--resume`, `--full` run or grader that the fixes were actually applied. A stopped loop simply never reaches this step; there is nothing else to do to leave the phase open.
@@ -513,6 +519,7 @@ The orchestrator outputs JSON with batches:
         }
       ],
       "file_key": "src/api.ts",
+      "prior_changes_id": "src/api.ts#4b1d9f2a",
       "batch_type": "bug",
       "executor_role": "agent",
       "fix_count": 2,
@@ -697,7 +704,7 @@ Fix 2: [What was changed]
 To process fixes one-at-a-time (legacy mode):
 
 ```bash
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --no-batch
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --no-batch
 ```
 
 This is useful for:
@@ -755,13 +762,13 @@ If validation produces many `validation_failed` items due to parsing errors or t
 
 ```bash
 # Option 1: Re-run validation with a different model
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --revalidate \
   --revalidate-model cursor-agent:opus
 
 # Option 2: Bulk approve validation failures (if you trust the fixes)
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --approve-validation-failed
 ```
@@ -821,12 +828,12 @@ If a session is interrupted, progress is saved automatically:
 
 ```bash
 # Resume from where you left off
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --resume
 
 # Or start fresh, clearing all previous progress
-uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
   --plan-file "$PLAN_PATH" \
   --fresh
 ```

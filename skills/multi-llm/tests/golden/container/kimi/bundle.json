@@ -41,11 +41,11 @@
   },
   "manifest": {
     "bundle_version": 1,
-    "captured_at": "2026-08-25T09:25:57Z",
+    "captured_at": "2026-08-27T14:10:33Z",
     "cli": "kimi",
     "image": "mllm-e2e:local",
     "row_id": "chain-kimi",
-    "run_bundle": "20260825T090022Z"
+    "run_bundle": "20260827T131354Z"
   },
   "markers": [
     "[VALIDATION_BATCHES_PENDING]",
@@ -319,6 +319,7 @@
                   "validation_status": "valid"
                 }
               ],
+              "prior_changes_id": "src/security.py#b17808f6",
               "priority_score": 5.0,
               "prompt": "<text:sha256:00d990014472:2010>",
               "subagent_type": "general-purpose",
@@ -357,6 +358,7 @@
                   "validation_status": "valid"
                 }
               ],
+              "prior_changes_id": "src/auth.py#fd43b6fc",
               "priority_score": 2.0,
               "prompt": "<text:sha256:4e2c1dc8c002:1017>",
               "subagent_type": "general-purpose",
@@ -395,6 +397,7 @@
                   "validation_status": "valid"
                 }
               ],
+              "prior_changes_id": "src/security.py#22cf58a5",
               "priority_score": 1.0,
               "prompt": "<text:sha256:873e3e371ce4:973>",
               "subagent_type": "general-purpose",
@@ -598,7 +601,7 @@
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
-            "host_max_concurrent_subagents": null,
+            "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
               "codex": null
             },
@@ -879,7 +882,7 @@
               "kind": "apply_code_fixes",
               "output_name": "apply_fix_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
-              "prior_changes_id": "src/security.py",
+              "prior_changes_id": "src/security.py#b17808f6",
               "prompt": "<text:sha256:00d990014472:2010>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -908,7 +911,7 @@
               "kind": "apply_code_fixes",
               "output_name": "apply_fix_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_1.json",
-              "prior_changes_id": "src/auth.py",
+              "prior_changes_id": "src/auth.py#fd43b6fc",
               "prompt": "<text:sha256:4e2c1dc8c002:1017>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -937,7 +940,7 @@
               "kind": "apply_code_fixes",
               "output_name": "apply_fix_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
-              "prior_changes_id": "src/security.py",
+              "prior_changes_id": "src/security.py#22cf58a5",
               "prompt": "<text:sha256:873e3e371ce4:973>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -966,6 +969,7 @@
           "batches": [
             {
               "batch_type": "addition",
+              "prior_changes_id": "step_1#4ad56b19",
               "priority_score": 3.0,
               "prompt": "<text:sha256:de14197c66ac:1279>",
               "section_key": "step_1",
@@ -994,6 +998,7 @@
             },
             {
               "batch_type": "addition",
+              "prior_changes_id": "step_6#4d10ac91",
               "priority_score": 3.0,
               "prompt": "<text:sha256:f41c0933c0a9:1330>",
               "section_key": "step_6",
@@ -1022,6 +1027,7 @@
             },
             {
               "batch_type": "addition",
+              "prior_changes_id": "step_2#5e8e6c98",
               "priority_score": 2.0,
               "prompt": "<text:sha256:2c685fbbe6be:1315>",
               "section_key": "step_2",
@@ -1050,6 +1056,7 @@
             },
             {
               "batch_type": "clarification",
+              "prior_changes_id": "step_3#a35270ee",
               "priority_score": 2.0,
               "prompt": "<text:sha256:0acef9f77304:1315>",
               "section_key": "step_3",
@@ -1211,7 +1218,7 @@
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
-            "host_max_concurrent_subagents": null,
+            "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
               "codex": null
             },
@@ -1560,7 +1567,7 @@
               "kind": "apply_suggestions",
               "output_name": "apply_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_0.json",
-              "prior_changes_id": "step_1",
+              "prior_changes_id": "step_1#4ad56b19",
               "prompt": "<text:sha256:de14197c66ac:1279>",
               "result_channel": "file",
               "section_key": "step_1",
@@ -1589,7 +1596,7 @@
               "kind": "apply_suggestions",
               "output_name": "apply_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_1.json",
-              "prior_changes_id": "step_6",
+              "prior_changes_id": "step_6#4d10ac91",
               "prompt": "<text:sha256:f41c0933c0a9:1330>",
               "result_channel": "file",
               "section_key": "step_6",
@@ -1618,7 +1625,7 @@
               "kind": "apply_suggestions",
               "output_name": "apply_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_2.json",
-              "prior_changes_id": "step_2",
+              "prior_changes_id": "step_2#5e8e6c98",
               "prompt": "<text:sha256:2c685fbbe6be:1315>",
               "result_channel": "file",
               "section_key": "step_2",
@@ -1647,7 +1654,7 @@
               "kind": "apply_suggestions",
               "output_name": "apply_batch_3.json",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_3.json",
-              "prior_changes_id": "step_3",
+              "prior_changes_id": "step_3#a35270ee",
               "prompt": "<text:sha256:0acef9f77304:1315>",
               "result_channel": "file",
               "section_key": "step_3",
@@ -1677,6 +1684,7 @@
           "batches": [
             {
               "batch_type": "addition",
+              "prior_changes_id": "section:plan_coverage#f6649fb6",
               "priority_score": 3.0,
               "prompt": "<text:sha256:8f8bdfc35cb0:5150>",
               "section_key": "section:plan_coverage",
@@ -1706,6 +1714,7 @@
             },
             {
               "batch_type": "clarification",
+              "prior_changes_id": "section:t002#3f5dc1a6",
               "priority_score": 2.0,
               "prompt": "<text:sha256:28381e1455a4:5169>",
               "section_key": "section:t002",
@@ -1735,6 +1744,7 @@
             },
             {
               "batch_type": "modification",
+              "prior_changes_id": "section:t003#65f886c7",
               "priority_score": 1.0,
               "prompt": "<text:sha256:acc685460420:5103>",
               "section_key": "section:t003",
@@ -1885,7 +1895,7 @@
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
-            "host_max_concurrent_subagents": null,
+            "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
               "codex": null
             },
@@ -2163,7 +2173,7 @@
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_0.json",
-              "prior_changes_id": "section:plan_coverage",
+              "prior_changes_id": "section:plan_coverage#f6649fb6",
               "prompt": "<text:sha256:8f8bdfc35cb0:5150>",
               "result_channel": "file",
               "section_key": "section:plan_coverage",
@@ -2192,7 +2202,7 @@
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_1.json",
-              "prior_changes_id": "section:t002",
+              "prior_changes_id": "section:t002#3f5dc1a6",
               "prompt": "<text:sha256:28381e1455a4:5169>",
               "result_channel": "file",
               "section_key": "section:t002",
@@ -2221,7 +2231,7 @@
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_2.json",
-              "prior_changes_id": "section:t003",
+              "prior_changes_id": "section:t003#65f886c7",
               "prompt": "<text:sha256:acc685460420:5103>",
               "result_channel": "file",
               "section_key": "section:t003",
@@ -2882,7 +2892,7 @@
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
-            "host_max_concurrent_subagents": null,
+            "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
               "codex": null
             },

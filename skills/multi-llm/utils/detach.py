@@ -232,25 +232,28 @@ def resolve_uv() -> str:
     """The absolute ``uv`` path, by the same probe the shim preflight uses.
 
     ``MULTI_LLM_UV`` first (an explicit override, also what the hermetic tests
-    point at a stub), then ``PATH``, then the two documented install locations.
+    point at a stub), then ``PATH``, then :data:`utils.unattended.UV_CANDIDATES`.
     An unresolvable ``uv`` is a foreground pre-flight failure, never a child that
     dies into a log.
+
+    It **delegates** rather than probing: this function used to carry its own
+    two-entry list — ``~/.local/bin/uv`` and ``~/.cargo/bin/uv``, no ``.exe``, no
+    Homebrew, no ``/usr/local``, no ``/opt/local`` — and named that shortened list
+    back to the user in its own error text. So the detached path, which
+    ``detach: required`` puts *every* fan-out mode through, could refuse on a
+    machine where the foreground preflight had just succeeded, and the two
+    ``.exe`` entries that are the whole Windows story were missing from it. The
+    error text is rendered from the same tuple for the same reason.
     """
-    override = os.environ.get(UV_ENV)
-    if override and os.path.isfile(override):
-        return os.path.abspath(override)
-    found = shutil.which("uv")
-    if found:
-        return os.path.abspath(found)
-    for candidate in (
-        os.path.expanduser("~/.local/bin/uv"),
-        os.path.expanduser("~/.cargo/bin/uv"),
-    ):
-        if os.path.isfile(candidate):
-            return candidate
+    from .unattended import UV_CANDIDATES, find_uv
+
+    found = find_uv()
+    if found is not None:
+        return found
+    looked = ", ".join(("$" + UV_ENV, "PATH") + UV_CANDIDATES)
     raise DetachError(
         "ERROR: --detach needs `uv` on PATH and it could not be found.\n"
-        "       Looked at: $MULTI_LLM_UV, PATH, ~/.local/bin/uv, ~/.cargo/bin/uv\n"
+        f"       Looked at: {looked}\n"
         "       Install it (https://docs.astral.sh/uv/) or run the phase in the "
         "foreground."
     )
@@ -330,6 +333,13 @@ def build_child_command(
     child would inherit it *without* uv, so no lockfile resolution, no re-sync of
     a stale environment, and no ``--project`` for a worker that may run for an hour
     from a different cwd.
+
+    The uv flags come from :func:`utils.unattended.uv_run_args`, the same owner
+    the foreground launcher and every printed follow-up read. They were absent
+    here, which meant a careful launch — preflighted, ``--no-dev``-ed — handed
+    off to a worker that synced the whole dev group anyway, or failed offline,
+    with the failure moving out of the launcher where the model sees it and into
+    a log where it does not.
     """
     base = Path(base) if base is not None else skill_dir()
     uv_bin = uv or resolve_uv()
@@ -340,8 +350,10 @@ def build_child_command(
             f"skill dir ({base}); using the running one.",
             file=sys.stderr,
         )
+    from .unattended import uv_run_args
+
     return [
-        uv_bin, "run", "--project", str(base), "--", "python",
+        uv_bin, "run", *uv_run_args(), "--project", str(base), "--", "python",
         str(base / "multi_llm.py"), mode,
         *build_worker_argv(mode, argv, run_id=run_id),
     ]
@@ -355,6 +367,19 @@ def child_env(*, base: Optional[Path] = None) -> Dict[str, str]:
         env.pop(name, None)
     env["MULTI_LLM_SKILL_DIR"] = str(base)
     env[WORKER_ENV] = "1"
+    # Propagate the *binary*, not only the flags: the worker outlives the shell
+    # that launched it and may not share its PATH, so re-probing could resolve a
+    # different uv — or none — than the preflight approved. ``UV_ENV`` is common
+    # to this module and ``unattended`` (both are "MULTI_LLM_UV"), which is what
+    # makes this a one-line propagation rather than a new variable. An override
+    # already in the environment is left alone: it is what put us here.
+    if not env.get(UV_ENV):
+        try:
+            env[UV_ENV] = resolve_uv()
+        except DetachError:
+            # Nothing to propagate. The child's own probe will fail with the
+            # full message rather than this one being swallowed here.
+            pass
     config = env.get("MULTI_LLM_PROVIDERS_CONFIG")
     if config and not os.path.isabs(config):
         env["MULTI_LLM_PROVIDERS_CONFIG"] = os.path.abspath(config)
@@ -1122,6 +1147,22 @@ POLL_LOOP_TEXT = (
 )
 
 
+#: The banner's headline, and the field names under it, in printed order.
+#:
+#: Constants rather than inline f-strings because the banner is **parsed**, not
+#: only read: it is the only place a launch reports its ``run_id``. The
+#: ``MULTI_LLM_RESULT`` payload has no ``run_id`` key at all, and the launch's
+#: ``next`` carries ``--run-id`` only for ``ask`` runs — so any host driving a
+#: detached launch has to read it off these lines. The OpenCode plugin does, and
+#: it reads this list out of generated data rather than spelling the field names
+#: in JavaScript. Renaming a field here is therefore a change with a consumer,
+#: and this is where that consumer looks.
+BANNER_HEADLINE = "=== DETACHED RUN STARTED ==="
+BANNER_FIELDS: Tuple[str, ...] = (
+    "run_id", "pid", "mode", "phase", "log", "status", "abort",
+)
+
+
 def _print_banner(
     *,
     run_id: str,
@@ -1132,15 +1173,20 @@ def _print_banner(
     status_cmd: str,
     abort_cmd: str,
 ) -> None:
+    values = {
+        "run_id": run_id,
+        "pid": pid,
+        "mode": mode,
+        "phase": phase_dir,
+        "log": log,
+        "status": status_cmd,
+        "abort": abort_cmd,
+    }
+    width = max(len(name) for name in BANNER_FIELDS) + 3
     print("")
-    print("=== DETACHED RUN STARTED ===")
-    print(f"  run_id:  {run_id}")
-    print(f"  pid:     {pid}")
-    print(f"  mode:    {mode}")
-    print(f"  phase:   {phase_dir}")
-    print(f"  log:     {log}")
-    print(f"  status:  {status_cmd}")
-    print(f"  abort:   {abort_cmd}")
+    print(BANNER_HEADLINE)
+    for name in BANNER_FIELDS:
+        print(f"  {(name + ':').ljust(width)}{values[name]}")
     print("")
     print(POLL_LOOP_TEXT)
 

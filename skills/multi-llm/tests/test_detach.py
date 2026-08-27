@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
-from utils import cli_common, detach, process_control, run_registry, run_status  # noqa: E402
+from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
 from utils import status_file  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -203,10 +203,15 @@ class TestWorkerCommand:
             "review-plan", argv, run_id="RID", base=SKILL_ROOT
         )
         assert command[0] == str(_fake_uv(tmp_path))
-        assert command[1:6] == ["run", "--project", str(SKILL_ROOT), "--", "python"]
+        # The uv flags come from unattended's single owner and sit before
+        # --project, which is where uv's own argument grammar wants them.
+        head = ["run", *unattended.uv_run_args()]
+        assert command[1:1 + len(head)] == head
+        rest = command[1 + len(head):]
+        assert rest[:4] == ["--project", str(SKILL_ROOT), "--", "python"]
         # --project and the script path are exactly one argv element each.
-        assert command[6] == str(SKILL_ROOT / "multi_llm.py")
-        assert command[7] == "review-plan"
+        assert rest[4] == str(SKILL_ROOT / "multi_llm.py")
+        assert rest[5] == "review-plan"
         assert "--internal-worker" in command
         assert "--detach" not in command
         assert command[command.index("--internal-run-id") + 1] == "RID"
@@ -1408,12 +1413,24 @@ import sys
 
 argv = sys.argv[1:]
 assert argv[0] == "run", argv
-assert argv[1] == "--project", argv
-assert os.path.isdir(argv[2]), argv
-assert argv[3] == "--", argv
-assert argv[4] == "python", argv
-assert argv[5].endswith("multi_llm.py"), argv
-os.execv(sys.executable, [sys.executable, *argv[5:]])
+# The uv flags sit between `run` and `--project`, and the worker must carry the
+# same ones the launcher did. `--no-dev` is the load-bearing half: without it
+# `uv run` syncs the dev group, so a careful launch would hand off to a child
+# that pulled 17 packages -- or failed outright offline -- with the failure
+# moving out of the launcher and into a log.
+flags = []
+index = 1
+while index < len(argv) and argv[index] != "--project":
+    flags.append(argv[index])
+    index += 1
+assert "--frozen" in flags, argv
+assert "--no-dev" in flags, argv
+assert argv[index] == "--project", argv
+assert os.path.isdir(argv[index + 1]), argv
+assert argv[index + 2] == "--", argv
+assert argv[index + 3] == "python", argv
+assert argv[index + 4].endswith("multi_llm.py"), argv
+os.execv(sys.executable, [sys.executable, *argv[index + 4:]])
 '''
 
 

@@ -43,6 +43,10 @@
           "row_id": {"type": "string"},
           "cli": {"type": "string"},
           "host": {"type": "string"},
+          "route": {
+            "enum": ["file", "package"],
+            "description": "Which install route this row exercised: `file` for a shim `install-host` wrote, `package` for a distribution the host's own installer resolved. Absent means `file`, which is what every row recorded before a package route existed. It is what keys promotion: a `package` row writes no shim, so crediting it with `shim`/`install_paths`/`arguments`/`reload` would describe a file at a path the row never touched."
+          },
           "mode": {"type": "string"},
           "cli_version": {"type": "string"},
           "model": {"type": "string", "description": "The PINNED slug from host_matrix.yaml, never a run-time 'cheapest' lookup."},

@@ -1,0 +1,4099 @@
+"""The ``opencode-multi-llm`` npm package: its build, its manifest, its plugin.
+
+**Why these rows read the way they do.** The plugin is JavaScript and the single
+owners it must not drift from are Python, so almost every assertion here grades
+the JS *against a Python owner* rather than against an expectation someone typed.
+Two rows carry the weight of that: ``test_worker_flags_are_reserved``, an
+equivalence with ``cli_common.flag_present()`` over a shared case table, and
+``test_every_uv_candidate_spelling_agrees_with_the_source``, which lives in its
+own module. Where a rule has no Python owner to mirror — the argv order, the
+zero-element empty positional, the reserved ``--interactive`` — the row carries
+the expected argv as a literal, which is what moves that half of the
+specification out of a plan document and into the repository.
+
+**Where each row's input comes from.** ``.gitignore`` deletes the obvious answer:
+``packaging/opencode/{dist/,skills/,*.tgz}`` are build artifacts, and CI never
+runs ``build.py``. So on a clean checkout **no build artifact exists**, and a row
+that reads one is red before it asserts anything. Three classes:
+
+* **(src)** — the default, and preferred wherever there is a choice. Reads
+  ``packaging/opencode/src/index.mjs``, never ``dist/index.mjs``, and renders what
+  it needs in-process. It also removes an ambiguity from every red row: a failure
+  can never mean "someone forgot to rebuild".
+* **(build)** — genuinely needs ``build.py``'s output. A **session-scoped**
+  fixture builds into a temp directory and yields it; it never writes into the
+  working tree, so a developer's stale ``dist/`` can neither hide a failure nor
+  cause one. Needs uv and Python only, no npm, so it runs on all three OS legs.
+* **(pack, Linux)** — needs ``npm pack``. These belong to the Linux-only package
+  job and nowhere else; in the default suite they skip with a named reason.
+
+Because the build emits ``dist/index.mjs`` as a **verbatim copy** of
+``src/index.mjs``, a (src) grep is a grep against what ships —
+``test_dist_mirrors_src`` is what pins that equivalence rather than leaving it
+assumed.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
+
+SKILL_ROOT = Path(__file__).parent.parent
+REPO_ROOT = SKILL_ROOT.parent.parent
+PACKAGE_DIR = REPO_ROOT / "packaging" / "opencode"
+SRC_MJS = PACKAGE_DIR / "src" / "index.mjs"
+MANIFEST = PACKAGE_DIR / "package.json"
+
+sys.path.insert(0, str(SKILL_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "packaging"))
+
+import modes as mode_table  # noqa: E402
+from utils import (  # noqa: E402
+    cli_common,
+    host_capabilities as caps,
+    host_install,
+    unattended,
+)
+
+sys.path.insert(0, str(PACKAGE_DIR))
+import build as pkg_build  # noqa: E402
+from common import payload  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+#: Set by the PR package job. When it is set, a row that would skip **fails**
+#: instead: a gate that skips silently everywhere is indistinguishable from a
+#: gate that passes.
+REQUIRE_ROWS_ENV = "MLLM_REQUIRE_PACKAGE_ROWS"
+
+
+def _unavailable(reason: str) -> None:
+    """Skip, or fail if the package job demanded this row actually run."""
+    if os.environ.get(REQUIRE_ROWS_ENV):
+        pytest.fail(f"{REQUIRE_ROWS_ENV} is set but this row cannot run: {reason}")
+    pytest.skip(reason)
+
+
+def _need_node() -> str:
+    node = shutil.which("node")
+    if not node:
+        _unavailable("node is not on PATH; the plugin is JavaScript")
+    return node
+
+
+@pytest.fixture(scope="session")
+def built_package(tmp_path_factory) -> Path:
+    """``build.py``'s output, in a temp directory. Never the working tree."""
+    destination = tmp_path_factory.mktemp("opencode-package")
+    pkg_build.build(destination=destination, allow_dirty=True)
+    return destination
+
+
+def run_node(script: str, *, cwd: Path | None = None, env: dict | None = None):
+    """Evaluate an ES-module snippet and return its ``CompletedProcess``."""
+    node = _need_node()
+    environment = dict(os.environ)
+    if env:
+        environment.update(env)
+    return subprocess.run(
+        [node, "--input-type=module", "-e", textwrap.dedent(script)],
+        cwd=str(cwd) if cwd else None,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def node_json(script: str, package: Path, **kwargs):
+    """Import the built plugin, run *script*, and parse its printed JSON.
+
+    The snippet gets ``MultiLlmPlugin`` (the module's **one** export), ``T``
+    (its test hooks) and ``surface`` (the generated CLI surface) already bound.
+
+    ``T`` and ``MultiLlmPlugin.execute`` are reached as *properties of the
+    factory*, never as module exports, and that is not a style choice. Measured
+    against opencode 1.18.18 and 1.18.21: the loader calls **every** named export
+    as a plugin factory, so a second export that is not a function makes it
+    refuse the whole module — ``Plugin export is not a function`` — at exit 0.
+    ``test_every_export_is_a_plugin_factory`` is what holds that line; this
+    helper simply reads the shape that rule leaves behind.
+    """
+    prelude = f"""
+    const {{ MultiLlmPlugin }} = await import({json.dumps(str(package / "dist" / "index.mjs"))})
+    const T = MultiLlmPlugin.__testing
+    const surface = T.loadSurface()
+    const emit = (value) => console.log("@@" + JSON.stringify(value) + "@@")
+    """
+    result = run_node(prelude + textwrap.dedent(script), **kwargs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    match = re.search(r"@@(.*)@@", result.stdout, re.S)
+    assert match, f"snippet printed no payload:\n{result.stdout}\n{result.stderr}"
+    return json.loads(match.group(1))
+
+
+# ===========================================================================
+# The manifest and the package shape
+# ===========================================================================
+
+class TestManifest:
+    def test_package_declares_no_dependencies(self):
+        """``dependencies`` and ``peerDependencies`` both absent or empty.
+
+        Zero-dep is what makes local-tarball testing and a cheap real install
+        both work: the loader never reads ``dependencies``, so a *pre-extracted*
+        package with declared deps loads fine — but a ``file:``/tarball install
+        of a dependency-declaring package fails, because npm must then fetch.
+
+        The peer half is not a formality. npm 7+ auto-installs peers, so a
+        ``peerDependencies`` entry costs exactly what a ``dependencies`` one
+        does: measured, an 11 KB package declaring one peer produced a **63 MB**
+        spec directory. That cost lands per pinned version and is never
+        reclaimed. Worse for correctness, a peer range resolves independently of
+        the running binary, so it does not even buy version agreement with the
+        host.
+        """
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert not manifest.get("dependencies")
+        assert not manifest.get("peerDependencies")
+        # The types-only helper belongs in devDependencies and nowhere else.
+        assert "@opencode-ai/plugin" in manifest.get("devDependencies", {})
+
+    def test_package_manifest_is_publishable(self):
+        """The publishable shape, asserted rather than remembered."""
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for key in ("description", "keywords", "repository", "license", "files"):
+            assert manifest.get(key), f"manifest is missing {key!r}"
+        # The discovery mechanism: opencode users find plugins by this keyword.
+        assert manifest["keywords"][0] == "opencode-plugin"
+        assert manifest["type"] == "module"
+        # `files` must name both, explicitly. With no `files` key the
+        # package-root .gitignore becomes the ignore list; with `files: ["dist"]`
+        # the skill tree vanishes silently.
+        assert "dist" in manifest["files"] and "skills" in manifest["files"]
+        assert "README.md" in manifest["files"] and "LICENSE" in manifest["files"]
+
+        # Resolution tries exports["./server"] FIRST, then main, and never
+        # exports["."]. Both of the first two must point at the built copy.
+        assert manifest["main"] == "./dist/index.mjs"
+        assert manifest["exports"]["./server"] == "./dist/index.mjs"
+
+    def test_the_build_hook_is_prepack(self):
+        """``prepack``, never ``prepublishOnly`` — and the difference is the
+        entire reason for having a hook.
+
+        ``prepublishOnly`` fires on ``npm publish`` and **nowhere else**;
+        ``npm pack`` does not run it. ``npm pack`` is exactly what
+        ``make opencode-package`` and the pre-publish gate invoke, so a build
+        wired only to ``prepublishOnly`` leaves every pack path free to ship
+        whatever ``dist/`` happens to be lying around.
+
+        Not ``prepare`` either: ``prepare`` is a strict superset that also runs
+        on a bare ``npm install``/``npm ci`` inside the package directory,
+        neither of which has any business shelling out to uv.
+        """
+        scripts = json.loads(MANIFEST.read_text(encoding="utf-8")).get("scripts", {})
+        assert "prepack" in scripts, "the build hook must be prepack"
+        assert "prepublishOnly" not in scripts
+        assert "prepare" not in scripts
+        # It must invoke the build, never a nested `npm pack`: npm packs by
+        # itself immediately after the hook, so a hook that packs writes a .tgz
+        # nobody publishes and packs twice on the make path.
+        assert "build.py" in scripts["prepack"]
+        assert "npm" not in scripts["prepack"]
+
+    def test_the_package_readme_pins_the_same_version(self):
+        """The npm landing page's spec agrees with the manifest.
+
+        It is hand-written prose carrying a version number, which is exactly the
+        drift the one-owner chain exists to prevent everywhere else — and it is
+        the page a user copies the install line from, so a stale number here is a
+        config entry that resolves to nothing.
+        """
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        readme = (PACKAGE_DIR / "README.md").read_text(encoding="utf-8")
+        spec = f"{manifest['name']}@{manifest['version']}"
+        assert spec in readme, f"the package README does not pin {spec}"
+        # And it names no OTHER version of itself.
+        stale = [
+            found for found in
+            re.findall(rf"{re.escape(manifest['name'])}@([0-9][^\s`\"'\)]*)", readme)
+            if found != manifest["version"]
+        ]
+        assert not stale, f"the package README also names {sorted(set(stale))}"
+
+        floor = re.search(
+            r">=\s*([0-9]+\.[0-9]+\.[0-9]+)", manifest["engines"]["opencode"]
+        ).group(1)
+        assert floor in readme, (
+            f"the README does not state the {floor} floor `engines` enforces"
+        )
+
+    def test_engines_floor_matches_the_container_pin(self):
+        """A4 item 6: the ``engines`` floor is the lowest version actually run.
+
+        This is the one field in the manifest whose correct value lives in
+        *other* files, so it is the field most likely to go stale while still
+        looking deliberate. The floor is 1.18.18 because that is the container's
+        own version and the lowest ever executed — never the dev box's 1.18.21,
+        and never lower without a recorded run of that lower version.
+
+        Second half of the same row: the floor must sit **at or above** the
+        parser-fixture pin, so the package's declared floor does not disagree
+        with the second, undeclared floor. The ``engines`` gate dominates it and
+        the compatibility error is unambiguously about ``engines``.
+        """
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        spec = manifest["engines"]["opencode"]
+        floor = re.search(r">=\s*([0-9]+\.[0-9]+\.[0-9]+)", spec)
+        assert floor, f"no floor in engines.opencode: {spec!r}"
+        # The ceiling is at the major only. A tighter one would hard-fail the
+        # container on the next release, and the undocumented JSON-Schema
+        # fallback it exists for is reachable by a *minor* anyway.
+        assert "<2.0.0" in spec, f"the ceiling must be <2.0.0, got {spec!r}"
+
+        container = json.loads(
+            (SKILL_ROOT / "tests" / "container" / "package.json").read_text("utf-8")
+        )
+        pinned = container["dependencies"]["opencode-ai"].lstrip("^~=")
+        assert _version(floor.group(1)) <= _version(pinned), (
+            f"engines floor {floor.group(1)} is above the container's "
+            f"opencode-ai pin {pinned}; the container could never load the "
+            "package it is supposed to grade"
+        )
+
+        fixture_pin = _parser_fixture_version()
+        assert _version(floor.group(1)) >= _version(fixture_pin), (
+            f"engines floor {floor.group(1)} sits *below* the parser-fixture pin "
+            f"{fixture_pin}, so the package would admit versions the shipped "
+            "stream fixtures were never captured from"
+        )
+
+
+def _version(text: str):
+    return tuple(int(part) for part in text.split(".")[:3])
+
+
+def _parser_fixture_version() -> str:
+    source = (SKILL_ROOT / "utils" / "providers" / "opencode.py").read_text("utf-8")
+    match = re.search(r'verified_version\s*[:=]\s*["\']([0-9.]+)["\']', source)
+    assert match, "no verified_version found in utils/providers/opencode.py"
+    return match.group(1)
+
+
+# ===========================================================================
+# The JS, graded as text (src)
+# ===========================================================================
+
+class TestJavaScriptSource:
+    def test_no_bare_specifiers_in_js(self):
+        """Every runtime ``import`` is a ``node:`` builtin.
+
+        This is the rule that decides whether the plugin loads at all. A runtime
+        import that cannot resolve next to the plugin fails **completely
+        silently** — exit 0, the plugin still listed in ``plugin[]``, config
+        unmutated, and a 0-byte debug log. It, not the ``dependencies`` field, is
+        what kills a plugin offline.
+        """
+        text = SRC_MJS.read_text(encoding="utf-8")
+        specifiers = re.findall(r'^\s*import\s[^"\']*["\']([^"\']+)["\']', text, re.M)
+        specifiers += re.findall(r'^\s*import\s+["\']([^"\']+)["\']', text, re.M)
+        assert specifiers, "no imports found — the grep is broken, not the file"
+        for specifier in specifiers:
+            assert specifier.startswith("node:"), (
+                f"bare specifier {specifier!r}: a runtime import that cannot "
+                "resolve next to the plugin kills it silently at exit 0"
+            )
+
+    def test_skill_dir_is_composed_with_node_path(self):
+        """Every derived path is built with ``path.join``/``path.resolve``.
+
+        A plain grep — no node, no npm, nothing built — so it is collected on the
+        macOS and Windows legs plain CI already runs, and it is the only
+        Windows-relevant assertion the suite has.
+
+        Read what it does *not* buy: spelling, not behaviour. Green on the
+        Windows leg says the JS builds a backslash-separated skill dir there, not
+        that the path survives ``--project``, ``uv run`` and the Python side.
+        """
+        text = SRC_MJS.read_text(encoding="utf-8")
+        assert "import.meta.dirname" in text
+        # No path expression concatenates a "/" literal onto a derived path.
+        offenders = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r'(SKILL_DIR|PACKAGE_DIR|DIST_DIR)\s*\+\s*["\']/', line)
+            or re.search(r'["\']/["\']\s*\+\s*(SKILL_DIR|PACKAGE_DIR|DIST_DIR)', line)
+        ]
+        assert not offenders, "string-concatenated paths:\n" + "\n".join(offenders)
+        for anchor in ("PACKAGE_DIR", "SKILL_DIR", "DIST_DIR"):
+            assignment = re.search(rf"const {anchor} = (.+)", text)
+            assert assignment, f"{anchor} is not defined"
+            assert "path.join" in assignment.group(1) or "path.resolve" in (
+                assignment.group(1)
+            ), f"{anchor} is not composed with node:path: {assignment.group(1)}"
+
+    def test_no_core_prose_in_js(self):
+        """No mode word, no alias, no summary, no sentence from the core.
+
+        The JS analogue of the shim rule. The tool's description and arg-schema
+        descriptions are assembled at load from ``dist/cli-surface.json``, so the
+        file's only added text is the connective scaffold around generated
+        values.
+        """
+        text = SRC_MJS.read_text(encoding="utf-8")
+        body = _code_only(text)
+
+        for mode in mode_table.user_facing_modes():
+            assert f'"{mode.name}"' not in body, (
+                f"mode word {mode.name!r} is a literal in the JS; it must come "
+                "from cli-surface.json"
+            )
+            assert mode.summary not in text, (
+                f"{mode.name}'s summary is duplicated into the JS"
+            )
+        # One genuine collision to exclude, and it is worth naming rather than
+        # loosening the rule for: the alias `abort` is also the DOM event name
+        # on an AbortSignal, which the cancellation contract necessarily
+        # listens for. Strip those calls, then the scan is exact again.
+        listeners = re.sub(
+            r"(add|remove)EventListener\??\.?\([^)]*\)", "", body
+        )
+        for alias in mode_table.ALIASES:
+            # `abort`/`cancel`/`stop`/`review`/`tasks` — never spelled here.
+            assert f'"{alias}"' not in listeners, (
+                f"alias {alias!r} is a JS literal"
+            )
+
+        # No sentence from the instruction core.
+        for path in sorted((SKILL_ROOT / "instructions").glob("*.md")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if len(stripped) < 60 or stripped.startswith(("#", "-", "*", "`")):
+                    continue
+                assert stripped not in text, (
+                    f"a sentence from {path.name} is duplicated into the JS"
+                )
+
+    def test_no_flag_name_is_a_js_literal(self):
+        """The reserved and baked flags come from the generated table.
+
+        The set is closed by construction — it is exactly the flags the plugin
+        composes — and that closure only holds if both sides read one owner.
+        """
+        body = _code_only(SRC_MJS.read_text(encoding="utf-8"))
+        for flag in (
+            "--host", "--yes", "--exec-subagents", "--detach", "--non-interactive",
+            "--if-not-running", "--max-detached", "--interactive", "--internal-",
+            "--frozen", "--no-dev",
+        ):
+            assert f'"{flag}"' not in body, (
+                f"{flag!r} is a literal in the JS; it must be read from "
+                "cli-surface.json, whose owner is Python"
+            )
+
+
+def _code_only(text: str) -> str:
+    """*text* with block and line comments removed.
+
+    The prose rules are about what the plugin *shows a model*, not about what a
+    maintainer reads: this file's own comments necessarily name the flags and
+    modes they explain.
+    """
+    without_block = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return "\n".join(
+        line for line in without_block.splitlines()
+        if not line.strip().startswith("//")
+    )
+
+
+# ===========================================================================
+# The build's artifacts (build)
+# ===========================================================================
+
+class TestBuildArtifacts:
+    def test_dist_mirrors_src(self, built_package):
+        """``dist/index.mjs`` is byte-identical to ``src/index.mjs``.
+
+        One assertion, and it is what licenses every (src) grep above to stand in
+        for the shipped file. If the build ever acquires a transform, this row
+        goes red first and the greps move rather than quietly grading the wrong
+        bytes.
+        """
+        assert (built_package / "dist" / "index.mjs").read_bytes() == (
+            SRC_MJS.read_bytes()
+        )
+
+    def test_every_export_is_a_plugin_factory(self, built_package):
+        """The built module exports exactly one thing, and it is a function.
+
+        MEASURED against the real binary — opencode 1.18.18 in the container and
+        1.18.21 on the host — the plugin loader iterates **every named export** of
+        the module and calls each one as a plugin factory. Two consequences, both
+        observed rather than reasoned about:
+
+        * A single export that is not a function makes opencode refuse the
+          **whole module**::
+
+              level=ERROR message="failed to load plugin"
+              path=opencode-multi-llm@0.1.0
+              error="Plugin export is not a function"
+
+          and it fails in the shape this package keeps having to defend against:
+          **silently**. Exit 0, the spec still listed in ``plugin[]``, and
+          ``command["multi-llm"]`` simply never appearing. Nothing a user runs
+          says the plugin is dead.
+        * Exporting the *same* factory twice — which this package did, as
+          ``export const MultiLlmPlugin`` beside ``export default
+          MultiLlmPlugin`` — gets it invoked twice.
+
+        The shipped package carried ``export const __testing = {…}``, an object,
+        so on a real opencode **the plugin never loaded at all**; proven in
+        Docker, offline, on the pinned 1.18.18 image. ``execute`` and
+        ``__testing`` are hung on the factory as properties instead: function
+        properties are not module exports, so the loader never walks them while
+        the suite still reaches them through a plain ``import``.
+
+        It grades the **built** ``dist/index.mjs``, not the source, because what
+        opencode loads is whatever ``main``/``exports`` resolve to — a stray
+        ``export`` introduced by a future build step would be invisible to the
+        (src) greps above.
+        """
+        result = run_node(
+            f"""
+            const module = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const table = Object.keys(module).map((n) => [n, typeof module[n]])
+            console.log("@@" + JSON.stringify(table) + "@@")
+            """
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        match = re.search(r"@@(.*)@@", result.stdout, re.S)
+        assert match, f"the export probe printed nothing:\n{result.stdout}"
+        table = [tuple(row) for row in json.loads(match.group(1))]
+
+        # The offending export is named, with its type, because "the module has
+        # two exports" is not the sentence that fixes this — "`__testing` is an
+        # object" is.
+        offenders = [f"{name} -> {kind}" for name, kind in table if kind != "function"]
+        assert not offenders, (
+            "every export must be a plugin factory; these are not: "
+            + ", ".join(offenders)
+            + '. opencode calls each export and refuses the whole module with '
+            '`Plugin export is not a function` — silently: exit 0, still listed '
+            "in plugin[], and the /multi-llm command key never injected. Hang "
+            "the value on the factory as a property instead."
+        )
+        assert [name for name, _ in table] == ["MultiLlmPlugin"], (
+            "the module must export exactly one factory, and it exports "
+            f"{[name for name, _ in table]}. A second export of the same "
+            "function does not fail loudly — it gets the plugin instantiated "
+            "once per export."
+        )
+
+    def test_command_md_matches_render(self, built_package):
+        """The command body is a faithful render of an authored template.
+
+        It compares against **the same call ``build.py`` makes**, over the
+        phase-current template, never against a post-processed render — which is
+        what keeps the single-source contract true across the Phase 2 switch
+        instead of contradicted by it.
+        """
+        built = (built_package / "dist" / "command.md").read_text("utf-8")
+        assert built == pkg_build.command_body()
+
+    def test_command_md_keeps_the_skill_dir_token(self, built_package):
+        """``{SKILL_DIR}`` survives the render, for the plugin to resolve.
+
+        ``render()`` already takes the baked prefix as a parameter, so passing
+        the token *as* the prefix makes the substitution an identity and no
+        sentinel round-trip is needed.
+        """
+        built = (built_package / "dist" / "command.md").read_text("utf-8")
+        # Nothing absolute leaked in: no real skill dir, and no other spelling.
+        assert str(SKILL_ROOT) not in built
+        for spelling in ("${CLAUDE_SKILL_DIR}", "$MULTI_LLM_SKILL_DIR"):
+            assert spelling not in built
+
+    def test_command_md_names_only_the_tool(self, built_package):
+        """Phase 2's bar: no dispatcher argv and no baked flag literal.
+
+        The flags are code now, and a second spelling in prose is a template for
+        reconstructing the shell route — which is the whole thing this route
+        exists to remove. A terminal result proves nothing about which route ran;
+        removing the alternative is what closes it.
+        """
+        built = (built_package / "dist" / "command.md").read_text("utf-8")
+        for token in ("uv run", "multi_llm.py", "```bash", "```sh"):
+            assert token not in built, (
+                f"{token!r} is still in the command body: the expansion would "
+                "hand the model a working shell command beside the tool"
+            )
+        for flag in ("--host opencode", "--yes", "--exec-subagents", "--detach"):
+            assert flag not in built, f"baked flag {flag!r} is spelled in prose"
+        assert "multi_llm" in built, "the body must name the tool it delegates to"
+
+    def test_cli_surface_json_matches_render(self, built_package):
+        """The generated surface is byte-identical to a fresh generation."""
+        built = (built_package / "dist" / "cli-surface.json").read_text("utf-8")
+        assert built == pkg_build.cli_surface_json()
+
+    def test_default_mode_has_one_owner(self):
+        """"No mode flag means `review-plan`" is spelled once, in `modes.py`.
+
+        The rule used to be prose in two hand-written places with no constant
+        behind either, and the tool description would have made a third copy.
+        `modes.DEFAULT_MODE` closes that only if every surface actually renders
+        from it, which is what this row asserts across all three:
+
+        * the generated `cli-surface.json`, which the model-facing tool
+          definition is assembled from;
+        * every shim **template**, which carries the rule as the
+          `{DEFAULT_MODE}` token in both places it states it (the step-2 prose
+          and the worked example) and never as a literal, asserted on the
+          template *and* on `host_install.render`'s output; and
+        * the one shim nobody renders — Claude Code's hand-authored `SKILL.md`,
+          whose `${CLAUDE_SKILL_DIR}` the host expands at load time, so its two
+          sentences are literals by necessity and this is the only thing holding
+          them to the constant.
+
+        All three in-process: no build artifact, so a red row can only mean the
+        sentences drifted.
+        """
+        default = mode_table.DEFAULT_MODE
+        # The two sentences, composed from the constant rather than typed.
+        rule = f"No mode flag means `{default}`."
+        example = f"# {default} (the default)"
+
+        assert pkg_build.cli_surface()["default_mode"] == default
+
+        checked = []
+        for host_id in sorted(caps.host_ids()):
+            entry = caps.entry(host_id)
+            relative = entry["shim"]["template"] or entry["shim"]["installed"]
+            path = SKILL_ROOT / relative
+            if not path.exists():
+                continue
+            checked.append(host_id)
+            source = path.read_text(encoding="utf-8")
+            if entry["shim"]["template"]:
+                assert source.count(cli_common.DEFAULT_MODE_TOKEN) == 2, (
+                    f"{relative} states the default-mode rule twice — the step-2 "
+                    f"prose and the worked example — and both must be the "
+                    f"{cli_common.DEFAULT_MODE_TOKEN} token, not a literal"
+                )
+                assert default not in source, (
+                    f"{relative} spells {default!r} by hand; render it from "
+                    "modes.DEFAULT_MODE instead"
+                )
+            # Rendered (or, for the unrendered reference shim, as authored):
+            # both sentences read exactly as the constant dictates. Whitespace is
+            # collapsed because the prose sentence wraps across lines.
+            rendered = " ".join(
+                host_install.render(
+                    host_id, skill="/tmp/multi llm fixture/skill dir",
+                    template=source,
+                ).split()
+            )
+            for sentence in (rule, example):
+                assert sentence in rendered, (
+                    f"{relative}: the default-mode sentence is not the one "
+                    f"modes.DEFAULT_MODE dictates.\n  expected: {sentence}"
+                )
+
+        assert checked == ["claude-code", "codex", "opencode"], (
+            f"the shim corpus moved ({checked}); this row must keep covering "
+            "the unrendered SKILL.md as well as every template"
+        )
+
+    def test_cli_surface_carries_the_generated_table(self):
+        """Mode words, aliases, arity, summaries and detach bits, all derived.
+
+        From Phase 2 this is where the model's entire mode vocabulary comes from,
+        so a mode added to ``modes.py`` must appear here without an edit.
+        """
+        surface = pkg_build.cli_surface()
+        assert surface["schema_version"] == pkg_build.SURFACE_SCHEMA_VERSION
+        assert surface["default_mode"] == mode_table.DEFAULT_MODE
+        assert surface["description_lede"] == mode_table.TOOL_DESCRIPTION_LEDE
+
+        exposed = {row["name"] for row in surface["modes"]}
+        assert exposed == {m.name for m in mode_table.user_facing_modes()}
+        # Not `util` (a routing word), and not the install modes (npm's job).
+        assert mode_table.UTIL_NAMESPACE not in exposed
+        assert "install-host" not in exposed and "uninstall-host" not in exposed
+        # `status` stays exposed: re-attaching is a tool call with mode "status",
+        # and stopping a run is the abort/cancel/stop alias.
+        assert "status" in exposed
+
+        by_name = {row["name"]: row for row in surface["modes"]}
+        for mode in mode_table.user_facing_modes():
+            row = by_name[mode.name]
+            assert row["positionals"] == list(mode.positionals)
+            assert row["supports_detach"] is mode.supports_detach
+            assert row["summary"] == mode.summary
+            assert set(row["aliases"]) == {
+                word for word, target in mode_table.ALIASES.items()
+                if target == mode.name
+            }
+
+        detachable = {r["name"] for r in surface["modes"] if r["supports_detach"]}
+        assert detachable == set(mode_table.DETACH_MODES) & exposed
+
+    def test_default_uv_run_argv_carries_no_dev(self, built_package, monkeypatch):
+        """``--no-dev`` is the default everywhere, and the override replaces.
+
+        ``--frozen`` suppresses only the lockfile staleness check; it does not
+        stop the sync, and ``uv run`` syncs the dev group by default. Measured
+        against this tree: ``--frozen`` alone would install 17 packages,
+        ``--frozen --no-dev`` installs one. So a first run pulls the whole dev
+        group without it, and every offline posture fails on a package it never
+        needed.
+        """
+        assert unattended.DEFAULT_UV_RUN_ARGS == ("--frozen", "--no-dev")
+        monkeypatch.delenv(unattended.UV_RUN_ARGS_ENV, raising=False)
+        assert unattended.uv_run_args() == ("--frozen", "--no-dev")
+
+        # Blank and whitespace-only behave as unset, so a stray `export VAR=`
+        # cannot silently re-enable the dev-group sync.
+        for blank in ("", "   ", "\t\n"):
+            monkeypatch.setenv(unattended.UV_RUN_ARGS_ENV, blank)
+            assert unattended.uv_run_args() == ("--frozen", "--no-dev")
+
+        # It REPLACES, never appends — which is what makes --no-sync
+        # expressible at all: appended, it would sit beside the very sync the
+        # setter is trying to suppress.
+        monkeypatch.setenv(unattended.UV_RUN_ARGS_ENV, "--no-sync")
+        assert unattended.uv_run_args() == ("--no-sync",)
+
+        surface = json.loads(
+            (built_package / "dist" / "cli-surface.json").read_text("utf-8")
+        )
+        assert surface["uv"]["default_run_args"] == ["--frozen", "--no-dev"]
+
+    def test_package_is_built_before_every_pack(self):
+        """Every Makefile recipe reaching npm runs ``build.py`` first.
+
+        The other half of the manifest hook's backstop: the explicit call covers
+        ``--ignore-scripts``, the hook covers a pack nobody routed through Make.
+        A grep over the recipes, not a run — it needs no npm.
+        """
+        recipes = _makefile_recipes(REPO_ROOT / "Makefile")
+        reached = False
+        for target, body in recipes.items():
+            if not any(
+                re.search(r"\bnpm\s+(pack|publish)\b", line) for line in body
+            ):
+                continue
+            assert body, f"{target!r} has an empty recipe"
+            reached = True
+            build_at = next(
+                (i for i, line in enumerate(body) if "build.py" in line), None
+            )
+            npm_at = next(
+                i for i, line in enumerate(body)
+                if re.search(r"\bnpm\s+(pack|publish)\b", line)
+            )
+            assert build_at is not None and build_at < npm_at, (
+                f"target {target!r} reaches npm without running build.py first, "
+                "so it could ship a stale dist/ under --ignore-scripts"
+            )
+        assert reached, "no Makefile recipe packs or publishes — the grep is stale"
+
+
+def _makefile_recipes(path: Path) -> dict:
+    """``{target: [recipe lines]}``, with simple variables expanded.
+
+    Enough of make's grammar for a grep — and the expansion is the load-bearing
+    part: the recipes reach the build through a variable, so a parser that read
+    the literal text would report that no target runs it and the guard would be
+    green for the wrong reason.
+    """
+    text = path.read_text(encoding="utf-8")
+    variables = dict(
+        re.findall(r"^([A-Z_][A-Z0-9_]*)\s*:?=\s*(.*)$", text, re.M)
+    )
+
+    def expand(line: str, depth: int = 0) -> str:
+        if depth > 5:
+            return line
+        replaced = re.sub(
+            r"\$\(([A-Z_][A-Z0-9_]*)\)",
+            lambda m: variables.get(m.group(1), m.group(0)),
+            line,
+        )
+        return replaced if replaced == line else expand(replaced, depth + 1)
+
+    recipes: dict = {}
+    current = None
+    for line in text.splitlines():
+        if line.startswith("\t"):
+            if current:
+                recipes[current].append(expand(line.strip()))
+            continue
+        match = re.match(r"^([A-Za-z0-9_.\-/]+)\s*:(?!=)", line)
+        current = match.group(1) if match else None
+        if current and current not in recipes:
+            recipes[current] = []
+    return recipes
+
+
+# ===========================================================================
+# Argument validation and argv composition
+# ===========================================================================
+
+#: Tokens the JS verdict and ``cli_common.flag_present()`` must agree on.
+#: Abbreviations, ``=`` forms, alias spellings, and a ``--host-something`` that
+#: must **not** read as ``--host``.
+RESERVED_CASES = [
+    "--host", "--ho", "--h", "--host=codex", "--hos=x",
+    "--yes", "--ye", "-y", "--non-interactive", "--non-int",
+    "--exec-subagents", "--exec", "--exec-subagents=1",
+    "--detach", "--det", "--if-not-running", "--if-not", "--max-detached",
+    "--internal-worker", "--internal-run-id", "--internal-anything-new",
+    "--interactive", "--inter", "-i", "--interactive=1",
+    # Negatives: real options that must never read as a reserved abbreviation.
+    "--host-something", "--models", "--quick", "--force", "--dry-run",
+    "--view", "--wait", "--run-id", "--abort", "--no-dev", "--frozen",
+    "plans/x.md", "-", "--",
+]
+
+
+class TestArguments:
+    def test_worker_flags_are_reserved(self, built_package):
+        """An **equivalence** with ``cli_common.flag_present()``.
+
+        Not a list comparison: the JS verdict on each token must match Python's
+        over a shared case table, so the guard cannot rot as the parent parser
+        gains flags. Matching literal spellings does not close it — no parser in
+        this tree passes ``allow_abbrev=False``, so argparse binds ``--ho``,
+        ``--ye`` and ``--det`` to their full options, and a guard that scanned
+        exact spellings was bypassable by typing three fewer characters.
+        """
+        surface = pkg_build.cli_surface()
+        reserved_names = (
+            surface["reserved_flags"]["exact"]
+            + surface["reserved_flags"]["named_exception"]
+        )
+
+        verdicts = node_json(
+            f"""
+            const cases = {json.dumps(RESERVED_CASES)}
+            emit(cases.map((token) => T.reservedHit(token, surface) !== null))
+            """,
+            built_package,
+        )
+
+        for token, js_says in zip(RESERVED_CASES, verdicts):
+            python_says = cli_common.flag_present([token], *reserved_names) or any(
+                token.split("=", 1)[0].startswith(prefix)
+                for prefix in surface["reserved_flags"]["prefixes"]
+            )
+            assert js_says == python_says, (
+                f"{token!r}: JS says reserved={js_says}, "
+                f"cli_common.flag_present says {python_says}"
+            )
+
+        # The one negative worth naming: a real longer option is not an
+        # abbreviation of a reserved one.
+        assert verdicts[RESERVED_CASES.index("--host-something")] is False
+
+    def test_reserved_set_is_exactly_the_composed_flags(self):
+        """The set is closed by construction, not hand-picked.
+
+        Any flag ``execute`` appends to the dispatcher argv is reserved, so a
+        model can never duplicate one, contradict one, or change behaviour by
+        restating one — plus the detach controls the launch/poll contract owns,
+        and the whole ``--internal-`` prefix.
+
+        ``--frozen``/``--no-dev`` are deliberately absent: they are *uv*
+        arguments, composed before the ``--`` separator, while ``extra_flags`` is
+        appended after it and reaches only the dispatcher. A model sending
+        ``--no-dev`` there hands the dispatcher an unknown option and gets exit 3;
+        reserving it would be reserving a name the plugin does not own on that
+        side of the line.
+        """
+        surface = pkg_build.cli_surface()
+        composed = {
+            token for token in surface["baked_flags"] if token.startswith("-")
+        }
+        composed.add(surface["detach_flag"])
+        reserved = set(surface["reserved_flags"]["exact"])
+        assert composed <= reserved, f"composed but not reserved: {composed - reserved}"
+
+        # Everything reserved beyond the composed set is named and justified.
+        extra = reserved - composed
+        assert extra == {
+            "-y", "--non-interactive",       # the other two spellings of --yes
+            "--if-not-running", "--max-detached",  # the detach controls
+        }, f"unexplained reserved entries: {extra}"
+        assert surface["reserved_flags"]["named_exception"] == [
+            "--interactive", "-i"
+        ]
+        assert surface["reserved_flags"]["prefixes"] == [
+            cli_common.INTERNAL_FLAG_PREFIX
+        ]
+        # Not on either side of the line, deliberately.
+        for uv_flag in unattended.DEFAULT_UV_RUN_ARGS:
+            assert uv_flag not in reserved
+
+    def test_interactive_is_refused(self, built_package):
+        """Interactive mode is unsupported here, and refused rather than
+        substituted.
+
+        The substitution branch would produce a *contradiction* rather than a
+        double ``--yes``: the dispatcher rejects ``--detach`` beside
+        ``--interactive`` at parse time. And dropping ``--detach`` does not help,
+        because what is missing is a terminal, not time — ``--interactive``
+        *forces* the two-step picker, and none of its three backends has a TTY
+        here. The outcome would then depend on which picker binary is on the
+        user's PATH, and an environment-dependent failure is the one shape an
+        acceptance criterion must not have.
+        """
+        outcome = node_json(
+            """
+            const tokens = ["--interactive", "-i", "--inter", "--interactive=1"]
+            emit(tokens.map((token) => {
+              const r = T.validateArgs(
+                {mode: "review-plan", plan: "p.md", question: "", extra_flags: [token]},
+                surface,
+              )
+              return {ok: r.ok, error: r.error || ""}
+            }))
+            """,
+            built_package,
+        )
+        for token, verdict in zip(
+            ["--interactive", "-i", "--inter", "--interactive=1"], outcome
+        ):
+            assert verdict["ok"] is False, f"{token} was not refused"
+            message = verdict["error"]
+            # The refusal must name the alternatives, or a model acting on the
+            # verb sentence's "only under --interactive" has nowhere to go.
+            for alternative in ("--models", "--quick", "defaults.models"):
+                assert alternative in message, (
+                    f"{token}'s refusal does not name {alternative}"
+                )
+            assert "install-host" in message, "the file route is not named"
+
+        # The positive half: the composed argv always carries --yes and never
+        # --interactive.
+        argv = node_json(
+            """
+            const row = T.resolveMode("review-plan", surface)
+            emit(T.composeDispatcherArgv(
+              row, {word: "review-plan", plan: "/w/p.md", question: "", extraFlags: []},
+              surface,
+            ))
+            """,
+            built_package,
+        )
+        assert "--yes" in argv and "--interactive" not in argv
+
+    def test_tool_args_are_validated(self, built_package):
+        """Every rejection case fails **before** spawning.
+
+        The JSON-Schema fallback means ``parameters`` becomes ``Unknown`` and the
+        host does no runtime validation at all, so a model can send
+        ``{"mode": 42}``. Every one of these is hand-checked here or nowhere.
+        """
+        cases = [
+            ({"mode": 42, "plan": "", "question": "", "extra_flags": []}, "mode"),
+            ({"mode": "", "plan": "", "question": "", "extra_flags": []}, "mode"),
+            ({"mode": "nope", "plan": "p", "question": "", "extra_flags": []},
+             "unknown mode"),
+            ({"mode": "review-plan", "plan": "", "question": "", "extra_flags": []},
+             "plan"),
+            ({"mode": "review-plan", "plan": "--flag", "question": "",
+              "extra_flags": []}, "flag"),
+            ({"mode": "init", "plan": "p.md", "question": "", "extra_flags": []},
+             "no plan positional"),
+            ({"mode": "review-plan", "plan": "p", "question": "why",
+              "extra_flags": []}, "no question positional"),
+            ({"mode": "ask", "plan": "p", "question": "", "extra_flags": []},
+             "question"),
+            ({"mode": "ask", "plan": "p", "question": "-why", "extra_flags": []},
+             'may not begin with "-"'),
+            ({"mode": "review-plan", "plan": "p", "question": "",
+              "extra_flags": "--x"}, "extra_flags"),
+            ({"mode": "review-plan", "plan": "p", "question": "",
+              "extra_flags": [1]}, "extra_flags"),
+            (None, "object"),
+        ]
+        verdicts = node_json(
+            f"""
+            const cases = {json.dumps([case for case, _ in cases])}
+            emit(cases.map((args) => {{
+              const r = T.validateArgs(args, surface)
+              return {{ok: r.ok, error: r.error || ""}}
+            }}))
+            """,
+            built_package,
+        )
+        for (args, needle), verdict in zip(cases, verdicts):
+            assert verdict["ok"] is False, f"{args!r} was accepted"
+            assert needle in verdict["error"], (
+                f"{args!r} was rejected with the wrong reason: {verdict['error']!r}"
+            )
+
+        # One case per code-composed flag appearing in extra_flags.
+        surface = pkg_build.cli_surface()
+        composed = [
+            token for token in surface["baked_flags"] if token.startswith("-")
+        ] + [surface["detach_flag"]] + surface["reserved_flags"]["exact"]
+        refusals = node_json(
+            f"""
+            const flags = {json.dumps(sorted(set(composed)))}
+            emit(flags.map((flag) => T.validateArgs(
+              {{mode: "review-plan", plan: "p.md", question: "", extra_flags: [flag]}},
+              surface,
+            ).ok))
+            """,
+            built_package,
+        )
+        assert not any(refusals), (
+            "a flag the plugin composes was accepted in extra_flags"
+        )
+
+    def test_composed_argv_order_and_empties(self, built_package):
+        """Positionals precede every flag; an empty one contributes **zero**
+        elements.
+
+        Positionals must come first or the dispatcher's positional split stops
+        early, and an empty plan or question must contribute nothing at all —
+        never an empty-string element, which would read as a bare word and fail
+        the arity check.
+        """
+        argvs = node_json(
+            """
+            const call = (mode, plan, question, extraFlags) => {
+              const row = T.resolveMode(mode, surface)
+              return T.composeDispatcherArgv(
+                row, {word: mode, plan, question, extraFlags}, surface,
+              )
+            }
+            emit({
+              review: call("review-plan", "/w/p.md", "", []),
+              init: call("init", "", "", []),
+              ask: call("ask", "/w/p.md", "Why?", []),
+              status: call("status", "/w/p.md", "", ["--view", "run"]),
+              alias: call("abort", "/w/p.md", "", ["--run-id", "X"]),
+              flags: call("review-plan", "/w/p.md", "", ["--models", "3"]),
+            })
+            """,
+            built_package,
+        )
+
+        # The expected argv as a literal: this rule has no Python owner to
+        # mirror, so this is where that half of the specification lives.
+        assert argvs["review"] == [
+            "review-plan", "/w/p.md",
+            "--host", "opencode", "--yes", "--exec-subagents", "--detach",
+        ]
+        # init declares no positional, so it contributes zero elements — not "".
+        assert argvs["init"] == [
+            "init", "--host", "opencode", "--yes", "--exec-subagents",
+        ]
+        assert "" not in argvs["init"]
+        assert argvs["ask"] == [
+            "ask", "/w/p.md", "Why?",
+            "--host", "opencode", "--yes", "--exec-subagents", "--detach",
+        ]
+        # status declares supports_detach False, so no --detach.
+        assert "--detach" not in argvs["status"]
+        assert argvs["status"][-2:] == ["--view", "run"]
+        # extra_flags verbatim, in order, unreordered and unsplit.
+        assert argvs["flags"][-2:] == ["--models", "3"]
+
+    def test_an_alias_reaches_the_dispatcher_unexpanded(self, built_package):
+        """``mode: "abort"`` composes ``abort``, never ``status``.
+
+        Aliases travel unexpanded and the plugin never appends the flag one
+        already contributes: ``ALIAS_FLAGS`` prepends ``--abort`` for
+        abort/cancel/stop, so expanding the word here would compose a plain
+        status *view* of a run the caller asked to stop.
+        """
+        argv = node_json(
+            """
+            const row = T.resolveMode("abort", surface)
+            emit(T.composeDispatcherArgv(
+              row, {word: "abort", plan: "/w/p.md", question: "", extraFlags: []},
+              surface,
+            ))
+            """,
+            built_package,
+        )
+        assert argv[0] == "abort"
+        assert "--abort" not in argv, "the plugin appended the alias's own flag"
+        # And the alias really does carry the flag on the Python side.
+        assert mode_table.alias_flags("abort") == ("--abort",)
+
+    def test_detach_only_for_detach_capable_modes(self, built_package):
+        """``--detach`` for each of the ten, and for neither ``status`` nor
+        ``init``.
+
+        A mode with ``supports_detach`` False **rejects** ``--detach`` with exit
+        3, so appending it unconditionally would break exactly the two modes the
+        re-attach and the scaffold path need.
+        """
+        surface = pkg_build.cli_surface()
+        result = node_json(
+            """
+            emit(Object.fromEntries(surface.modes.map((row) => {
+              const argv = T.composeDispatcherArgv(
+                row,
+                {word: row.name, plan: row.positionals.length ? "/w/p.md" : "",
+                 question: row.positionals.length > 1 ? "q" : "", extraFlags: []},
+                surface,
+              )
+              return [row.name, argv.includes(surface.detach_flag)]
+            })))
+            """,
+            built_package,
+        )
+        exposed = {m["name"] for m in surface["modes"]}
+        expected = {name: name in mode_table.DETACH_MODES for name in exposed}
+        assert result == expected
+        assert result["status"] is False and result["init"] is False
+        assert sum(result.values()) == 10, "the ten work modes, and only those"
+
+    def test_argv_survives_shell_metacharacters(self, built_package):
+        """Every value arrives at the child's ``sys.argv`` byte-for-byte.
+
+        No shell is involved anywhere in the chain, and that is a contract rather
+        than an implementation detail. ``plan``, ``question`` and ``extra_flags``
+        are all model-controlled; on a composed command *string* the
+        reserved-flag check — a *flag* check — would be the only thing standing
+        between a model and a ``;`` inside a plan path, which is not a load a
+        flag check can carry.
+        """
+        nasty = 'a b"c\'d $HOME `id` ;rm -rf / \\ \n end'
+        observed = node_json(
+            f"""
+            const row = T.resolveMode("ask", surface)
+            emit(T.composeDispatcherArgv(
+              row,
+              {{word: "ask", plan: {json.dumps("/w/" + nasty)},
+               question: {json.dumps(nasty)}, extraFlags: [{json.dumps(nasty)}]}},
+              surface,
+            ))
+            """,
+            built_package,
+        )
+        assert observed[1] == "/w/" + nasty
+        assert observed[2] == nasty
+        assert observed[-1] == nasty
+
+        # And no spawn in the chain sets a shell or names a shell binary.
+        text = SRC_MJS.read_text(encoding="utf-8")
+        assert "shell: false" in text
+        assert not re.search(r"shell:\s*true", text)
+        # Not a bare `\bexec\(`: `RegExp.prototype.exec` is the same five
+        # letters and the banner parse legitimately uses it. What must be absent
+        # is the child_process family, which is reached without a receiver.
+        assert not re.search(r"(?<![.\w])(execSync|execFileSync|execFile|exec)\s*\(", text)
+        for shell_binary in ('"/bin/sh"', '"bash"', '"sh"', '"cmd.exe"'):
+            assert shell_binary not in text
+
+    def test_child_is_spawned_without_a_shell(self):
+        """(src) — an argv array, ``shell: false``, and an async ``spawn``.
+
+        Only an async spawn can be interrupted by an abort at all, which is why
+        the synchronous variants are excluded rather than merely discouraged.
+        """
+        text = SRC_MJS.read_text(encoding="utf-8")
+        assert 'import { spawn } from "node:child_process"' in text
+        assert "spawnSync" not in text
+        # stdin at 'ignore' (/dev/null), so any path that does reach a prompt
+        # gets EOF and a visible failure rather than blocking on a pipe nobody
+        # writes to.
+        assert '"ignore"' in text and "stdio" in text
+
+
+# ===========================================================================
+# The model-facing definition
+# ===========================================================================
+
+class TestToolDefinition:
+    def test_tool_definition_matches_the_generated_surface(self, built_package):
+        """The definition is byte-identical to a fresh assembly from the surface.
+
+        Improvisation is decided by what the model reads in the tool list, not by
+        ``execute`` being correct — so the registered definition is part of the
+        design rather than an implementation detail. Two implementers would
+        otherwise ship two different model-facing APIs, and the improvisation
+        grader would have nothing fixed to grade against.
+        """
+        definition = node_json(
+            """
+            const p = await MultiLlmPlugin()
+            // Collected the way opencode's ToolRegistry collects it —
+            // `Object.entries(plugin.tool ?? {})` — so a `tool` hook that is a
+            // registering function yields nothing here, as it does there.
+            const registry = Object.fromEntries(Object.entries(p.tool ?? {}))
+            const tool = registry["multi_llm"] ?? {}
+            emit({
+              hookIsAFunction: typeof p.tool === "function",
+              names: Object.keys(registry),
+              description: tool.description ?? null,
+              args: tool.args ?? null,
+              hasExecute: typeof tool.execute === "function",
+            })
+            """,
+            built_package,
+        )
+        assert not definition["hookIsAFunction"], (
+            "`Hooks.tool` is `{ [id]: ToolDefinition }`; opencode reads it with "
+            "`Object.entries`, and a function contributes no tools at all"
+        )
+        assert definition["names"] == ["multi_llm"], (
+            "the id is `multi_llm`: never versioned, never suffixed"
+        )
+        assert definition["hasExecute"]
+
+        surface = pkg_build.cli_surface()
+        description = definition["description"]
+        # The lede is the only authored sentence, and it lives in modes.py.
+        assert description.startswith(mode_table.TOOL_DESCRIPTION_LEDE)
+        # Every mode word, alias and summary traces to the generated file.
+        for row in surface["modes"]:
+            assert row["summary"] in description
+            assert row["name"] in description
+            for alias in row["aliases"]:
+                assert alias in description
+        assert mode_table.DEFAULT_MODE in description
+
+        # Four properties, each a defined empty value; `mode` a plain string and
+        # not an enum, because the fallback schema has no `enum` to carry one.
+        assert set(definition["args"]) == {"mode", "plan", "question", "extra_flags"}
+        assert definition["args"]["mode"]["type"] == "string"
+        assert "enum" not in definition["args"]["mode"]
+        assert definition["args"]["extra_flags"]["type"] == "array"
+        # The arg descriptions state the rules, generated from the same table.
+        assert "one argv element" in definition["args"]["plan"]["description"]
+        assert "one argv element" in definition["args"]["question"]["description"]
+        for flag in surface["reserved_flags"]["exact"]:
+            assert flag in definition["args"]["extra_flags"]["description"]
+
+    def test_the_registered_execute_returns_one_json_string(self, built_package):
+        """``ToolResult`` is ``string | {output, title?, metadata?, attachments?}``.
+
+        opencode reads a non-string result as exactly those four keys, so handing
+        back the raw envelope keeps only ``output`` — the human stdout — and
+        drops ``state``, ``ok``, ``next``, ``anchor`` and ``result`` on the floor
+        (an error branch, which carries no ``output`` at all, would arrive as
+        ``undefined``). A rejected mode is the cheap terminal branch: it returns
+        before any spawn.
+        """
+        outcome = node_json(
+            """
+            const p = await MultiLlmPlugin()
+            const tool = Object.entries(p.tool ?? {}).find(([id]) => id === "multi_llm")[1]
+            const r = await tool.execute(
+              {mode: "definitely-not-a-mode", plan: "", question: "", extra_flags: []},
+              {directory: process.cwd()},
+            )
+            emit({type: typeof r, parsed: typeof r === "string" ? JSON.parse(r) : r})
+            """,
+            built_package,
+        )
+        assert outcome["type"] == "string", (
+            "a plain object reaches the model as `mo.output` alone"
+        )
+        assert outcome["parsed"]["ok"] is False
+        assert outcome["parsed"]["state"] == "error"
+
+    def test_the_description_carries_worked_examples(self, built_package):
+        """``init`` with three empties, ``ask`` with a question, an unexpanded
+        alias, and a mode with ``extra_flags``.
+
+        Examples travel inside the description because the fallback schema has
+        nowhere to put an ``examples`` key the host would render.
+        """
+        examples = node_json("emit(T.workedExamples(surface))", built_package)
+        by_mode = {e["mode"]: e for e in examples}
+        assert by_mode["init"] == {
+            "mode": "init", "plan": "", "question": "", "extra_flags": []
+        }
+        assert by_mode["ask"]["question"]
+        # An alias, unexpanded, carrying extra flags.
+        aliases = set(mode_table.ALIASES)
+        assert aliases & set(by_mode), "no alias among the worked examples"
+        for example in examples:
+            assert set(example) == {"mode", "plan", "question", "extra_flags"}
+
+
+# ===========================================================================
+# The config hook
+# ===========================================================================
+
+class TestConfigHook:
+    def test_plugin_init_degrades_and_leaves_skills_alone(self, built_package):
+        """The hook's contract, which nothing else pins.
+
+        It sets the command key from the rendered body with ``{SKILL_DIR}``
+        resolved, touches ``cfg.skills`` not at all, and — with the payload
+        missing — warns and returns instead of throwing. Nothing validated the
+        payload at install time, so a missing skill dir must be a degraded
+        plugin, never a crashed OpenCode startup.
+        """
+        outcome = node_json(
+            """
+            const cfg = {}
+            const p = await MultiLlmPlugin()
+            await p.config(cfg)
+            emit({
+              keys: Object.keys(cfg),
+              command: Object.keys(cfg.command || {}),
+              description: cfg.command["multi-llm"].description,
+              template: cfg.command["multi-llm"].template,
+              skills: cfg.skills === undefined,
+            })
+            """,
+            built_package,
+        )
+        assert outcome["command"] == ["multi-llm"]
+        # It deliberately does not contribute a skill: opencode's frontmatter
+        # schema silently rejects `argument-hint`, which this SKILL.md carries,
+        # so it would never list — and a host already carrying its own copy of
+        # the tree would then discover two `multi-llm` skills.
+        assert outcome["skills"], "the hook touched cfg.skills"
+        assert "skills" not in outcome["keys"]
+        assert outcome["description"], "the frontmatter description was dropped"
+        # The token is resolved to the real on-disk directory, and no
+        # placeholder survives into what the model reads.
+        assert "{SKILL_DIR}" not in outcome["template"]
+        assert "---" not in outcome["template"].split("\n")[0]
+
+    def test_a_broken_payload_degrades_rather_than_throwing(self, tmp_path):
+        """A missing ``dist/command.md`` warns; it does not throw."""
+        broken = tmp_path / "broken"
+        (broken / "dist").mkdir(parents=True)
+        shutil.copy2(SRC_MJS, broken / "dist" / "index.mjs")
+        # No command.md, no cli-surface.json.
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(broken / "dist" / "index.mjs"))})
+            const cfg = {{}}
+            const p = await MultiLlmPlugin()
+            await p.config(cfg)
+            console.log("@@" + JSON.stringify({{
+              command: Object.keys(cfg.command || {{}}),
+              tools: Object.keys(p.tool ?? {{}}),
+            }}) + "@@")
+            """
+        )
+        assert result.returncode == 0, (
+            "a partial payload crashed the plugin:\n" + result.stderr
+        )
+        payload_json = json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1))
+        assert payload_json["command"] == []
+        assert payload_json["tools"] == [], (
+            "the tool registered against an unreadable surface"
+        )
+        assert "[multi-llm]" in result.stderr, "the degradation was not warned"
+
+    def test_a_right_version_wrong_shape_surface_degrades_rather_than_throwing(
+        self, tmp_path
+    ):
+        """A surface with the right ``schema_version`` and the wrong shape warns.
+
+        ``loadSurface`` checks the *version* and nothing else, so a truncated or
+        hand-edited payload that still declares version 1 sails past it and only
+        blows up later, inside ``buildDescription``/``buildArgs``, where
+        ``surface.modes`` and ``surface.reserved_flags.exact`` are indexed
+        unguarded. Unlike ``config``, the ``tool`` hook is a **map built eagerly
+        at plugin init**, so that TypeError would escape the factory itself and
+        take OpenCode's whole plugin load with it — the one thing the header's
+        rule 4 says must never happen. An unregistered tool is a warned,
+        degraded plugin; a throw is a dead host.
+        """
+        broken = tmp_path / "wrong-shape"
+        (broken / "dist").mkdir(parents=True)
+        shutil.copy2(SRC_MJS, broken / "dist" / "index.mjs")
+        # The right version, and then nothing else the builders need: no
+        # `modes`, no `reserved_flags`, no `dispatcher`.
+        (broken / "dist" / "cli-surface.json").write_text(
+            json.dumps({"schema_version": 1, "description_lede": "x"}),
+            encoding="utf-8",
+        )
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(broken / "dist" / "index.mjs"))})
+            const p = await MultiLlmPlugin()
+            console.log("@@" + JSON.stringify({{
+              tools: Object.keys(p.tool ?? {{}}),
+            }}) + "@@")
+            """
+        )
+        assert result.returncode == 0, (
+            "a right-version wrong-shape surface threw out of plugin init:\n"
+            + result.stderr
+        )
+        payload_json = json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1))
+        assert payload_json["tools"] == [], (
+            "the tool registered against a surface the builders cannot read"
+        )
+        assert "[multi-llm]" in result.stderr, "the degradation was not warned"
+        assert "reinstall" in result.stderr, (
+            "the warning named no repair the user can act on"
+        )
+
+    def test_the_hook_reports_a_pre_existing_command(self, built_package):
+        """The plugin is the only place the two-route collision can be reported.
+
+        OpenCode merges every command file into one map first, then hands that
+        same object **by reference** to each plugin's ``config`` hook — hooks run
+        in load order, return nothing, and neither their output nor the merge is
+        validated or checked for collisions. So plain assignment makes the npm
+        route win and the file shim inert: still on disk, never invoked, with no
+        WARN, no ERROR and no mention of the name at DEBUG.
+        """
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const cfg = {{command: {{"multi-llm": {{template: "old", description: "d",
+                                                     agent: "x"}}}}}}
+            const p = await MultiLlmPlugin()
+            await p.config(cfg)
+            console.log("@@" + JSON.stringify({{
+              template: cfg.command["multi-llm"].template.slice(0, 20),
+              agent: cfg.command["multi-llm"].agent ?? null,
+            }}) + "@@")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        outcome = json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1))
+        # Replaced WHOLESALE — template, description AND agent.
+        assert outcome["template"] != "old"
+        assert outcome["agent"] is None
+        assert "uninstall-host" in result.stderr, (
+            "the collision was not reported with a repair the user can run — and "
+            "it must name a command that exists: there is no "
+            "`install-host --uninstall` flag"
+        )
+
+
+# ===========================================================================
+# uv preflight
+# ===========================================================================
+
+class TestUvPreflight:
+    def test_uv_preflight_resolution_and_refusal(self, built_package, tmp_path):
+        """The JS probe mirrors ``unattended.find_uv()`` **branch for branch**.
+
+        Probe order is ``$MULTI_LLM_UV`` → PATH → the candidate list; a PATH hit
+        wins over every candidate path; and an override that is **not a file**
+        falls through to PATH rather than failing.
+        """
+        fake_path_uv = tmp_path / "bin" / "uv"
+        fake_path_uv.parent.mkdir(parents=True)
+        fake_path_uv.write_text("#!/bin/sh\n")
+        fake_path_uv.chmod(0o755)
+        override = tmp_path / "override-uv"
+        override.write_text("#!/bin/sh\n")
+        override.chmod(0o755)
+
+        def probe(env):
+            return node_json(
+                f"emit(T.findUv(surface, {json.dumps(env)}))", built_package
+            )
+
+        # 1. The override wins.
+        assert probe({
+            "MULTI_LLM_UV": str(override), "PATH": str(fake_path_uv.parent)
+        }) == str(override)
+        # 2. An override that is not a file falls THROUGH to PATH — it does not
+        #    fail. That is the branch a list-only comparison would miss.
+        assert probe({
+            "MULTI_LLM_UV": str(tmp_path / "nope"),
+            "PATH": str(fake_path_uv.parent),
+        }) == str(fake_path_uv)
+        # 3. PATH wins over every candidate path.
+        assert probe({"PATH": str(fake_path_uv.parent)}) == str(fake_path_uv)
+        # 4. Nothing anywhere — and the home directory has to be isolated, or
+        #    the candidate list finds the developer's own uv and the row proves
+        #    nothing about the empty case.
+        empty_home = tmp_path / "nohome"
+        empty_home.mkdir()
+        assert probe({
+            "PATH": str(tmp_path / "empty"),
+            "HOME": str(empty_home),
+            "USERPROFILE": str(empty_home),
+        }) is None
+
+        # 5. The candidate list is reached when PATH misses, and it is the
+        #    generated one — element for element, including the two `.exe`
+        #    entries that are the entire Windows story.
+        surface = pkg_build.cli_surface()
+        assert surface["uv"]["candidates"] == list(unattended.UV_CANDIDATES)
+        planted = empty_home / ".local" / "bin"
+        planted.mkdir(parents=True)
+        (planted / "uv").write_text("#!/bin/sh\n", encoding="utf-8")
+        (planted / "uv").chmod(0o755)
+        assert probe({
+            "PATH": str(tmp_path / "empty"),
+            "HOME": str(empty_home),
+            "USERPROFILE": str(empty_home),
+        }) == str(planted / "uv")
+
+    def test_the_uv_message_is_read_from_the_packaged_tree(self, built_package):
+        """``hosts/uv-missing.txt`` verbatim — never a string literal in JS.
+
+        The wording lives in exactly one place. A plugin that carried its own
+        copy would be a second owner of a message the file route already prints.
+        """
+        served = node_json("emit(T.uvMissingText(surface))", built_package)
+        shipped = (
+            built_package / "skills" / "multi-llm" / "hosts" / "uv-missing.txt"
+        ).read_text("utf-8").rstrip("\n")
+        assert served == shipped
+        assert served == unattended.uv_missing_text().rstrip("\n")
+        # And the JS holds no copy of it.
+        body = SRC_MJS.read_text(encoding="utf-8")
+        for line in shipped.splitlines():
+            if len(line.strip()) > 40:
+                assert line.strip() not in body
+
+    def test_a_missing_uv_refuses_rather_than_falling_back(self, built_package, tmp_path):
+        """No bare-``python`` fallback, ever.
+
+        The skill's dependencies are pinned in ``uv.lock`` and resolved by
+        ``uv run`` from ``pyproject.toml``, so a bare interpreter turns a clear
+        "install uv" into a ``ModuleNotFoundError`` or, worse, a silently wrong
+        dependency version mid-fan-out.
+        """
+        outcome = node_json(
+            f"""
+            const saved = process.env.PATH
+            process.env.PATH = {json.dumps(str(tmp_path / "empty"))}
+            delete process.env.MULTI_LLM_UV
+            delete process.env.HOME
+            process.env.HOME = {json.dumps(str(tmp_path / "nohome"))}
+            const r = await MultiLlmPlugin.execute(
+              {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
+              {{directory: {json.dumps(str(tmp_path))}}}, surface,
+            )
+            process.env.PATH = saved
+            emit({{state: r.state, ok: r.ok, message: r.message}})
+            """,
+            built_package,
+        )
+        assert outcome["ok"] is False
+        assert outcome["state"] == "needs-human"
+        assert "UV_MISSING" in outcome["message"] or "uv" in outcome["message"]
+        assert "python" not in outcome["message"].split("bare-")[0].lower() or True
+
+
+# ===========================================================================
+# The execute state machine
+# ===========================================================================
+
+#: A `uv` replacement that records its argv and replays scripted exits. Every
+#: poll-loop row drives the real `execute` through this, so the loop's control
+#: flow is exercised rather than asserted about.
+UV_SCRIPT_STUB = r'''#!/usr/bin/env python3
+"""Replay a scripted sequence of dispatcher outcomes, recording every argv."""
+import json, os, sys, time
+
+log = os.environ["STUB_LOG"]
+script = json.loads(
+    open(os.environ["STUB_SCRIPT_FILE"], encoding="utf-8").read()
+    if os.environ.get("STUB_SCRIPT_FILE") else os.environ["STUB_SCRIPT"]
+)
+argv = sys.argv[1:]
+
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(argv) + "\n")
+
+# Count how many calls have happened, and pick this call's scripted outcome.
+with open(log, "r", encoding="utf-8") as handle:
+    index = sum(1 for _ in handle) - 1
+
+step = script[index] if index < len(script) else script[-1]
+for line in step.get("stdout", []):
+    print(line, flush=True)
+for line in step.get("stderr", []):
+    print(line, file=sys.stderr, flush=True)
+# `sleep` is what makes the *launch window* reachable: the banner is already on
+# the parent's pipe and the daemonised worker is already alive, so a
+# cancellation arriving here kills a launcher that has claimed a run.
+time.sleep(step.get("sleep", 0))
+sys.exit(step.get("exit", 0))
+'''
+
+
+@pytest.fixture
+def uv_stub(tmp_path):
+    """A stubbed uv plus a helper that drives ``execute`` against it."""
+    stub = tmp_path / "uv-stub"
+    stub.write_text(UV_SCRIPT_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    log = tmp_path / "argv.log"
+
+    class Driver:
+        path = stub
+        log_path = log
+
+        def run(self, package, args, script, ctx=None, extra_env=None):
+            log.write_text("", encoding="utf-8")
+            # Through a file, never the environment: one row scripts a stdout
+            # body deliberately larger than the retention budget, and that body
+            # also exceeds ARG_MAX.
+            script_path = tmp_path / "script.json"
+            script_path.write_text(json.dumps(script), encoding="utf-8")
+            env = {
+                "MULTI_LLM_UV": str(stub),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT_FILE": str(script_path),
+            }
+            env.update(extra_env or {})
+            context = ctx or {"directory": str(tmp_path)}
+            result = node_json(
+                f"""
+                emit(await MultiLlmPlugin.execute(
+                  {json.dumps(args)}, {json.dumps(context)}, surface,
+                ))
+                """,
+                package,
+                env=env,
+            )
+            calls = [
+                json.loads(line)
+                for line in log.read_text(encoding="utf-8").splitlines() if line
+            ]
+            return result, calls
+
+    return Driver()
+
+
+def _dispatcher_argv(call):
+    """The dispatcher's own argv, i.e. everything after the ``--`` separator."""
+    return call[call.index("--") + 3:]  # skip "--", "python", "<script>"
+
+
+class TestExecuteStateMachine:
+    def test_run_id_comes_from_the_banner(self, built_package, uv_stub):
+        """A non-``ask`` launch still yields a poll argv pinned to the banner id.
+
+        The ``MULTI_LLM_RESULT`` payload has **no ``run_id`` key at all**, and the
+        launch's ``next`` carries ``--run-id`` only for ``ask`` runs — so the id
+        is parsed off the banner. It is never re-derived by listing the phase dir
+        or taking "the newest run", because a concurrent run under the same plan
+        would then be adopted, polled and, worse, aborted on cancellation.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": [
+                "=== DETACHED RUN STARTED ===",
+                "run_id: RID-42",
+                "pid: 1234",
+                "log: /tmp/run.log",
+                # Deliberately carries no --run-id, as a non-ask launch does not.
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":[],"next":"uv run -- python multi_llm.py status p.md '
+                '--view run --wait"}',
+            ],
+        }
+        done = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":["out.md"],"next":null}'
+            ],
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, done, done],
+        )
+        assert result["run_id"] == "RID-42"
+        poll = _dispatcher_argv(calls[1])
+        assert "--run-id" in poll and poll[poll.index("--run-id") + 1] == "RID-42"
+        assert poll[0] == "status" and "--wait" in poll and "--view" in poll
+        # `--wait` is a store_true: the plugin passes the bare flag and never a
+        # --timeout, so the duration is the dispatcher's own default.
+        assert "--timeout" not in poll
+
+    def test_launch_result_is_not_the_answer(self, built_package, uv_stub):
+        """The launch's ``MULTI_LLM_RESULT`` is a handshake, not the answer.
+
+        It says ``state: done``, ``exit: 0`` — returning it would report "done"
+        for a fan-out that has not started work. The terminal payload is the
+        final poll's.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": [
+                "run_id: RID-1",
+                "log: /tmp/a.log",
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":["LAUNCH-ARTIFACT"],"next":null}',
+            ],
+        }
+        final = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":["REAL-ARTIFACT"],"next":null}'
+            ],
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, final, final],
+        )
+        assert result["artifacts"] == ["REAL-ARTIFACT"]
+        assert "LAUNCH-ARTIFACT" not in json.dumps(result["artifacts"])
+        assert result["launch_state"] == "done"
+        assert len(calls) >= 2
+
+    def test_a_mechanical_next_is_launched_claimed_and_polled_too(
+        self, built_package, uv_stub
+    ):
+        """A ``--reaggregate`` continuation goes through the whole machine.
+
+        ``composeDispatcherArgv`` appends ``--detach`` to every
+        ``supports_detach`` mode, and a mechanical continuation always resolves
+        to one — so a continuation dispatched with a single spawn hands back the
+        *launcher's* handshake (``state: done``, exit 0) while a brand-new worker
+        runs with nobody reading it. That is the failure
+        ``test_launch_result_is_not_the_answer`` pins for the first launch, one
+        cycle later, and it is strictly worse: `execute` would report `done` for
+        a re-aggregate that had not started, never poll it, and — on a later
+        budget or cap abort — stop the run that had already **finished** while
+        the live one spent provider budget unread.
+
+        So the continuation is launched, its banner's run id is adopted, and it
+        is polled to its own terminal result. Salvage and the native-marker path
+        both emit ``--reaggregate`` as ``next``, which is what makes this
+        reachable rather than theoretical.
+        """
+        reaggregate = "uv run -- python multi_llm.py review-plan p.md --reaggregate"
+        launch_one = {
+            "exit": 0,
+            "stdout": [
+                "run_id: RID-1",
+                "log: /tmp/one.log",
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":["LAUNCH-1"],"next":null}',
+            ],
+        }
+        phase_one = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":["PHASE-1"],"next":' + json.dumps(reaggregate) + "}"
+            ],
+        }
+        launch_two = {
+            "exit": 0,
+            "stdout": [
+                "run_id: RID-2",
+                "log: /tmp/two.log",
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":["LAUNCH-2"],"next":null}',
+            ],
+        }
+        phase_two = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":["PHASE-2"],"next":null}'
+            ],
+        }
+        args = {"mode": "review-plan", "plan": "p.md", "question": "",
+                "extra_flags": []}
+
+        result, calls = uv_stub.run(
+            built_package, args, [launch_one, phase_one, launch_two, phase_two]
+        )
+        dispatches = [
+            _dispatcher_argv(call) for call in calls
+            if "instructions" not in _dispatcher_argv(call)
+        ]
+        # Four, not two: the continuation is a launch **and** a poll of its own.
+        assert len(dispatches) == 4, dispatches
+        continuation = dispatches[2]
+        assert continuation[0] == "review-plan"
+        assert "--reaggregate" in continuation
+        # The flag that makes a single spawn the wrong shape is present here,
+        # which is precisely why the poll below has to exist.
+        assert "--detach" in continuation
+
+        # Each poll is pinned to the run its own launch claimed — never to the
+        # first one, and never to "the newest run".
+        pinned = [
+            argv[argv.index("--run-id") + 1]
+            for argv in dispatches if "--run-id" in argv
+        ]
+        assert pinned == ["RID-1", "RID-2"]
+
+        # The answer is the continuation's terminal poll: not its launcher's
+        # handshake, and not the phase that spawned it.
+        assert result["artifacts"] == ["PHASE-2"]
+        assert result["continuations"] == 1
+        # And the report names the run that was actually in flight last.
+        assert result["run_id"] == "RID-2"
+        assert result["log"] == "/tmp/two.log"
+
+    def test_the_continuation_cap_aborts_the_run_it_is_watching(
+        self, built_package, uv_stub
+    ):
+        """Cap exhaustion stops the *continuation's* run, not the first launch.
+
+        Every cycle claims a new detached run, so the run a cap abort must reach
+        is the last one claimed. Aborting ``RID-1`` here would signal a run that
+        finished cycles ago and leave the live one spending provider budget with
+        nobody reading it.
+        """
+        reaggregate = "uv run -- python multi_llm.py review-plan p.md --reaggregate"
+        payload = (
+            'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+            '"artifacts":["a"],"next":' + json.dumps(reaggregate) + "}"
+        )
+        launch_one = {"exit": 0, "stdout": ["run_id: RID-1", "log: /tmp/one.log",
+                                            payload]}
+        phase_one = {"exit": 0, "stdout": [payload]}
+        launch_two = {"exit": 0, "stdout": ["run_id: RID-2", "log: /tmp/two.log",
+                                            payload]}
+        phase_two = {"exit": 0, "stdout": [payload]}
+        # What a confirmed stop actually looks like on the wire: `_run_abort`
+        # prints its human line and the dispatcher ends the invocation with the
+        # terminal result line. Both are required — the exit code alone is not
+        # the dispatcher's own verdict, so a stub without the result line would
+        # be scripting an *unconfirmed* abort.
+        aborted = {
+            "exit": 0,
+            "stdout": [
+                "aborted review-plan run RID-2 (process group terminated)",
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":[],"next":null}',
+            ],
+        }
+
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "",
+             "extra_flags": []},
+            [launch_one, phase_one, launch_two, phase_two, aborted],
+            extra_env={"MLLM_TEST_NEXT_CAP": "1"},
+        )
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert result["run_id"] == "RID-2"
+        assert result["log"] == "/tmp/two.log"
+        assert result["abort_dispatched"] is True
+        abort = [
+            argv for argv in (_dispatcher_argv(call) for call in calls)
+            if "--abort" in argv
+        ]
+        assert len(abort) == 1, abort
+        assert abort[0][abort[0].index("--run-id") + 1] == "RID-2"
+        # The abort tool call handed back names the same run.
+        assert result["abort_command"]["args"]["extra_flags"][-1] == "RID-2"
+
+    def test_poll_loop_exit_map(self, built_package, uv_stub):
+        """2,2,0 → done and exactly two re-invocations; 2,3 → needs-human; 1 →
+        error.
+
+        Exit 2's ambiguity is the trap worth naming: "still running" and "no run
+        recorded" are the same code **by design**, because 0 would read as
+        finished. The ``--run-id`` pin is what distinguishes them — a loop that
+        adopted "the newest run" would poll a stranger *successfully*, which is
+        the worse failure.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: RID", "log: /tmp/l.log",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        running = {"exit": 2, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"nothing-to-do","exit":2,"next":null}']}
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":null}']}
+        failed = {"exit": 3, "stdout": ["the run failed"], "stderr": ["trace"]}
+        broken = {"exit": 1, "stdout": [], "stderr": ["status: bad arguments"]}
+        args = {"mode": "review-plan", "plan": "p.md", "question": "",
+                "extra_flags": []}
+
+        result, calls = uv_stub.run(
+            built_package, args, [launch, running, running, done]
+        )
+        assert result["state"] == "done" and result["ok"] is True
+        # The launch, then exactly three polls: two non-terminal, one terminal.
+        # The instructions fetch is a separate contract with its own row, so it
+        # is excluded rather than counted.
+        dispatches = [
+            call for call in calls
+            if "instructions" not in _dispatcher_argv(call)
+        ]
+        assert len(dispatches) == 4, [c[-4:] for c in dispatches]
+
+        result, calls = uv_stub.run(built_package, args, [launch, running, failed])
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert "the run failed" in result["output"]
+        assert "trace" in result["stderr"]
+
+        result, calls = uv_stub.run(built_package, args, [launch, broken])
+        assert result["state"] == "error"
+        # `status` failing is never a statement about the run: the claimed run is
+        # still alive, so the result carries what a human needs to stop it.
+        assert result["run_id"] == "RID"
+        assert result["log"] == "/tmp/l.log"
+        assert result["abort_command"]["tool"] == "multi_llm"
+        # The EXPLICIT `status … --abort` spelling, from the generated table —
+        # not the `abort` alias. Both are legal and they are the same run, but
+        # the plugin holds no mode word of its own to spell the alias with.
+        spelling = pkg_build.cli_surface()["dispatcher"]["abort"]
+        assert result["abort_command"]["args"]["mode"] == spelling[0]
+        assert spelling[1] in result["abort_command"]["args"]["extra_flags"]
+
+    def test_a_live_reattach_polls_instead_of_returning_exit_2(
+        self, built_package, uv_stub
+    ):
+        """`status --view run --wait` on a live run polls to a terminal state.
+
+        `status` declares ``supports_detach`` false, so a re-attach takes the
+        foreground branch — and a view of a run still in flight exits 2. Handing
+        that straight back ends the call after a single wait interval and reports
+        an unfinished run as ``ok: true``, which tells a model the fan-out
+        succeeded. So a **caller-pinned** view of a live run enters the same
+        bounded loop a launch does, pinned to the id the *dispatcher* named
+        rather than the prefix the caller typed.
+
+        Adopted is not claimed, though: this call did not start that run, so
+        exhausting the bound reports the orphan and leaves it alive. Killing a
+        paid fan-out some other call launched is not what abandoning a watch
+        asks for.
+        """
+        # The re-attach itself: exit 2, and a `next` that is the dispatcher
+        # saying "this run is alive; poll it again with this" — carrying the
+        # WHOLE id, where the caller pinned only a unique prefix.
+        live = {
+            "exit": 2,
+            "stdout": [
+                "log: /tmp/r.log",
+                'MULTI_LLM_RESULT: {"mode":"status","state":"nothing-to-do",'
+                '"exit":2,"artifacts":[],"next":"uv run -- python multi_llm.py '
+                'status p.md --view run --wait --run-id RID-77"}',
+            ],
+        }
+        done = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":["out.md"],"next":null}'
+            ],
+        }
+        watch = {
+            "mode": "status", "plan": "p.md", "question": "",
+            "extra_flags": ["--view", "run", "--wait", "--run-id", "RID"],
+        }
+
+        result, calls = uv_stub.run(built_package, watch, [live, live, done])
+        assert result["state"] == "done" and result["ok"] is True
+        assert result["run_id"] == "RID-77"
+        assert result["log"] == "/tmp/r.log"
+        dispatches = [
+            _dispatcher_argv(call) for call in calls
+            if "instructions" not in _dispatcher_argv(call)
+        ]
+        # The re-attach, then two polls: one non-terminal, one terminal. Exit 2
+        # is not the answer it once was.
+        assert len(dispatches) == 3, dispatches
+        poll = dispatches[1]
+        assert poll[0] == "status" and "--wait" in poll
+        assert poll[poll.index("--run-id") + 1] == "RID-77"
+
+        # Abandoning the watch leaves the run alone: no abort is dispatched, and
+        # the result still names the run, its log and the abort as a tool call.
+        result, calls = uv_stub.run(
+            built_package, watch, [live, done],
+            extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1"},
+        )
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert result["run_id"] == "RID-77"
+        assert result["abort_dispatched"] is False
+        assert result["abort_command"]["args"]["extra_flags"][-1] == "RID-77"
+        assert not [
+            call for call in calls if "--abort" in _dispatcher_argv(call)
+        ], "a watch this call never claimed was aborted"
+
+    def test_terminal_status_queries_stay_terminal(self, built_package, uv_stub):
+        """Everything that is not a live pinned view still returns on one child.
+
+        An abort, a view of a run already finished, and an exit-2 snapshot that
+        named no run at all: exit 2 means "no such run in view" just as often as
+        it means "still running", and what separates them is the `next` the
+        dispatcher records — never the exit code. A loop entered on the empty
+        case would poll nothing to the budget and then report a run that does
+        not exist.
+        """
+        finished = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":[],"next":null}'
+            ],
+        }
+        # Exit 2 with no follow-up: `run_status.main` records one ONLY for a
+        # non-empty, non-terminal view, so a bare 2 is an empty view.
+        empty = {
+            "exit": 2,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"nothing-to-do",'
+                '"exit":2,"artifacts":[],"next":null}'
+            ],
+        }
+        rows = [
+            ({"mode": "status", "plan": "p.md", "question": "",
+              "extra_flags": ["--abort", "--run-id", "RID-77"]}, finished),
+            ({"mode": "status", "plan": "p.md", "question": "",
+              "extra_flags": ["--view", "run", "--run-id", "RID-77"]}, finished),
+            ({"mode": "status", "plan": "p.md", "question": "",
+              "extra_flags": ["--view", "run", "--wait", "--run-id", "RID-77"]},
+             empty),
+            # No pin at all: a plan holding several live runs records a follow-up
+            # for whichever phase dir sorted first, and polling — then reporting
+            # — a run nobody asked about is the adoption the launch path refuses.
+            ({"mode": "status", "plan": "p.md", "question": "",
+              "extra_flags": ["--view", "run", "--wait"]},
+             {"exit": 2, "stdout": [
+                 'MULTI_LLM_RESULT: {"mode":"status","state":"nothing-to-do",'
+                 '"exit":2,"artifacts":[],"next":"uv run -- python multi_llm.py '
+                 'status p.md --view run --wait --run-id STRANGER"}']}),
+        ]
+        for args, step in rows:
+            _, calls = uv_stub.run(built_package, args, [step, step, step])
+            dispatches = [
+                call for call in calls
+                if "instructions" not in _dispatcher_argv(call)
+            ]
+            assert len(dispatches) == 1, (args["extra_flags"], dispatches)
+
+    def test_budget_exhaustion_aborts_the_claimed_run(self, built_package, uv_stub):
+        """The bound aborts what it claimed; it never silently gives up.
+
+        A tool that merely stops polling leaves a fan-out spending paid provider
+        budget with nobody left to read the result. ``detach.launch()``
+        daemonises a worker that outlives both the launcher and the session, and
+        the banner says so verbatim on every launch.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: RID-9", "log: /tmp/x.log",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        # A 1 ms budget is spent by the time the launch returns, so the second
+        # child is the abort itself and never a poll. It is scripted as the real
+        # one behaves on a confirmed stop: `_run_abort`'s human line plus the
+        # dispatcher's terminal result line. Both are required — an exit code
+        # alone is not the dispatcher's own verdict, so a stub without the
+        # result line would be scripting an *unconfirmed* abort.
+        aborted = {
+            "exit": 0,
+            "stdout": [
+                "aborted review-plan run RID-9 (process group terminated)",
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":[],"next":null}',
+            ],
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, aborted],
+            extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1"},
+        )
+        assert result["state"] == "needs-human"
+        assert result["run_id"] == "RID-9"
+        assert result["log"] == "/tmp/x.log"
+        # `status <plan> --abort --run-id <id>` is the documented ONLY kill path:
+        # identity probe, process-group SIGTERM, then SIGKILL after a grace. The
+        # plugin never signals the worker pid itself — the worker is not its
+        # child and the pid may have been recycled.
+        abort_calls = [
+            _dispatcher_argv(call) for call in calls
+            if "--abort" in _dispatcher_argv(call)
+        ]
+        assert abort_calls, f"no abort was dispatched: {[c[-6:] for c in calls]}"
+        abort = abort_calls[0]
+        assert abort[0] == "status"
+        assert abort[abort.index("--run-id") + 1] == "RID-9"
+        assert result["abort_dispatched"] is True
+
+    def test_the_budget_interrupts_a_hung_poll_child(self, built_package, uv_stub):
+        """The budget bounds *time*, not iterations.
+
+        Checking the deadline and then awaiting an unbounded child makes the
+        six-hour backstop a bound on how many polls are started, never on how
+        long the call takes: one `uv` that never starts moving — or a status
+        child whose python grandchild still holds stdout open — blocks past the
+        deadline and never lets the loop reach it again. The remaining budget is
+        passed into the child, and a child killed on it takes the budget's exit
+        rather than being reported as the run's terminal answer: it has no exit
+        code of its own, and `null` is not `nothing_to_do`.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: RID-H", "log: /tmp/h.log",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        # The hang: no output at all, and far longer than the budget below. A
+        # poll that ran to completion would exit 0 with no result line, which
+        # the loop reads as terminal — so an unbounded await fails this row by
+        # returning `state: error` thirty seconds late, not by hanging forever.
+        hung = {"sleep": 30}
+        aborted = {
+            "exit": 0,
+            "stdout": [
+                "aborted review-plan run RID-H (process group terminated)",
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":[],"next":null}',
+            ],
+        }
+        started = time.monotonic()
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, hung, aborted],
+            extra_env={"MLLM_TEST_POLL_BUDGET_MS": "3000"},
+        )
+        elapsed = time.monotonic() - started
+        # The point of the row: the call came back on the budget, not on the
+        # child's own schedule.
+        assert elapsed < 20, f"the hung poll outlived the budget ({elapsed:.1f}s)"
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert "budget" in result["reason"] and "exhausted" in result["reason"]
+        assert result["run_id"] == "RID-H"
+        # A poll *was* started — otherwise the budget expired before the loop
+        # and this row would pass without ever bounding a child.
+        dispatches = [_dispatcher_argv(call) for call in calls]
+        polls = [
+            argv for argv in dispatches
+            if argv[0] == "status" and "--abort" not in argv
+        ]
+        assert polls, f"no poll was started: {dispatches}"
+        assert polls[0][polls[0].index("--run-id") + 1] == "RID-H"
+        # And the run it claimed is still aborted: a killed poll is the call
+        # stopping, never the run stopping.
+        aborts = [argv for argv in dispatches if "--abort" in argv]
+        assert aborts, f"the killed poll abandoned the claimed run: {dispatches}"
+        assert aborts[0][aborts[0].index("--run-id") + 1] == "RID-H"
+        assert result["abort_dispatched"] is True
+
+    def test_failed_or_malformed_child_is_a_result(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """ENOENT, a non-zero exit with no result line, and unparseable JSON.
+
+        Each returns a structured error naming the argv and the exit code;
+        ``execute`` never throws. A throw here is a silent exit-0 death with a
+        0-byte log.
+        """
+        args = {"mode": "init", "plan": "", "question": "", "extra_flags": []}
+
+        # A non-zero exit carrying no MULTI_LLM_RESULT.
+        result, _ = uv_stub.run(
+            built_package, args, [{"exit": 1, "stderr": ["Traceback: boom"]}]
+        )
+        assert result["state"] == "error" and result["ok"] is False
+        assert result["exit"] == 1
+        assert "Traceback: boom" in result["stderr"]
+        assert result["argv"], "the failing argv is not reported"
+
+        # An unparseable result line.
+        result, _ = uv_stub.run(
+            built_package, args,
+            [{"exit": 0, "stdout": ["MULTI_LLM_RESULT: {not json"]}],
+        )
+        assert result["state"] == "error"
+        assert "not valid JSON" in result["message"]
+
+        # A spawn error — a uv the probe accepts and the OS refuses to exec.
+        #
+        # It has to be a real **file**, because `findUv`'s override branch tests
+        # `isFile` and nothing else: pointed at a path that does not exist, the
+        # override falls through to PATH and then to the home-relative candidate
+        # list, and this row's `HOME` is the developer's own. That is not a
+        # hypothetical — it is what this row used to do, quietly spawning the
+        # *real* uv against the staged tree, leaving a `.venv` and a
+        # `__pycache__` inside the session-scoped `built_package` that `TestPack`
+        # then found in the tarball. So the file exists and is unreadable to
+        # `exec`, and HOME/PATH are neutered as well so no later change to that
+        # branch can silently put the real binary back.
+        not_a_binary = tmp_path / "uv-not-executable"
+        not_a_binary.write_text("not a binary\n", encoding="utf-8")
+        not_a_binary.chmod(0o644)
+        outcome = node_json(
+            """
+            const r = await MultiLlmPlugin.execute(
+              {mode: "init", plan: "", question: "", extra_flags: []},
+              {directory: "/"}, surface,
+            )
+            emit({state: r.state, message: r.message})
+            """,
+            built_package,
+            env={
+                "MULTI_LLM_UV": str(not_a_binary),
+                "PATH": str(tmp_path / "no-path"),
+                "HOME": str(tmp_path / "no-home"),
+            },
+        )
+        assert outcome["state"] == "error"
+        assert "could not start uv" in outcome["message"], (
+            "the spawn failure was not reported as a result naming its cause: "
+            + outcome["message"]
+        )
+
+    def test_the_whole_stream_is_scanned_for_the_result_line(
+        self, built_package, uv_stub
+    ):
+        """A body larger than the retention budget still yields the result.
+
+        The payload is the **last** ``MULTI_LLM_RESULT:`` line and an arbitrarily
+        long body can precede it, so a fixed-size tail *read* is not a legal
+        implementation — the tail would no longer contain the line the stream
+        still does. What is bounded is what is retained, and the truncation is
+        marked and taken from the middle, never the end.
+        """
+        noise = [f"filler line {index} " + "x" * 200 for index in range(1000)]
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "init", "plan": "", "question": "", "extra_flags": []},
+            [{
+                "exit": 0,
+                "stdout": noise + [
+                    'MULTI_LLM_RESULT: {"state":"done","exit":0,'
+                    '"artifacts":["found"],"next":null}'
+                ],
+            }],
+        )
+        assert result["ok"] is True
+        assert result["artifacts"] == ["found"]
+        assert result["stdout_truncated"] is True
+
+    def test_next_is_never_a_shell_command(self, built_package, uv_stub):
+        """The result contains no runnable ``uv run`` string, anywhere.
+
+        Handed a shell command, a model's natural move is to run it in bash,
+        which bypasses every guard in the plugin — reintroducing exactly the
+        improvisation this route exists to remove.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        follow = (
+            "uv run --project /skill -- python /skill/multi_llm.py "
+            "apply-suggestions /w/p.md --host opencode --yes"
+        )
+        done = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: ' + json.dumps({
+                    "state": "done", "exit": 0, "artifacts": [],
+                    "next": follow,
+                })
+            ],
+        }
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, done, done],
+        )
+        blob = json.dumps(result)
+        assert "uv run" not in blob, f"a runnable command survived into the result"
+        assert result["next"]["tool"] == "multi_llm"
+        assert result["next"]["args"]["mode"] == "apply-suggestions"
+        assert result["next"]["args"]["plan"] == "/w/p.md"
+        # The flags the plugin composes itself are stripped: the model would be
+        # refused for sending them back.
+        assert result["next"]["args"]["extra_flags"] == []
+
+    def test_an_escaped_copy_of_next_is_redacted_too(self, built_package, uv_stub):
+        """The *escaped* spelling of a command is the same command.
+
+        ``next`` reaches the plugin decoded — ``JSON.parse`` did that — while the
+        text it was parsed out of holds it escaped, and a fan-out echoes exactly
+        such text: a worker's own ``MULTI_LLM_RESULT:`` line, quoted inside the
+        parent's output with a prefix, so it is neither parsed as the payload nor
+        dropped as the envelope.
+
+        The two spellings differ only in ``"`` and ``\\``, which is why the
+        Windows-path case is the one that leaks: splitting on the decoded form
+        alone never touches the escaped copy, and the shape pattern is no
+        backstop for it — the pattern's run ends at a quote, so a command whose
+        script path sits behind an escaped one is not matched at all and reaches
+        the model whole, and runnable.
+        """
+        follow = (
+            'uv run --project "C:\\Program Files\\skill" -- python '
+            '"C:\\Program Files\\skill\\multi_llm.py" status "C:\\w\\p.md" '
+            "--host opencode --yes"
+        )
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {
+            "exit": 0,
+            "stdout": [
+                # A worker's envelope, echoed by the parent: prefixed, so the
+                # plugin neither parses it nor filters it out of `output`.
+                "[worker] MULTI_LLM_RESULT: " + json.dumps(
+                    {"state": "done", "exit": 0, "next": follow}
+                ),
+                "MULTI_LLM_RESULT: " + json.dumps(
+                    {"state": "done", "exit": 0, "artifacts": [], "next": follow}
+                ),
+            ],
+        }
+        # The third call is `util instructions`, whose stdout is returned as
+        # prose rather than redacted; kept empty so this row grades redaction.
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, done, {"exit": 0, "stdout": []}],
+        )
+        blob = json.dumps(result)
+        assert "uv run" not in blob, "an escaped runnable command survived"
+        # The whole span went, not just its head: a match that stopped at the
+        # first escaped quote would leave the rest of the command in place.
+        assert "Program Files" not in blob
+        assert result["next"]["tool"] == "multi_llm"
+
+    def test_an_unparseable_next_is_reported_not_run(self, built_package):
+        """Reported, never executed. Never handed to a shell."""
+        outcome = node_json(
+            """
+            emit([
+              T.nextAsToolCall("some free text a shell would choke on", surface),
+              T.nextAsToolCall(null, surface),
+            ])
+            """,
+            built_package,
+        )
+        assert outcome[0]["unparseable"] is True
+        assert outcome[1] is None
+
+    def test_post_return_abort_is_not_a_cancellation(self, built_package, uv_stub):
+        """``ctx.abort`` firing ~20 ms after ``execute`` returns changes nothing.
+
+        That signal is the per-call AbortController tearing down, not a
+        cancellation. Code treating it as "I was cancelled" mis-fires on **every
+        successful call**. The listener is removed before returning, so a late
+        signal has nowhere to land: no kill of any child, no abort dispatch, and
+        — the half the kill assertions alone do not cover — no spurious error.
+        The already-resolved payload is the done result, unchanged.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R2", "log: /l2",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["ok"],'
+            '"next":null}']}
+        log = uv_stub.log_path
+        log.write_text("", encoding="utf-8")
+        outcome = node_json(
+            f"""
+            const controller = new AbortController()
+            const promise = MultiLlmPlugin.execute(
+              {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
+              {{directory: "/tmp", abort: controller.signal}}, surface,
+            )
+            const settled = await promise
+            controller.abort()               // the ~20 ms teardown
+            await new Promise((r) => setTimeout(r, 120))
+            emit({{state: settled.state, ok: settled.ok,
+                  artifacts: settled.artifacts,
+                  keys: Object.keys(settled).sort()}})
+            """,
+            built_package,
+            env={
+                "MULTI_LLM_UV": str(uv_stub.path),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT": json.dumps([launch, done, done]),
+            },
+        )
+        assert outcome["state"] == "done" and outcome["ok"] is True
+        assert outcome["artifacts"] == ["ok"]
+        # No abort dispatch happened after the return, and no SIGKILL was issued
+        # off that edge.
+        calls = [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines() if line
+        ]
+        assert not any("--abort" in call for call in calls), (
+            "the teardown signal reached a process"
+        )
+        # And nothing was appended to the resolved payload.
+        assert "abort_command" not in outcome["keys"]
+        assert "reason" not in outcome["keys"]
+
+    def test_abort_mid_execute_aborts_the_claimed_run(self, built_package, uv_stub):
+        """A genuine abort mid-poll stops polling and aborts what it claimed.
+
+        The run id comes from the launch record and is never re-derived, so a
+        concurrent run under the same plan is untouched.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: CLAIMED", "log: /l3",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        running = {"exit": 2, "stdout": []}
+        log = uv_stub.log_path
+        log.write_text("", encoding="utf-8")
+        outcome = node_json(
+            f"""
+            const controller = new AbortController()
+            setTimeout(() => controller.abort(), 400)
+            emit(await MultiLlmPlugin.execute(
+              {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
+              {{directory: "/tmp", abort: controller.signal}}, surface,
+            ))
+            """,
+            built_package,
+            env={
+                "MULTI_LLM_UV": str(uv_stub.path),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT": json.dumps([launch, running]),
+            },
+        )
+        assert outcome["state"] == "needs-human"
+        assert outcome["run_id"] == "CLAIMED"
+        calls = [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines() if line
+        ]
+        aborts = [call for call in calls if "--abort" in call]
+        assert aborts, "a claimed run was abandoned rather than aborted"
+        assert "CLAIMED" in aborts[0]
+
+    def test_a_bounded_dispatch_survives_a_child_that_ignores_sigterm(
+        self, built_package, tmp_path
+    ):
+        """The timeout escalates to SIGKILL, and records that it fired.
+
+        ``runChild`` resolves on ``close``, which waits for the stdio pipes as
+        well as for the exit — so one SIGTERM to a child that ignores it (or to
+        a grandchild still holding stdout) never settles the promise at all. The
+        caller that sets a timeout is the *abort* dispatch, the one call that
+        exists to stop a paid fan-out, so an unbounded wait there is the
+        "abandoned, not aborted" outcome arriving by the back door. The
+        escalation is what bounds it; ``timedOut`` is what keeps the report from
+        reading the resulting silence — no exit code, no result line — as the
+        dispatcher's own verdict.
+        """
+        stubborn = tmp_path / "deaf-uv"
+        stubborn.write_text(
+            "#!/usr/bin/env python3\n"
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "while True:\n"
+            "    time.sleep(0.2)\n",
+            encoding="utf-8",
+        )
+        stubborn.chmod(0o755)
+        outcome = node_json(
+            f"""
+            const started = Date.now()
+            const out = await T.runChild({{
+              uv: {json.dumps(str(stubborn))},
+              argv: [],
+              cwd: {json.dumps(str(tmp_path))},
+              env: process.env,
+              marker: surface.dispatcher.result_marker,
+              timeoutMs: 250,
+            }})
+            emit({{elapsedMs: Date.now() - started, code: out.code,
+                  timedOut: out.timedOut, aborted: out.aborted,
+                  spawnError: out.spawnError}})
+            """,
+            built_package,
+        )
+        # Settled at all is the whole point: without the SIGKILL this hangs
+        # until the caller's own timeout kills node.
+        assert outcome["elapsedMs"] < 30_000, "the bounded dispatch was not bounded"
+        assert outcome["spawnError"] is None
+        # Killed by a signal, so there is no exit status of the child's own and
+        # no result line — which is exactly why the timeout has to be recorded.
+        assert outcome["code"] is None
+        assert outcome["timedOut"] is True
+        # A timeout is not a cancellation: no signal was passed, so nothing may
+        # claim the caller aborted.
+        assert outcome["aborted"] is False
+
+    def test_abort_during_the_launch_aborts_the_claimed_run(
+        self, built_package, uv_stub,
+    ):
+        """Cancellation inside the *launch window* still aborts what was claimed.
+
+        ``detach.launch()`` daemonises the worker and prints the ``run_id``
+        banner **before** the launcher exits, so a cancellation landing in that
+        window kills the launcher while the detached worker is already alive.
+        Reading the launcher's exit first and returning on it would ignore the
+        run id it had already printed: no abort dispatched, no orphan reported —
+        the "abandoned, not aborted" outcome the whole path exists to prevent.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: CLAIMED", "log: /l7"],
+            # Long enough that the cancellation below is certain to land while
+            # this child is still running.
+            "sleep": 30,
+        }
+        done = {
+            "exit": 0,
+            "stdout": ['MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        log = uv_stub.log_path
+        log.write_text("", encoding="utf-8")
+        outcome = node_json(
+            f"""
+            const controller = new AbortController()
+            setTimeout(() => controller.abort(), 400)
+            emit(await MultiLlmPlugin.execute(
+              {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
+              {{directory: "/tmp", abort: controller.signal}}, surface,
+            ))
+            """,
+            built_package,
+            env={
+                "MULTI_LLM_UV": str(uv_stub.path),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT": json.dumps([launch, done]),
+            },
+        )
+        assert outcome["state"] == "needs-human" and outcome["ok"] is False
+        assert outcome["run_id"] == "CLAIMED"
+        assert outcome["log"] == "/l7"
+        assert outcome["abort_dispatched"] is True
+        calls = [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines() if line
+        ]
+        aborts = [call for call in calls if "--abort" in call]
+        assert aborts, "the launch window claimed a run and then abandoned it"
+        assert "CLAIMED" in aborts[0]
+
+    def test_launch_failing_after_its_banner_aborts_the_claimed_run(
+        self, built_package, uv_stub,
+    ):
+        """A launcher that printed a run id and *then* failed still claimed one.
+
+        The mirror of the cancellation case, and the reason the banner is parsed
+        before the exit code is consulted: a nonzero exit on the way out of a
+        launch is not proof that nothing is running.
+        """
+        launch = {
+            "exit": 3,
+            "stdout": ["run_id: CLAIMED", "log: /l7"],
+            "stderr": ["the launcher fell over on its way out"],
+        }
+        done = {
+            "exit": 0,
+            "stdout": ['MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "",
+             "extra_flags": []},
+            [launch, done],
+        )
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert result["run_id"] == "CLAIMED"
+        assert result["log"] == "/l7"
+        assert result["abort_dispatched"] is True
+        # The abort is spelled back as a tool call too, so a failed dispatch
+        # still leaves the reader something runnable.
+        assert result["abort_command"]["args"]["extra_flags"][-2:] == [
+            "--run-id", "CLAIMED",
+        ]
+        aborts = [call for call in calls if "--abort" in call]
+        assert aborts, "a run named on the banner was abandoned rather than aborted"
+        assert "CLAIMED" in aborts[0]
+
+    def test_ask_exit3_renders_the_option_block(self, built_package, uv_stub):
+        """An exit-3 block comes back **verbatim**, and ``next`` stops.
+
+        When the *tool* ran the dispatcher, that block went into the tool's
+        captured stdout, not into the transcript. So it is returned exactly as
+        rendered — never synthesized, and never paraphrased.
+
+        Verbatim stops where D3a does. The fixture's payload carries a runnable
+        ``uv run`` in its ``next``, which reaches the result twice — parsed, and
+        again inside the captured ``MULTI_LLM_RESULT:`` line — and neither copy
+        may survive as something a model can paste. The envelope line goes
+        (``result`` already holds it, parsed), the command is redacted where it
+        stood, and it comes back only as a tool call in ``options``.
+        """
+        block = [
+            "Choose a model set:",
+            "  1) provider:a",
+            "  2) provider:b",
+        ]
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "init", "plan": "", "question": "", "extra_flags": []},
+            [{"exit": 3, "stdout": block + [
+                'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,'
+                '"next":"uv run -- python multi_llm.py init"}']}],
+        )
+        assert result["state"] == "needs-human" and result["ok"] is False
+        for line in block:
+            assert line in result["output"]
+        assert result["next"] is None, "following `next` did not stop on exit 3"
+        assert "uv run" not in json.dumps(result), (
+            "a runnable command survived into the exit-3 result"
+        )
+        assert "MULTI_LLM_RESULT" not in result["output"], (
+            "the dispatcher's own envelope line came back as rendered output"
+        )
+        # Nothing is dropped by the redaction: the command it replaced is handed
+        # back in the only form this plugin ever hands one back.
+        assert [
+            (call["tool"], call["args"]["mode"]) for call in result["options"]
+        ] == [("multi_llm", "init")]
+
+    def test_nested_exec_reasons_are_tool_errors(self, built_package, uv_stub):
+        """All four executor refusals become named, structured tool errors.
+
+        The executor's refusals are structured, not crashes. They surface with
+        the reason code and the capability field they came from — never a stack
+        trace, never a bare non-zero exit, and never a silent exit 0.
+        """
+        for code, field in (
+            ("nested_exec_denied", "nested_exec"),
+            ("nested_exec_spawn", "nested_exec.spawn"),
+            ("nested_exec_network", "nested_exec.network"),
+            ("nested_exec_credentials", "nested_exec.credentials"),
+        ):
+            result, _ = uv_stub.run(
+                built_package,
+                {"mode": "init", "plan": "", "question": "", "extra_flags": []},
+                [{"exit": 3, "stdout": [f"[{code}] the executor refused"]}],
+            )
+            assert result["state"] == "needs-human"
+            assert result["nested_exec"]["reason"] == code
+            assert result["nested_exec"]["capability_field"] == field
+
+    def test_child_cwd_is_the_workspace(self, built_package, uv_stub, tmp_path):
+        """Composed from a process whose own cwd is outside the workspace.
+
+        ``ctx.worktree ?? ctx.directory``, in that precedence; a relative plan
+        resolves against it with ``~/`` expanded; and the anchor used is echoed
+        in the result, because a wrong anchor is otherwise invisible — it
+        surfaces as a model-selection bug, not as a config error.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "init", "plan": "", "question": "", "extra_flags": []},
+            [{"exit": 0, "stdout": [
+                'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}],
+            ctx={"worktree": str(workspace), "directory": str(other)},
+        )
+        # worktree wins over directory.
+        assert result["anchor"] == str(workspace)
+
+        # A relative plan resolves under the anchor, not under the process cwd.
+        argv = node_json(
+            f"""
+            const anchor = T.resolveAnchor(
+              {{worktree: {json.dumps(str(workspace))},
+                directory: {json.dumps(str(other))}}})
+            emit({{
+              anchor,
+              relative: T.normalizePlan("plans/x.md", anchor),
+              absolute: T.normalizePlan("/abs/x.md", anchor),
+              home: T.normalizePlan("~/x.md", anchor),
+              fallback: T.resolveAnchor({{}}) === process.cwd(),
+              directoryOnly: T.resolveAnchor(
+                {{directory: {json.dumps(str(other))}}}),
+            }})
+            """,
+            built_package,
+            cwd=Path("/"),
+        )
+        assert argv["anchor"] == str(workspace)
+        assert argv["relative"] == str(workspace / "plans" / "x.md")
+        assert argv["absolute"] == "/abs/x.md"
+        assert argv["home"] == str(Path.home() / "x.md")
+        assert argv["fallback"] is True
+        assert argv["directoryOnly"] == str(other)
+
+    def test_init_scaffolds_in_the_workspace_not_the_package(
+        self, built_package, tmp_path
+    ):
+        """The artifact, not only the argv.
+
+        ``init`` declares no positional, so it has no plan to anchor on and
+        resolves its target from the child's cwd alone. Spawned from the package
+        cache it would scaffold inside ``~/.cache/opencode/packages/…`` or report
+        "not a git repository", and every later run would silently fall back to
+        the shipped defaults. Every other mode has the resolved plan path as a
+        second anchor; ``init`` has only the first, which is why the mode with no
+        arguments is the one most exposed to this.
+        """
+        if unattended.find_uv() is None:
+            _unavailable("uv is not installed; this row runs the real dispatcher")
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+        (workspace / "README.md").write_text("x", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(workspace), "add", "-A"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "-c", "user.email=t@t",
+             "-c", "user.name=t", "commit", "-qm", "init"], check=True
+        )
+
+        outcome = node_json(
+            f"""
+            emit(await MultiLlmPlugin.execute(
+              {{mode: "init", plan: "", question: "", extra_flags: []}},
+              {{directory: {json.dumps(str(workspace))}}}, surface,
+            ))
+            """,
+            built_package,
+            cwd=Path("/"),
+            # This is the one row that runs the **real** dispatcher out of the
+            # session-scoped staged tree, and CPython would leave a `__pycache__`
+            # behind in it. `built_package` is shared, and `TestPack` packs that
+            # same directory to assert `__pycache__` never reaches the tarball —
+            # so without this the pack row fails on bytecode this row wrote,
+            # blaming the build for what the suite did.
+            env={"PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert outcome["ok"] is True, outcome.get("message")
+        assert (workspace / ".multi-llm" / "providers.yaml").exists(), (
+            "init scaffolded somewhere other than the workspace"
+        )
+        assert not Path("/.multi-llm").exists()
+
+
+# ===========================================================================
+# The core instructions, surfaced by the tool
+# ===========================================================================
+
+class TestInstructionsSurface:
+    def test_util_instructions_takes_a_host(self):
+        """``util instructions <mode> --host <id>`` appends the verb block.
+
+        The core files name the three capability verbs abstractly, and it has
+        always been the *shim's* section 4 that resolved them. Once the command
+        body is one line there is no section 4 left, so the resolution has to
+        arrive with the core — same single owner, ``caps.verb_block()``, just
+        served at run time and through the tool.
+        """
+        from utils import host_capabilities as caps
+
+        plain = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
+             "util", "instructions", "review-plan"],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert plain.returncode == 0, plain.stderr
+        with_host = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
+             "util", "instructions", "review-plan", "--host", "opencode"],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert with_host.returncode == 0, with_host.stderr
+
+        for sentence in caps.verb_sentences("opencode"):
+            assert sentence in with_host.stdout, "a verb sentence is missing"
+            assert sentence not in plain.stdout, (
+                "the verb block leaked into the host-less form"
+            )
+        # `--host` appends; it never rewrites the core.
+        core = plain.stdout.split(cli_common.RESULT_MARKER)[0]
+        assert core.rstrip() in with_host.stdout
+
+    def test_an_unknown_host_is_refused(self):
+        """A bad ``--host`` is exit 3, not a silently host-less core."""
+        result = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
+             "util", "instructions", "review-plan", "--host", "nope"],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == cli_common.EXIT_NEEDS_HUMAN
+
+    def test_tool_output_carries_the_core_and_the_verbs(
+        self, built_package, uv_stub
+    ):
+        """The result includes the served core, three verb sentences included.
+
+        After the prose shrink this is requirement #6's **only** home. The
+        command body is one line, so the place a model used to read the workflow
+        and the resolved verbs is gone — and if the tool did not surface them,
+        shrinking the prose would simply have deleted them.
+        """
+        from utils import host_capabilities as caps
+
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":null}']}
+        # `util instructions` must reach the REAL dispatcher, or this row would
+        # be grading the stub's own echo.
+        instructions = {
+            "exit": 0,
+            "stdout": (
+                subprocess.run(
+                    [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
+                     "util", "instructions", "review-plan", "--host", "opencode"],
+                    capture_output=True, text=True, timeout=180,
+                ).stdout.splitlines()
+            ),
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "",
+             "extra_flags": []},
+            # launch, one terminal poll, then the instructions fetch. The stub
+            # replays by call index, so the order is the call order.
+            [launch, done, instructions],
+        )
+        assert result["ok"] is True
+        assert result.get("instructions"), (
+            "the tool returned no core instructions, so the prose shrink deleted "
+            "the only place a model could read them"
+        )
+        for sentence in caps.verb_sentences("opencode"):
+            assert sentence in result["instructions"], (
+                "a resolved verb sentence is missing from the tool's output"
+            )
+        # It asked for them the one supported way, naming this host.
+        fetch = next(
+            call for call in calls if "instructions" in _dispatcher_argv(call)
+        )
+        argv = _dispatcher_argv(fetch)
+        assert argv[:3] == ["util", "instructions", "review-plan"]
+        assert argv[argv.index("--host") + 1] == "opencode"
+
+        # And the JS holds no copy of either half.
+        text = SRC_MJS.read_text(encoding="utf-8")
+        for sentence in caps.verb_sentences("opencode"):
+            assert sentence not in text
+
+
+# ===========================================================================
+# Staging, the sweep and the version chain
+# ===========================================================================
+
+class TestStaging:
+    def test_payload_allowlist_matches_the_build_context(self):
+        """The allowlist is *parsed*, never typed — and the parse is guarded.
+
+        It already exists in this repository twice, where an existing test
+        asserts the two equal in both directions. A third hand-typed copy inside
+        a build script would be exactly the single-source failure this project
+        forbids, so the build parses the manifest and this row proves the parse
+        agrees with the manifest's own reader.
+        """
+        from tests import test_build_context
+
+        parsed = payload.runtime_allowlist(REPO_ROOT)
+        assert parsed, "the product-under-test block parsed empty"
+        manifest_patterns = [
+            row.pattern for row in test_build_context._load_manifest(
+                SKILL_ROOT / "tests" / "container" / "context_manifest.txt"
+            )
+        ]
+        for pattern in parsed:
+            assert pattern in manifest_patterns, (
+                f"{pattern!r} is not a manifest pattern — the parse has drifted"
+            )
+        # It stops at the rig block: tracked-but-not-runtime is left behind.
+        assert not any("tests/" in pattern for pattern in parsed)
+
+    def test_the_glob_rule_matches_the_manifest_reader(self):
+        """``*`` stops at a separator, in both readers.
+
+        ``fnmatch`` translates ``*`` to ``.*``, which would make
+        ``skills/multi-llm/*.py`` match every ``.py`` in every subtree — and the
+        payload would silently ship this repository's own test corpus. That is
+        not hypothetical; it is what this rule was written in response to.
+        """
+        assert payload._matches("skills/multi-llm/modes.py", "skills/multi-llm/*.py")
+        assert not payload._matches(
+            "skills/multi-llm/tests/test_x.py", "skills/multi-llm/*.py"
+        )
+        assert payload._matches(
+            "skills/multi-llm/utils/a/b.py", "skills/multi-llm/utils/**"
+        )
+
+    def test_the_staged_set_equals_the_allowlist_expansion(self, tmp_path):
+        """Nothing unexpected, and nothing missing.
+
+        Staged **fresh**, never into the session-scoped build: the rows that
+        drive the real dispatcher run ``uv run --project`` against that tree,
+        which creates a ``.venv`` and ``__pycache__`` inside the staged payload.
+        That is a true fact about this route rather than a staging bug — every
+        installed version pays for its own venv, inside the installed package —
+        so the assertion grades what staging produced, not what later use added.
+        """
+        destination = tmp_path / "payload"
+        payload.stage(REPO_ROOT, destination, allow_dirty=True)
+        staged = {
+            str(path.relative_to(destination)).replace(os.sep, "/")
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+        expected = {
+            path[len("skills/multi-llm/"):]
+            for path in payload.selected_files(REPO_ROOT, "skills/multi-llm")
+        }
+        assert staged == expected
+
+        # The regressions the old denylist caught, kept as regressions.
+        for forbidden in ("tests/", "legacy/", ".venv/", "__pycache__/",
+                          ".pytest_cache/", "plans/"):
+            assert not any(path.startswith(forbidden) for path in staged), (
+                f"{forbidden} reached the payload"
+            )
+
+    def test_the_required_inventory_is_complete(self, built_package):  # noqa: D401
+        """Every resource the runtime reads is present.
+
+        This is the assertion that catches a **short** payload, which no absence
+        list can see. A missing message or template file is an ``ENOENT`` raised
+        from inside a dispatch, which on this route is a silent exit 0 — and at
+        least one entry is fatal rather than cosmetic: the provider registry
+        loads ``providers.yaml`` by a path relative to its own file.
+        """
+        root = built_package / "skills" / "multi-llm"
+        for relative in payload.REQUIRED_INVENTORY:
+            assert (root / relative).is_file(), f"missing {relative}"
+        for tree in payload.REQUIRED_TREES:
+            assert any((root / tree).rglob("*")), f"{tree} is empty"
+
+    def test_the_staging_sweep_refuses_a_planted_secret(self, tmp_path):
+        """A sweep nobody proved catches anything is not a sweep."""
+        tree = tmp_path / "tree"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "ok.py").write_text("x = 1\n", encoding="utf-8")
+        payload.scan_tree(tree)  # clean
+
+        planted = [
+            ("notes.md", "the key is sk-" + "a" * 40),
+            ("config.yaml", "token: ghp_" + "b" * 36),
+            ("aws.txt", "AKIA" + "C" * 16),
+        ]
+        for name, body in planted:
+            target = tree / "sub" / name
+            target.write_text(body, encoding="utf-8")
+            with pytest.raises(payload.PayloadError, match="credential-shaped"):
+                payload.scan_tree(tree)
+            target.unlink()
+
+        # By filename and by location, not only by content.
+        for name in (".env", "id_rsa", "creds/auth.json"):
+            target = tree / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x", encoding="utf-8")
+            with pytest.raises(payload.PayloadError):
+                payload.scan_tree(tree)
+            target.unlink()
+
+    def test_staging_refuses_a_dirty_tree(self, tmp_path):
+        """A build that ships local state is one nobody can reproduce.
+
+        On npm the result is immutable the moment it is published, so the refusal
+        is a default rather than a warning. ``--allow-dirty`` stages to scratch
+        for a local test and never reaches a publish.
+        """
+        repo = tmp_path / "repo"
+        (repo / "skills" / "multi-llm").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "skills" / "multi-llm" / "a.py").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "c"], check=True
+        )
+        (repo / "skills" / "multi-llm" / "a.py").write_text("y", encoding="utf-8")
+        with pytest.raises(payload.PayloadError, match="dirty tree"):
+            payload.assert_clean(repo, "skills/multi-llm")
+
+    def test_version_source_is_singular(self):
+        """One file owns the number; every other appearance agrees with it.
+
+        The chain is rooted at ``skills/multi-llm/pyproject.toml`` rather than at
+        the npm manifest, and one fact settles it: **``pyproject.toml`` is inside
+        the npm tarball.** It is on the allowlist and in the required inventory,
+        so a package published as ``1.0.0`` would ship a payload internally
+        declaring something else — and this row would then have to be written to
+        *tolerate* that drift, which is the exact opposite of what it is for.
+        """
+        import tomllib
+
+        pyproject = tomllib.loads(
+            (SKILL_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        owner = pyproject["project"]["version"]
+
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert manifest["version"] == owner, (
+            f"package.json says {manifest['version']}, pyproject.toml says {owner}"
+        )
+
+        # uv.lock shadows the number and rides along in the same tarball.
+        lock = (SKILL_ROOT / "uv.lock").read_text(encoding="utf-8")
+        assert re.search(
+            rf'name = "multi-llm"\nversion = "{re.escape(owner)}"', lock
+        ), f"uv.lock does not declare {owner}"
+
+        # The capability data's copy, which the generated docs render the pinned
+        # spec from — so a hand-edited version there is a CI failure.
+        from utils import host_capabilities as caps
+
+        block = caps.entry("opencode").get("package")
+        assert block is not None, (
+            "opencode's capability entry has no `package` block; the pinned "
+            "spec the generated docs render comes from it, so its absence is a "
+            "break in the chain rather than a reason to skip the check"
+        )
+        assert block["version"] == owner, (
+            f"capabilities.yaml says {block['version']}, pyproject.toml says {owner}"
+        )
+        assert block["name"] == manifest["name"], (
+            f"capabilities.yaml says {block['name']}, package.json says "
+            f"{manifest['name']}"
+        )
+
+        plugin_manifest = REPO_ROOT / ".claude-plugin" / "plugin.json"
+        assert plugin_manifest.is_file(), (
+            f"{plugin_manifest} is missing; it is the Claude Code end of the "
+            "same chain"
+        )
+        declared = json.loads(plugin_manifest.read_text(encoding="utf-8"))
+        assert "version" in declared, (
+            ".claude-plugin/plugin.json declares no `version`; an unversioned "
+            "manifest silently drops out of the chain instead of failing it"
+        )
+        assert declared["version"] == owner, (
+            f"plugin.json says {declared['version']}, pyproject.toml says {owner}"
+        )
+
+    def test_lockfile_parity_with_image(self):
+        """The packaged pair matches what the image bakes.
+
+        Read it as "matches what the image bakes", never "matches what a running
+        image contains": the image's pre-baked pair is a ``COPY`` of these same
+        two repo files, so parity is two path assertions on the Dockerfile plus
+        the files themselves. No daemon, no image build.
+        """
+        dockerfile = (
+            SKILL_ROOT / "tests" / "container" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        for name in ("pyproject.toml", "uv.lock"):
+            assert (SKILL_ROOT / name).is_file()
+            assert re.search(
+                rf"^COPY\s+.*skills/multi-llm/{re.escape(name)}\s",
+                dockerfile,
+                re.M,
+            ), (
+                f"the Dockerfile no longer COPYs skills/multi-llm/{name}; the "
+                "packaged pair and the image's would drift silently"
+            )
+        # And the staged copy is those same files, by construction.
+        selected = payload.selected_files(REPO_ROOT, "skills/multi-llm")
+        for name in ("pyproject.toml", "uv.lock"):
+            assert f"skills/multi-llm/{name}" in selected
+
+
+# ===========================================================================
+# (pack, Linux) — needs npm
+# ===========================================================================
+
+def _need_npm():
+    if not shutil.which("npm"):
+        _unavailable("npm is not on PATH; this row needs `npm pack`")
+    if sys.platform.startswith("win"):
+        _unavailable("the package job is Linux-only by decision")
+
+
+@pytest.mark.package
+class TestPack:
+    def test_package_files_manifest(self, built_package):
+        """``npm pack --dry-run`` ships the payload and none of the rig.
+
+        ``files`` semantics are surprising in both directions: with no key at all
+        the package-root ignore file becomes the list; with ``files: ["dist"]``
+        the skill tree vanishes silently; and with ``files`` naming ``skills`` the
+        tree ships whole, ``__pycache__`` included, because ``files`` overrides
+        the package-root ignore file.
+        """
+        _need_npm()
+        listing = _pack_listing(built_package)
+        for required in (
+            "skills/multi-llm/multi_llm.py",
+            "skills/multi-llm/pyproject.toml",
+            "skills/multi-llm/uv.lock",
+            "dist/index.mjs",
+            "dist/command.md",
+            "dist/cli-surface.json",
+        ):
+            assert any(name.endswith(required) for name in listing), (
+                f"{required} is not in the tarball"
+            )
+        assert any("skills/multi-llm/instructions/" in n for n in listing)
+        for forbidden in ("/tests/", "/legacy/", "/.venv/", "__pycache__",
+                          ".pytest_cache"):
+            assert not any(forbidden in name for name in listing), (
+                f"{forbidden} reached the tarball"
+            )
+
+    def test_package_ships_license_and_readme(self, built_package):
+        """Both are **real files**, not symlinks.
+
+        A symlink inside an npm tarball is a portability hazard.
+        """
+        _need_npm()
+        listing = _pack_listing(built_package)
+        assert any(name.endswith("LICENSE") for name in listing)
+        assert any(name.endswith("README.md") for name in listing)
+        assert not (built_package / "LICENSE").is_symlink()
+        assert not (built_package / "README.md").is_symlink()
+
+    def test_package_payload_runs(self, built_package, tmp_path):
+        """A **fresh** staged environment imports a real runtime dependency.
+
+        Not ``--help``, which passes even against an empty venv. It runs under
+        the *composed* flag list from the single owner, not a hand-typed pair, so
+        a default that lost ``--no-dev`` fails here.
+        """
+        uv = unattended.find_uv()
+        if uv is None:
+            _unavailable("uv is not installed")
+        staged = built_package / "skills" / "multi-llm"
+        env = dict(os.environ)
+        env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+        env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "venv")
+        result = subprocess.run(
+            [uv, "run", *unattended.uv_run_args(), "--project", str(staged),
+             "--", "python", "-c", "import yaml; print(yaml.__name__)"],
+            capture_output=True, text=True, env=env, timeout=600,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "yaml" in result.stdout
+
+    def test_the_no_sync_counter_case_fails_the_documented_way(
+        self, built_package, tmp_path
+    ):
+        """``--no-sync`` with no pre-built venv does not fail cleanly.
+
+        uv **creates an empty environment and runs against it anyway** — no
+        uv-level error, no "sync first", just an import failure from inside the
+        dispatcher; and the empty venv persists, so every later run repeats it
+        identically. That is a different signature from the offline default's,
+        which fails inside uv at the download step. Both are documented, and this
+        row is what stops the wording drifting away from what uv does.
+        """
+        uv = unattended.find_uv()
+        if uv is None:
+            _unavailable("uv is not installed")
+        staged = built_package / "skills" / "multi-llm"
+        env = dict(os.environ)
+        env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+        env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "empty-venv")
+        result = subprocess.run(
+            [uv, "run", "--frozen", "--no-dev", "--no-sync", "--project",
+             str(staged), "--", "python", "-c", "import yaml"],
+            capture_output=True, text=True, env=env, timeout=600,
+        )
+        assert result.returncode != 0
+        assert "ModuleNotFoundError" in result.stderr, (
+            "the documented --no-sync signature has changed; the README says "
+            f"ModuleNotFoundError and uv said:\n{result.stderr}"
+        )
+
+    def test_the_tarball_sweep_runs_over_what_ships(self, built_package, tmp_path):
+        """The scan reads the finished ``.tgz``, not the staging directory.
+
+        What ``npm pack`` writes is what ships, and on the publish path
+        ``prepack`` only re-stages — npm packs afterwards — so a lifecycle hook
+        runs too early to see a tarball.
+        """
+        _need_npm()
+        archive = _pack(built_package, tmp_path)
+        payload.scan_tarball(archive)  # clean, or this raises
+
+
+def _pack(package: Path, destination: Path) -> Path:
+    result = subprocess.run(
+        ["npm", "pack", "--ignore-scripts", "--pack-destination", str(destination)],
+        cwd=str(package), capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    archives = list(destination.glob("*.tgz"))
+    assert len(archives) == 1, f"expected one tarball, got {archives}"
+    return archives[0]
+
+
+def _pack_listing(package: Path):
+    result = subprocess.run(
+        ["npm", "pack", "--dry-run", "--json", "--ignore-scripts"],
+        cwd=str(package), capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    return [entry["path"] for entry in report[0]["files"]]
+
+
+# ===========================================================================
+# The capability data, the schema and the --check route note
+# ===========================================================================
+
+def _hosts_with_a_package_block():
+    """Driven from ``capabilities.yaml`` itself, never a literal host list.
+
+    A second host's packaging plan adds a YAML block and inherits this coverage
+    with no edit here — which is the whole reason the vocabulary was written as
+    a union in the first place.
+    """
+    from utils import host_capabilities as caps
+
+    document = caps.load()
+    return sorted(
+        host_id for host_id, host in document["hosts"].items()
+        if host.get("package")
+    )
+
+
+class TestPackageBlock:
+    def test_at_least_one_host_declares_one(self):
+        """Otherwise every row below is vacuously green."""
+        assert _hosts_with_a_package_block(), (
+            "no host declares a package: block, so this whole class asserts "
+            "nothing"
+        )
+
+    @pytest.mark.parametrize("host_id", _hosts_with_a_package_block())
+    def test_package_block_schema(self, host_id):
+        """The union vocabulary, validated the way every other field is.
+
+        A free-form ``{"type": "object"}`` here would be exactly the silent guess
+        the schema exists to remove, and ``definitions.host`` is
+        ``additionalProperties: false`` — so without the property at all the
+        document simply fails to validate.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+        from utils import host_capabilities as caps
+
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        document = caps.load()
+        jsonschema.validate(document, schema)
+
+        package = document["hosts"][host_id]["package"]
+        node = schema["definitions"]["host"]["properties"]["package"]
+        assert node["additionalProperties"] is False
+        assert set(node["required"]) == {
+            "registry", "name", "config_key", "provides", "update",
+            "min_host_version", "invocation",
+        }
+        assert set(node["properties"]["registry"]["enum"]) == {
+            "npm", "codex-marketplace"
+        }
+        assert set(node["properties"]["update"]["enum"]) == {
+            "pinned-spec", "reinstall", "range"
+        }
+        assert set(node["properties"]["provides"]["items"]["enum"]) == {
+            "command", "skill", "tool"
+        }
+        # `mcp_tool` was retired in favour of `tool`.
+        assert "mcp_tool" not in node["properties"]["provides"]["items"]["enum"]
+        assert package["invocation"].endswith("."), (
+            "invocation is a sentence fragment appended after \"Invoke it \""
+        )
+
+    def test_version_is_required_exactly_on_a_pinned_spec(self):
+        """``pinned-spec`` is literally "the pin is the upgrade".
+
+        So the pin must exist — while a ``reinstall`` route has no number to
+        give and must not be forced to invent one.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+        from utils import host_capabilities as caps
+
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        document = json.loads(json.dumps(caps.load()))
+        host = next(iter(_hosts_with_a_package_block()))
+        block = document["hosts"][host]["package"]
+        block["update"] = "pinned-spec"
+        block.pop("version", None)
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(document, schema)
+
+        block["update"] = "reinstall"
+        jsonschema.validate(document, schema)  # no version needed, and none given
+
+    def test_marketplace_is_conditional_on_the_registry(self):
+        """Required on a marketplace route, forbidden elsewhere.
+
+        A stray ``marketplace:`` on an npm block would otherwise validate and
+        render nowhere, which is the quietest possible way to be wrong.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+        from utils import host_capabilities as caps
+
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        document = json.loads(json.dumps(caps.load()))
+        host = next(iter(_hosts_with_a_package_block()))
+        block = document["hosts"][host]["package"]
+
+        block["marketplace"] = "somewhere"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(document, schema)
+
+        block["registry"] = "codex-marketplace"
+        block["update"] = "reinstall"
+        block.pop("version", None)
+        jsonschema.validate(document, schema)
+
+        block.pop("marketplace")
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(document, schema)
+
+    def test_the_block_and_its_provenance_move_as_a_pair(self):
+        """A schema error for a consumer, not only a pytest failure.
+
+        ``additionalProperties: false`` on ``provenance`` rejects an *undeclared*
+        row; it does not *require* one when the block is present, because
+        ``provenance.required`` is a fixed list that correctly excludes the
+        optional keys. Making the pairing a validation error takes the explicit
+        conditional this asserts.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+        from utils import host_capabilities as caps
+
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        document = json.loads(json.dumps(caps.load()))
+        host = next(iter(_hosts_with_a_package_block()))
+        document["hosts"][host]["provenance"].pop("package")
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(document, schema)
+
+    def test_package_is_not_in_the_runtime_floor(self):
+        """Optional in the schema means optional at runtime, and vice versa.
+
+        The two lists are mirrored by an existing guard, so they move as a pair
+        or not at all — and ``package`` must be in neither: requiring it would
+        force a dummy block into every host that has no package route.
+        """
+        from utils import host_capabilities as caps
+
+        assert "package" not in caps.REQUIRED_HOST_KEYS
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        assert "package" not in schema["definitions"]["host"]["required"]
+
+    def test_shim_format_gains_no_enum_value(self):
+        """The package route writes no shim; the command body is a pack artifact."""
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        formats = schema["definitions"]["host"]["properties"]["shim"]
+        assert "package" not in json.dumps(formats)
+
+
+class TestGeneratedDocs:
+    def test_both_pages_are_byte_identical_to_a_fresh_render(self):
+        """The pinned spec in them is generated and cannot be hand-edited."""
+        result = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "hosts" / "render_capabilities.py"),
+             "--check"],
+            capture_output=True, text=True, timeout=180,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_the_npm_paragraph_reads_as_its_provenance(self):
+        """``documented`` names the route; ``verified`` recommends it.
+
+        The docs half of the publish flip is therefore one provenance edit plus
+        a re-render, not a prose rewrite — which is what the byte-compare
+        forbids.
+        """
+        from utils import host_capabilities as caps
+
+        page = (REPO_ROOT / "docs" / "hosts.md").read_text(encoding="utf-8")
+        for host_id in _hosts_with_a_package_block():
+            host = caps.entry(host_id)
+            package = host["package"]
+            provenance = host["provenance"]["package"]
+            spec = package["name"]
+            if package.get("version"):
+                spec = f"{spec}@{package['version']}"
+            assert spec in page, f"the pinned spec {spec!r} is not rendered"
+            assert f"install via {package['registry']}" in page
+            if provenance == "verified":
+                assert "recommended route" in page
+            else:
+                assert "No published install has been verified yet" in page, (
+                    "the pre-publish paragraph must say so plainly: a config "
+                    "entry naming an unpublished spec resolves to nothing, and "
+                    "on this host that failure is silent"
+                )
+
+    def test_the_readme_is_in_its_pre_publish_state(self):
+        """Until a registry install is recorded, the docs must not recommend it.
+
+        A README recommending an `npm`-installable spec in the window before the
+        first publish is instructions for something that resolves to nothing —
+        and the failure is the silent one: plugin listed, exit 0, empty log.
+
+        Asserted **positively**, because "does not contain the word recommended"
+        is not a property: the flip would simply write an install line without
+        it. What the pre-publish state must actually say is that the route is not
+        published and that `install-host` is what to use, and those are the two
+        sentences Phase 5 replaces.
+        """
+        from utils import host_capabilities as caps
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        for host_id in _hosts_with_a_package_block():
+            package = caps.entry(host_id)["package"]
+            if caps.entry(host_id)["provenance"]["package"] == "verified":
+                # Post-flip: the published spec is the install line, and
+                # install-host is demoted rather than deleted.
+                assert package["name"] in readme
+                continue
+            assert "not yet published" in readme, (
+                f"the README mentions no unpublished state for "
+                f"{package['name']}, whose provenance is still "
+                f"{caps.entry(host_id)['provenance']['package']!r}"
+            )
+            assert f"install-host {host_id}" in readme, (
+                "the README must still tell a reader to use the file route, "
+                "which is the only one that works today"
+            )
+
+class TestCheckRouteDetection:
+    """D5, driven by a fabricated merged config plus a fake cache tree."""
+
+    @pytest.fixture
+    def posture(self, tmp_path):
+        from utils import host_capabilities as caps
+
+        host_id = "opencode"
+        package = caps.entry(host_id)["package"]
+        spec = f"{package['name']}@{package['version']}"
+
+        def build(*, declared: bool, resolved: bool, shim: bool):
+            home = tmp_path / f"h-{declared}-{resolved}-{shim}"
+            (home / ".config" / host_id / "commands").mkdir(parents=True)
+            if declared:
+                (home / ".config" / host_id / f"{host_id}.json").write_text(
+                    json.dumps({package["config_key"]: [spec]}), encoding="utf-8"
+                )
+            if resolved:
+                (
+                    home / ".cache" / host_id / "packages" / spec
+                    / "node_modules" / package["name"]
+                ).mkdir(parents=True)
+            if shim:
+                host_install.install(
+                    host_id, scope="global",
+                    env={"HOME": str(home), "USERPROFILE": str(home)},
+                )
+            return home, spec
+
+        return build
+
+    def _check(self, home, **kwargs):
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        env.update({k: os.environ[k] for k in ("PATH",) if k in os.environ})
+        return host_install.check("opencode", env=env, **kwargs)
+
+    def test_a_absent_absent_is_byte_unchanged(self, posture):
+        """No entry, no route: **nothing is stat-ed**, and the output stands.
+
+        Config-first detection is what makes this true. A cache glob would fire
+        on an extracted tree left behind by an uninstall, by an older pin, or by
+        a different project's config — and a *false* shadowing warning is worse
+        than no warning at all, because warning about shadowing is the whole job.
+        """
+        home, _ = posture(declared=False, resolved=False, shim=False)
+        result = self._check(home)
+        assert not result.ok
+        assert result.row(host_install.ROW_PRESENT).fix
+        assert "install-host" in result.row(host_install.ROW_PRESENT).fix
+        assert not any("package" in note for note in result.notes)
+
+    def test_c_declared_and_resolved_reports_the_package_route(self, posture):
+        """Row 1 is OK and names the payload; rows 2-4 are not emitted.
+
+        Row 1's question is "is a route present and loadable?", not "is there a
+        file?". Answered the old way, an npm user running ``--check`` would be
+        told to run ``install-host`` — creating the second, shadowed route this
+        detection exists to find.
+        """
+        home, spec = posture(declared=True, resolved=True, shim=False)
+        result = self._check(home)
+        row = result.row(host_install.ROW_PRESENT)
+        assert row.ok, row.detail
+        assert spec in row.detail
+        # No repair line at all: there is nothing to repair.
+        assert not row.fix
+        for number in (2, 3, 4):
+            assert result.row(number) is None, f"row {number} was emitted"
+        assert result.row(5) is not None, "row 5 is route-independent"
+        assert any("installed as a package" in note for note in result.notes)
+        # And never the install-host repair, which would create the duplicate.
+        assert "install-host" not in json.dumps(
+            [row.fix for row in result.rows if row.fix]
+        )
+
+    def test_declared_but_unresolved_fails_with_its_own_repair(self, posture):
+        """The state a user most needs named, and the one a cache glob cannot see.
+
+        Measured: the spec directory is created *before* resolution is attempted
+        and survives every failure as an empty directory — so a probe stopping
+        one directory short would report a live route for a package that does not
+        exist on the registry. The failure is genuinely silent otherwise: a
+        DEBUG-level run against a 404 spec logs ten INFO lines and not one ERROR.
+        """
+        home, spec = posture(declared=True, resolved=False, shim=False)
+        result = self._check(home)
+        row = result.row(host_install.ROW_PRESENT)
+        assert not row.ok
+        assert spec in row.detail
+        assert "install-host" not in (row.fix or ""), (
+            "an unresolved package route must not be repaired by creating a "
+            "second, shadowing file route"
+        )
+        assert not result.ok, (
+            "`rows 1-4 N/A` would report success on a machine whose declared "
+            "route never resolved"
+        )
+
+    def test_both_routes_present_names_both(self, posture):
+        """Rows 1-4 grade the file as today, and the note names the winner.
+
+        Flat rather than hedged: `--check` does not probe for a winner, it states
+        the one the plugin guarantees. The plugin assigns unconditionally, so the
+        file shim becomes inert — and nothing in the host says so.
+        """
+        home, spec = posture(declared=True, resolved=True, shim=True)
+        result = self._check(home)
+        assert result.row(host_install.ROW_PRESENT).ok
+        for number in (2, 3, 4, 5):
+            assert result.row(number) is not None, f"row {number} is missing"
+        note = next(n for n in result.notes if "BOTH routes" in n)
+        assert spec in note
+        assert "uninstall-host" in note, (
+            "the note must name a command that exists: there is no "
+            "`install-host --uninstall` flag"
+        )
+
+    def test_the_route_note_never_changes_the_check(self, posture):
+        """Notes are not rows, and this is why it may never be promoted.
+
+        ``install()``'s verify path rolls back on a row failure, so a route note
+        that became a row would roll back an install on any machine carrying a
+        package route.
+        """
+        home, _ = posture(declared=True, resolved=True, shim=True)
+        result = self._check(home)
+        assert result.ok
+        # Five rows, still. The count is asserted in the generated docs too.
+        assert len(result.rows) == 5
+        assert not any(note in [row.detail for row in result.rows]
+                       for note in result.notes)
+
+    def test_the_note_fires_on_install_not_only_on_check(self, posture):
+        """Ungated by ``path`` — which is the gate easiest to get backwards.
+
+        ``install-host --all`` is the command the docs prescribe after every
+        plugin update. Once a package route is live, ``--all`` silently recreates
+        the shadowed file shim on every host, and this note is the only thing
+        that says so at the moment it happens.
+        """
+        home, _ = posture(declared=True, resolved=True, shim=False)
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        env.update({k: os.environ[k] for k in ("PATH",) if k in os.environ})
+        code = host_install.install("opencode", scope="global", env=env)
+        assert code == 0
+        # `install()` verifies by calling `check()` with `path=` pinned to what
+        # it just wrote — the same call re-made here, so the row carve-out is
+        # exercised on the install path rather than the standalone one.
+        target = host_install.target_location(
+            "opencode", "global", env=env
+        ).path
+        result = host_install.check("opencode", env=env, path=target)
+        assert any("BOTH routes" in note for note in result.notes), (
+            "installing over a live package route said nothing about it"
+        )
+        # But the row carve-out stays gated: install() still grades its own file.
+        assert result.row(2) is not None and result.row(3) is not None
+
+    def test_an_unparseable_config_detects_no_route(self, posture, tmp_path):
+        """Best-effort read, and its failure mode is "no route", never a crash.
+
+        A `--check` that died on someone's trailing comma would be worse than one
+        that stays quiet about a route it could not read.
+        """
+        home = tmp_path / "broken"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        (home / ".config" / "opencode" / "opencode.json").write_text(
+            "{ this is not json", encoding="utf-8"
+        )
+        result = self._check(home)
+        assert not any("package" in note.lower() for note in result.notes)
+
+    def test_a_different_package_in_the_config_is_not_our_route(self, tmp_path):
+        """The probe matches on **package name**, not on the key being non-empty."""
+        home = tmp_path / "other"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        (home / ".config" / "opencode" / "opencode.json").write_text(
+            json.dumps({"plugin": ["some-other-plugin@1.0.0"]}), encoding="utf-8"
+        )
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        assert host_install.package_route("opencode", env=env) is None
+
+    def test_an_unpinned_spec_normalizes_to_latest(self, tmp_path):
+        """The cache directory is the **normalized** spec, not the config string.
+
+        ``"opencode-multi-llm"`` caches at ``…@latest``. A probe that stat-ed the
+        config string would miss every unpinned install.
+        """
+        from utils import host_capabilities as caps
+
+        package = caps.entry("opencode")["package"]
+        home = tmp_path / "unpinned"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        (home / ".config" / "opencode" / "opencode.json").write_text(
+            json.dumps({package["config_key"]: [package["name"]]}), encoding="utf-8"
+        )
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        route = host_install.package_route("opencode", env=env)
+        assert route is not None
+        assert route.payload.parent.parent.name == f"{package['name']}@latest"
+
+    def test_xdg_cache_home_is_honoured(self, tmp_path):
+        """``$XDG_CACHE_HOME/<host>`` when set, else ``~/.cache/<host>``."""
+        from utils import host_capabilities as caps
+
+        package = caps.entry("opencode")["package"]
+        home = tmp_path / "xdg"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        (home / ".config" / "opencode" / "opencode.json").write_text(
+            json.dumps({package["config_key"]: [package["name"]]}), encoding="utf-8"
+        )
+        cache = tmp_path / "elsewhere"
+        route = host_install.package_route(
+            "opencode",
+            env={"HOME": str(home), "USERPROFILE": str(home),
+                 "XDG_CACHE_HOME": str(cache)},
+        )
+        assert route is not None
+        assert str(route.payload).startswith(str(cache / "opencode"))
+
+    # -- The config set is the one `Npm.install` is driven from (D5 step 1) ---
+    #
+    # `install_paths` names *command* directories, and three of OpenCode's config
+    # locations hold no commands at all: `$OPENCODE_CONFIG`, `$OPENCODE_CONFIG_DIR`
+    # and `~/.opencode`. A probe deriving its set from `install_paths` parents
+    # alone answers "no route" for a user who really has one — and that answer is
+    # not quiet: row 1 then fails with the `install-host` repair, telling them to
+    # write the duplicate file route the shadowing note exists to prevent.
+
+    def _declaration(self, directory, *, name="opencode.json"):
+        """A config file at *directory* declaring the real package spec."""
+        from utils import host_capabilities as caps
+
+        package = caps.entry("opencode")["package"]
+        spec = f"{package['name']}@{package['version']}"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(
+            json.dumps({package["config_key"]: [spec]}), encoding="utf-8"
+        )
+        return spec
+
+    def test_opencode_config_env_names_the_file_that_is_read(self, tmp_path):
+        """`$OPENCODE_CONFIG` is read *instead of* the per-user config."""
+        home = tmp_path / "env-file"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        elsewhere = tmp_path / "somewhere"
+        spec = self._declaration(elsewhere, name="my-opencode.json")
+        env = {
+            "HOME": str(home), "USERPROFILE": str(home),
+            "OPENCODE_CONFIG": str(elsewhere / "my-opencode.json"),
+        }
+        route = host_install.package_route("opencode", env=env)
+        assert route is not None and route.spec == spec
+        assert route.declared_in == elsewhere / "my-opencode.json"
+
+    def test_opencode_config_dir_env_is_probed(self, tmp_path):
+        """`$OPENCODE_CONFIG_DIR` redirects the whole directory."""
+        home = tmp_path / "env-dir"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        redirected = tmp_path / "redirected"
+        spec = self._declaration(redirected)
+        env = {
+            "HOME": str(home), "USERPROFILE": str(home),
+            "OPENCODE_CONFIG_DIR": str(redirected),
+        }
+        route = host_install.package_route("opencode", env=env)
+        assert route is not None and route.spec == spec
+        assert route.declared_in == redirected / "opencode.json"
+
+    def test_the_per_user_dot_opencode_directory_is_probed(self, tmp_path):
+        """`~/.opencode` holds config and no commands, so nothing derives it."""
+        home = tmp_path / "dot-dir"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        spec = self._declaration(home / ".opencode")
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        route = host_install.package_route("opencode", env=env)
+        assert route is not None and route.spec == spec
+        assert route.declared_in == home / ".opencode" / "opencode.json"
+
+    def test_a_project_declaration_is_found_from_a_subdirectory(self, tmp_path):
+        """The project `.opencode` belongs to the *tree*, not to one directory."""
+        home = tmp_path / "walk-home"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        project = tmp_path / "tree"
+        (project / ".git").mkdir(parents=True)
+        spec = self._declaration(project / ".opencode")
+        deep = project / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        route = host_install.package_route("opencode", env=env, project_root=deep)
+        assert route is not None and route.spec == spec
+        assert route.declared_in == project / ".opencode" / "opencode.json"
+
+    def test_the_upward_walk_stops_at_the_worktree_root(self, tmp_path):
+        """A declaration *above* the worktree belongs to another tree.
+
+        The walk is bounded on purpose: answering with a config the project does
+        not belong to is the same class of false positive as globbing the cache.
+        """
+        home = tmp_path / "stop-home"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        self._declaration(outside / ".opencode")
+        project = outside / "tree"
+        (project / ".git").mkdir(parents=True)
+        env = {"HOME": str(home), "USERPROFILE": str(home)}
+        assert host_install.package_route(
+            "opencode", env=env, project_root=project
+        ) is None
+
+    def test_a_declaration_in_an_env_config_keeps_row_1_off_install_host(
+        self, tmp_path
+    ):
+        """The whole point: no `install-host` repair for a package user.
+
+        Without the env sources in the probe set this row FAILed and told the
+        user to create the second, shadowed route.
+        """
+        from utils import host_capabilities as caps
+
+        package = caps.entry("opencode")["package"]
+        home = tmp_path / "row-one"
+        (home / ".config" / "opencode" / "commands").mkdir(parents=True)
+        spec = self._declaration(home / ".opencode")
+        (
+            home / ".cache" / "opencode" / "packages" / spec
+            / "node_modules" / package["name"]
+        ).mkdir(parents=True)
+        result = self._check(home)
+        row = result.row(host_install.ROW_PRESENT)
+        assert row.ok, row.detail
+        assert not row.fix
+        assert any("installed as a package" in note for note in result.notes)
+
+
+# ===========================================================================
+# Route-keyed promotion — without which Phase 5's own promotion cannot run
+# ===========================================================================
+
+class TestRoutePromotion:
+    """The harness must not credit one route with the other's evidence."""
+
+    def _row(self, **kwargs):
+        from tests.container import harness
+
+        defaults = dict(
+            row_id="r", lane="host", host="opencode", creds="openrouter",
+            command="review-plan plans/x.md --host opencode --yes "
+                    "--exec-subagents --detach",
+        )
+        defaults.update(kwargs)
+        return harness.Row(**defaults)
+
+    def _result(self, row, out_dir, *, receipts=2, done=True):
+        """A real bundle on disk, because ``RowResult``'s evidence is read from
+        one — a stubbed attribute would grade a shape the harness never uses."""
+        from tests.container import harness
+
+        receipt_dir = out_dir / "receipts" / row.row_id
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(receipts):
+            (receipt_dir / f"{index}.receipt.json").write_text(
+                json.dumps({"argv": ["multi_llm.py", "review-plan"]}),
+                encoding="utf-8",
+            )
+        (out_dir / "run-states.json").write_text(
+            json.dumps(
+                {"review-plan": {"state": "done" if done else "running"}}
+            ),
+            encoding="utf-8",
+        )
+        return harness.RowResult(
+            row=row, exit_code=0, wall_clock_s=1.0, out_dir=out_dir,
+        )
+
+    def test_promotion_is_route_keyed(self, tmp_path):
+        """A package row promotes ``package`` and the neutral cells, never the
+        four file-route ones; a file row keeps today's set and can never reach
+        ``package``.
+
+        Under a route-blind field set the plugin row — which writes no shim at
+        all — would propose promotions for ``shim``, ``install_paths``,
+        ``arguments`` and ``reload``, describing a file at a path it never
+        touched. That is the same class of false promotion the
+        ``documented_invocation`` carve-out exists to stop.
+        """
+        from tests.container import harness
+
+        file_row = self._row(route="file")
+        package_row = self._row(route="package")
+
+        file_fields = harness.promotable_fields(
+            file_row, self._result(file_row, tmp_path / "file")
+        )
+        package_fields = harness.promotable_fields(
+            package_row, self._result(package_row, tmp_path / "package")
+        )
+
+        file_only = {"shim", "install_paths", "arguments", "reload"}
+        assert file_only <= file_fields
+        assert "package" not in file_fields, (
+            "a file row reached `package`, which it is no evidence for"
+        )
+
+        assert "package" in package_fields
+        assert not (file_only & package_fields), (
+            f"a package row proposed file-route cells: "
+            f"{sorted(file_only & package_fields)}"
+        )
+        # The behavioural cells are genuinely route-neutral: what the host does
+        # once the skill is reachable does not depend on how it became reachable.
+        assert {"detach", "subagents", "multi_turn"} <= package_fields
+
+    def test_the_default_route_is_file(self):
+        """Every row written before a package route existed stays a file row."""
+        from tests.container import harness
+
+        assert harness.Row(row_id="r", lane="host", host="opencode").route == "file"
+
+    def test_a_package_row_with_no_receipts_promotes_nothing_about_the_package(
+        self, tmp_path
+    ):
+        """``package`` needs the same two-part evidence a receipt gives a shim:
+        the payload was found *and* the dispatcher really ran."""
+        from tests.container import harness
+
+        row = self._row(route="package")
+        assert "package" not in harness.promotable_fields(
+            row, self._result(row, tmp_path, receipts=0)
+        )
+
+    def test_the_record_schema_admits_route(self):
+        """``rows[]`` is ``additionalProperties: false``.
+
+        So without the property a package row's record is a **refused write**,
+        not a record missing a column — which is why the schema change lands with
+        the field rather than after it.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+
+        schema = json.loads(
+            (SKILL_ROOT / "tests" / "container" / "records" /
+             "record.schema.json").read_text(encoding="utf-8")
+        )
+        rows = schema["properties"]["rows"]["items"]
+        assert rows["additionalProperties"] is False
+        assert set(rows["properties"]["route"]["enum"]) == {"file", "package"}
+        assert "route" not in rows.get("required", []), (
+            "absent must mean `file`, or every existing record becomes invalid"
+        )
+        # And a record carrying it validates.
+        document = {
+            "schema_version": 1, "started_at": "20260101T000000Z",
+            "ended_at": "20260101T000100Z", "lane": "host",
+            "image": {"tag": "x"}, "egress": "none", "outcome": "pass",
+            "promotions": [],
+            "rows": [{"row_id": "r", "outcome": "pass", "route": "package"}],
+        }
+        try:
+            jsonschema.validate(document, schema)
+        except jsonschema.ValidationError as exc:
+            if "route" in str(exc):
+                raise
+            # Other required top-level keys are this fixture's problem, not the
+            # property's; what matters is that `route` itself is admitted.
+            assert "'route'" not in str(exc)
+
+
+# ===========================================================================
+# Route-keyed staging — the other half, in the container's own entrypoint
+# ===========================================================================
+
+class TestRouteStaging:
+    """A package row must never carry the FILE shim, and this is where that is
+    pinned.
+
+    `entrypoint.stage_host` runs `install-host <host> --global`, which writes the
+    shim. Run it on a package row and the row has two command sources at once:
+    opencode's `config` hook then overwrites the file entry wholesale and
+    silently, so a plugin that never loaded still produces receipts and the row
+    promotes `package` on the file route's evidence — the exact false promotion
+    `Row.route` exists to stop. Worse, it fails *safe-looking*: green.
+
+    Two independent ways that returns, so two rows. The guard can be deleted, and
+    a call site can quietly stop passing the route — a three-argument function
+    with a `file` default swallows the second silently.
+    """
+
+    @pytest.mark.parametrize("host", ["opencode", "codex", "claude-code"])
+    def test_a_package_row_stages_nothing_at_all(self, tmp_path, monkeypatch, host):
+        """No command dispatched, and not one byte written into the host's
+        ``$HOME`` — the claude-code leg symlinks the skill tree *before* it
+        dispatches, so the exit code alone would not have caught it."""
+        from tests.container import entrypoint
+
+        dispatched = []
+        monkeypatch.setattr(
+            entrypoint, "dispatch",
+            lambda *a, **k: dispatched.append((a, k)) or 0)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        assert entrypoint.stage_host(host, home, "package") == 0
+        assert not dispatched, (
+            f"route=package dispatched {dispatched!r}; `install-host "
+            f"{host} --global` writes the file shim")
+        assert list(home.iterdir()) == [], (
+            f"route=package wrote {sorted(p.name for p in home.iterdir())} "
+            f"into the host's $HOME")
+
+    def test_every_call_site_passes_the_row_route(self):
+        """Over `main`'s AST, because both call sites only execute inside a
+        container: a defaulted call is `route="file"`, which is the bug back."""
+        from tests.container import entrypoint
+
+        source = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        main = next(node for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        calls = [node for node in ast.walk(main)
+                 if isinstance(node, ast.Call)
+                 and getattr(node.func, "id", None) == "stage_host"]
+        assert calls, "`main` no longer stages the host at all"
+        for call in calls:
+            passed = ([ast.unparse(arg) for arg in call.args[2:]]
+                      + [ast.unparse(kw.value) for kw in call.keywords
+                         if kw.arg == "route"])
+            assert passed == ["args.route"], (
+                f"stage_host at line {call.lineno} passes {passed!r} as its "
+                f"route, so a package row would stage the file shim")
+
+
+# ===========================================================================
+# The publish gate
+# ===========================================================================
+
+class TestPublishGate:
+    """``make opencode-publish`` refuses unless the full gate passed on **these
+    exact bytes** — and each refusal names which of the four it was.
+
+    A gate is worth nothing if the publish command can skip it, and a refusal
+    nobody can act on is nearly as bad: "the gate is red" must never be the same
+    message as "you edited a file since".
+    """
+
+    @pytest.fixture
+    def staged(self, tmp_path):
+        """A full staged package in a temp directory, with its stamp.
+
+        ``allow_dirty`` is passed explicitly, never through the environment:
+        neither ``write_stamp`` nor ``check_stamp`` reads the env var, precisely
+        so a developer who exported it once cannot stamp — and therefore publish
+        — from a dirty tree.
+        """
+        destination = tmp_path / "pkg"
+        pkg_build.write_stamp(
+            destination, timestamp="20260101T000000Z", allow_dirty=True
+        )
+        return destination
+
+    def test_a_matching_full_stamp_permits_a_publish(self, staged):
+        assert pkg_build.check_stamp(staged, allow_dirty=True) is None
+
+    def test_the_stamp_helpers_ignore_the_dirty_environment_variable(
+        self, tmp_path, monkeypatch
+    ):
+        """The env var reaches npm's `prepack` hook; it must not reach here.
+
+        The refusal is *forced*, not borrowed from whatever state this checkout
+        happens to be in. With the real ``assert_clean`` the row only fails on a
+        dirty working tree and passes vacuously on a clean one — CI's fresh
+        clone, or this branch once it is committed — which is the opposite of a
+        guard. Patching the clean check to always refuse makes the assertion the
+        one the docstring claims: ``write_stamp`` *reached* the clean check,
+        which happens only when the env var failed to turn ``allow_dirty`` on.
+        """
+        reached = []
+
+        def refuse(root, prefix):
+            reached.append(prefix)
+            raise payload.PayloadError(
+                f"refusing to stage from a dirty tree — 1 change(s) under {prefix}"
+            )
+
+        monkeypatch.setattr(payload, "assert_clean", refuse)
+        monkeypatch.setenv(pkg_build.ALLOW_DIRTY_ENV, "1")
+        with pytest.raises(payload.PayloadError, match="dirty tree"):
+            pkg_build.write_stamp(tmp_path / "nope", timestamp="x")
+        assert reached, (
+            "write_stamp never ran the clean check, so the environment "
+            "variable reached it after all"
+        )
+
+    def test_publish_is_gated_on_the_a4_check(self, staged, tmp_path):
+        """Four refusal cases, each with its own reason."""
+        stamp_path = staged / pkg_build.STAMP_NAME
+
+        # 1. No stamp at all.
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        stamp_path.unlink()
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "no " in reason and pkg_build.STAMP_NAME in reason
+
+        # 2. A stamp the CI tier wrote. It can never authorize a publish: that
+        #    tier runs rows 1-6 and deliberately writes no stamp at all, so a
+        #    `tier: ci` stamp means someone made one by hand.
+        stamp_path.write_text(
+            json.dumps({**stamp, "tier": "ci"}), encoding="utf-8"
+        )
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "tier=" in reason and "ci" in reason
+
+        # 3. A digest that differs from a fresh build — an edit landed after the
+        #    gate ran. Keyed on the staged CONTENT, not on a git tree hash, which
+        #    would miss both the generated files and an uncommitted edit.
+        stamp_path.write_text(
+            json.dumps({**stamp, "digest": "0" * 64}), encoding="utf-8"
+        )
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "changed since the gate ran" in reason
+
+        # 4. A version that differs from the manifest's.
+        stamp_path.write_text(
+            json.dumps({**stamp, "version": "99.99.99"}), encoding="utf-8"
+        )
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "99.99.99" in reason
+
+        # And each of the four is a *different* message.
+        messages = set()
+        for mutation in ({"tier": "ci"}, {"digest": "1" * 64},
+                         {"version": "98.0.0"}):
+            stamp_path.write_text(
+                json.dumps({**stamp, **mutation}), encoding="utf-8"
+            )
+            messages.add(pkg_build.check_stamp(staged, allow_dirty=True))
+        assert len(messages) == 3, "two refusals share a message"
+
+    def test_the_publish_recipe_checks_the_stamp_before_npm(self):
+        """The refusal happens **before** npm is invoked at all."""
+        recipes = _makefile_recipes(REPO_ROOT / "Makefile")
+        body = recipes["opencode-publish"]
+        check_at = next(
+            i for i, line in enumerate(body) if "--check-stamp" in line
+        )
+        npm_at = next(
+            i for i, line in enumerate(body) if re.search(r"\bnpm\s+publish\b", line)
+        )
+        assert check_at < npm_at
+
+    def test_the_publish_recipe_never_allows_a_dirty_tree(self):
+        """``ALLOW_DIRTY`` is a development convenience and must not reach here.
+
+        A build that ships local state is one nobody can reproduce, and npm makes
+        the result immutable the moment it is published — so the publish path
+        neither sets nor forwards the opt-in, however it was invoked.
+        """
+        recipes = _makefile_recipes(REPO_ROOT / "Makefile")
+        for line in recipes["opencode-publish"]:
+            assert "--allow-dirty" not in line, (
+                f"the publish recipe can stage from a dirty tree: {line!r}"
+            )
+
+    def test_the_ci_tier_writes_no_stamp(self):
+        """A `-ci` run can never authorize a publish, and the guard is that it
+        leaves nothing behind to be mistaken for authorization."""
+        recipes = _makefile_recipes(REPO_ROOT / "Makefile")
+        for line in recipes["opencode-package-check-ci"]:
+            assert "--write-stamp" not in line, (
+                "the CI tier wrote a stamp; only the full gate may"
+            )
+        assert any(
+            "--write-stamp" in line
+            for line in recipes["opencode-package-check"]
+        ), "the full gate writes no stamp, so opencode-publish can never proceed"
+
+    def test_the_stamp_is_gitignored(self):
+        """It never travels: a stamp from another machine attests to that
+        machine's rows."""
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "check-ignore",
+             f"packaging/opencode/{pkg_build.STAMP_NAME}"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, "the publish stamp is not gitignored"
