@@ -50,5 +50,15 @@ RAW_OUTPUT
 
 Print ONLY the extracted JSON array and nothing else — no prose, no
 markdown fences, no explanation. Do not write any file; whoever invoked you
-persists your reply. If nothing recoverable is present, print an empty
-array.
+persists your reply.
+
+If the raw output holds nothing recoverable at all, print exactly this object
+instead — never an empty array, which is indistinguishable from a
+review that ran and genuinely found nothing:
+
+{"salvage_failed": true, "reason": "<what the raw output actually was>"}
+
+The reason is one short factual clause naming what the raw output turned out to
+be — an authentication error, a stack trace, a truncated log line, an empty
+stream, prose with no JSON anywhere in it. Not an apology, and not an account of
+what you tried.

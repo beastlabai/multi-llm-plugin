@@ -46,6 +46,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 import code_review_orchestrator as cro  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
+from utils import subagent_tasks as subagent_tasks_mod  # noqa: E402
 from utils.status_file import write_status  # noqa: E402
 
 
@@ -322,12 +323,22 @@ def _issues(titles):
     ]
 
 
-def _run_cro_reaggregate(plan, phase_dir):
+def _run_cro_reaggregate(
+    plan, phase_dir, *, skip_validation=True, render_report=False, extra_patches=()
+):
     """Drive the code-review reaggregate; return the patched report mock.
 
     Everything patched here is git/state/report machinery the identity question
     does not touch — ``build_unsanitize_map`` is deliberately NOT patched, since
     the recorded checkpoint is the whole point.
+
+    ``render_report=True`` leaves the *real* ``generate_review_report`` in place,
+    which is the only way to assert on what ``report.md`` actually says about a
+    model; it is off by default so the identity tests keep asserting on the
+    ``results`` dict handed to the renderer rather than on rendered markdown.
+    ``extra_patches`` takes already-built ``patch`` objects (a spy on
+    ``check_task_file_inputs``, a ``group_similar_suggestions`` rigged to raise)
+    so a caller can pin what was *called* and not only what was written.
     """
     args = argparse.Namespace(
         plan_file=str(plan),
@@ -337,8 +348,8 @@ def _run_cro_reaggregate(plan, phase_dir):
         timeout=None,
         max_parallel=2,
         base_ref=None,
-        skip_validation=True,
-        validation_model=None,
+        skip_validation=skip_validation,
+        validation_model="auto",
         apply_fixes=False,
         force=False,
         rerun_all=False,
@@ -355,12 +366,20 @@ def _run_cro_reaggregate(plan, phase_dir):
     )
     report = MagicMock(return_value="# report\n")
 
-    with patch.object(cro, "get_or_create_state", return_value=fake_state), \
-         patch.object(cro, "get_phase_dir", return_value=phase_dir), \
-         patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
-         patch.object(cro, "intent_to_add_untracked",
-                      side_effect=lambda files: contextlib.nullcontext()), \
-         patch.object(cro, "generate_review_report", report):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch.object(cro, "get_or_create_state", return_value=fake_state))
+        stack.enter_context(
+            patch.object(cro, "get_phase_dir", return_value=phase_dir))
+        stack.enter_context(
+            patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
+        stack.enter_context(
+            patch.object(cro, "intent_to_add_untracked",
+                         side_effect=lambda files: contextlib.nullcontext()))
+        if not render_report:
+            stack.enter_context(patch.object(cro, "generate_review_report", report))
+        for extra in extra_patches:
+            stack.enter_context(extra)
         asyncio.run(
             cro.reaggregate_from_existing_files(
                 "plan", plan.parent / "out", plan, args
@@ -511,8 +530,14 @@ class TestCodeReviewCopyReadsOneFilePerLogicalModel:
 # the real entry point can be wrong about either.
 
 
-def _fanout_args(plan, models):
-    """`parse_args` output for a foreground `review-code` run with no validation."""
+def _fanout_args(plan, models, skip_validation=True):
+    """`parse_args` output for a foreground `review-code` run.
+
+    ``skip_validation=False`` is the leg the documented workflow actually uses:
+    the fan-out materializes `validation_tasks.json`, prints
+    `[VALIDATION_BATCHES_PENDING]` and returns, leaving the run to be completed
+    by `--reaggregate`.
+    """
     return argparse.Namespace(
         plan_file=str(plan),
         models=list(models),
@@ -521,8 +546,8 @@ def _fanout_args(plan, models):
         timeout=None,
         max_parallel=2,
         base_ref=None,
-        skip_validation=True,
-        validation_model=None,
+        skip_validation=skip_validation,
+        validation_model="auto",
         apply_fixes=False,
         force=False,
         rerun_all=False,
@@ -546,31 +571,48 @@ def _fanout_state():
     return fake_state
 
 
-def _run_cro_fanout(tmp_path, issues_by_model):
+def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
+                    extra_patches=()):
     """Drive `code_review_orchestrator.main()` with the providers mocked out.
 
     Only the model invocation and the report renderer are stubbed — the phase
     dir, `save_model_result`, grouping and `grouped.json` are the real ones, so
     what lands on disk is what a real fan-out leaves for `--reaggregate` to read.
+
+    Returns the plan, the phase dir and **what `main()` returned**, because two
+    of the questions below are about the run surviving something: a checkpoint
+    write that quietly does nothing must not turn into an early return or a
+    non-zero exit, and `None` (the validation leg's early return, which
+    `sys.exit` treats as 0) has to be distinguishable from `EXIT_OK` only in the
+    sense that neither is a failure.
     """
     plan = tmp_path / "auth-feature.md"
     plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
 
     models = list(issues_by_model)
     results = {m: (True, issues_by_model[m], None) for m in models}
+    args = _fanout_args(plan, models, skip_validation=skip_validation)
 
-    with patch.object(cro, "parse_args", return_value=_fanout_args(plan, models)), \
-         patch.object(cro, "get_or_create_state", return_value=_fanout_state()), \
-         patch.object(cro, "resolve_models", return_value=models), \
-         patch.object(cro, "is_model_valid", return_value=True), \
-         patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
-         patch.object(cro, "intent_to_add_untracked",
-                      side_effect=lambda files: contextlib.nullcontext()), \
-         patch.object(cro, "run_all_reviews", new=AsyncMock(return_value=results)), \
-         patch.object(cro, "generate_review_report", return_value="# report\n"):
-        asyncio.run(cro.main())
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(cro, "parse_args", return_value=args))
+        stack.enter_context(
+            patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
+        stack.enter_context(patch.object(cro, "resolve_models", return_value=models))
+        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(
+            patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
+        stack.enter_context(
+            patch.object(cro, "intent_to_add_untracked",
+                         side_effect=lambda files: contextlib.nullcontext()))
+        stack.enter_context(
+            patch.object(cro, "run_all_reviews", new=AsyncMock(return_value=results)))
+        stack.enter_context(
+            patch.object(cro, "generate_review_report", return_value="# report\n"))
+        for extra in extra_patches:
+            stack.enter_context(extra)
+        exit_code = asyncio.run(cro.main())
 
-    return plan, cro.get_phase_dir(plan, "code-review")
+    return plan, cro.get_phase_dir(plan, "code-review"), exit_code
 
 
 #: Two specs whose sanitized stems are lossy in both of the ways that matter: the
@@ -581,7 +623,7 @@ _REAL_SPECS = ["claude-code:sonnet-4.6", "cursor-agent:cursor-grok-4.6-xhigh"]
 class TestReviewCodeWritesTheCheckpointReaggregationReads:
     def test_the_fanout_records_the_canonical_specs(self, tmp_path):
         """`.status.json` exists, and it holds specs — not filename stems."""
-        plan, phase_dir = _run_cro_fanout(
+        plan, phase_dir, _exit_code = _run_cro_fanout(
             tmp_path,
             {
                 _REAL_SPECS[0]: _issues(["Issue A"]),
@@ -615,7 +657,7 @@ class TestReviewCodeWritesTheCheckpointReaggregationReads:
         change, and `check_task_file_inputs` refuses `validation_tasks.json`
         against a `grouped.json` that reaggregation itself just rewrote.
         """
-        plan, phase_dir = _run_cro_fanout(
+        plan, phase_dir, _exit_code = _run_cro_fanout(
             tmp_path,
             {
                 _REAL_SPECS[0]: _issues(["Shared issue", "Only A"]),
@@ -637,3 +679,681 @@ class TestReviewCodeWritesTheCheckpointReaggregationReads:
         attributed = {m for group in payload["groups"] for m in group["models"]}
         assert attributed == set(_REAL_SPECS)
         assert all(":" in spec and "." in spec for spec in attributed)
+
+
+# ---------------------------------------------------------------------------
+# The bound `grouped.json` is reused, not rewritten
+# ---------------------------------------------------------------------------
+#
+# `--reaggregate` is the command that *checks* `grouped.json`'s bytes: it builds
+# `inputs.grouped_sha256` from the file and hands it to `read_task_file`, which
+# refuses `validation_tasks.json` if the hash has moved
+# (`utils/subagent_tasks.check_task_file_inputs`). While the code-review copy
+# regrouped unconditionally, it broke that binding and then audited it — the file
+# it hashed was the file it had just rewritten — so the operator's
+#
+#     ERROR: Refusing task file .../validation_tasks.json: the inputs it was
+#     materialized from have changed (grouped_sha256: ...)
+#
+# was this command refusing itself, on the one workflow the phase documents.
+#
+# The byte-identity test above is the regression guard for that, and it stays:
+# it catches a serializer or grouping drift at the point of divergence. But it is
+# a guard over a property nothing enforces — that regrouping is perfectly
+# reproducible out of two separate dict literals in two functions — and the class
+# of defect is "the bound file was rewritten at all", not "the rewrite differed".
+# `utils/review_orchestrator_base.reaggregate_from_existing_files` has never had
+# the problem because it *loads* the file instead ("preserves validation
+# alignment", in its own printed words); these pin the ported branch by what it
+# does NOT do: no write, and no call into grouping.
+
+
+def _fanout_with_validation(tmp_path, issues_by_model):
+    """A phase dir left exactly where `[VALIDATION_BATCHES_PENDING]` leaves one.
+
+    The real fan-out, with validation *enabled*: per-model results,
+    `grouped.json`, and a `validation_tasks.json` whose `inputs.grouped_sha256`
+    binds to the bytes of the `grouped.json` sitting beside it. `main()` returns
+    at the marker, which is where the documented workflow hands over to the
+    agent.
+    """
+    plan, phase_dir, exit_code = _run_cro_fanout(
+        tmp_path, issues_by_model, skip_validation=False
+    )
+    return plan, phase_dir, exit_code
+
+
+def _complete_validation_batches(phase_dir, status="valid"):
+    """Write the batch outputs the agent would have written after the marker.
+
+    Every group the task file names gets a verdict, joined by `group_hash` —
+    which `merge_batched_validation_results` treats as authoritative — so the
+    merge exercises the real join rather than positional luck.
+
+    `grouped.json` is deliberately untouched: its bytes are what
+    `inputs.grouped_sha256` binds to, and the flow under test is the one where
+    reaggregation *checks* that binding rather than moving it.
+    """
+    tasks = json.loads(
+        (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+    )
+    for batch in tasks["batches"]:
+        verdicts = [
+            {
+                "group_index": global_index,
+                "group_hash": batch["group_ids"][local_index],
+                "status": status,
+                "reason": f"Confirmed against the diff (group {global_index}).",
+                "confidence": 0.9,
+            }
+            for local_index, global_index in enumerate(batch["group_indices"])
+        ]
+        (phase_dir / f"validation_batch_{batch['batch_index']}.json").write_text(
+            json.dumps({"groups": verdicts}, indent=2), encoding="utf-8"
+        )
+    return tasks
+
+
+def _unrelated_issues(names):
+    """Issues no two of which `group_similar_suggestions` will ever merge.
+
+    `compute_similarity` (`utils/suggestion_processor.py`) scores shared *words*
+    in the title and the desc plus a flat 0.2 for a matching `type`, against a
+    0.4 threshold — so `_issues`' shared "Description for ..." boilerplate and
+    single `type` collapse an arbitrary list into one group, which is fine for
+    the identity questions above and useless here. These share no word and no
+    type, so the group count is the name count, and the batch count that follows
+    from it (`max_per_batch=4`) is something a test can rely on.
+    """
+    return [
+        {
+            "title": name,
+            "desc": f"{name}{name} {name}{name}",
+            "importance": "medium",
+            "file": f"src/{name.lower()}.py",
+            "type": f"kind-{name.lower()}",
+        }
+        for name in names
+    ]
+
+
+#: Six mutually dissimilar findings, the last three shared, so the fan-out
+#: produces six groups — two validation batches at `max_per_batch=4` — and at
+#: least one group carrying both specs.
+_A_ONLY = ["Alpha", "Bravo", "Charlie"]
+_SHARED = ["Delta"]
+_B_ONLY = ["Echo", "Foxtrot"]
+
+
+def _two_model_findings():
+    return {
+        _REAL_SPECS[0]: _unrelated_issues(_A_ONLY + _SHARED),
+        _REAL_SPECS[1]: _unrelated_issues(_SHARED + _B_ONLY),
+    }
+
+
+def _raises_if_grouped(*_args, **_kwargs):
+    raise AssertionError(
+        "group_similar_suggestions was called on a phase dir whose grouped.json "
+        "is bound by validation_tasks.json — reaggregation must load that file, "
+        "not regenerate it"
+    )
+
+
+class TestReaggregateReusesTheGroupedFileValidationIsBoundTo:
+    def test_a_phase_dir_carrying_validation_tasks_is_never_regrouped(
+        self, tmp_path
+    ):
+        """Not "the rewrite matched" — no rewrite, and no call into grouping.
+
+        `group_similar_suggestions` is patched to raise rather than merely
+        counted, because a reuse branch that still calls it and throws the result
+        away would satisfy a byte-compare and leave the defect one refactor from
+        returning.
+        """
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+
+        grouped_path = phase_dir / "grouped.json"
+        before = grouped_path.read_bytes()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            skip_validation=False,
+            extra_patches=[
+                patch.object(cro, "group_similar_suggestions", _raises_if_grouped)
+            ],
+        )
+
+        assert grouped_path.read_bytes() == before, (
+            "reaggregation rewrote the grouped.json that validation_tasks.json's "
+            "grouped_sha256 binds to"
+        )
+
+    def test_a_regroup_that_would_diverge_no_longer_breaks_the_binding(
+        self, tmp_path, capsys
+    ):
+        """The case the byte-identical round trip cannot cover.
+
+        An extra key is stamped on one model's issues after the fan-out — the
+        stand-in for every drift the plan's Out of scope lists: a field added on
+        one path, a reorder inside `SuggestionGroup.to_dict`, a changed argument
+        to `json.dump`. Regrouping would now produce different bytes, so the old
+        unconditional rewrite would move `grouped_sha256` and refuse its own task
+        file. Loading the bound file makes the divergence irrelevant: the run
+        completes, the verdicts are merged, and the report is written.
+        """
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+
+        stem = cro.sanitize_model_name(_REAL_SPECS[0])
+        result_path = phase_dir / f"{stem}.json"
+        drifted = json.loads(result_path.read_text(encoding="utf-8"))
+        for issue in drifted:
+            issue["serializer_drift"] = "a field a later release added"
+        result_path.write_text(json.dumps(drifted, indent=2), encoding="utf-8")
+
+        grouped_path = phase_dir / "grouped.json"
+        before = grouped_path.read_bytes()
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+        out, err = capsys.readouterr()
+
+        assert grouped_path.read_bytes() == before
+        assert "Refusing task file" not in out + err
+        assert (phase_dir / "report.md").exists()
+        assert (phase_dir / "validation.json").exists()
+
+    def test_a_run_interrupted_before_grouping_still_groups_and_writes(
+        self, tmp_path
+    ):
+        """The other half of the guard: nothing bound means nothing to preserve.
+
+        `--reaggregate` is also the path `main` points a dir at when it holds
+        per-model results and no `grouped.json` ("Found N per-model result
+        file(s) but no grouped.json"). Reuse must not turn that into a run that
+        aggregates nothing.
+        """
+        plan, phase_dir, _exit_code = _run_cro_fanout(
+            tmp_path, _two_model_findings()
+        )
+        grouped_path = phase_dir / "grouped.json"
+        grouped_path.unlink()
+        assert not (phase_dir / "validation_tasks.json").exists()
+
+        _run_cro_reaggregate(plan, phase_dir)
+
+        assert grouped_path.exists(), (
+            "a phase dir interrupted before grouping was not grouped"
+        )
+        payload = json.loads(grouped_path.read_text(encoding="utf-8"))
+        attributed = {m for group in payload["groups"] for m in group["models"]}
+        assert attributed == set(_REAL_SPECS)
+
+
+# ---------------------------------------------------------------------------
+# The documented validate-then-reaggregate workflow, end to end
+# ---------------------------------------------------------------------------
+#
+# Every test above drives `cro.main()` with `skip_validation=True`. So
+# `validation_tasks.json` is never materialized, no batch output is ever
+# completed, and `check_task_file_inputs` — the function that printed the refusal
+# this whole area exists to fix — is never called. Byte-identity of
+# `grouped.json` is a proxy for the cause; it is one layer below the failure the
+# operator actually met, which was a *task file* being rejected against the file
+# reaggregation had just rewritten. Nothing in this suite would have gone red on
+# that as reported.
+#
+# So this walks the whole documented path: fan out with validation on, take the
+# `[VALIDATION_BATCHES_PENDING]` handover, write the batch outputs the agent
+# would have written, and complete the run with `--reaggregate`. It asserts on
+# the operator-visible outcome — accepted, merged, reported, exit 0 — and it
+# asserts `check_task_file_inputs` actually *ran*, since "no refusal printed" is
+# equally true of a check that was skipped.
+
+
+class TestTheDocumentedValidateThenReaggregateFlowCompletes:
+    def test_the_task_file_is_accepted_and_its_verdicts_reach_the_report(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir, fanout_exit = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        fanout_out = capsys.readouterr().out
+
+        # The handover the phase documents, and the artifacts it leaves behind.
+        assert "[VALIDATION_BATCHES_PENDING]" in fanout_out
+        assert fanout_exit is None or fanout_exit == cro.EXIT_OK
+        tasks_path = phase_dir / "validation_tasks.json"
+        assert tasks_path.exists()
+        bound_hash = json.loads(tasks_path.read_text(encoding="utf-8"))["inputs"][
+            "grouped_sha256"
+        ]
+
+        tasks = _complete_validation_batches(phase_dir)
+        assert tasks["total_batches"] >= 2, (
+            "the fixture is meant to exercise the *batched* handover"
+        )
+        # Left exactly as the fan-out bound it — the test would be vacuous if the
+        # fixture re-bound the hash to whatever reaggregation produces.
+        assert json.loads(tasks_path.read_text(encoding="utf-8"))["inputs"][
+            "grouped_sha256"
+        ] == bound_hash
+
+        checked = []
+        real_check = subagent_tasks_mod.check_task_file_inputs
+
+        def spy(document, path, phase_dir_arg, current_inputs):
+            checked.append((path, dict(current_inputs)))
+            return real_check(document, path, phase_dir_arg, current_inputs)
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            skip_validation=False,
+            render_report=True,
+            extra_patches=[
+                patch.object(subagent_tasks_mod, "check_task_file_inputs", spy)
+            ],
+        )
+        out, err = capsys.readouterr()
+
+        # Accepted — and the check that could have refused it actually ran.
+        assert checked, (
+            "check_task_file_inputs never ran, so this asserts nothing about the "
+            "binding that produced the original refusal"
+        )
+        assert checked[0][0] == str(tasks_path)
+        assert checked[0][1]["grouped_sha256"] == bound_hash
+        assert "Refusing task file" not in out + err
+
+        # The verdicts were consumed, not ignored.
+        validation_path = phase_dir / "validation.json"
+        assert validation_path.exists()
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "**Validation:** 6 valid, 0 invalid, 0 needs human review" in report
+        assert "? Unknown" not in report
+
+        # Attribution is the canonical spec, never the stem it sanitizes to.
+        for spec in _REAL_SPECS:
+            assert f"**Model:** {spec}" in report
+            assert cro.sanitize_model_name(spec) not in report
+
+    def test_the_same_flow_holds_with_grouping_rigged_to_raise(
+        self, tmp_path, capsys
+    ):
+        """The proof that the bound file is not merely reproduced but reused.
+
+        Same workflow, same assertions on the outcome, with
+        `group_similar_suggestions` unavailable. Before the reuse branch this run
+        could not exist: reaggregation had to regroup before it could hash.
+        """
+        plan, phase_dir, _fanout_exit = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            skip_validation=False,
+            render_report=True,
+            extra_patches=[
+                patch.object(cro, "group_similar_suggestions", _raises_if_grouped)
+            ],
+        )
+        out, err = capsys.readouterr()
+
+        assert "Refusing task file" not in out + err
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "**Validation:** 6 valid, 0 invalid, 0 needs human review" in report
+        for spec in _REAL_SPECS:
+            assert f"**Model:** {spec}" in report
+
+
+# ---------------------------------------------------------------------------
+# A checkpoint that could not be written stops being a silent degradation
+# ---------------------------------------------------------------------------
+#
+# Every test above drives a writable `tmp_path`, so `write_status` always
+# succeeds and the failure path is never entered — the suite would look identical
+# if the call had been left out on an unwritable dir. And there is nothing to
+# catch: `write_status` is best-effort *by contract*, wrapping the temp write and
+# the `os.replace` in a bare `except Exception: pass` (`utils/status_file.py`),
+# unlinking the temp file and returning `None`. A read-only or full filesystem, a
+# phase dir made unwritable between the mkdir and the write, a checkpoint lock it
+# could not take — each leaves the run proceeding exactly as it did before the
+# write existed, and the operator meets the consequence days later as stems in a
+# report.
+#
+# Patching it to a no-op is the honest simulation of that swallow. The posture
+# under test is verify-and-warn: the fan-out below this line is the expensive
+# half of the run and sits under the detach boundary where nobody is watching, so
+# a checkpoint that could not be written must never become a fan-out that never
+# ran. Fail-closed belongs at `resolve_models`, where refusing costs a correct
+# run nothing.
+
+#: The sentence both warning sites share, and the thing the negatives assert the
+#: absence of. Matching on the consequence rather than on "WARNING" keeps these
+#: from passing on some unrelated warning that happens to reach stderr.
+_STEM_WARNING = "attributes issues by filename stem instead of by model spec"
+
+
+def _no_op_write_status(*_args, **_kwargs):
+    """`write_status`, exactly as it behaves when its write throws."""
+    return None
+
+
+def _half_landing_write_status(phase_dir, data):
+    """A checkpoint that lands carrying `phase` and `state` and nothing else.
+
+    What a partially merged, truncated or hand-edited `.status.json` looks like.
+    `build_unsanitize_map` reads only `models_requested`/`models_completed`, so
+    this file is worth exactly as much as no file — which is why the probe is on
+    the field and not on `os.path.exists`.
+    """
+    write_status(phase_dir, {"phase": data.get("phase"), "state": data.get("state")})
+
+
+class TestAFanOutWhoseCheckpointWriteFailedSaysSoAndCarriesOn:
+    def test_a_write_that_silently_does_nothing_neither_raises_nor_returns_early(
+        self, tmp_path
+    ):
+        """The whole point of warning instead of raising: the run still happens."""
+        plan, phase_dir, exit_code = _run_cro_fanout(
+            tmp_path,
+            {
+                _REAL_SPECS[0]: _issues(["Issue A"]),
+                _REAL_SPECS[1]: _issues(["Issue B"]),
+            },
+            extra_patches=[
+                patch.object(cro, "write_status", _no_op_write_status)
+            ],
+        )
+
+        assert exit_code == cro.EXIT_OK
+        for spec in _REAL_SPECS:
+            assert (phase_dir / f"{cro.sanitize_model_name(spec)}.json").exists(), (
+                "the fan-out did not dispatch, so a lost checkpoint cost the run "
+                "the expensive half rather than the identity map"
+            )
+        assert (phase_dir / "report.md").exists()
+
+    def test_the_warning_names_the_consequence_and_both_recoveries_on_stderr(
+        self, tmp_path, capsys
+    ):
+        """One warning, on stderr, in the operator's terms rather than the mechanism's."""
+        _plan, _phase_dir, _exit_code = _run_cro_fanout(
+            tmp_path,
+            {
+                _REAL_SPECS[0]: _issues(["Issue A"]),
+                _REAL_SPECS[1]: _issues(["Issue B"]),
+            },
+            extra_patches=[
+                patch.object(cro, "write_status", _no_op_write_status)
+            ],
+        )
+        out, err = capsys.readouterr()
+
+        assert _STEM_WARNING in err
+        # stdout is this phase's machine-readable channel; a degradation nobody
+        # chose does not belong in it.
+        assert _STEM_WARNING not in out
+        assert err.count(_STEM_WARNING) == 1, "one warning, not one per model"
+
+        # The consequence, spelled as the thing that will go wrong later.
+        assert "--reaggregate" in err
+        assert "cursor-agent_cursor-grok-4_6-xhigh" in err
+        assert "cursor-agent:cursor-grok-4.6-xhigh" in err
+
+        # Both recoveries, and the specs the hand-written one needs — a stem in
+        # an old report is exactly what cannot be inverted, so the warning has to
+        # be the source.
+        assert "--force" in err
+        assert ".status.json" in err
+        for spec in _REAL_SPECS:
+            assert spec in err
+
+    def test_a_checkpoint_that_lands_without_models_requested_is_warned_identically(
+        self, tmp_path, capsys
+    ):
+        """The probe is on the field `build_unsanitize_map` needs, not on the file."""
+        _plan, phase_dir, exit_code = _run_cro_fanout(
+            tmp_path,
+            {_REAL_SPECS[0]: _issues(["Issue A"])},
+            extra_patches=[
+                patch.object(cro, "write_status", _half_landing_write_status)
+            ],
+        )
+        err = capsys.readouterr().err
+
+        assert (phase_dir / ".status.json").exists(), (
+            "this variant is about a checkpoint that exists and is useless"
+        )
+        assert _STEM_WARNING in err
+        assert exit_code == cro.EXIT_OK
+
+    def test_an_ordinary_run_on_a_writable_dir_is_not_warned_about(
+        self, tmp_path, capsys
+    ):
+        """The negative that keeps the read-back from becoming noise."""
+        _plan, phase_dir, exit_code = _run_cro_fanout(
+            tmp_path,
+            {
+                _REAL_SPECS[0]: _issues(["Issue A"]),
+                _REAL_SPECS[1]: _issues(["Issue B"]),
+            },
+        )
+        out, err = capsys.readouterr()
+
+        assert _STEM_WARNING not in err + out
+        assert exit_code == cro.EXIT_OK
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_requested"] == _REAL_SPECS
+
+
+# ---------------------------------------------------------------------------
+# ...and reaggregation says the same thing from the other end
+# ---------------------------------------------------------------------------
+#
+# The fan-out's read-back covers runs from here on. It does nothing for the
+# artifacts already on disk: a dir whose fan-out predates the checkpoint write, a
+# dir copied to another machine or carried across a branch, a dir whose
+# `.status.json` was hand-merged without the field. `build_unsanitize_map`
+# returns `{}` for all three, `resolve_result_files_by_model` falls back to "the
+# stem IS the identity", and on the `--skip-validation` leg the run completes and
+# writes a report attributed to stems with nothing said about it.
+#
+# Warning-only, deliberately, and not a gate. Refusing would break a path that
+# completes today, which is a change that owes an override flag; and it is the
+# same posture as the fan-out's read-back, so the operator meets one story about
+# stem attribution rather than two. The wording is literally shared
+# (`warn_stem_attribution`), which is what keeps them from drifting into two
+# paraphrases.
+
+
+def _stemmed_phase(tmp_path, checkpoint):
+    """A code-review phase dir with results and *checkpoint* written verbatim.
+
+    `checkpoint=None` writes no `.status.json` at all — the pre-checkpoint or
+    hand-copied dir. Anything else is written through `write_status`, so the
+    fixture cannot drift from the real document's shape.
+    """
+    plan = tmp_path / "auth-feature.md"
+    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+    phase_dir = cro.get_phase_dir(plan, "code-review")
+
+    for spec, titles in ((_REAL_SPECS[0], ["Alpha"]), (_REAL_SPECS[1], ["Bravo"])):
+        (phase_dir / f"{cro.sanitize_model_name(spec)}.json").write_text(
+            json.dumps(_unrelated_issues(titles)), encoding="utf-8"
+        )
+
+    if checkpoint is not None:
+        write_status(str(phase_dir), dict(checkpoint))
+    return plan, phase_dir
+
+
+class TestReaggregatingADirWithNoRecordedModelsWarnsAndStillCompletes:
+    def test_a_dir_with_no_status_json_still_writes_the_report(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _stemmed_phase(tmp_path, checkpoint=None)
+        assert not (phase_dir / ".status.json").exists()
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        out, err = capsys.readouterr()
+
+        # Warned, not refused: the report is still there and nothing exited.
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "# Code Review Report" in report
+        assert _STEM_WARNING in err
+        assert _STEM_WARNING not in out
+        assert err.count(_STEM_WARNING) == 1
+        assert "--force" in err and ".status.json" in err
+
+        # And the misattribution the warning is about is really happening, which
+        # is what makes it worth printing.
+        for spec in _REAL_SPECS:
+            assert cro.sanitize_model_name(spec) in report
+
+    def test_a_checkpoint_without_models_requested_is_warned_about_identically(
+        self, tmp_path, capsys
+    ):
+        """A file that exists and inverts nothing is the same defect as no file."""
+        plan, phase_dir = _stemmed_phase(
+            tmp_path,
+            checkpoint={"phase": "code-review", "state": "models_complete"},
+        )
+        assert (phase_dir / ".status.json").exists()
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        err = capsys.readouterr().err
+
+        assert _STEM_WARNING in err
+        assert (phase_dir / "report.md").exists()
+
+    def test_a_dir_with_a_proper_checkpoint_is_not_warned_about(
+        self, tmp_path, capsys
+    ):
+        """The negative, and the positive it implies: specs, not stems."""
+        plan, phase_dir = _stemmed_phase(
+            tmp_path,
+            checkpoint={
+                "phase": "code-review",
+                "state": "models_complete",
+                "models_requested": list(_REAL_SPECS),
+                "models_completed": list(_REAL_SPECS),
+            },
+        )
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        out, err = capsys.readouterr()
+
+        assert _STEM_WARNING not in err + out
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        for spec in _REAL_SPECS:
+            assert f"**Model:** {spec}" in report
+            assert cro.sanitize_model_name(spec) not in report
+
+
+# ---------------------------------------------------------------------------
+# The gate that keeps the identity map injective in the first place (D1 amended)
+# ---------------------------------------------------------------------------
+
+#: A pair that is distinct as specs and identical as filenames. `sanitize_model_name`
+#: flattens every separator a spec carries, so `.` and `_` both become `_` and these
+#: two collapse onto `p_a_b`. The `--models` leg is the one used here deliberately:
+#: it is the only leg that does not filter on `get_provider(name).is_available()`,
+#: so a fictitious provider reaches the gate instead of dying earlier on "all
+#: providers unavailable" — which would pass this test for the wrong reason. The
+#: config legs are covered as unit tests in `tests/test_provider_registry.py`.
+_COLLIDING_SPECS = ["p:a.b", "p:a_b"]
+_COLLIDING_STEM = "p_a_b"
+
+
+def _run_cro_fanout_resolving_models(tmp_path, models):
+    """`_run_cro_fanout`, minus the one patch that would hide the gate.
+
+    Every other fan-out driver in this file patches `resolve_models` to hand back
+    a fixed list, because every other question here is about what happens *after*
+    selection. This one is about selection itself, so the real function has to
+    run — patching it is exactly the mistake that would make a green test mean
+    nothing.
+    """
+    plan = tmp_path / "auth-feature.md"
+    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+    args = _fanout_args(plan, models)
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(cro, "parse_args", return_value=args))
+        stack.enter_context(
+            patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
+        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(
+            patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
+        stack.enter_context(
+            patch.object(cro, "intent_to_add_untracked",
+                         side_effect=lambda files: contextlib.nullcontext()))
+        stack.enter_context(
+            patch.object(cro, "run_all_reviews",
+                         new=AsyncMock(side_effect=AssertionError(
+                             "the fan-out dispatched despite a stem collision"))))
+        stack.enter_context(
+            patch.object(cro, "generate_review_report", return_value="# report\n"))
+        return plan, asyncio.run(cro.main())
+
+
+class TestTwoSpecsSharingOneFilenameStemNeverReachTheFanOut:
+    """The end-to-end shape of D1's collision gate.
+
+    `tests/test_provider_registry.py` pins `resolve_models`' refusal directly, on
+    all four legs. What that cannot show is the consequence the refusal buys:
+    that the run stops while stopping is still free. Both silent failures a
+    collision causes are downstream of a per-model *file* — one model's result
+    overwriting the other's under the shared stem, and `skip_existing_result`
+    mis-skipping the second because the first one's file is already there — so
+    the property worth pinning here is that **no per-model result exists at all**
+    when the run ends. The overwrite and the mis-skip are then unreachable rather
+    than merely unlikely.
+    """
+
+    def test_a_colliding_pair_stops_the_run_before_any_result_is_written(
+        self, tmp_path, capsys
+    ):
+        """Exit 3, both specs and the stem named, and nothing on disk to misread."""
+        with pytest.raises(SystemExit) as exit_info:
+            _run_cro_fanout_resolving_models(tmp_path, _COLLIDING_SPECS)
+
+        assert exit_info.value.code == 3
+
+        err = capsys.readouterr().err
+        assert "share one filename stem" in err
+        for spec in _COLLIDING_SPECS:
+            assert repr(spec).replace('"', "'") in err or spec in err
+        assert _COLLIDING_STEM in err
+
+        # `get_phase_dir` mkdirs, so asking it where the phase dir *would* be
+        # would create the very directory this asserts is absent. Sweep the
+        # tmp tree for the artifact instead: the collision refusal fires above
+        # `out_dir.mkdir()`, so not one per-model file — under either spec's
+        # stem — can have been written.
+        written = [p.name for p in tmp_path.rglob("*.json")]
+        assert f"{_COLLIDING_STEM}.json" not in written
+        assert not any(name.startswith(_COLLIDING_STEM) for name in written)
+
+    def test_a_pair_whose_stems_differ_is_not_stopped(self, tmp_path):
+        """The negative: the gate refuses a collision, not a separator.
+
+        `_REAL_SPECS` carry both lossy characters — the `:` between provider and
+        model and the `.` inside a version — and still sanitize apart. A gate
+        that fired on them would refuse every realistic run this plan exists to
+        make work.
+        """
+        with pytest.raises(AssertionError, match="dispatched despite"):
+            _run_cro_fanout_resolving_models(tmp_path, list(_REAL_SPECS))

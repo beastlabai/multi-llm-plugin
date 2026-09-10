@@ -30,6 +30,7 @@ from .json_extractor import (
     extract_json_from_text,
     find_json_candidates,
     generate_output_path,
+    is_answer_shaped,
     read_json_from_file,
     sanitize_model_name,
 )
@@ -221,6 +222,7 @@ __all__ = [
     "extract_json_from_text",
     "find_json_candidates",
     "generate_output_path",
+    "is_answer_shaped",
     "read_json_from_file",
     "sanitize_model_name",
     # schema_validator

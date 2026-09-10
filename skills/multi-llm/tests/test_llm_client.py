@@ -26,6 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import llm_client
 from utils.llm_client import (
     LLMClientError,
     SubagentTimeoutError,
@@ -39,6 +40,9 @@ from utils.llm_client import (
     CMDLINE_CAP_UTF16_BATCH,
     CMDLINE_CAP_UTF16_NATIVE,
     CMDLINE_UTF16_HEADROOM,
+    MAX_LOG_STREAM_BYTES,
+    MAX_LOG_TAIL_LINES,
+    _attach_stdout_excerpt,
     _save_log,
     _resolve_executable,
     _utf16_code_units,
@@ -56,6 +60,13 @@ from utils.llm_client import (
     invoke_for_json,
 )
 from utils.providers.cursor_agent import CursorAgentProvider
+
+# The redaction canary is *synthesized*, never written out — the same table
+# `tests/test_redaction.py` draws its `anthropic-api-key` vector from, shared so
+# the two suites cannot drift in their fixtures (§4.5.5). A literal
+# `sk-ant-api03-...` here would make this file the one committed secret nobody
+# scans, and `tests/test_no_committed_secrets.py` would say so.
+from .test_no_committed_secrets import _synthesize  # noqa: E402
 
 
 # `check_cursor_agent_available()` and its three tests are deleted (§9.5): the
@@ -545,6 +556,428 @@ class TestInvokeWithProvider:
         assert "duration_seconds" in result["details"]
         assert isinstance(result["details"]["duration_seconds"], float)
         assert result["details"]["duration_seconds"] >= 0
+
+
+class TestHardFailureStdoutExcerpt:
+    """``details["stdout_excerpt"]`` on the two paths that used to drop stdout.
+
+    ``invoke_with_provider`` loses a run three ways, and until this change only
+    one of them carried what the provider had actually printed:
+
+    * a **zero exit whose output would not parse** attached
+      ``details["stdout_excerpt"]`` — the original site, added because "JSON
+      parsing failed from both file and stdout" was what a cursor ``--mode ask``
+      write refusal looked like from the outside;
+    * a **non-zero exit** attached ``exit_code`` and ``stderr`` and nothing else;
+    * a **timeout** attached neither stream.
+
+    The two silent ones are the interesting ones, because a non-zero exit is not
+    only "the provider never spoke". It is also the provider that wrote a
+    truncated or fenced array and *then* died — a kill at the deadline, a crash on
+    teardown — and that array is on **stdout**, never on stderr. Salvage gating in
+    ``code_review_orchestrator.py`` runs under exactly that branch
+    (``if not result["success"]``), so with stderr as its only channel it would
+    announce "Provider failed before producing any JSON — nothing to salvage"
+    about a run that had produced JSON, and drop a recoverable review without
+    saying so. The JSON-erroring providers press the same point from the other
+    side: ``opencode run --format json`` puts its failure shape on stdout with
+    stderr empty, and a relayed ``{"error": {"code": 401, ...}}`` body is
+    indistinguishable from any HTTP-backed CLI — those reached the gate as the
+    empty string, so even the verdicts it reached correctly were reached for the
+    wrong reason.
+
+    These tests pin the **plumbing half**: that the text arrives on the envelope,
+    that it arrives redacted and bounded (this excerpt can reach a salvage
+    request, a log *and* a report), and that absence still means absence so no
+    consumer needs an empty-string special case. What the orchestrator then
+    *decides* with it is site A's own business and is tested there.
+    """
+
+    @pytest.fixture
+    def mock_subprocess(self):
+        """Create a mock for subprocess.run."""
+        with patch("utils.llm_client.subprocess.run") as mock:
+            yield mock
+
+    @pytest.fixture
+    def mock_provider_available(self):
+        """Mock provider to appear available."""
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"):
+            yield
+
+    #: A review array cut off mid-object: what a provider killed while streaming
+    #: leaves behind, and the single most salvageable failure this skill has.
+    #: Deliberately not valid JSON — the point is that `has_salvageable_json` gets
+    #: to look at it, not that it parses here.
+    TRUNCATED_ARRAY = (
+        '[{"title": "Retry ladder re-runs a schema violation", '
+        '"importance": "high", "file": "utils/retry_ladder.py", '
+        '"type": "logic", "desc": "The ladder treats a schema_violation as'
+    )
+
+    #: kilocode's measured auth failure, ANSI escapes and all, as captured in
+    #: `tests/test_stderr_diagnosis.py` — a provider that died *before* saying
+    #: anything, on the stream it was supposed to use. Nothing to salvage, and the
+    #: envelope must say so by omission rather than by an empty string.
+    KILOCODE_AUTH_STDERR = "\x1b[91m\x1b[1mError: \x1b[0mUser not found.\n"
+
+    #: The opencode error shape: a JSON failure body on **stdout**, stderr empty.
+    OPENCODE_ERROR_BODY = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "name": "ProviderAuthError",
+                "data": {"providerID": "google", "message": "API key is missing."},
+            },
+        }
+    )
+
+    @staticmethod
+    def _failed_run(stdout, stderr, returncode=1):
+        """A `CompletedProcess` stand-in for a provider that exited non-zero."""
+        mock_result = MagicMock()
+        mock_result.returncode = returncode
+        mock_result.stdout = stdout
+        mock_result.stderr = stderr
+        return mock_result
+
+    @staticmethod
+    def _timeout(stdout, stderr="", timeout=600):
+        """A `TimeoutExpired` carrying whatever the kill managed to recover."""
+        exc = subprocess.TimeoutExpired(cmd=["cursor-agent"], timeout=timeout)
+        exc.stdout = stdout
+        exc.stderr = stderr
+        return exc
+
+    # -- the non-zero exit ---------------------------------------------------
+
+    def test_a_non_zero_exit_carries_its_truncated_stdout_array_out_as_stdout_excerpt(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The answer was on stdout and the exit code was 1; both must survive.
+
+        This is the case the stderr-only salvage gate was structurally unable to
+        see: stderr is empty, so the pre-change envelope handed the gate the empty
+        string and the array went in the bin. The assertion is on the *text*, not
+        merely on the key, because a consumer is going to run
+        `has_salvageable_json` over it.
+        """
+        mock_subprocess.return_value = self._failed_run(self.TRUNCATED_ARRAY, "")
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert result["details"]["exit_code"] == 1
+        assert result["details"]["stdout_excerpt"] == self.TRUNCATED_ARRAY
+
+    def test_a_non_zero_exit_with_the_kilocode_auth_text_on_stderr_attaches_no_excerpt(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The negative of the case above: nothing was printed, so no key appears.
+
+        kilocode's `Error: User not found.` is an auth verdict written to stderr
+        by a CLI that never emitted a byte of answer. `details["stderr"]` must
+        still carry it verbatim — the stderr diagnosis path reads it — and
+        `stdout_excerpt` must be **absent**, not present-and-empty, so that
+        `details.get("stdout_excerpt")` reads as "the provider said nothing we
+        can use" without every call site adding a second emptiness check.
+        """
+        mock_subprocess.return_value = self._failed_run("", self.KILOCODE_AUTH_STDERR)
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="kilocode:moonshotai/kimi-k3",
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "stdout_excerpt" not in result["details"]
+        assert result["details"]["stderr"] == self.KILOCODE_AUTH_STDERR
+
+    def test_a_json_erroring_provider_reaches_the_caller_with_its_error_body_attached(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """opencode's failure shape is on stdout with stderr empty.
+
+        `describe_failure` already reads that body for the one-line reason on
+        `result["error"]`, but a one-line reason is a verdict, not evidence. The
+        body itself now rides out too, so a consumer that wants to reach its own
+        conclusion — is this JSON at all? is it salvageable? — has the same text
+        the adapter judged.
+        """
+        mock_subprocess.return_value = self._failed_run(self.OPENCODE_ERROR_BODY, "")
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="opencode:google/gemini-2.5-pro",
+        )
+
+        assert result["success"] is False
+        assert "ProviderAuthError: API key is missing." in result["error"]
+        assert result["details"]["stdout_excerpt"] == self.OPENCODE_ERROR_BODY
+
+    # -- the timeout ---------------------------------------------------------
+
+    def test_a_timeout_kill_carries_the_partial_stdout_it_recovered(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The timeout path *does* have the bytes, and now returns them.
+
+        Worth stating because the opposite would have been a reason to attach
+        nothing: `subprocess.run` re-raises a `TimeoutExpired` already populated
+        with everything read off the pipe before the deadline (POSIX populates it
+        as it raises; Windows kills and re-`communicate()`s), so a provider killed
+        mid-stream leaves a real, partial answer here. `_save_log` has always
+        written it to the log file; only the returned envelope dropped it, and the
+        envelope is the half a caller can act on.
+        """
+        mock_subprocess.side_effect = self._timeout(self.TRUNCATED_ARRAY)
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+            timeout=600,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert result["details"]["timeout"] == 600
+        assert result["details"]["stdout_excerpt"] == self.TRUNCATED_ARRAY
+
+    def test_a_timeout_decodes_partial_stdout_from_bytes_before_excerpting_it(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """`TimeoutExpired.stdout` arrives as **bytes** even under `text=True`.
+
+        Measured, not assumed: `Popen._communicate` joins the raw chunks it has
+        accumulated and hands them to the exception without running them through
+        the stream decoder, so the `text=True` guarantee that holds for a
+        `CompletedProcess` does not hold here. The excerpt therefore has to sit
+        downstream of the module's own utf-8/replace decode, or it would be
+        excerpting a `bytes` repr.
+        """
+        mock_subprocess.side_effect = self._timeout(self.TRUNCATED_ARRAY.encode("utf-8"))
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        assert result["details"]["stdout_excerpt"] == self.TRUNCATED_ARRAY
+
+    @pytest.mark.parametrize("partial", [None, "", "   \n\n  "])
+    def test_a_timeout_that_recovered_nothing_usable_attaches_no_excerpt_key(
+        self, mock_subprocess, mock_provider_available, partial
+    ):
+        """A kill before the child's first write, and its whitespace-only cousin.
+
+        All three are "the provider said nothing", and all three must reach a
+        consumer identically. The `.strip()` is why the third belongs here: a
+        provider that emitted only a newline before dying is not a salvage
+        candidate, and an excerpt of `"\\n"` would make `.get("stdout_excerpt")`
+        truthy for one.
+        """
+        mock_subprocess.side_effect = self._timeout(partial)
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert "stdout_excerpt" not in result["details"]
+
+    # -- §4.5 then §4.4, on the paths that just started carrying text ---------
+
+    def test_a_credential_in_stdout_does_not_survive_the_non_zero_exit_excerpt(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """Redaction is not inherited from the log writer; this path needs its own.
+
+        The excerpt is a *third* sink for provider output — it reaches a salvage
+        request, `failed/*.attemptN.json` and whatever report quotes it — and it
+        is the newest, which makes it exactly the sink a redaction change would
+        forget. The canary is the shared synthesized `anthropic-api-key` vector,
+        so a pattern-set regression names the same shape here that it names in
+        `tests/test_redaction.py`.
+        """
+        secret = _synthesize("anthropic-api-key", "llm-client-non-zero-exit")
+        mock_subprocess.return_value = self._failed_run(
+            f'{{"error": "invalid x-api-key {secret}"}}', ""
+        )
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        excerpt = result["details"]["stdout_excerpt"]
+        assert secret not in excerpt
+        assert "<redacted:" in excerpt
+        # The surrounding sentence survives, or the excerpt stops being evidence.
+        assert "invalid x-api-key" in excerpt
+
+    def test_a_credential_in_partial_stdout_does_not_survive_the_timeout_excerpt(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The same gate on the other new path, asserted rather than inferred.
+
+        Two paths now attach this key and both went through one helper, but "they
+        share a helper" is a claim about today's source; the leak this prevents is
+        someone tomorrow inlining one of them back.
+        """
+        secret = _synthesize("anthropic-api-key", "llm-client-timeout")
+        mock_subprocess.side_effect = self._timeout(f"streaming... key={secret}")
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        excerpt = result["details"]["stdout_excerpt"]
+        assert secret not in excerpt
+        assert "<redacted:" in excerpt
+
+    def test_an_over_long_stdout_is_bounded_to_the_tail_on_the_non_zero_exit_path(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """§4.4's caps apply here too — and the run killed at the deadline is the
+        run most likely to have emitted megabytes.
+
+        A *successful* `review-plan` once wrote a 6,254,326 B log; nothing stops a
+        failing one from producing the same volume, and this excerpt travels into
+        a salvage prompt where an unbounded stream is a cost as well as a hazard.
+        """
+        stdout = "\n".join(f"chunk {i}" for i in range(MAX_LOG_TAIL_LINES * 3))
+        mock_subprocess.return_value = self._failed_run(stdout, "")
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        excerpt = result["details"]["stdout_excerpt"]
+        lines = excerpt.splitlines()
+        assert len(lines) == MAX_LOG_TAIL_LINES + 1, "the marker plus the kept tail"
+        assert "earlier line(s) truncated" in lines[0]
+        assert "chunk 0" not in excerpt
+        assert f"chunk {MAX_LOG_TAIL_LINES * 3 - 1}" in excerpt
+
+    def test_a_single_enormous_stdout_line_is_cut_to_the_per_stream_byte_budget(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The last-20-lines rule is no cap at all against one huge line.
+
+        A provider streaming JSON without newlines — which is the normal shape for
+        a `--format json` CLI — produces exactly one line, so the byte budgets are
+        the only thing standing between a 200 KB answer and a 200 KB excerpt.
+        """
+        mock_subprocess.return_value = self._failed_run("x" * (MAX_LOG_STREAM_BYTES * 4), "")
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        excerpt = result["details"]["stdout_excerpt"]
+        assert len(excerpt.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+        assert "stream truncated" in excerpt
+
+    # -- the refactor's own guard rails --------------------------------------
+
+    def test_the_zero_exit_parse_failure_still_attaches_the_excerpt_it_always_did(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """A regression pin on the site the helper was factored *out of*.
+
+        This one predates the change and is the reason the helper had to keep
+        `.strip()` and the omit-when-empty rule rather than inventing its own: the
+        cursor `--mode ask` refusal that cost three 450 s runs is read out of this
+        key by `tests/test_fake_lane_output_channel.py`, and by anyone debugging a
+        parse failure.
+        """
+        refusal = "I can't write the requested file while Ask mode is active."
+        mock_subprocess.return_value = self._failed_run(refusal, "", returncode=0)
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"]["stdout_excerpt"] == refusal
+
+    def test_a_zero_exit_that_parsed_cleanly_attaches_no_excerpt(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """Success carries data, not a transcript.
+
+        The key exists to explain a loss. Attaching it to a run that succeeded
+        would double every successful envelope's payload for no reader, and would
+        make `.get("stdout_excerpt")` useless as the "did this go wrong" signal
+        the failure paths now use it as.
+        """
+        wrapper = {"type": "result", "result": json.dumps([{"title": "ok"}])}
+        mock_subprocess.return_value = self._failed_run(json.dumps(wrapper), "", returncode=0)
+
+        result = invoke_with_provider(
+            prompt="Test",
+            model_spec="cursor-agent:gpt-4",
+        )
+
+        assert result["success"] is True
+        assert "stdout_excerpt" not in result["details"]
+
+    def test_all_three_losing_paths_route_through_the_one_helper(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """The factoring itself, pinned — because three copies drift twice.
+
+        The redact-before-bound order is normative (`_bound_stream` says so: a cut
+        applied first leaves a remnant no pattern matches), and a cap tightened or
+        a pattern added at two of three copies leaks from the third invisibly,
+        until a human reads an artifact. Asserting the call rather than only its
+        output is what makes an inlined fourth copy fail here instead of shipping.
+        """
+        seen = []
+        with patch.object(
+            llm_client,
+            "_attach_stdout_excerpt",
+            side_effect=lambda details, stdout: seen.append(stdout),
+        ):
+            mock_subprocess.return_value = self._failed_run("nonzero stdout", "")
+            invoke_with_provider(prompt="T", model_spec="cursor-agent:gpt-4")
+
+            mock_subprocess.return_value = self._failed_run("unparseable", "", returncode=0)
+            invoke_with_provider(prompt="T", model_spec="cursor-agent:gpt-4")
+
+            mock_subprocess.return_value = None
+            mock_subprocess.side_effect = self._timeout("timeout stdout")
+            invoke_with_provider(prompt="T", model_spec="cursor-agent:gpt-4")
+
+        assert seen == ["nonzero stdout", "unparseable", "timeout stdout"]
+
+    def test_the_helper_omits_the_key_rather_than_writing_an_empty_string(self):
+        """The contract stated directly, without a subprocess in the way.
+
+        `details.get("stdout_excerpt")` has to mean "there is text worth looking
+        at". A key holding `""` would satisfy `in details` for every caller that
+        checks membership, and the first one written that way turns "the provider
+        printed nothing" into "the provider printed something".
+        """
+        for nothing in (None, "", "\n\n", "   "):
+            details = {"exit_code": 1}
+            _attach_stdout_excerpt(details, nothing)
+            assert details == {"exit_code": 1}, f"attached a key for {nothing!r}"
+
+        details = {"exit_code": 1}
+        _attach_stdout_excerpt(details, "  something  \n")
+        assert details["stdout_excerpt"] == "something"
 
 
 class TestIsValidParsedData:

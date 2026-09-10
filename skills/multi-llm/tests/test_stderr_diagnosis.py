@@ -49,25 +49,45 @@ envelopes. That sweep is derived from every C3 adapter's own
 ``auth_error_patterns`` delta (:data:`C3_ADAPTERS`), not from gemini's two, so
 muse's ``api key from`` is graded as directly as gemini's ``unauthenticated``.
 
+**``kilocode`` joined on 2026-09-10**, from the other end: not a probe run but
+one real ``review-code`` slot against a dead account, where the CLI painted
+``Error: User not found.`` onto stderr, exited 1, and the operator-visible line
+read ``kilocode exited with code 1`` — costing the reader a diagnosis step,
+because a bare exit code sends them looking for a parse problem when the fix is
+provider auth. It is graded on the same five rungs as pi and gemini, and it adds
+the one thing neither of them could exercise: **paint**. This CLI colours its own
+diagnostics, so the escapes come off at rung 4 alongside the run banner, and the
+painted capture and its unpainted twin have to produce the identical sentence —
+a diagnosis that changes with the terminal's colour support is not one.
+``plans/reaggregate-identity-and-salvage-gating.md`` residual item 4 is the
+entry that asked for these rows.
+
 C4's and C3's tests live here rather than in ``test_providers.py`` on purpose:
 they are one subject read end to end, and the hand-written per-adapter classes
-in that module grade parsing.
+in that module grade parsing. The channel each override declares is pinned
+*there*, in ``_DESCRIBE_FAILURE_CHANNELS``, whose roster is derived from the
+classes — so an override cannot land without declaring the stream it reads, and
+kilocode's row is ``stderr``.
 """
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.llm_client import invoke_with_provider  # noqa: E402
 from utils.providers.base import LLMProvider, matches_any  # noqa: E402
 from utils.providers.claude_code import ClaudeCodeProvider  # noqa: E402
 from utils.providers.cline import ClineProvider  # noqa: E402
 from utils.providers.gemini import GeminiProvider  # noqa: E402
 from utils.providers.muse import MuseProvider  # noqa: E402
 from utils.providers.gemini import _MAX_DIAGNOSIS_CHARS as GEMINI_CAP  # noqa: E402
+from utils.providers.kilocode import KiloCodeProvider  # noqa: E402
+from utils.providers.kilocode import _MAX_DIAGNOSIS_CHARS as KILOCODE_CAP  # noqa: E402
 from utils.providers.pi import PiProvider  # noqa: E402
 from utils.providers.pi import _MAX_DIAGNOSIS_CHARS as PI_CAP  # noqa: E402
 
@@ -75,6 +95,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 PI = PiProvider()
 GEMINI = GeminiProvider()
+KILOCODE = KiloCodeProvider()
 
 
 def _capture_rows(provider):
@@ -210,6 +231,103 @@ GEMINI_CLASSIFY = {
     "server-error": None,
     "zero-byte-response": None,
 }
+
+
+# --------------------------------------------------------------------------- #
+# kilocode's captures — literals rather than files, and why
+# --------------------------------------------------------------------------- #
+#
+# pi and gemini were probed row by row against a localhost stub inside the E2E
+# container, so their nineteen captures are committed as
+# `<row>.{stdout,stderr}.txt` pairs with a `manifest.yaml` the §6.2 rig grades,
+# and `_streams` reads them off disk. kilocode has had no such probe run. What it
+# has is ONE real slot — a `--review-code --quick` fan-out on 2026-08-24 whose
+# `kilocode` model was configured against an account the key no longer belonged
+# to — and those bytes are already committed verbatim as a literal twice:
+# `tests/test_json_extractor.py::KILOCODE_AUTH_FAILURE` (the salvage gate: is
+# there anything here to repair?) and its twin in `tests/test_e2e_failures.py`
+# (the path a slot with nothing to salvage takes). This is the third statement of
+# the same measurement, for the third question it answers — what the operator
+# reads — and it is written the same way rather than imported across test modules,
+# which would couple three suites' collection to one file's identifier.
+
+#: The measured bytes. Colour, the CLI's run banner, and a four-word failure.
+KILOCODE_AUTH_STDERR = (
+    "\x1b[0m\n> code · moonshotai/kimi-k3\n\x1b[0m\n"
+    "\x1b[91m\x1b[1mError: \x1b[0mUser not found.\n"
+)
+
+#: The stdout the same slot produced: **nothing**. It is spelled out rather than
+#: left implicit because it is what puts 100% of the diagnosis on stderr, which
+#: is the whole reason this adapter needed the hook.
+KILOCODE_AUTH_STDOUT = ""
+
+#: Every row this adapter is graded on. The first is the capture; the next two
+#: are **derivations of it, marked as such** — neither is a second measurement,
+#: and each exists because it is a shape the same failure really arrives in:
+#:
+#: * ``auth-error-no-color`` — the same run with the paint off, which is what a
+#:   ``NO_COLOR``/non-tty build prints (``NO_COLOR`` and ``FORCE_COLOR`` are both
+#:   in ``base.ENV_ALLOWLIST_BASE_NAMES``, so the harness passes the user's choice
+#:   straight through to the child and either rendering can reach this hook).
+#: * ``auth-error-from-a-log`` — the same run after a round-trip through a log
+#:   that dropped its ESC bytes, leaving ``[91m[1m`` as bare text flush against
+#:   the label. ``tests/test_json_extractor.py`` pins that shape for the salvage
+#:   gate for the same reason, and it is the row that calibrated
+#:   ``kilocode._ERROR_LABEL`` (see that constant: anchored, this line loses to
+#:   the content-free ``[0m`` residue above it).
+#:
+#: ``banner-only`` and ``clean-run`` are the two negatives, and they are the
+#: point of the table rather than padding: one says the run header is never
+#: promoted to a diagnosis, the other that a successful slot has none.
+KILOCODE_CAPTURES = {
+    "auth-error": (KILOCODE_AUTH_STDOUT, KILOCODE_AUTH_STDERR),
+    "auth-error-no-color": (
+        KILOCODE_AUTH_STDOUT,
+        "\n> code · moonshotai/kimi-k3\n\nError: User not found.\n",
+    ),
+    "auth-error-from-a-log": (
+        KILOCODE_AUTH_STDOUT,
+        KILOCODE_AUTH_STDERR.replace("\x1b", ""),
+    ),
+    "banner-only": ("", "\x1b[0m\n> code · moonshotai/kimi-k3\n\x1b[0m\n"),
+    "clean-run": ('[{"title": "x", "desc": "y", "importance": "low"}]', ""),
+}
+
+#: kilocode's five rows split **3 / 0 / 2**: every failing one carries the CLI's
+#: own ``Error:`` label, so the fallback tier answers none of them today. That is
+#: recorded as a measurement, not as dead code — the fallback is what speaks for
+#: a failure whose wording nobody here has seen, and the day one lands it changes
+#: this column rather than the adapter.
+KILOCODE_TIERS = {
+    "auth-error": KiloCodeProvider.TIER_ERROR_LINE,
+    "auth-error-no-color": KiloCodeProvider.TIER_ERROR_LINE,
+    "auth-error-from-a-log": KiloCodeProvider.TIER_ERROR_LINE,
+    "banner-only": None,
+    "clean-run": None,
+}
+
+#: The vendor's own words, per row — the four that name the failure, and the
+#: whole sentence where the escapes did not survive to be stripped.
+KILOCODE_WORDS = {
+    "auth-error": ("Error: User not found.",),
+    "auth-error-no-color": ("Error: User not found.",),
+    "auth-error-from-a-log": ("User not found.",),
+}
+
+#: The acceptance snapshot, and the cell this change was **not** allowed to move.
+#: ``User not found.`` is a wording ``providers/cline`` declares in its
+#: ``auth_error_patterns`` because cline measured it; kilocode declares nothing of
+#: the sort, so this capture classifies as ``None`` — no rung, no ``[needs-auth]``
+#: tag appended to the operator's line. Declaring it here would be a
+#: classification change with its own measurement, and ``describe_failure`` is
+#: diagnostics, never classification.
+KILOCODE_CLASSIFY = {row: None for row in KILOCODE_CAPTURES}
+
+
+def _kilocode_streams(row):
+    """``(stdout, stderr)`` for one kilocode row, mirroring :func:`_streams`."""
+    return KILOCODE_CAPTURES[row]
 
 
 # --------------------------------------------------------------------------- #
@@ -821,3 +939,234 @@ class TestGeminiInternalRetryEnvelope:
         assert "REMOVES a retry" in text
         assert "6(b)" in text
         assert STOP_VENDOR_ALREADY_RETRIED
+
+
+# --------------------------------------------------------------------------- #
+# Residual item 4 — kilocode's operator-visible line
+# --------------------------------------------------------------------------- #
+
+#: The spec of the slot that produced the capture, kept verbatim so the Lane A
+#: assertion below runs through the same ``provider:model`` parse the failing run
+#: did — including the ``:thinking`` suffix, which ``split_reasoning_effort``
+#: takes off as a ``--variant`` rather than as part of the model id.
+KILOCODE_SPEC = "kilocode:openrouter/moonshotai/kimi-k3:thinking"
+
+
+class TestKilocodeNamesTheAccountFailureInsteadOfItsExitCode:
+    """Residual item 4: the hook that turns an exit code back into a sentence.
+
+    The incident, in one line: a `review-code` fan-out slot died on an account
+    the configured key no longer belonged to, the CLI said so on stderr in
+    colour, and the operator read ``kilocode exited with code 1``. Nothing was
+    wrong with the harness — ``base.LLMProvider.describe_failure``'s contract is
+    that neither caller prints raw stderr of its own, so with no override there
+    was nothing to print. The adapter is the place that knows how to read this
+    CLI's stderr, and this class is the mapping pinned the way pi's and gemini's
+    are: capture, tier, words, and the two cells that may not move with them.
+    """
+
+    @pytest.mark.parametrize("row", sorted(KILOCODE_TIERS))
+    def test_every_capture_lands_on_its_declared_tier(self, row):
+        """The precedence, graded per row rather than asserted in prose."""
+        diagnosis = KILOCODE._diagnose(*_kilocode_streams(row))
+        tier = None if diagnosis is None else diagnosis[0]
+
+        assert tier == KILOCODE_TIERS[row]
+
+    def test_the_tier_table_names_every_committed_capture(self):
+        """A new row forces a tier decision instead of going ungraded.
+
+        The same rule ``test_the_table_names_every_committed_capture`` applies to
+        pi and gemini, read against the literals above rather than against a
+        fixture directory, because that is where kilocode's bytes live.
+        """
+        assert sorted(KILOCODE_TIERS) == sorted(KILOCODE_CAPTURES)
+
+    @pytest.mark.parametrize("row", sorted(KILOCODE_WORDS))
+    def test_the_message_carries_the_vendors_own_words(self, row):
+        reason = KILOCODE.describe_failure(*_kilocode_streams(row))
+
+        assert reason is not None
+        for needle in KILOCODE_WORDS[row]:
+            assert needle in reason
+
+    def test_the_operator_visible_line_is_the_one_the_plan_asked_for(self):
+        """The close condition, end to end through the lane that failed.
+
+        Not a reconstruction of ``llm_client``'s format string: the real Lane A
+        non-zero-exit branch runs, over the captured bytes, and the assertion is
+        on the ``error`` a fan-out slot would print. The ``before`` half is
+        asserted in the same test with the override swapped back out for the
+        base implementation, because "instead of ``kilocode exited with code
+        1``" is half of what residual item 4 asks for and a test that only
+        checks the new string cannot tell an improvement from a coincidence.
+        """
+        stdout, stderr = _kilocode_streams("auth-error")
+
+        def _run():
+            failed = MagicMock()
+            failed.returncode = 1
+            failed.stdout = stdout
+            failed.stderr = stderr
+            with patch("utils.llm_client.subprocess.run", return_value=failed), \
+                    patch("shutil.which", return_value="/usr/bin/kilocode"):
+                return invoke_with_provider(
+                    prompt="Review this diff.", model_spec=KILOCODE_SPEC
+                )
+
+        after = _run()
+        with patch.object(
+            KiloCodeProvider, "describe_failure", LLMProvider.describe_failure
+        ):
+            before = _run()
+
+        assert before["success"] is False
+        assert before["error"] == "kilocode exited with code 1"
+        assert after["success"] is False
+        assert after["error"] == "kilocode exited with code 1: Error: User not found."
+        # The summary is added, never substituted: the full stream stays where
+        # the contract says it stays, so nothing that reads `details["stderr"]`
+        # or the log file loses a byte to the improvement.
+        assert after["details"]["stderr"] == stderr
+
+    def test_colour_never_changes_the_diagnosis(self):
+        """A message that depends on the terminal's colour support is not one.
+
+        The painted capture and its unpainted twin are the same failure, so they
+        must produce the same sentence — which is what makes the ANSI strip part
+        of the diagnosis rather than a cosmetic pass. This is the row pi and
+        gemini could not contribute: neither CLI paints its stderr.
+        """
+        painted = KILOCODE.describe_failure(*_kilocode_streams("auth-error"))
+        plain = KILOCODE.describe_failure(*_kilocode_streams("auth-error-no-color"))
+
+        assert painted == plain == "Error: User not found."
+
+    def test_the_run_banner_is_never_promoted_to_a_diagnosis(self):
+        """Rung 5, and the row that makes it a rule for this adapter.
+
+        ``> code · moonshotai/kimi-k3`` is printed by a run that succeeds as
+        readily as by one that dies. Reported as a reason it would read like a
+        diagnosis and be none — the failure mode gemini's dropped stack and
+        ``/tmp/mllm-inv/…`` path exist to prevent — so a stderr holding only the
+        banner gets ``None``, and no row's message quotes it.
+        """
+        assert KILOCODE.describe_failure(*_kilocode_streams("banner-only")) is None
+
+        for row in KILOCODE_CAPTURES:
+            reason = KILOCODE.describe_failure(*_kilocode_streams(row)) or ""
+
+            assert "moonshotai/kimi-k3" not in reason, f"{row}: the banner leaked"
+            assert not reason.startswith(">"), f"{row}: the banner leaked"
+
+    @pytest.mark.parametrize("row", sorted(KILOCODE_CAPTURES))
+    def test_the_answer_channel_never_becomes_the_reason(self, row):
+        """Rung 1, asserted with a loud stdout every row is given for free.
+
+        kilocode's captured stdout is empty, so the rung decides nothing on the
+        bytes alone — and that is exactly when it needs asserting, because a
+        future edit reading stdout here would pass every other test in this
+        class. The stdout used is fabricated and says so: it is a model's own
+        answer, the thing ``parse_output`` exists to read and the last thing a
+        failure reason may quote.
+        """
+        stdout, stderr = _kilocode_streams(row)
+        answer = stdout or '[{"title": "A finding", "desc": "…", "importance": "low"}]'
+
+        assert KILOCODE.describe_failure(answer, stderr) == \
+            KILOCODE.describe_failure("", stderr)
+        assert KILOCODE.describe_failure(answer, "") is None
+
+    def test_no_message_is_long_multiline_or_still_painted(self):
+        """Rung 4: one short line, and the escapes really are off it.
+
+        The caller keeps the full stream (``details["stderr"]`` and the log
+        file), so this hook is the summary. The ESC-byte assertion is the
+        kilocode-specific half: a message that still carried ``\\x1b[91m`` would
+        repaint whatever line the operator's own terminal put it on.
+        """
+        for row in KILOCODE_CAPTURES:
+            reason = KILOCODE.describe_failure(*_kilocode_streams(row))
+            if reason is None:
+                continue
+
+            assert "\n" not in reason, f"{row}: not one line"
+            assert len(reason) <= KILOCODE_CAP, f"{row}: over the cap"
+            assert "\x1b" not in reason, f"{row}: an escape byte survived"
+
+    def test_a_long_stderr_is_capped_rather_than_copied(self):
+        """No committed capture is long; the cap is for the release that is.
+
+        Fabricated on purpose — kilocode's real stderr is 62 bytes, so the only
+        honest way to assert the bound is to hand it something that exceeds it
+        and say so.
+        """
+        stderr = "\x1b[91mError: \x1b[0m" + ("retrying the request; " * 800)
+
+        reason = KILOCODE.describe_failure("", stderr)
+
+        assert reason is not None
+        assert len(reason) <= KILOCODE_CAP
+        assert reason.endswith("…")
+        assert len(stderr) > 50 * len(reason)
+
+
+class TestNoKilocodeClassifyCellMoved:
+    """``describe_failure`` is diagnostics, never classification — here too."""
+
+    @pytest.mark.parametrize("row", sorted(KILOCODE_CLASSIFY))
+    def test_the_declared_cells_are_the_expected_ones(self, row):
+        """Every row classifies as ``None``, and that is a decision.
+
+        ``User not found.`` is the wording ``providers/cline`` declares in its
+        ``auth_error_patterns``, because cline measured it coming out of its own
+        CLI. kilocode declares nothing of the sort and this change did not add
+        it: the capture is an auth failure that the classifier does not call one,
+        so no rung moves, no retry decision moves, and no ``[needs-auth]`` tag is
+        appended to the line the previous class pins. Widening the table is a
+        separate change with its own measurement.
+        """
+        stdout, stderr = _kilocode_streams(row)
+
+        assert KILOCODE.classify_failure(stdout, stderr, 1) == KILOCODE_CLASSIFY[row]
+
+    def test_classification_does_not_consult_the_diagnosis_hook(self, monkeypatch):
+        """Structural, not incidental: break the hook, keep every verdict.
+
+        The same assertion pi and gemini get. If ``classify_failure`` ever grew a
+        dependency on the prose built by ``describe_failure``, a change to a
+        *message* could silently move a *category*.
+        """
+        before = {
+            row: KILOCODE.classify_failure(*_kilocode_streams(row), 1)
+            for row in KILOCODE_CAPTURES
+        }
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("classify_failure must not call describe_failure")
+
+        monkeypatch.setattr(KiloCodeProvider, "describe_failure", boom)
+        monkeypatch.setattr(KiloCodeProvider, "_diagnose", boom)
+
+        after = {
+            row: KILOCODE.classify_failure(*_kilocode_streams(row), 1)
+            for row in KILOCODE_CAPTURES
+        }
+
+        assert after == before
+
+    def test_a_successful_run_is_byte_for_byte_what_it_was(self):
+        """Only a failure grew a sentence. ``parse_output`` did not move at all.
+
+        kilocode's parse path was left alone on purpose — both lanes reach the
+        new hook, and pi's and gemini's matching ``parse_output`` clauses exist
+        to satisfy a §6.2 fixture rig kilocode has no manifest for. Asserted with
+        a loud stderr rather than the captured empty one, because a parser that
+        folded the diagnosis into a *successful* result would be a far worse bug
+        than the one being fixed.
+        """
+        stdout, _ = _kilocode_streams("clean-run")
+
+        assert KILOCODE.parse_output(stdout, KILOCODE_AUTH_STDERR) == \
+            KILOCODE.parse_output(stdout, "")
+        assert KILOCODE.parse_output(stdout, KILOCODE_AUTH_STDERR)["success"] is True

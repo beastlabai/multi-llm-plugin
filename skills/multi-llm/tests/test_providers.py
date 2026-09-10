@@ -6076,11 +6076,21 @@ class TestClassifyFailure:
 #: ``parse_output`` and never mentioned it again, so 100% of the diagnosis was
 #: discarded while the CLI exited non-zero with the vendor's full error object
 #: sitting unused. The hook is therefore a *channel* rule, not a stream name.
+#:
+#: ``kilocode`` joined on 2026-09-10 on the stderr side, from a live failure
+#: rather than a probe: a `review-code` slot on a dead account whose stderr read
+#: ``Error: User not found.`` in ANSI colour and whose operator-visible line read
+#: ``kilocode exited with code 1``. It ships **no ``.txt`` capture pairs**, so
+#: ``test_each_override_reads_only_the_channel_it_declares`` skips it here and
+#: ``tests/test_stderr_diagnosis.py`` makes the same assertion over the literals
+#: that file commits — the declared channel is graded either way, and the row is
+#: what stops the override landing without declaring one.
 _DESCRIBE_FAILURE_CHANNELS = {
     "opencode": "stdout",
     "muse": "stdout",
     "pi": "stderr",
     "gemini": "stderr",
+    "kilocode": "stderr",
 }
 
 

@@ -410,6 +410,42 @@ def _bound_stream(text: str) -> str:
     )
 
 
+def _attach_stdout_excerpt(details: Dict[str, Any], stdout: Optional[str]) -> None:
+    """Put the run's stdout on ``details`` as ``stdout_excerpt``, redacted then bounded.
+
+    **Why a helper and not a third copy.** ``invoke_with_provider`` loses a run
+    three ways — a non-zero exit, a timeout kill, and a zero exit whose output
+    would not parse — and all three are cases where the provider may already have
+    said the thing the caller needs. The rule for carrying that text out is not
+    one line but four decisions (``_redact`` *before* ``_bound_stream``, per
+    §4.5/§4.4; ``.strip()``; set the key only when something survives; never the
+    raw stream), and this module argues elsewhere that a rule spelled three times
+    is a rule that drifts twice — see ``_bound_stream``'s own note that the
+    redact/bound order "is normative", and §2's forward-maintenance case against
+    two hand-aligned blocks plus a comment. A cap tightened or a pattern added at
+    one copy and not the others would leak from whichever site was forgotten, and
+    the leak would be invisible until an artifact was read by a human. So it is
+    written once, here, and the three sites call it.
+
+    **Why the key is omitted rather than set empty.** Consumers test
+    ``details.get("stdout_excerpt")`` for "did the provider say anything we can
+    still use" — salvage gating at ``code_review_orchestrator.py``'s site A reads
+    it ahead of ``details["stderr"]`` for exactly that. An always-present key
+    holding ``""`` would make every one of those call sites carry a second
+    emptiness check, and the first one written without it would treat "the
+    provider printed nothing" as "the provider printed something". Absent means
+    absent.
+
+    Args:
+        details: The result envelope's ``details`` dict, mutated in place.
+        stdout: The raw captured stdout, or ``None`` when the path never had it
+            (a ``TimeoutExpired`` that carried no partial output).
+    """
+    excerpt = _bound_stream(_redact(stdout or "")).strip()
+    if excerpt:
+        details["stdout_excerpt"] = excerpt
+
+
 def _save_log(
     log_file: Union[str, Path],
     model: str,
@@ -888,6 +924,30 @@ def invoke_with_provider(
                 "model": model,
                 "duration_seconds": duration
             }
+            # THE ANSWER MAY ALREADY BE ON STDOUT, and this return used to drop
+            # it. A non-zero exit is not only "the provider never spoke": it is
+            # also the provider that wrote a truncated or fenced array and *then*
+            # died — a kill after the answer, a crash on teardown — and that array
+            # is on stdout, never on stderr. The salvage gate at
+            # `code_review_orchestrator.py`'s site A runs under exactly this
+            # branch (`if not result["success"]`), so with stderr as its only
+            # channel it printed "Provider failed before producing any JSON —
+            # nothing to salvage" over a run that *had* produced JSON, and a
+            # recoverable review was thrown away silently.
+            #
+            # The JSON-erroring providers make the same point from the other
+            # side: `opencode run --format json` puts its failure shape on stdout
+            # with stderr empty, and a relayed `{"error": {"code": 401, ...}}`
+            # body looks identical from any HTTP-backed CLI. Those reached the
+            # gate as the empty string, so even the verdicts it got *right* were
+            # reached for the wrong reason.
+            #
+            # `provider.describe_failure` and `availability_from_failure` above
+            # already read `result.stdout` for their own one-line verdicts; this
+            # carries the text itself, under §4.5/§4.4, so a consumer can form a
+            # different judgement from the same evidence.
+            _attach_stdout_excerpt(details, result.stdout)
+
             if schema_phase:
                 # §4.2.1 cases 2 and 4 both arrive here as a non-zero exit, and
                 # they are NOT the same failure: the CLI exhausting its own
@@ -993,11 +1053,13 @@ def invoke_with_provider(
         # requested file while Ask mode is active") cost three 450 s runs and a
         # hand-driven CLI invocation, because nothing downstream carried the
         # text. Redacted and bounded by the same §4.5/§4.4 boundary the log
-        # writer uses — never the raw stream.
+        # writer uses — never the raw stream. This is the *original* of the three
+        # `stdout_excerpt` sites; `_attach_stdout_excerpt` now spells the rule for
+        # all of them, and the two hard-failure returns above and below join it,
+        # so `details.get("stdout_excerpt")` means the same thing whichever way
+        # the run was lost.
         if not parsed.get("success", False):
-            excerpt = _bound_stream(_redact(result.stdout or "")).strip()
-            if excerpt:
-                parsed.setdefault("details", {})["stdout_excerpt"] = excerpt
+            _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
 
         # Save log if requested
         if log_file:
@@ -1046,16 +1108,44 @@ def invoke_with_provider(
                 duration_seconds=duration
             )
 
+        details = {
+            "provider": provider_name,
+            "model": model,
+            "timeout": effective_timeout,
+            "duration_seconds": duration
+        }
+        # A TIMEOUT KILL DOES RECOVER PARTIAL STDOUT, so this return no longer
+        # throws it away — checked rather than assumed, because attaching a key
+        # that is empty by construction would be worse than attaching nothing.
+        # `subprocess.run` re-raises a `TimeoutExpired` that already carries the
+        # bytes read off the pipe before the deadline: on POSIX
+        # `Popen._communicate` populates the exception as it raises, and on
+        # Windows `run` kills the child and calls `communicate()` again to collect
+        # them. That is the `e.stdout` the decode a few lines above has just
+        # turned into the `stdout` local — the same local `_save_log` is handed,
+        # so the log file has always kept this text and only the returned envelope
+        # did not. The envelope is the half a caller can act on.
+        #
+        # This is the archetype §2 of the plan names for salvage site A: a
+        # provider that streamed a review array and was killed mid-emission
+        # leaves a *truncated* array on stdout and nothing at all on stderr. It is
+        # the most salvageable failure this skill has, and the stderr-only gate
+        # was structurally unable to see it. Bounding matters more here than at
+        # either sibling site, because the run killed at the deadline is the run
+        # most likely to have emitted megabytes — the 6,254,326 B log `_save_log`
+        # was written to survive came off a path like this one.
+        #
+        # When the kill caught the child before its first write, `stdout` is the
+        # empty string rather than absent; the helper omits the key rather than
+        # attaching `""`, so this path and the non-zero-exit path answer
+        # `details.get("stdout_excerpt")` the same way.
+        _attach_stdout_excerpt(details, stdout)
+
         return {
             "success": False,
             "error": f"{provider_name} timed out after {effective_timeout}s",
             "error_code": ERROR_TIMEOUT,
-            "details": {
-                "provider": provider_name,
-                "model": model,
-                "timeout": effective_timeout,
-                "duration_seconds": duration
-            }
+            "details": details,
         }
 
     except OSError as e:

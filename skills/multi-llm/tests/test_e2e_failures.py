@@ -12,16 +12,19 @@ All tests use MULTI_LLM_TEST_FAST_BACKOFF=1 to ensure quick execution
 without real multi-second delays.
 """
 
+import argparse
 import asyncio
+import contextlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import pytest
 from pathlib import Path
 from typing import Dict, Any, List
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from .harness import (
     SkillRunner,
@@ -33,7 +36,10 @@ from .harness import (
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
+from utils import subagent_executor as executor
+from utils.llm_client import invoke_with_provider
 from utils.review_orchestrator_base import save_model_result as base_save_model_result
+from utils.subagent_tasks import tasks_of
 
 
 class TestLLMTimeoutHandled:
@@ -978,6 +984,97 @@ def _plan_file(tmp_path: Path) -> Path:
     return plan_path
 
 
+def _dead_process(stdout: str, stderr: str, returncode: int = 1):
+    """A `CompletedProcess` for a CLI that exited non-zero, as `subprocess.run` returns it.
+
+    A real `subprocess.CompletedProcess` rather than a `MagicMock` on purpose:
+    every attribute `invoke_with_provider` reads off it — `returncode`, `stdout`,
+    `stderr` — is one a mock would have invented, and a mock that answers
+    `.stdout` for a field the production code later renames answers it forever.
+    """
+    return subprocess.CompletedProcess(
+        args=["stub-cli"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def _real_hard_failure(model_spec: str, stdout: str, stderr: str) -> Dict[str, Any]:
+    """The envelope `invoke_with_file_output` really returns for a non-zero exit.
+
+    Built by running the **real** `invoke_with_provider` with only
+    `subprocess.run` replaced, then wrapping the result the way
+    `invoke_with_file_output`'s hard-failure early return does
+    (`utils/llm_client.py`: `{**result, "output_file": ...}` — a
+    `SUBPROCESS_FAILED` never reaches the file-reading half).
+
+    **Why not another hand-built dict.** The sibling fixtures above (`_hard_failure`,
+    `_unparseable_reply`) are literals, and a literal `details` dict is a snapshot
+    of what the plumbing looked like on the day it was typed. `details` is exactly
+    where the plumbing and its consumers meet: `_attach_stdout_excerpt`
+    (`utils/llm_client.py:413`) decides which keys appear and salvage site A
+    decides which it reads, and `_hard_failure_with_empty_stderr` below spent a
+    release asserting — in its own docstring — that a non-zero exit carries no
+    stdout, which stopped being true the moment that helper landed. A fixture that
+    re-derives `details` from the production code cannot drift that way: delete
+    the `stdout_excerpt` attachment and the salvage tests below go red, which is
+    the whole point of writing them.
+
+    `shutil.which` is patched so provider detection finds a binary without one
+    being installed; nothing here runs a real CLI.
+
+    Args:
+        model_spec: `provider:model`, resolved for real — the adapter's own
+            `describe_failure` / availability verdicts ride out in `error`.
+        stdout: What the CLI printed before dying.
+        stderr: ...and what it wrote to the other channel.
+
+    Returns:
+        The `invoke_with_file_output` reply, with `output_file` as the empty
+        string: it is the one field that cannot be reconstructed without the
+        caller's output directory, it is falsy so the "Output file:" line stays
+        unprinted, and it is only ever read into a salvage request's
+        `output_json_path` — which the callers of this helper never write.
+    """
+    with patch("utils.llm_client.subprocess.run",
+               return_value=_dead_process(stdout, stderr)), \
+         patch("shutil.which", return_value="/usr/bin/stub-cli"):
+        envelope = invoke_with_provider(prompt="Test", model_spec=model_spec)
+
+    assert envelope["success"] is False, "fixture must describe a losing run"
+    return {**envelope, "output_file": ""}
+
+
+def _drive_real_provider_failure(
+    tmp_path: Path, model_spec: str, stdout: str, stderr: str
+):
+    """Run `run_single_review` end to end with only `subprocess.run` faked out.
+
+    One seam, and it is the process boundary: the prompt template, the argv the
+    adapter builds, `invoke_with_provider`'s classification, `_attach_stdout_excerpt`'s
+    redact-then-bound excerpt, `invoke_with_file_output`'s hard-failure forward,
+    the salvage gate and the salvage writers are all the shipping code. Every
+    other salvage test in this file patches `cro.invoke_with_file_output` and
+    hands it a canned reply, which is the right seam for a question about what
+    the orchestrator *decides*; it is the wrong one for a question about which
+    **channel** the decision is made from, because a canned reply is free to
+    carry keys the plumbing does not produce (or to omit ones it does), and the
+    consumer half tested here reads `details` key by key.
+
+    Returns:
+        `(success, issues, error, phase_dir)` — the `run_single_review` triple
+        plus the phase directory the salvage artifacts would land in.
+    """
+    plan_path = _plan_file(tmp_path)
+
+    with patch("utils.llm_client.subprocess.run",
+               return_value=_dead_process(stdout, stderr)), \
+         patch("shutil.which", return_value="/usr/bin/stub-cli"):
+        success, issues, error = asyncio.run(
+            cro.run_single_review(model_spec, plan_path, tmp_path / "out")
+        )
+
+    return success, issues, error, cro.get_phase_dir(plan_path, "code-review")
+
+
 class TestSalvageOnlyWhenThereIsSomethingToSalvage:
     """Both directions of the gate in front of every `[SALVAGE_NEEDED]` marker.
 
@@ -1136,3 +1233,1201 @@ class TestSalvageOnlyWhenThereIsSomethingToSalvage:
         assert (phase_dir / "salvage_task_gemini_gemini-2_5-flash.json").exists()
         error_log = phase_dir / "error_gemini_gemini-2_5-flash.log"
         assert "Parse error" in error_log.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Which channel the gate is allowed to look at
+# ---------------------------------------------------------------------------
+
+
+class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
+    """The consumer half of `details["stdout_excerpt"]`, at salvage site A.
+
+    The class above asks whether the gate's *judgement* is right. This one asks
+    whether the gate is shown the evidence at all, which is a separate defect and
+    was the older one. Site A sits under `if not result["success"]`, and that
+    branch is not only "the provider never spoke": it is also the provider that
+    streamed a truncated or fenced array and *then* exited non-zero — a kill at
+    the deadline, a crash on teardown. That array is on **stdout** and never on
+    stderr, so a `raw_content` built from `details["stderr"]` alone made the
+    orchestrator print "Provider failed before producing any JSON — nothing to
+    salvage" about a run that had produced JSON, and drop a recoverable review
+    without saying so. The stderr-only code was equally blind before the gate
+    landed (its `raw_output` was the empty string), so this closes a latent hole
+    rather than a regression — but site A is the one place the gate could turn
+    that hole into a *visible* loss, which is why the two halves shipped in the
+    same pass: `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the text
+    on the envelope, and this reads it.
+
+    Every test here drives the real provider chain
+    (`_drive_real_provider_failure`) rather than a canned `details` literal,
+    because the claim under test is a claim about two modules agreeing on a key
+    name. A hand-built fixture would assert that agreement by construction and go
+    on passing after either side moved.
+    """
+
+    def test_a_provider_that_streamed_an_array_and_then_died_is_still_salvaged(
+        self, tmp_path, capsys
+    ):
+        """The case the stderr-only gate was structurally unable to see.
+
+        stdout holds a review array cut off mid-object, stderr holds nothing, and
+        the exit code is 1 — the archetype `utils/llm_client.py`'s timeout branch
+        names for this site, and the single most salvageable failure the skill
+        has. The assertion is on the salvage request's `raw_output` rather than
+        merely on `[SALVAGE_NEEDED]`, because a marker printed over an empty
+        `raw_output` is worse than no marker: it sends a subagent at a document
+        that is not there, and `build_salvage_prompt`'s "if nothing recoverable is
+        present, print an empty array" fallback then writes `[]` over
+        `output_path` — a model that produced nothing, recorded as one that
+        reviewed the diff and found nothing.
+        """
+        success, issues, error, phase_dir = _drive_real_provider_failure(
+            tmp_path, KILOCODE_SPEC, stdout=TRUNCATED_ARRAY, stderr="",
+        )
+
+        assert (success, issues) == (False, None)
+        assert error.startswith("kilocode exited with code 1")
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+        assert "nothing to salvage" not in output
+
+        sanitized = cro.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{sanitized}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"]
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert request["expected_type"] == "array"
+        assert (phase_dir / f"salvage_task_{sanitized}.json").exists()
+
+        # The text the gate judged is the text the subagent is handed. Gating on
+        # one string and persisting another would let a request be written for
+        # evidence nobody ever saw, and the excerpt is the only copy that has
+        # been through `_redact` — the raw stream must not reach an artifact.
+        envelope = _real_hard_failure(KILOCODE_SPEC, stdout=TRUNCATED_ARRAY, stderr="")
+        assert request["raw_output"] == envelope["details"]["stdout_excerpt"]
+
+    def test_the_kilocode_auth_text_on_stderr_alone_still_salvages_nothing(
+        self, tmp_path, capsys
+    ):
+        """The negative, and the proof that stdout-first is a fall-through.
+
+        kilocode's dead-account failure is four words of ANSI-coloured prose on
+        stderr by a CLI that never emitted a byte of answer, so
+        `_attach_stdout_excerpt` omits `stdout_excerpt` entirely rather than
+        setting it to `""` (`utils/llm_client.py:413` — "absent means absent").
+        Reading stdout *ahead of* stderr must therefore leave stderr reachable: a
+        precedence written as a replacement would blank `raw_content` for every
+        provider that dies before speaking, and the gate would then reach the
+        same verdict it reaches here for a reason that has nothing to do with the
+        payload. The sibling in `TestSalvageOnlyWhenThereIsSomethingToSalvage`
+        asserts the same outcome against a canned `details`; this one asserts it
+        against the envelope the plumbing actually builds, so the pair fails
+        differently if the key is renamed on one side only.
+        """
+        success, issues, error, phase_dir = _drive_real_provider_failure(
+            tmp_path, KILOCODE_SPEC, stdout="", stderr=KILOCODE_AUTH_FAILURE,
+        )
+
+        assert (success, issues) == (False, None)
+        # The adapter's own `describe_failure` reads the dead account off stderr
+        # and names it, so the operator's next move is auth rather than a JSON
+        # repair — which is exactly the move a salvage request would have stolen.
+        assert error.startswith("kilocode exited with code 1")
+        assert "User not found." in error
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert "nothing to salvage" in output
+
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+    def test_a_banner_on_stderr_does_not_join_the_array_stdout_carried(
+        self, tmp_path, capsys
+    ):
+        """Precedence, not concatenation — the plan's wording, and the wrong fix.
+
+        A provider that dies mid-answer usually leaves something on *both*
+        channels: the truncated array on stdout and its own launch banner, a
+        progress spinner or a teardown traceback on stderr. The obvious-looking
+        repair is to feed the gate `stdout + stderr`, and it is wrong twice over.
+        `has_salvageable_json` would see a document whose spans no longer line up,
+        and — worse, because it is silent — `raw_output` would reach the salvage
+        subagent as two documents with no marker saying which one it was asked to
+        repair, inviting exactly the empty-array fallback the gate exists to
+        prevent. stdout is the channel that can hold an answer, so stdout wins
+        outright and stderr is not appended.
+        """
+        success, _, _, phase_dir = _drive_real_provider_failure(
+            tmp_path, KILOCODE_SPEC,
+            stdout=TRUNCATED_ARRAY, stderr=KILOCODE_AUTH_FAILURE,
+        )
+
+        assert success is False
+        assert "[SALVAGE_NEEDED]" in capsys.readouterr().out
+
+        sanitized = cro.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{sanitized}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert "User not found." not in request["raw_output"]
+
+
+# ---------------------------------------------------------------------------
+# The provider whose failure is itself JSON — P2's other half
+# ---------------------------------------------------------------------------
+#
+# Everything above was proved live on kilocode, which announces a dead account
+# in coloured prose. A provider whose *failure* is a JSON document was never
+# exercised, and it is the payload the pre-2026-08-28 gate got wrong in the
+# worst possible way: `{"error": {"code": 401, …}}` parses, clause 1 accepted
+# any balanced candidate `json.loads` would take, so `has_salvageable_json`
+# returned True; salvage was dispatched; the salvage prompt's own "if nothing
+# recoverable is present, print an empty array" answered `[]`; and a salvage
+# task's `output_name` IS the model's result file
+# (`utils/subagent_tasks.py:774`) — so `[]` landed on `<model>.json` and
+# reaggregation read a model that never ran as one that reviewed the diff and
+# found nothing. `SuggestionGroup._recalculate_priority` scores
+# `len(self.models) + Σ importance`, so that silence counted as agreement.
+#
+# `_is_answer_shaped` (`utils/json_extractor.py:294`) plus the span-aware clause
+# 2 (:374–396) close it, and `tests/test_json_extractor.py` pins the predicate
+# in both directions. These are the layer above: the orchestrator's *use* of it,
+# once per salvage site, on the payload the live rerun could not produce.
+
+#: `opencode run --format json` announcing its own death. The whole failure is
+#: one event object on **stdout**; stderr is empty (see the OpenCode
+#: event-schema notes, and `tests/container/records/`). Nothing in it is a
+#: damaged answer — the document opened, closed, and said only that the request
+#: was refused.
+OPENCODE_ERROR_EVENT = (
+    '{"type": "error", "message": "AI_APICallError: Unauthorized", "code": 401}'
+)
+
+#: The same shape from any HTTP-backed CLI: the provider relays the API's own
+#: error body verbatim. Deliberately the 401 kilocode expressed in prose, so the
+#: two halves of P2 differ only in whether the CLI serialized its failure.
+RELAYED_API_ERROR = '{"error": {"code": 401, "message": "User not found"}}'
+
+OPENCODE_SPEC = "opencode:opencode/big-pickle"
+GEMINI_SPEC = "gemini:gemini-2.5-flash"
+
+
+def _hard_failure_with_empty_stderr() -> Dict[str, Any]:
+    """A non-zero exit whose only output was the JSON error body, on stdout.
+
+    Re-derived from the shipping plumbing (`_real_hard_failure`) rather than
+    typed out, and that is a deliberate change of kind. This fixture used to be a
+    literal whose docstring argued that a non-zero exit carries **no stdout at
+    all** — that `details["stdout_excerpt"]` existed only after a *zero* exit —
+    and that opencode's error body being absent was "the point of the fixture,
+    not an omission in it". That was true of the code it was written against and
+    is false of the code now: `_attach_stdout_excerpt`
+    (`utils/llm_client.py:413`) attaches the excerpt on all three losing paths,
+    non-zero exit included, and salvage site A reads exactly that key ahead of
+    `details["stderr"]`.
+
+    Keeping the fixture starved was the other defensible option and it was
+    rejected on the merits: the two tests below are the *only* place the
+    orchestrator meets a JSON-shaped provider failure on the channel opencode
+    really uses, and against a starved `details` both of them passed
+    structurally — the gate never saw `OPENCODE_ERROR_EVENT`, so "no salvage
+    request" said nothing about `has_salvageable_json` and everything about an
+    empty string. Feeding it the real envelope hands that assertion back to the
+    gate, which is the coverage the fixture was always meant to provide; a
+    starved copy would now be a fixture that agrees with the production code by
+    accident.
+
+    The one visible consequence is the error text: the adapter's own
+    availability verdict rides along, so `error` is
+    `"opencode exited with code 1 [needs-auth]"` rather than the bare sentence
+    the literal carried — a strictly better diagnostic, and the callers assert on
+    the stable prefix.
+    """
+    return _real_hard_failure(OPENCODE_SPEC, stdout=OPENCODE_ERROR_EVENT, stderr="")
+
+
+def _issue(title: str) -> Dict[str, Any]:
+    """One code-review finding, in the shape `validate_code_review_issues` takes."""
+    return {
+        "title": title,
+        "desc": f"Description for {title}",
+        "importance": "medium",
+        "file": "src/a.py",
+        "type": "style",
+    }
+
+
+def _good_reply(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """...and what `invoke_with_file_output` returns when the model answered."""
+    return {
+        "success": True,
+        "data": issues,
+        "source": "file",
+        "output_file": "",
+        "details": {},
+    }
+
+
+def _review_state():
+    """The `state.json` reads `main()` makes, with an implement phase behind it.
+
+    Tracked files are supplied so the run never falls through to `git diff` for
+    its changed-file list: what is being pinned is a salvage decision, and a
+    review whose file list depends on the checkout it happens to run in is not a
+    fixture.
+    """
+    state = MagicMock()
+    state.get = MagicMock(
+        side_effect=lambda key, default=None: {
+            "tracked_files": [{"path": "src/a.py"}],
+            "head_before_implement": "abc123",
+            "head_at_start": "abc123",
+            "pre_existing_changes": [],
+        }.get(key, default)
+    )
+    state.is_phase_completed = MagicMock(return_value=False)
+    state.state = {"phases_completed": {}}
+    return state
+
+
+def _review_args(plan: Path, models: List[str], **overrides):
+    """`parse_args` output for a foreground `review-code` run, validation skipped.
+
+    Hand-built for the reason `tests/test_reaggregate_identity.py::_fanout_args`
+    gives: the real parser reaches host detection and the `--yes` ladder, and
+    neither is what any test in this section is about.
+    """
+    args = argparse.Namespace(
+        plan_file=str(plan),
+        models=list(models),
+        interactive=False,
+        quick=False,
+        timeout=5,
+        max_parallel=2,
+        base_ref=None,
+        skip_validation=True,
+        validation_model=None,
+        apply_fixes=False,
+        force=False,
+        rerun_all=False,
+        reaggregate=False,
+        report_style="pr",
+        exec_subagents=False,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_overrides):
+    """Drive `code_review_orchestrator.main()` with only the CLI call replaced.
+
+    `tests/test_reaggregate_identity.py::_run_cro_fanout` stubs `run_all_reviews`
+    wholesale, which is right for a question about `grouped.json`'s bytes and
+    wrong for this one: both salvage sites live *inside* `run_single_review`, so
+    here the fan-out, `save_model_result`, grouping, the report and the
+    partial-results accounting are all real, and the one seam is
+    `invoke_with_file_output` — a canned provider result per model spec, in the
+    shape `invoke_with_provider` really hands back.
+
+    The launch stagger is flattened because two model slots would otherwise cost
+    a real 2 s `asyncio.sleep`; nothing here is about launch ordering.
+    """
+    plan = tmp_path / "auth-feature.md"
+    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+    models = list(replies)
+
+    with patch.object(cro, "parse_args",
+                      return_value=_review_args(plan, models, **arg_overrides)), \
+         patch.object(cro, "get_or_create_state", return_value=_review_state()), \
+         patch.object(cro, "resolve_models", return_value=models), \
+         patch.object(cro, "is_model_valid", return_value=True), \
+         patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
+         patch.object(cro, "intent_to_add_untracked",
+                      side_effect=lambda files: contextlib.nullcontext()), \
+         patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+         patch.object(cro, "invoke_with_file_output",
+                      side_effect=lambda **kwargs: replies[kwargs["model_spec"]]):
+        exit_code = asyncio.run(cro.main())
+
+    return plan, cro.get_phase_dir(plan, "code-review"), exit_code
+
+
+class TestAProviderWhoseFailureIsItselfJSON:
+    """P2's assertion for the JSON-erroring providers, one case per salvage site.
+
+    Three sites gate salvage on `has_salvageable_json`, and each one is reached
+    by a different failure: `code_review_orchestrator.py:688` when the CLI exits
+    non-zero, `:747` when it exits 0 having answered something unparseable, and
+    `utils/review_orchestrator_base.py:1451` for the `review-plan` /
+    `review-tasks` fan-out. A structured provider error must read as a provider
+    failure at all three, or the phantom participant comes back through whichever
+    one was left.
+    """
+
+    def test_a_json_erroring_provider_is_a_failed_model_not_a_salvage_request(
+        self, tmp_path, capsys
+    ):
+        """Salvage site A on the real `opencode` failure shape.
+
+        This test spent a release passing *structurally* rather than on the
+        gate's judgement — site A built `raw_content` from `details["stderr"]`
+        alone, a non-zero exit carried no stdout, and so the error body never
+        reached the predicate at all. Both halves of that have now landed:
+        `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the body on the
+        envelope and site A reads `details["stdout_excerpt"]` ahead of
+        `details["stderr"]`, so `OPENCODE_ERROR_EVENT` now goes straight into
+        `has_salvageable_json`'s clause 1 and the verdict below is the gate's own.
+        What it must decide is that `{"type": "error", …}` is a provider failure
+        and not a damaged answer: `type` is a required field of
+        `schemas/code_review_issues.schema.json` and also the envelope's first
+        key, which is precisely why `_is_answer_shaped` refuses to accept `type`
+        without `title`, `desc` and `importance` beside it.
+
+        The sibling test puts the same body on stderr instead, so the pair pins
+        the decision on both channels and neither can regress alone.
+        """
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _hard_failure_with_empty_stderr(),
+        ):
+            success, issues, error = asyncio.run(
+                cro.run_single_review(OPENCODE_SPEC, plan_path, tmp_path / "out")
+            )
+
+        assert (success, issues) == (False, None)
+        # The prefix, not the whole sentence: the fixture is the real envelope
+        # now, so the adapter's availability verdict (`[needs-auth]`) is appended
+        # by `availability_from_failure`. Pinning the exact string would make
+        # every improvement to that diagnostic a failure of this test, which is
+        # about salvage.
+        assert error.startswith("opencode exited with code 1")
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert "nothing to salvage" in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        # The diagnostic must not be lost along with the salvage: an operator
+        # whose provider is unauthenticated has to be able to read that from the
+        # phase dir, not only from a stdout line that scrolled past.
+        assert cro.save_model_result(
+            "plan", OPENCODE_SPEC, success, issues, error, phase_dir
+        ) is False
+        error_log = phase_dir / f"error_{cro.sanitize_model_name(OPENCODE_SPEC)}.log"
+        assert error_log.exists()
+        assert "opencode exited with code 1" in error_log.read_text(encoding="utf-8")
+
+    def test_the_same_error_body_on_stderr_is_the_case_the_gate_itself_decides(
+        self, tmp_path, capsys
+    ):
+        """Salvage site A again, with the payload where the gate can actually see it.
+
+        Fails on the pre-`_is_answer_shaped` gate: `{"error": {"code": 401, …}}`
+        is a balanced candidate `json.loads` accepts, so clause 1 returned True,
+        `[SALVAGE_NEEDED]` and `[SALVAGE_TASK]` were printed, and the subagent's
+        empty-array fallback was written over `openrouter_….json`. Tightening
+        clause 1 alone would not have caught it either — the envelope's own `{"`
+        is an opening outside no span, so clause 2 would have re-admitted it —
+        which is why clause 1 keeps the spans of the candidates it rejected.
+        """
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _hard_failure(RELAYED_API_ERROR),
+        ):
+            success, issues, error = asyncio.run(
+                cro.run_single_review(KILOCODE_SPEC, plan_path, tmp_path / "out")
+            )
+
+        assert (success, issues) == (False, None)
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert "nothing to salvage" in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        assert list(phase_dir.glob("salvage_task_*.json")) == []
+
+        assert cro.save_model_result(
+            "plan", KILOCODE_SPEC, success, issues, error, phase_dir
+        ) is False
+        error_log = phase_dir / f"error_{cro.sanitize_model_name(KILOCODE_SPEC)}.log"
+        assert "kilocode exited with code 1" in error_log.read_text(encoding="utf-8")
+
+    def test_an_error_event_read_off_stdout_is_no_answer_rather_than_a_damaged_one(
+        self, tmp_path, capsys
+    ):
+        """Salvage site B — the parse path, where the whole reply *is* gate input.
+
+        Nothing structural saves this one: `raw_content` is the reply verbatim,
+        so the event envelope goes straight into clause 1. `{"type": "error", …}`
+        is the shape the answer-field set deliberately leaves `type` out of —
+        `type` is a *required* field of `schemas/code_review_issues.schema.json`
+        and also the first key of this envelope, and no genuine finding carries
+        it without also carrying `title`, `desc` and `importance`.
+        """
+        plan_path = _plan_file(tmp_path)
+
+        with patch.object(
+            cro, "invoke_with_file_output",
+            side_effect=lambda **_: _unparseable_reply(OPENCODE_ERROR_EVENT),
+        ):
+            success, issues, error = asyncio.run(
+                cro.run_single_review(OPENCODE_SPEC, plan_path, tmp_path / "out")
+            )
+
+        assert (success, issues) == (False, None)
+        # Names what happened rather than claiming extraction failed, and carries
+        # the envelope forward so the 401 is readable without opening the log.
+        assert error.startswith("Model produced no JSON output:")
+        assert "Unauthorized" in error
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        assert cro.save_model_result(
+            "plan", OPENCODE_SPEC, success, issues, error, phase_dir
+        ) is False
+        error_log = phase_dir / f"error_{cro.sanitize_model_name(OPENCODE_SPEC)}.log"
+        assert "Model produced no JSON output:" in error_log.read_text(encoding="utf-8")
+
+    def test_the_fan_out_base_refuses_the_same_error_envelope(self, tmp_path, capsys):
+        """`review_orchestrator_base.save_model_result` — review-plan/review-tasks.
+
+        The third site, and the one whose `except (JSONDecodeError, ValueError)`
+        makes it look like a parse failure by construction. It is not: an error
+        body reaches that handler with nothing to repair, and `[]` written over
+        `output_path` here is the same invented clean review it is at the other
+        two. The error log is written on both branches — only its first line
+        moves, which is what makes it a usable diagnostic either way.
+        """
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+
+        saved = base_save_model_result(
+            "plan", GEMINI_SPEC, True, RELAYED_API_ERROR,
+            None, str(tmp_path), str(phase_dir), "review_plan",
+        )
+
+        assert saved is False
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert "nothing to salvage" in output
+
+        error_log = phase_dir / "error_gemini_gemini-2_5-flash.log"
+        logged = error_log.read_text(encoding="utf-8")
+        assert "No JSON in response" in logged
+        assert RELAYED_API_ERROR in logged
+
+    def test_json_erroring_slots_leave_the_run_on_the_partial_results_path(
+        self, tmp_path, capsys
+    ):
+        """The phase-level consequence: dead slots are partial output, not a stop.
+
+        D6 row 3 — a run that lost *some* models prints `[PARTIAL_RESULTS: …]`,
+        aggregates what exists and exits 0; only a run where *no* model produced
+        a result is exit 3. Driven through `main()` because the accounting that
+        decides it (`failed_models`, `completed_models`, the `.status.json`
+        write, `grouped.json` and the report) sits above `run_single_review` and
+        cannot be seen from there, and because "no salvage was requested" has to
+        hold for the whole phase dir at the *end* of a run rather than only at
+        the instant the gate ran.
+
+        Both failure channels are in this one run on purpose, and since site A
+        began reading `details["stdout_excerpt"]` ahead of `details["stderr"]`
+        both of them are now the gate's to decide: opencode's error event arrives
+        on stdout, kilocode's relayed 401 body on stderr, and
+        `has_salvageable_json` has to refuse each one on its own merits. That is a
+        strictly harder run than the same test posed before the excerpt was
+        plumbed through, when the opencode slot could only ever hand the
+        predicate an empty string — a regression in either the channel precedence
+        or the predicate now fails here as well as at the single-site tests above.
+        """
+        plan, phase_dir, exit_code = _run_cro_review(
+            tmp_path,
+            {
+                OPENCODE_SPEC: _hard_failure_with_empty_stderr(),
+                KILOCODE_SPEC: _hard_failure(RELAYED_API_ERROR),
+                GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+            },
+        )
+        output = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert f"[PARTIAL_RESULTS: {OPENCODE_SPEC},{KILOCODE_SPEC}]" in output
+        assert "ERROR: All models failed" not in output
+
+        # Not one salvage artifact anywhere in the phase dir, request or task.
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+
+        # Each failed slot has an error log and no result file; the survivor has
+        # a result file and is the only model the aggregate names.
+        for spec, reason in (
+            (OPENCODE_SPEC, "opencode exited with code 1"),
+            (KILOCODE_SPEC, "kilocode exited with code 1"),
+        ):
+            stem = cro.sanitize_model_name(spec)
+            assert reason in (phase_dir / f"error_{stem}.log").read_text(
+                encoding="utf-8"
+            )
+            assert not (phase_dir / f"{stem}.json").exists()
+        assert (phase_dir / f"{cro.sanitize_model_name(GEMINI_SPEC)}.json").exists()
+
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == [GEMINI_SPEC]
+        assert set(status["models_failed"]) == {OPENCODE_SPEC, KILOCODE_SPEC}
+
+        grouped = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        attributed = {m for group in grouped["groups"] for m in group["models"]}
+        assert attributed == {GEMINI_SPEC}
+
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert f"**Models:** {GEMINI_SPEC}" in report
+        assert f"- **{OPENCODE_SPEC}**: opencode exited with code 1" in report
+        assert f"- **{KILOCODE_SPEC}**: kilocode exited with code 1" in report
+
+
+# ---------------------------------------------------------------------------
+# A salvage that found nothing, seen from the phase that dispatched it
+# ---------------------------------------------------------------------------
+#
+# `build_salvage_prompt` no longer offers `[]` as its "nothing recoverable"
+# answer; it asks for `{"salvage_failed": true, "reason": "…"}`
+# (`utils/subagent_prompts.py:350–358`), and `_salvage_gave_up`
+# (`utils/subagent_executor.py:1969`) turns that into
+# `STATUS_SALVAGE_UNRECOVERABLE` between extraction and validation — before
+# anything can be written to the task's `output_path`, which for a salvage IS
+# the model's own result file. That much is pinned nine ways in
+# `tests/test_subagent_executor.py::TestSalvageFoundNothing`, and none of it is
+# repeated here.
+#
+# What no test reached is the consequence one level up: the gate is a heuristic
+# and the sentinel is the second defence, so what matters to an operator is that
+# a salvage which gave up leaves the model *failed* — absent from `grouped.json`,
+# absent from the report's `**Models:**` line, present in `Failed Reviews` — and
+# that the subagent's reason survives into `subagent_batch_report.json` instead
+# of being thrown away the way `[]` threw it away.
+
+
+def _native_salvage_reply(reply: Any):
+    """Stand in for the salvage child process, and for nothing else.
+
+    `dispatch_salvage_tasks` imports `run_task_file` from
+    `utils.subagent_executor` inside its own body, so replacing the module
+    attribute is enough to intercept the dispatch without touching the phase
+    code that calls it.
+
+    What replaces it is not a stubbed outcome. `simulate_native_invoker` is the
+    *other* real invoker of the D3a pair: it runs `refuse_reason`,
+    `_salvage_gave_up`, `validate_result` and `persist_result` exactly as the
+    subprocess lane does, and their equivalence on this very sentinel is pinned
+    by `tests/test_subagent_executor.py::TestSalvageFoundNothing::
+    test_the_native_invoker_answers_the_sentinel_identically`. So the only thing
+    this fixture decides is what the subagent said — which is the one thing a
+    test has to decide, since the alternative is a live model.
+    """
+    def _run(task_file, *, phase_dir=None, phase="", **_ignored):
+        document = json.loads(Path(task_file).read_text(encoding="utf-8"))
+        return executor.simulate_native_invoker(
+            tasks_of(document),
+            phase_dir=phase_dir or os.path.dirname(os.path.abspath(task_file)),
+            phase=phase,
+            kind=str(document.get("kind", "")),
+            respond=lambda _task: reply,
+            write_report=True,
+        )
+
+    return _run
+
+
+#: What a salvage subagent prints when the raw output holds no answer to repair.
+#: The reason is one short factual clause naming what the output turned out to
+#: be, which is what the prompt asks for and what `[]` could never carry.
+SALVAGE_SENTINEL = {
+    "salvage_failed": True,
+    "reason": "the raw output was a truncated log line, not a review",
+}
+
+
+class TestASalvageThatGaveUpIsNotAParticipant:
+    """The sentinel's phase-level consequence, on a run that really dispatched one.
+
+    The dispatch here is genuine: the failing slot answers with `TRUNCATED_ARRAY`,
+    so the gate says salvage — correctly, this time — `emit_salvage_task`
+    materializes `salvage_task_<stem>.json`, and `--exec-subagents` runs it.
+    That is the route the gate cannot cover and the sentinel exists for: every
+    false positive the heuristic has ends here, and what happens at this point
+    is the difference between a phantom participant and a failed model.
+    """
+
+    def _run(self, tmp_path):
+        with patch.object(
+            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+        ):
+            return _run_cro_review(
+                tmp_path,
+                {
+                    KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+                    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+                },
+                exec_subagents=True,
+            )
+
+    def test_a_salvage_that_gave_up_leaves_the_model_out_of_the_review(
+        self, tmp_path, capsys
+    ):
+        """The phantom participant, asserted where an operator would see it.
+
+        Fails on the pre-sentinel executor in the way the whole plan is about:
+        `[]` validated, `persist_result` wrote it to the task's `output_name` —
+        `kilocode_openrouter_moonshotai_kimi-k3_thinking.json`, the model's own
+        result path — `main()` folded it back into `results` as a repair, and the
+        report credited a model that never ran with a clean review. Nothing in
+        that chain was an error; that is why the fix had to be a value the
+        result handler can tell apart from an answer.
+        """
+        plan, phase_dir, exit_code = self._run(tmp_path)
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert exit_code == 0
+        # The salvage really was dispatched — otherwise this test proves nothing.
+        assert "[SALVAGE_TASK]" in output
+        assert "[exec-subagents] dispatching salvage task" in output
+        # The task file is no longer under its own name because the terminal
+        # verdict retired the pair (see the class below), which is a stronger
+        # witness that it was dispatched than its mere presence ever was: only a
+        # task that ran can have been declared unrecoverable. Renamed rather
+        # than deleted, so the raw output the request carries is still readable.
+        assert not (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert list(phase_dir.glob(f"retired_salvage_task_{stem}.*.json"))
+
+        # ...and it wrote nothing. `output_name` is the model's result file, so
+        # this absence is the whole defence.
+        assert not (phase_dir / f"{stem}.json").exists()
+        assert f"[{KILOCODE_SPEC}] recovered by salvage" not in output
+
+        assert f"[PARTIAL_RESULTS: {KILOCODE_SPEC}]" in output
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == [GEMINI_SPEC]
+        assert KILOCODE_SPEC in status["models_failed"]
+
+        grouped = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        attributed = {m for group in grouped["groups"] for m in group["models"]}
+        assert attributed == {GEMINI_SPEC}, (
+            "a model whose salvage gave up was counted among the models that "
+            "reviewed the diff, which is what _recalculate_priority scores"
+        )
+
+    def test_report_md_attributes_no_review_to_the_model_that_never_answered(
+        self, tmp_path, capsys
+    ):
+        """The operator-visible half: credited nowhere, explained once.
+
+        `**Models:**` is built from `successful_models` and every issue block
+        carries a `**Model:**` line, so a phantom participant shows up twice over
+        in the artifact a human actually reads. The failed slot belongs in
+        `Failed Reviews` with its error — and nowhere else.
+        """
+        plan, phase_dir, _ = self._run(tmp_path)
+        capsys.readouterr()
+
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+
+        assert f"**Models:** {GEMINI_SPEC}" in report
+        assert f"**Model:** {KILOCODE_SPEC}" not in report
+        assert "## Failed Reviews" in report
+        assert f"- **{KILOCODE_SPEC}**: kilocode exited with code 1" in report
+
+        # The one issue in the report came from the model that produced it.
+        assert report.count("Unbounded retry loop") >= 1
+
+    def test_the_subagents_own_reason_reaches_the_phases_batch_report(
+        self, tmp_path, capsys
+    ):
+        """`subagent_batch_report.json`, in the phase dir, naming what went wrong.
+
+        The diagnostic is the point of the sentinel's shape: `[]` said "no
+        findings" and destroyed the reason, so the operator's next move was a
+        JSON repair for a failure that was never about JSON. This is the record
+        `dispatch_salvage_tasks` also echoes to stderr — a batch report is what
+        survives the scrollback.
+        """
+        plan, phase_dir, _ = self._run(tmp_path)
+        err = capsys.readouterr().err
+
+        written = json.loads(
+            (phase_dir / executor.BATCH_REPORT_FILENAME).read_text(encoding="utf-8")
+        )
+        assert written["counts"] == {"salvage_unrecoverable": 1}
+        task = written["tasks"][0]
+        assert task["status"] == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert SALVAGE_SENTINEL["reason"] in task["reason"]
+        # `dispatch_salvage_tasks` prints every non-ok outcome as it collects it,
+        # so a run that never opens the report still says why the model stayed
+        # failed (utils/review_orchestrator_base.py:395).
+        assert "salvage_unrecoverable" in err
+        assert SALVAGE_SENTINEL["reason"] in err
+
+
+# ---------------------------------------------------------------------------
+# A salvage the executor has already given up on is not outstanding work
+# ---------------------------------------------------------------------------
+#
+# The sentinel stops a salvage that recovered nothing from *writing* anything.
+# It does not, on its own, stop the run from asking for that salvage again:
+# `emit_salvage_task` wrote `salvage_<stem>.json` when the gate said the raw
+# output held an answer, the executor then said it did not, and main()'s
+# end-of-run block globs `salvage_*.json` off disk with no idea that a verdict
+# has since been reached about it. Observed by running the phase and reading
+# stdout: `SALVAGE NEEDED / Models requiring salvage: 1`, then
+# `[REAGGREGATE_AFTER_SALVAGE] …`, then `record_next` of that same command.
+#
+# Every part of that is wrong at once. `STATUS_SALVAGE_UNRECOVERABLE` is
+# rung-less and in none of `RETRYABLE_STATUSES` / `BACKOFF_STATUSES` /
+# `FATAL_STATUSES` (`utils/retry_ladder.py`) *because* the same raw output
+# through the same prompt has the same answer — so the work being advertised
+# will never be done, an automated host following `record_next` walks a loop
+# that cannot make progress, and the one diagnostic that matters (the
+# subagent's own `reason`, which on the payload that found this said the raw
+# output was an auth error) is buried under a repair instruction.
+#
+# The verdict is applied where it is known — `dispatch_salvage_tasks`, the only
+# code that ever sees the outcome — by retiring the pair out of the two globs
+# and printing the reason in the marker's place. The alternative, teaching the
+# end-of-run block to re-open `subagent_batch_report.json` and re-derive the
+# status, puts the same rule in a second place and leaves the *dispatch* glob
+# still holding a task nobody will ever run again.
+
+
+def _never_dispatched(*_args, **_kwargs):
+    """A tripwire for `run_task_file`: reaching it at all fails the test.
+
+    "Nothing was dispatched" asserted from the absence of a stdout line is a
+    weaker claim than it looks — a dispatch that refused early prints on stderr
+    and could pass it — and letting the real executor run would spawn a runner
+    against whatever CLI the developer's machine happens to have installed.
+    """
+    raise AssertionError(
+        "dispatch_salvage_tasks ran a salvage task file that should have been "
+        f"retired before this run reached it: {_args!r}"
+    )
+
+
+class TestATerminalSalvageIsNotReAdvertised:
+    """What the phase tells the operator once the executor has given up.
+
+    Same run as the class above — a genuine salvage, correctly requested,
+    dispatched under `--exec-subagents`, answering with the sentinel — asserted
+    one level further out: at the end-of-run block that decides what the host is
+    pointed at next.
+    """
+
+    def _run(self, tmp_path, reply, **arg_overrides):
+        with patch.object(
+            executor, "run_task_file", _native_salvage_reply(reply)
+        ):
+            return _run_cro_review(
+                tmp_path,
+                {
+                    KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+                    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+                },
+                exec_subagents=True,
+                **arg_overrides,
+            )
+
+    def test_a_salvage_that_gave_up_is_not_advertised_as_work_still_owed(
+        self, tmp_path, capsys
+    ):
+        """No `SALVAGE NEEDED`, no reaggregate command, nothing on `record_next`.
+
+        `record_next` is asserted separately from the printed marker because the
+        two have different readers: the marker is for a human reading stdout,
+        `MULTI_LLM_RESULT.next` is what an automated host re-executes without
+        reading anything. Advertising a terminal salvage puts the second one in
+        a loop, which is the failure mode that costs a run rather than a glance.
+        Validation is skipped in this fixture, so the salvage site is the only
+        `record_next` caller a passing run could reach — the assertion is
+        therefore "never called" rather than "not called with this string".
+        """
+        with patch.object(cro, "record_next") as next_command:
+            plan, phase_dir, exit_code = self._run(tmp_path, SALVAGE_SENTINEL)
+        output = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert "SALVAGE NEEDED" not in output
+        assert "[REAGGREGATE_AFTER_SALVAGE]" not in output
+        assert next_command.call_args_list == []
+
+    def test_the_operator_is_shown_the_reason_where_the_marker_used_to_be(
+        self, tmp_path, capsys
+    ):
+        """The reason on the phase's own stdout, not only in the batch report.
+
+        `subagent_batch_report.json` already records it (pinned by the class
+        above) and `dispatch_salvage_tasks` already echoes every failed outcome
+        to stderr — but a host that merges streams, or an operator skimming the
+        run, needs the verdict on the same channel as the `[SALVAGE_NEEDED]`
+        marker it replaces. What must survive is the *content*: this model's
+        next move is the provider, and the reason is the only line that says so.
+        """
+        plan, phase_dir, _ = self._run(tmp_path, SALVAGE_SENTINEL)
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert f"[SALVAGE_UNRECOVERABLE] {stem}: " in output
+        assert SALVAGE_SENTINEL["reason"] in output
+
+    def test_the_pair_is_renamed_out_of_both_globs_rather_than_deleted(
+        self, tmp_path, capsys
+    ):
+        """How the advertisement stops: the artifacts leave the globs, not disk.
+
+        Two globs decide what is still owed — `dispatch_salvage_tasks`'s
+        `salvage_task_*.json` and main()'s `salvage_*.json` — and both are
+        prefix-anchored, so only a rename that moves the leading `salvage_`
+        takes an artifact out of them. Deleting would do that too and is
+        rejected: the request carries the raw output the model actually
+        produced, which is the evidence that separates a truncated answer from a
+        dead account, and it is exactly the run that gave up on it whose
+        evidence an operator wants to read.
+        """
+        plan, phase_dir, _ = self._run(tmp_path, SALVAGE_SENTINEL)
+        capsys.readouterr()
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert not (phase_dir / f"salvage_{stem}.json").exists()
+        assert not (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        retired_request = list(
+            phase_dir.glob(f"retired_salvage_{stem}.unrecoverable.*.json")
+        )
+        retired_task = list(
+            phase_dir.glob(f"retired_salvage_task_{stem}.unrecoverable.*.json")
+        )
+        assert len(retired_request) == 1
+        assert len(retired_task) == 1
+        # The raw output is still readable, under the name that says why it was
+        # retired and when.
+        request = json.loads(retired_request[0].read_text(encoding="utf-8"))
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert request["model"] == KILOCODE_SPEC
+
+    def test_a_recovered_salvage_still_reaggregates_exactly_as_before(
+        self, tmp_path, capsys
+    ):
+        """The other outcome of the same dispatch, unmoved.
+
+        Retirement keys on `salvage_unrecoverable` and nothing else, so a
+        salvage that actually repaired the model's review takes the path it
+        always took: the issues are folded back into `results`, the model is
+        credited in `grouped.json` and the report, `salvage_files` is filtered
+        by `salvaged_models` rather than by any file having moved, and the
+        request stays on disk as the audit trail. A regression that retired on
+        *any* outcome would still pass the three tests above and silently delete
+        the record of every successful repair.
+        """
+        recovered = [_issue("Missing null check")]
+        with patch.object(cro, "record_next") as next_command:
+            plan, phase_dir, exit_code = self._run(tmp_path, recovered)
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert exit_code == 0
+        assert f"[{KILOCODE_SPEC}] recovered by salvage" in output
+        assert json.loads((phase_dir / f"{stem}.json").read_text(encoding="utf-8")) == (
+            recovered
+        )
+
+        # Repaired, therefore not pending: no marker, no follow-up command.
+        assert "SALVAGE NEEDED" not in output
+        assert "[REAGGREGATE_AFTER_SALVAGE]" not in output
+        assert next_command.call_args_list == []
+
+        # ...and not retired either. The request is the audit trail of a repair.
+        assert (phase_dir / f"salvage_{stem}.json").exists()
+        assert list(phase_dir.glob("retired_salvage_*.json")) == []
+
+        grouped = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        attributed = {m for group in grouped["groups"] for m in group["models"]}
+        assert attributed == {KILOCODE_SPEC, GEMINI_SPEC}
+
+    def test_without_exec_subagents_the_documented_flow_is_untouched(
+        self, tmp_path, capsys
+    ):
+        """The negative that keeps salvage-then-reaggregate working at all.
+
+        With the flag off nothing is dispatched, so no verdict exists and none
+        can be assumed: the host is the invoker, the salvage has not been tried,
+        and the marker plus `[REAGGREGATE_AFTER_SALVAGE]` plus `record_next` are
+        the entire contract by which it gets run and its result folded in. A fix
+        for the terminal case that reached this path would break the flow it was
+        protecting — so the same run as the tests above, minus
+        `--exec-subagents`, must advertise exactly as it always did.
+        """
+        with patch.object(cro, "record_next") as next_command:
+            plan, phase_dir, exit_code = _run_cro_review(
+                tmp_path,
+                {
+                    KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+                    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+                },
+            )
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert exit_code == 0
+        assert "[exec-subagents] dispatching salvage task" not in output
+        assert "SALVAGE NEEDED" in output
+        assert "Models requiring salvage: 1" in output
+        assert f"  1. {stem} -> salvage_{stem}.json" in output
+
+        expected = cro.reaggregate_command("review-code", plan)
+        assert f"[REAGGREGATE_AFTER_SALVAGE] {expected}" in output
+        assert next_command.call_args_list == [((expected,), {})]
+
+        # Both halves of the pair are still exactly where the host expects them.
+        assert (phase_dir / f"salvage_{stem}.json").exists()
+        assert (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert list(phase_dir.glob("retired_salvage_*.json")) == []
+
+
+# ---------------------------------------------------------------------------
+# A salvage pair does not outlive the attempt that wrote it
+# ---------------------------------------------------------------------------
+#
+# The gate decides whether *this* attempt writes `salvage_<model>.json` and
+# `salvage_task_<model>.json`. Nothing used to decide whether an *earlier*
+# attempt's pair was still lying in the phase directory — and it always is:
+# `get_phase_dir` is stable per plan (`utils/output_handler.py`), so every run
+# for a plan writes into the same directory; `dispatch_salvage_tasks` globs
+# every `salvage_task_*.json` it finds there; main()'s end-of-run block globs
+# every `salvage_*.json`; and `--force` clears only the state file's
+# phase-completion marker, deleting nothing from disk.
+#
+# So the exact P2 rerun still reproduced P2 in full: kilocode dies on
+# `User not found.`, the gate correctly writes nothing, and the *previous*
+# run's kilocode salvage task is dispatched anyway, advertised under
+# `SALVAGE NEEDED` anyway, and can still write over that model's `output_path`
+# — which for a salvage task IS the model's own result file — so a model that
+# never produced a parseable word joins the aggregate and
+# `SuggestionGroup._recalculate_priority` scores its silence as agreement. The
+# phantom participant, arriving by the one route the gate cannot see.
+#
+# The rule is "the artifact is retired at the moment the attempt that would
+# replace it begins", applied in `run_single_review` before the provider is
+# invoked. `run_all_reviews` answers a resume from the existing `<model>.json`
+# and returns *before* that call, which is what keeps the rule off models that
+# began no attempt — the case the last test here pins.
+
+
+class TestAStaleSalvagePairDoesNotSurviveTheNextAttempt:
+    """Two runs against one phase dir, which is the only way to see any of this.
+
+    Every assertion below is about what run 2 does with run 1's leftovers, so
+    each test really runs the phase twice over the same plan — same
+    `get_phase_dir`, same artifacts, `--force` in between exactly as an operator
+    would type it. A single-run fixture cannot express the defect at all.
+    """
+
+    def _first_run_leaves_a_salvage_pair(self, tmp_path, capsys, extra_models=()):
+        """Run 1: a genuine salvage request nobody ever ran.
+
+        `TRUNCATED_ARRAY` is a real damaged answer, so the gate says salvage and
+        is right to. Without `--exec-subagents` the pair is left for a host that
+        — as far as run 2 is concerned — never came back, which is precisely the
+        state a phase dir is in after an interrupted or abandoned run.
+        """
+        replies = {
+            KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+            GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+        }
+        replies.update(extra_models)
+        plan, phase_dir, exit_code = _run_cro_review(tmp_path, replies)
+        assert exit_code == 0
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        assert (phase_dir / f"salvage_{stem}.json").exists()
+        assert (phase_dir / f"salvage_task_{stem}.json").exists()
+        capsys.readouterr()
+        return plan, phase_dir
+
+    def test_a_forced_rerun_does_not_dispatch_the_previous_runs_salvage_task(
+        self, tmp_path, capsys
+    ):
+        """The P2 rerun end to end: gate writes nothing, and nothing is left to run.
+
+        Run 2 is the failure that started all of this — kilocode's account is
+        dead, the whole of stderr is `Error: User not found.`, and
+        `has_salvageable_json` correctly declines to ask for a repair. What used
+        to happen next is the entire defect: run 1's task file was still there,
+        `dispatch_salvage_tasks` globbed it, and `--exec-subagents` ran a repair
+        pass against an answer from a run that no longer exists, over a slot
+        this run recorded as failed.
+
+        The tripwire on `run_task_file` is what makes "nothing dispatched" an
+        observation rather than an inference from a missing stdout line.
+        """
+        plan, phase_dir = self._first_run_leaves_a_salvage_pair(tmp_path, capsys)
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        with patch.object(executor, "run_task_file", _never_dispatched), \
+             patch.object(cro, "record_next") as next_command:
+            _, _, exit_code = _run_cro_review(
+                tmp_path,
+                {
+                    KILOCODE_SPEC: _hard_failure(KILOCODE_AUTH_FAILURE),
+                    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+                },
+                force=True,
+                exec_subagents=True,
+            )
+        output = capsys.readouterr().out
+
+        assert exit_code == 0
+        # The gate did its half: this attempt asked for no salvage.
+        assert "nothing to salvage" in output
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+
+        # ...and the other half: run 1's pair is not treated as this run's.
+        assert "[exec-subagents] dispatching salvage task" not in output
+        assert "SALVAGE NEEDED" not in output
+        assert "[REAGGREGATE_AFTER_SALVAGE]" not in output
+        assert next_command.call_args_list == []
+
+        assert not (phase_dir / f"salvage_{stem}.json").exists()
+        assert not (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert len(list(phase_dir.glob(f"retired_salvage_{stem}.superseded.*.json"))) == 1
+        assert len(
+            list(phase_dir.glob(f"retired_salvage_task_{stem}.superseded.*.json"))
+        ) == 1
+
+        # The point of all of it: nothing was written to this model's result
+        # path, so the aggregate names only the model that reviewed the diff.
+        assert not (phase_dir / f"{stem}.json").exists()
+        grouped = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        attributed = {m for group in grouped["groups"] for m in group["models"]}
+        assert attributed == {GEMINI_SPEC}
+
+    def test_a_rerun_all_advertises_only_the_models_this_run_could_not_parse(
+        self, tmp_path, capsys
+    ):
+        """The salvaged subset shrinking between runs, which is the common case.
+
+        Nothing about run 1 is wrong here — two models really did return damaged
+        answers and really did need salvage. Run 2 re-runs every model
+        (`--rerun-all`) and one of them answers cleanly this time; its request
+        describes an answer that no longer exists, and advertising it would send
+        the host to repair a reply it cannot see and does not need. The count
+        line is asserted as well as the names because `Models requiring salvage:
+        N` is what an operator reads first and what a host's log grep matches.
+        """
+        plan, phase_dir = self._first_run_leaves_a_salvage_pair(
+            tmp_path,
+            capsys,
+            extra_models={OPENCODE_SPEC: _hard_failure(TRUNCATED_ARRAY)},
+        )
+        kilocode_stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        opencode_stem = cro.sanitize_model_name(OPENCODE_SPEC)
+        assert (phase_dir / f"salvage_{opencode_stem}.json").exists()
+
+        _, _, exit_code = _run_cro_review(
+            tmp_path,
+            {
+                KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+                OPENCODE_SPEC: _good_reply([_issue("Missing null check")]),
+                GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+            },
+            force=True,
+            rerun_all=True,
+        )
+        output = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert "Models requiring salvage: 1" in output
+        assert f"  1. {kilocode_stem} -> salvage_{kilocode_stem}.json" in output
+        assert opencode_stem not in output.split("SALVAGE NEEDED", 1)[1]
+
+        # The model that failed again re-requested salvage under its own name:
+        # retiring is not "delete once", it is "the previous attempt's copy".
+        assert (phase_dir / f"salvage_{kilocode_stem}.json").exists()
+        assert (phase_dir / f"salvage_task_{kilocode_stem}.json").exists()
+        assert len(
+            list(phase_dir.glob(f"retired_salvage_{kilocode_stem}.superseded.*.json"))
+        ) == 1
+
+        # The model that answered has no live request left, only the retired one.
+        assert not (phase_dir / f"salvage_{opencode_stem}.json").exists()
+        assert not (phase_dir / f"salvage_task_{opencode_stem}.json").exists()
+        assert len(
+            list(phase_dir.glob(f"retired_salvage_{opencode_stem}.superseded.*.json"))
+        ) == 1
+        assert (phase_dir / f"{opencode_stem}.json").exists()
+
+    def test_a_model_skipped_as_already_complete_keeps_its_salvage_pair(
+        self, tmp_path, capsys
+    ):
+        """The boundary of the rule, and the reason it is placed where it is.
+
+        Retiring belongs to *the attempt that would replace the artifact*. A
+        resumed run (no `--rerun-all`) answers a model with an existing
+        `<model>.json` straight out of `run_all_reviews`'s skip branch and never
+        reaches `run_single_review` — no provider is invoked, no result is
+        produced, nothing supersedes anything. Retiring there would be the
+        opposite defect: destroying a live request on a run that did not even
+        look at the model.
+
+        The `<model>.json` here is written by hand on purpose — that is exactly
+        what the documented no-`--exec-subagents` flow does to a phase dir, a
+        host running `task.prompt` and writing the JSON it returns to
+        `task.output_path`.
+        """
+        plan, phase_dir = self._first_run_leaves_a_salvage_pair(tmp_path, capsys)
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        (phase_dir / f"{stem}.json").write_text(
+            json.dumps([_issue("Recovered by the host")]), encoding="utf-8"
+        )
+
+        _, _, exit_code = _run_cro_review(
+            tmp_path,
+            {
+                KILOCODE_SPEC: _hard_failure(KILOCODE_AUTH_FAILURE),
+                GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+            },
+            force=True,
+        )
+        output = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert "[SKIP]" in output
+        assert "already has results" in output
+        # The canned auth failure was never consulted: no attempt, no retirement.
+        assert "nothing to salvage" not in output
+        assert (phase_dir / f"salvage_{stem}.json").exists()
+        assert (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert list(phase_dir.glob("retired_salvage_*.json")) == []
