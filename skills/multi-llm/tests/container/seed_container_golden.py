@@ -21,6 +21,56 @@ non-zero, ran fewer commands than it declared or did not record every chain phas
 completed is refused by name. A capped CLI has no parseable output and a failed
 row's artifacts are half a run; either one, frozen as "expected", would make every
 later comparison agree with a broken run.
+
+**The debt that keeps landing on this file, and the three lines it always owes.**
+A product change that moves what a phase *writes* invalidates all 15 baselines at
+once, and this lane is deselected by default (`addopts = -m 'not container'`) — so
+the staleness is invisible until someone opts in, and then reads 15 identical
+failures as 15 regressions. Whoever files that debt owes the next reader three
+things, and they belong HERE rather than only in a plan file, because a plan file
+is not what anyone has open at the moment they pay it:
+
+1. **The command.** Host-side, from the repo root, after a green
+   `full --quick --yes` chain run per CLI:
+
+       uv run --project skills/multi-llm -- \\
+           python skills/multi-llm/tests/container/seed_container_golden.py --cli <cli>
+
+   `--cli` is repeatable and defaults to every provider-lane CLI in
+   `redirect.yaml` with a chain bundle on disk, so one bare invocation after a
+   full provider-lane sweep re-seeds all 15. It needs Docker and **no
+   credential**: the provider lane redirects every CLI at an in-container stub
+   and runs `--network none`, so a 15-row sweep spends wall clock (~25 min,
+   measured 2026-09-10) and not one API call. Anyone reaching for a real
+   provider key to re-seed a golden is in the wrong lane.
+2. **The failure to expect until it is paid**, spelled out so nobody debugs it.
+   The rule that generalises: a failure *identical across all 15 rows* is a shape
+   change meeting a stale baseline, not a regression — the one thing those rows
+   do not share is the binary in the middle, so nothing a single CLI does can
+   move all 15 pointers the same way. The worked example is
+   `plans/reaggregate-identity-and-salvage-gating.md`, whose
+   `code-review/.status.json` change was predicted to fail every row on the two
+   added `created_paths` (`.status.json`, `.status.lock`) plus a `steps` list
+   grown from `["progress.subagents"]` to
+   `["phase=code-review", "state=models_complete", "progress.subagents"]`. The
+   response to that is a re-seed, never a hunt through the checkpoint writer.
+3. **The close condition.** The regenerated `bundle.json` diffs are *reviewed and
+   committed* — this script writes host-side precisely so they land as a
+   reviewable diff — and `-m container` passes. Not "it passed on one machine":
+   an unreviewed re-seed freezes whatever that run happened to do, which is the
+   same failure as a `--force`, only slower to notice.
+
+**Status of that particular debt: paid, and NOT by this docstring's own
+instructions (verified 2026-09-10).** All 15 baselines carry
+`manifest.captured_at = 2026-08-27T14:10:33Z` from run bundle
+`20260827T131354Z`, and already hold both extra `created_paths` and the grown
+`steps` — the opencode-plugin branch swept the lane after the fix landed and
+re-seeded them in passing, before the plan that filed the debt was finished. A
+full 15-row sweep on 2026-09-10 (image rebuilt from the working tree, 277 passed
+in 24:48) reproduced every baseline at **zero diffs**, so no CLI is stale and
+nothing here needs re-seeding. Recorded rather than deleted: the next shape
+change gets the same three lines, and the reason this one closed without work is
+itself the evidence that the lane, not the plan file, is what notices.
 """
 
 from __future__ import annotations

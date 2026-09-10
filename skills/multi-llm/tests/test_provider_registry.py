@@ -62,6 +62,7 @@ from utils.provider_registry import (
     has_quick_models,
     _deep_merge,
 )
+from utils.unattended import NeedsHuman
 
 
 class TestLoadConfig:
@@ -1606,6 +1607,219 @@ class TestOrchestratorIntegration:
         _reset_cache()
         cwd_based = resolve_models(mode=None)
         assert cwd_based == ["cursor-agent:auto"]
+
+
+def _assert_stem_collision_refusal(excinfo, specs, stem):
+    """The refusal has to name BOTH colliding specs and the stem they share.
+
+    Each of the three is load-bearing on its own. Naming one spec leaves the
+    operator to work out which of the other four ``--models`` entries it collided
+    with; naming neither and only the stem describes a string that never appeared
+    in anything they typed. And the stem is the half that cannot be re-derived by
+    eye — ``sanitize_model_name`` flattens ``:``, ``.`` and ``/`` alike, so
+    "which two of these become the same file name" is precisely the question the
+    message exists to answer.
+
+    ``site`` and ``exit_code`` are asserted here rather than in each test because
+    they are what makes the refusal *uniform*: all three orchestrators route
+    :class:`NeedsHuman` through ``unattended.fail_closed``, so a collision has to
+    arrive as D6 row 2 (which models to fan out to) at exit 3, exactly like the
+    empty-``--models`` and nothing-resolved gates beside it. A ``ValueError``
+    here would exit 1 with a traceback on one caller and be swallowed on another.
+    """
+    message = str(excinfo.value)
+    for spec in specs:
+        assert spec in message, (
+            f"the refusal never names the colliding spec {spec!r}: {message}"
+        )
+    assert stem in message, (
+        f"the refusal never names the shared stem {stem!r}, which is the one "
+        f"string in it the operator cannot derive by eye: {message}"
+    )
+    assert excinfo.value.site == "model-selection", (
+        "a stem collision is D6 row 2's decision site, so it must be recorded "
+        f"under that site_id like every other refusal resolve_models raises; "
+        f"got {excinfo.value.site!r}"
+    )
+    assert excinfo.value.exit_code == 3, (
+        "exit 3 is reserved for 'unattended run cannot proceed'; a collision "
+        "cannot be resolved without a human choosing which spec was meant"
+    )
+
+
+@pytest.mark.config_override
+class TestCollidingModelStemsAreRefusedBeforeDispatch:
+    """Two distinct specs, one filename stem: refused at ``resolve_models``.
+
+    ``sanitize_model_name`` (``utils/json_extractor.py``) is lossy in one
+    direction only — every separator a spec can carry collapses to ``_`` — so
+    ``p:a.b`` and ``p:a_b`` are two models with one stem, ``p_a_b``. Selecting
+    both breaks two invariants silently: the per-model artifacts (``{stem}.json``
+    and its ``log_``/``error_``/``salvage_`` siblings) overwrite each other,
+    with ``skip_existing_result`` mis-skipping the second model as already done;
+    and ``build_unsanitize_map`` keeps whichever spec the checkpoint listed last,
+    so ``--reaggregate`` attributes that one file's groups to a model that may
+    not have produced them.
+
+    ``resolve_models`` is where that is refused, because it is the single seam
+    all three orchestrators resolve through and it sits before anything
+    expensive: refusing costs a correct run nothing, where refusing at the
+    ``write_status`` that records ``models_requested`` would throw away a whole
+    fan-out.
+
+    Every leg of the priority ladder is exercised, and that is the point of
+    having three of them rather than one: ``--models``, ``defaults.models`` and
+    ``quick_models`` all return through the same ``_canonical`` closure, and
+    these tests are what pin that they do. A gate placed on the ``cli_models``
+    branch alone would pass the first test here and leave a colliding pair in a
+    project's ``providers.yaml`` entirely unguarded.
+    """
+
+    #: The plan's own example, and the one the ``--models`` leg can use verbatim:
+    #: ``parse_model_spec`` splits on the first ``:`` and validates nothing, so a
+    #: fictitious provider ``p`` survives canonicalization untouched.
+    FLAG_SPECS = ["p:a.b", "p:a_b"]
+    FLAG_STEM = "p_a_b"
+
+    #: The same collision spelled with a provider that has a hardcoded adapter.
+    #: The config legs below filter on ``get_provider(name).is_available()``, so
+    #: ``p`` would be dropped as unavailable and the run would die on "all
+    #: providers unavailable" long before reaching the gate — which would make
+    #: those two tests pass for entirely the wrong reason. The collision is in
+    #: the model half of the spec either way: ``a.b`` and ``a_b`` are one stem.
+    CONFIG_SPECS = ["claude-code:a.b", "claude-code:a_b"]
+    CONFIG_STEM = "claude-code_a_b"
+
+    def test_two_models_flag_specs_that_share_a_stem_are_refused(self, reg):
+        from utils.interactive import resolve_models
+
+        with pytest.raises(NeedsHuman) as excinfo:
+            resolve_models(cli_models=list(self.FLAG_SPECS))
+        _assert_stem_collision_refusal(excinfo, self.FLAG_SPECS, self.FLAG_STEM)
+
+    def test_the_same_pair_reaching_defaults_models_is_refused_identically(
+        self, reg, monkeypatch, tmp_path
+    ):
+        """The config leg, with no ``--models`` anywhere in the call.
+
+        A colliding pair committed to a project's ``providers.yaml`` is the
+        *worse* case of the two: it is typed once and then silently re-selected
+        by every run in that repo, where a bad ``--models`` invocation at least
+        has a human looking at it.
+        """
+        from utils.interactive import resolve_models
+
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  models:\n"
+            + "".join(f"    - {spec}\n" for spec in self.CONFIG_SPECS),
+        )
+        _set_project_config(monkeypatch, override)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+        with pytest.raises(NeedsHuman) as excinfo:
+            resolve_models(mode=None)
+        _assert_stem_collision_refusal(excinfo, self.CONFIG_SPECS, self.CONFIG_STEM)
+
+    def test_the_same_pair_reaching_quick_models_is_refused_identically(
+        self, reg, monkeypatch, tmp_path
+    ):
+        """The third leg. ``--quick`` returns through ``_canonical`` too.
+
+        Worth its own test rather than trusting the shared closure, because
+        ``--quick`` is the leg with its own availability filter, its own
+        "all providers unavailable" exit and its own fall-through into step 4 —
+        three chances for a future edit to build a return path that skips the
+        gate.
+        """
+        from utils.interactive import resolve_models
+
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml",
+            "defaults:\n  quick_models:\n"
+            + "".join(f"    - {spec}\n" for spec in self.CONFIG_SPECS),
+        )
+        _set_project_config(monkeypatch, override)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+        with pytest.raises(NeedsHuman) as excinfo:
+            resolve_models(quick=True, mode=None)
+        _assert_stem_collision_refusal(excinfo, self.CONFIG_SPECS, self.CONFIG_STEM)
+
+    def test_three_specs_on_one_stem_are_named_in_one_refusal(self, reg):
+        """An N-way collision is one message that reads as one, not as a pair.
+
+        Three variants of one model is the case where the operator is *least*
+        likely to spot the collision by eye, so it is the case where a message
+        written for exactly two — "two of the selected models", "both sanitize
+        to" — would be at its most misleading. The refusal has to name all three
+        and still parse as English.
+        """
+        from utils.interactive import resolve_models
+
+        # `/` and `.` both flatten to `_`; `-` does **not** — it is inside
+        # `sanitize_model_name`'s allowed class, so `p:a-b` keeps its hyphen and
+        # is not a collision at all. The slash is the realistic third member
+        # anyway: `openrouter/moonshotai/kimi-k3` is how half the specs in this
+        # repo's own config are written.
+        specs = ["p:a.b", "p:a_b", "p:a/b"]
+        with pytest.raises(NeedsHuman) as excinfo:
+            resolve_models(cli_models=list(specs))
+        _assert_stem_collision_refusal(excinfo, specs, "p_a_b")
+
+        message = str(excinfo.value)
+        assert "all sanitize to" in message, (
+            f"three specs on one stem still read 'both sanitize to': {message}"
+        )
+        assert "both sanitize to" not in message
+        assert message.count("sanitize to") == 1, (
+            f"one stem is one collision and must be one line: {message}"
+        )
+
+    def test_one_spec_carrying_a_separator_is_not_a_collision(self, reg):
+        """The first negative: a lossy stem is normal, and normal must still run.
+
+        Nearly every real spec sanitizes to something it cannot be recovered
+        from — ``cursor-agent:cursor-grok-4.6-xhigh`` becomes
+        ``cursor-agent_cursor-grok-4_6-xhigh``. The defect is two specs sharing
+        one stem, never one spec having a lossy one, and a gate that confused the
+        two would refuse the entire model catalog.
+        """
+        from utils.interactive import resolve_models
+
+        assert resolve_models(cli_models=["p:a.b"]) == ["p:a.b"]
+
+    def test_the_same_spec_passed_twice_is_collapsed_rather_than_refused(self, reg):
+        """The second negative, and the one the gate is most likely to get wrong.
+
+        ``--models p:a.b p:a.b`` is a user typing one thing twice. There is one
+        model, one stem and one result file, so there is nothing to overwrite and
+        nothing to misattribute — a naive "are all stems distinct?" check would
+        refuse it anyway. Collapsing (rather than passing both through) is the
+        stronger answer: two identical entries would otherwise fan out twice,
+        spend twice and write the same file twice for one answer.
+        """
+        from utils.interactive import resolve_models
+
+        assert resolve_models(cli_models=["p:a.b", "p:a.b"]) == ["p:a.b"]
+
+    def test_a_bare_spec_and_its_prefixed_twin_collapse_rather_than_collide(
+        self, reg
+    ):
+        """Deduplication is on the CANONICAL form, which is why it can collapse.
+
+        ``defaults.models`` and ``--models`` both legally carry bare, prefix-less
+        entries, so ``sonnet`` and ``cursor-agent:sonnet`` — under this config's
+        ``default_provider`` — are one model written two ways. They resolve to
+        one spec and therefore to one stem; deduplicating on the raw input
+        instead would have let two spellings of one model through as a collision
+        and refused a perfectly ordinary list.
+        """
+        from utils.interactive import resolve_models
+
+        assert resolve_models(
+            cli_models=["sonnet", "cursor-agent:sonnet"]
+        ) == ["cursor-agent:sonnet"]
 
 
 @pytest.mark.config_override

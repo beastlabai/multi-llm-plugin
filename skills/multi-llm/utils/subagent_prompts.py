@@ -288,6 +288,19 @@ def build_salvage_prompt(salvage_request: Dict[str, Any]) -> str:
     reaggregation. What is left is extraction alone, which is why salvage no
     longer needs workspace access.
 
+    **"Nothing recoverable" is a sentinel object, never an empty array.** A
+    salvage task's ``output_name`` *is* the model's own result path, so an empty
+    array printed here would be persisted over that path and reaggregation would
+    read it as "this model reviewed the input and found nothing" — a model that
+    never produced a parseable word becomes a phantom participant, and finding
+    priority is scored partly by how many models flagged something. So the
+    fallback is ``{"salvage_failed": true, "reason": ...}``, which
+    ``subagent_executor`` recognises as a failed, never-retried outcome that
+    writes nothing and carries the subagent's own reason into
+    ``subagent_batch_report.json``. A bare empty array stays legal *as a
+    recovery* — it is what a model whose reply really was an empty review
+    produced — which is exactly why the negative needs a shape of its own.
+
     Args:
         salvage_request: The salvage-request record (``model``, ``phase``,
             ``raw_output``, ``expected_type``, ``expected_schema``, …).
@@ -332,8 +345,18 @@ RAW_OUTPUT
 
 Print ONLY the extracted JSON {expected_type} and nothing else — no prose, no
 markdown fences, no explanation. Do not write any file; whoever invoked you
-persists your reply. If nothing recoverable is present, print an empty
-{expected_type}.
+persists your reply.
+
+If the raw output holds nothing recoverable at all, print exactly this object
+instead — never an empty {expected_type}, which is indistinguishable from a
+review that ran and genuinely found nothing:
+
+{{"salvage_failed": true, "reason": "<what the raw output actually was>"}}
+
+The reason is one short factual clause naming what the raw output turned out to
+be — an authentication error, a stack trace, a truncated log line, an empty
+stream, prose with no JSON anywhere in it. Not an apology, and not an account of
+what you tried.
 '''
 
 

@@ -70,6 +70,20 @@ STATUS_CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
 #: adapter's declared vendor envelope.
 STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 
+#: ``salvage`` only: the subagent read the raw output it was handed and reported
+#: back that it holds no recoverable document
+#: (``{"salvage_failed": true, "reason": ...}``, ``build_salvage_prompt``'s
+#: fallback). Terminal, and in **none** of the three policy sets below: the
+#: dispatch worked, the answer is a definite negative, and re-sending an
+#: unchanged raw output to an unchanged prompt asks a question already answered.
+#:
+#: Deliberately absent from ``RUNG_BY_STATUS`` too. A rung is a position on the
+#: *transport* failure ladder, and nothing about this dispatch failed — the child
+#: spawned, replied and was understood. What is being recorded is the content of
+#: the reply, so a rung here would be a category error in the same way it is for
+#: ``budget_exhausted`` and the two D3g verification failures.
+STATUS_SALVAGE_UNRECOVERABLE = "salvage_unrecoverable"
+
 #: The D3k ladder, first match wins. Every dispatch failure lands on exactly one
 #: rung, and the status is what ``subagent_batch_report.json`` records verbatim.
 RUNG_BY_STATUS = {

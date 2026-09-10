@@ -11,6 +11,7 @@ brackets inside "..."), and returning each structure individually.
 
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
@@ -30,14 +31,87 @@ def sanitize_model_name(model: str) -> str:
     return re.sub(r'[^a-zA-Z0-9\-_]', '_', model)
 
 
+def _warn_stem_collision(
+    phase_dir: str, stem: str, specs: List[str], retained: str
+) -> None:
+    """Name the specs that share one stem, and what the report will claim instead.
+
+    Split out of :func:`build_unsanitize_map` so the loop stays a loop and this
+    stays prose: the operator-facing half of a collision is the *consequence*,
+    not the detection, and it takes more words than the detection does.
+
+    **stderr, not stdout.** The reaggregate path's stdout is its
+    machine-readable channel — the ``[PARTIAL_RESULTS: ...]`` and
+    ``[REAGGREGATE_AFTER_SALVAGE]`` markers a host parses — and a degradation
+    nobody chose does not belong in it. Same rule, and for the same reason, as
+    ``warn_stem_attribution`` (``code_review_orchestrator.py``), which says so at
+    length for the sibling case.
+
+    **A plain print rather than that shared helper**, because the helper lives in
+    an orchestrator and this is a leaf module every orchestrator imports;
+    reaching back up for it would make ``utils.json_extractor`` depend on
+    ``code_review_orchestrator``. A ``WARNING:``-headlined stderr print is what
+    the rest of the package already does for exactly this class of
+    "continuing, but degraded" notice (``utils/status_file.py``,
+    ``utils/tasks_file.py``, ``utils/filtering.py``).
+    """
+    listed = ", ".join(repr(spec) for spec in specs)
+    print(
+        f"WARNING: {phase_dir}/.status.json lists {len(specs)} distinct model "
+        f"specs that sanitize to one filename stem {stem!r}: {listed}.\n"
+        f"  Every group attributed to {stem} is reported as {retained!r} — the "
+        f"spec listed last, which need not be the model that produced it. "
+        f"sanitize_model_name flattens every separator a spec carries and "
+        f"nothing can put one back, so this phase dir cannot say which of those "
+        f"models {stem}.json came from; during the fan-out they wrote that one "
+        f"file between them, so at most one of their answers survived and the "
+        f"resume predicate would have skipped the second as already done.\n"
+        f"  resolve_models (utils/interactive.py) refuses a colliding pair "
+        f"before dispatch, so this checkpoint predates that gate or was written "
+        f"by hand. Recover by editing models_requested / models_completed down "
+        f"to the model this dir's results actually came from, or re-run the "
+        f"fan-out with --force once the selected specs no longer collide.",
+        file=sys.stderr,
+    )
+
+
 def build_unsanitize_map(phase_dir: str) -> Dict[str, str]:
     """Build a mapping from sanitized model names back to original specs.
 
     Reads ``.status.json`` in *phase_dir* and uses ``models_requested`` /
     ``models_completed`` to create a ``sanitize(original) -> original`` dict.
 
+    **The inverse exists only while the map is one-to-one, and this is the last
+    place that can still notice it is not.** :func:`sanitize_model_name` is lossy
+    in one direction only — every separator a spec can carry (``:``, ``.``,
+    ``/``) collapses to the same ``_`` — so ``p:a.b`` and ``p:a_b`` are two
+    models with one stem, ``p_a_b``, and so are
+    ``openrouter:qwen/qwen3-max`` and ``openrouter:qwen.qwen3-max``.
+    ``resolve_models`` (``utils/interactive.py``) refuses such a pair before
+    anything is dispatched, which is where refusing costs a correct run nothing.
+    But ``--reaggregate`` resolves nothing at all and only reads this file, so
+    the gate never runs for it: a checkpoint written before the gate existed, or
+    written by hand — which is a recovery ``warn_stem_attribution``
+    (``code_review_orchestrator.py``) actively recommends — can still hold a
+    colliding pair. Left alone the loop below is a plain dict write, the spec
+    listed *last* silently wins, and every group under that stem is attributed
+    to a model that may not have produced it. That is a **misattribution, not an
+    omission**: the report names a model that did not say the thing, and reads
+    as plausible either way.
+
+    **The collision is reported and the run continues, deliberately.** The same
+    posture ``warn_stem_attribution`` takes for the sibling case — a phase dir
+    whose checkpoint records no models at all still reaggregates, warning that
+    attribution has fallen back to stems — because the two degradations have to
+    tell the operator one story rather than two. Raising here would also throw
+    away a fan-out that already completed in order to protect the *naming* of
+    its results, which is the wrong trade at this end of the run; fail-closed
+    belongs at ``resolve_models``, before the spend.
+
     Returns:
-        Dict mapping sanitized names to original model specs.
+        Dict mapping sanitized names to original model specs. On a collision the
+        last spec still wins — the mapping is unchanged — but one warning per
+        colliding stem goes to stderr first.
         Empty dict if ``.status.json`` is missing or unreadable.
     """
     status_path = Path(phase_dir) / ".status.json"
@@ -48,9 +122,31 @@ def build_unsanitize_map(phase_dir: str) -> Dict[str, str]:
     except (json.JSONDecodeError, OSError):
         return {}
     mapping: Dict[str, str] = {}
+    # Distinct specs per stem, first-seen order, accumulated across BOTH keys
+    # before anything is reported. Both halves of that matter:
+    #
+    #  * a run that resumed lists its models under ``models_requested`` and again
+    #    under ``models_completed``, so a colliding spec's twin is as likely to
+    #    sit in the other key as beside it — detecting per key would miss the
+    #    commonest real shape;
+    #  * warning inside the loop would chain a three-way collision into two
+    #    pairwise warnings, the second of which has already forgotten the first
+    #    spec. One warning per stem naming every spec is the thing an operator
+    #    can act on.
+    #
+    # Repeats of the *same* spec are not a collision — that is just the union of
+    # the two keys doing its job — so identity, not arrival, is what counts.
+    by_stem: Dict[str, List[str]] = {}
     for key in ("models_requested", "models_completed"):
         for original in data.get(key, []):
-            mapping[sanitize_model_name(original)] = original
+            stem = sanitize_model_name(original)
+            seen = by_stem.setdefault(stem, [])
+            if original not in seen:
+                seen.append(original)
+            mapping[stem] = original
+    for stem, specs in by_stem.items():
+        if len(specs) > 1:
+            _warn_stem_collision(phase_dir, stem, specs, mapping[stem])
     return mapping
 
 
@@ -249,14 +345,84 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
 #: the provider layer and importing upward would invert the dependency.
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+#: The field names a model *answer* record carries and a failure envelope does
+#: not. Both shipped answer schemas require ``title``, ``desc`` and
+#: ``importance`` on every record (``schemas/review_suggestions.schema.json``
+#: adds ``reference``, ``schemas/code_review_issues.schema.json`` adds
+#: ``line_range``, ``anchor_text`` and ``suggested_fix``), so a real record trips
+#: this set on its first key. The two required names deliberately left out are
+#: ``type`` and ``file``: they are shared with the very shapes this set is here
+#: to reject — ``{"type": "error", "message": …}`` is a provider event record
+#: verbatim — and leaving them out costs nothing, because no record can carry
+#: them without also carrying the three above. ``severity`` is the one name from
+#: outside the schemas: it is the near-miss a model writes in place of
+#: ``importance``, and repairing a near-miss is exactly what salvage is for.
+_ANSWER_FIELD_NAMES = frozenset(
+    {
+        "title",
+        "desc",
+        "importance",
+        "severity",
+        "reference",
+        "line_range",
+        "anchor_text",
+        "suggested_fix",
+    }
+)
+
 #: A JSON structure that was **started**: ``[`` or ``{`` followed by a token
-#: only JSON puts in that position — a string, a nested structure, or an
-#: unquoted key (mechanical damage salvage exists to repair). Truncation is why
-#: balanced matching alone is not enough: ``[{"title": "x"`` never closes, so
-#: :func:`find_json_candidates` cannot see it, and a half-written array is
+#: only JSON puts in that position — a string or a nested structure. Truncation
+#: is why balanced matching alone is not enough: ``[{"title": "x"`` never closes,
+#: so :func:`find_json_candidates` cannot see it, and a half-written array is
 #: precisely what salvage is for. Requiring that token is what keeps ``[ERROR]``,
-#: ``[91m`` and ``[docs]`` — brackets from log levels, escapes and prose — out.
-_JSON_STRUCTURE_OPENING = re.compile(r'[\[{]\s*(?:["\[{]|[A-Za-z_][A-Za-z0-9_]*\s*:)')
+#: ``[91m`` and ``[docs]`` — brackets from log levels, escapes and prose — out,
+#: and with them ``[kilocode:openrouter/moonshotai/kimi-k3]`` and
+#: ``{code: 401, message: "x"}``: a colon-tagged log prefix (this tool's own
+#: ``[provider:model]`` format among them) and a brace dict written the way a
+#: language that is not JSON writes one. An unquoted key is not one of the
+#: admissible tokens, mechanical damage though it is: a model emitting JSON
+#: quotes its keys, ``json.loads`` refuses an unquoted one in any case, and every
+#: truncation this clause exists to catch opens ``[{"``, ``{"`` or ``[[`` — so
+#: the only documents ``name:`` after a bracket ever brings in are log lines.
+_JSON_STRUCTURE_OPENING = re.compile(r'[\[{]\s*["\[{]')
+
+
+def is_answer_shaped(data: Any) -> bool:
+    """True when a parsed value could be the answer, or hold it.
+
+    An array is an answer whatever it contains, ``[]`` included. An object
+    qualifies two ways: one array-valued key (the model wrapped its array), or
+    one key the answer schemas require (the model emitted a single record where
+    an array was asked for, or truncated the array away around one). Anything
+    else — an error envelope, a provider event, a bare scalar map — is a
+    document that parsed and still holds nothing for a repair pass to find.
+
+    Public because it is the rule at **both** ends of salvage, and one rule
+    spelled twice is two rules waiting to disagree:
+
+    * the **gate** — :func:`has_salvageable_json` — asks it of a candidate found
+      in the raw output: *is there an answer here to ask a repair pass for?* A
+      ``{"error": {"code": 401, …}}`` body parses and holds nothing, so no
+      salvage is dispatched and the operator is sent to the provider's auth
+      rather than to a JSON repair.
+    * the **persist step** — ``utils/subagent_executor._salvage_gave_up`` — asks
+      it of what the salvage subagent came back with: *is what came back an
+      answer?* A salvage task's ``output_name`` **is** the model's own result
+      file, so a subagent that faithfully "recovered" the relayed error envelope
+      out of a truncated stream would have that envelope written over the model's
+      review, and reaggregation would count a model that never produced a
+      parseable word as a participant.
+
+    The same shapes fail at both ends for the same reason, which is why the
+    predicate is shared rather than reimplemented at the second one.
+    """
+    if isinstance(data, list):
+        return True
+    if isinstance(data, dict):
+        if any(isinstance(value, list) for value in data.values()):
+            return True
+        return not _ANSWER_FIELD_NAMES.isdisjoint(data)
+    return False
 
 
 def has_salvageable_json(text: str) -> bool:
@@ -276,13 +442,26 @@ def has_salvageable_json(text: str) -> bool:
 
     Two ways text qualifies, in order:
 
-    1. **A balanced candidate that parses.** A fenced array, an array with prose
-       either side of it, an object where an array was wanted, or the inner
-       object of an array truncated after it — :func:`find_json_candidates`
-       finds all of them, and parsing is what separates a real structure from
-       ``[ERROR]``.
+    1. **A balanced candidate that parses *into an answer's shape*.** A fenced
+       array, an array with prose either side of it, an object where an array
+       was wanted, or the inner object of an array truncated after it —
+       :func:`find_json_candidates` finds all of them. Parsing separates a real
+       structure from ``[ERROR]``, but it does not separate an answer from a
+       failure, because a failure is frequently well-formed JSON:
+       ``{"error": {"code": 401, "message": "User not found"}}`` and the
+       ``{"type": "error", "message": …}`` record a provider CLI prints as an
+       event both parse perfectly and hold nothing to repair. So the parsed
+       value has to be an **array** (``[]`` included — a model that found
+       nothing wrote an answer), an **object with an array-valued key** (a model
+       wrapped its array in an object), or an **object naming a field the answer
+       schemas require** (:data:`_ANSWER_FIELD_NAMES`). Objects are not rejected
+       wholesale: a wrapped array is genuine salvage.
     2. **Failing that, a structure that was started.** Clause 1 cannot see a
-       truncated document, because an unclosed bracket is not a candidate.
+       truncated document, because an unclosed bracket is not a candidate. Only
+       openings *outside* every candidate clause 1 parsed and turned down count
+       here — the ``{`` an error envelope opens is a document that closed and
+       said nothing, not a truncation — which is what lets a reply carrying both
+       (an envelope, then a half-written array) still qualify on the array.
 
     The expected type is deliberately not a parameter: a model that wrapped the
     array in an object (``{"suggestions": [ …``) is the ordinary salvage case,
@@ -301,14 +480,36 @@ def has_salvageable_json(text: str) -> bool:
     if not body.strip():
         return False
 
-    for candidate in find_json_candidates(body, "both"):
+    # Clause 1. A candidate that parses but holds no answer is *turned down*,
+    # never returned on, so a reply that opens with an error envelope is still
+    # read to the end. Its span is kept: balanced runs nest or stay disjoint and
+    # arrive in increasing start order, so extending the open interval whenever
+    # the next span begins inside it leaves a short, sorted, disjoint list of
+    # the regions clause 2 must not read a truncation into.
+    settled: List[Tuple[int, int]] = []
+    for start, end, candidate in _candidate_spans(body, "both"):
         try:
-            json.loads(candidate)
+            data = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        return True
+        if is_answer_shaped(data):
+            return True
+        if settled and start <= settled[-1][1]:
+            settled[-1] = (settled[-1][0], max(settled[-1][1], end))
+        else:
+            settled.append((start, end))
 
-    return _JSON_STRUCTURE_OPENING.search(body) is not None
+    # Clause 2. Both sequences ascend, so one pointer over *settled* walks them
+    # together rather than re-scanning the list per opening.
+    index = 0
+    for match in _JSON_STRUCTURE_OPENING.finditer(body):
+        opening = match.start()
+        while index < len(settled) and settled[index][1] <= opening:
+            index += 1
+        if index == len(settled) or opening < settled[index][0]:
+            return True
+
+    return False
 
 
 def generate_output_path(

@@ -13,8 +13,9 @@ rather than guessing when models cannot be resolved from flags and config.
 import shutil
 import subprocess
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from .json_extractor import sanitize_model_name
 from .provider_registry import load_config
 from .unattended import NeedsHuman, row
 
@@ -346,6 +347,111 @@ def select_models_two_step(anchor: Optional[str] = None) -> List[str]:
     return selected_models
 
 
+def _refuse_colliding_stems(specs: List[str]) -> None:
+    """Fail closed when two *distinct* specs sanitize to one filename stem.
+
+    Every downstream artifact a fan-out writes is named for
+    ``sanitize_model_name(spec)`` and nothing else: ``{stem}.json``,
+    ``log_{stem}.txt``, ``error_{stem}.txt``, ``salvage_{stem}.json``. That
+    function (``utils/json_extractor.py``) is one
+    ``re.sub(r'[^a-zA-Z0-9\\-_]', '_', model)``, so every separator a spec can
+    carry — ``:``, ``.``, ``/`` — collapses to the same ``_``: ``p:a.b`` and
+    ``p:a_b`` are two models with one stem, ``p_a_b``, and so are
+    ``openrouter:qwen/qwen3-max`` and ``openrouter:qwen.qwen3-max``. Selecting
+    both breaks two invariants at once, and neither one is loud:
+
+    * **The per-model files overwrite each other.** Whichever model finishes last
+      wins; the other's issues are gone while ``models_completed`` still lists
+      both. Under the resume predicate
+      (``skip_existing_result``, ``utils/review_orchestrator_base.py``) it is
+      quieter still — the second model is *skipped*, because the first one's file
+      is already sitting there, and one model's answer is then read as two models
+      agreeing. That is exactly the corroboration inflation
+      ``resolve_result_files_by_model`` exists to prevent, arriving from the
+      identity side instead of the duplicate-file side.
+    * **The identity round trip stops being a round trip.**
+      ``build_unsanitize_map`` (``utils/json_extractor.py``) inverts the stems
+      recorded in ``.status.json`` so ``--reaggregate`` can attribute groups to
+      specs rather than to filenames; an inverse exists only while the map is
+      one-to-one. Two colliding specs make one entry, and the report then names a
+      model that did not say the thing — a misattribution, not an omission.
+
+    The trigger is not exotic. Before this repair the code-review phase printed
+    sanitized stems where specs belong, so an operator copying
+    ``cursor-agent_cursor-grok-4_6-xhigh`` out of an old report or a filename
+    into ``--models``, alongside the real ``cursor-agent:cursor-grok-4.6-xhigh``,
+    builds a colliding pair out of artifacts that very bug produced.
+
+    **Why here, and why fail closed.** This is the single seam all three
+    orchestrators resolve through (``code_review_orchestrator.py``,
+    ``utils/review_orchestrator_base.py``, ``ask_orchestrator.py``) and the point
+    at which the specs are already canonical, and it sits *before* anything
+    expensive: refusing costs a correct run nothing. The sibling site — the
+    ``write_status`` that records ``models_requested`` — is below the detach
+    boundary, where refusing would throw away a whole fan-out to protect the
+    naming of its results.
+
+    :class:`NeedsHuman` (exit 3), not ``ValueError``, because that is precisely
+    what this is: the machine cannot pick which of the two specs was meant, and
+    no default is defensible. It is also the class the rest of this function
+    already raises for its fail-closed gates (empty ``--models``, ``--interactive``
+    with ``--yes``, nothing-resolved), and all three orchestrators already route
+    it to ``unattended.fail_closed`` — so the refusal lands identically on every
+    caller, attended or not, instead of one path exiting 1 with a traceback and
+    another exiting 3.
+
+    Args:
+        specs: The canonical, already-deduplicated spec list about to be
+            returned. Exact duplicates must be collapsed *before* this runs —
+            ``--models p:a.b p:a.b`` is a user typing one thing twice, which is
+            not a collision and must not be refused as one.
+
+    Raises:
+        NeedsHuman: When two distinct specs share a stem (exit 3).
+    """
+    by_stem: Dict[str, List[str]] = {}
+    for spec in specs:
+        by_stem.setdefault(sanitize_model_name(spec), []).append(spec)
+    collisions = [(stem, group) for stem, group in by_stem.items() if len(group) > 1]
+    if not collisions:
+        return
+    lines = [
+        "ERROR: selected models that share one filename stem would overwrite "
+        "each other's results:",
+    ]
+    for stem, group in collisions:
+        # Two specs read "'a' and 'b' both sanitize to"; three or more read
+        # "'a', 'b' and 'c' all sanitize to". Worth the branch: a run selecting
+        # three variants of one model is exactly the case where the operator is
+        # least likely to spot the collision by eye, so the line that reports it
+        # should not be the one that reads as though it were written for a pair.
+        quoted = [repr(spec) for spec in group]
+        if len(quoted) == 2:
+            joined, verb = " and ".join(quoted), "both"
+        else:
+            joined = ", ".join(quoted[:-1]) + " and " + quoted[-1]
+            verb = "all"
+        lines.append(
+            f"         {joined} {verb} sanitize to {stem!r}"
+        )
+    lines.append(
+        "       Every per-model artifact is named for that stem — <stem>.json, "
+        "log_<stem>.txt,\n"
+        "       error_<stem>.txt, salvage_<stem>.json — and sanitize_model_name "
+        "discards the\n"
+        "       separator, so nothing downstream can tell the two apart again: "
+        "--resume would\n"
+        "       skip the second model because the first one's file is already "
+        "there, and\n"
+        "       --reaggregate would attribute that one file's groups to "
+        "whichever spec the\n"
+        "       checkpoint listed last.\n"
+        "       Re-run naming only one of them, or rename one so the stems "
+        "differ."
+    )
+    raise NeedsHuman("\n".join(lines), site=row(2).site_id)
+
+
 def resolve_models(
     cli_models: Optional[List[str]] = None,
     interactive: bool = False,
@@ -403,7 +509,10 @@ def resolve_models(
         the resolved form.
 
     Raises:
-        NeedsHuman: When nothing resolves and no human may be asked (exit 3).
+        NeedsHuman: When nothing resolves and no human may be asked (exit 3),
+            and — via :func:`_refuse_colliding_stems`, on every leg — when two
+            distinct canonical specs sanitize to the same filename stem and
+            would therefore write over each other's per-model results.
     """
     # Import here to avoid circular imports
     from .provider_registry import (
@@ -416,11 +525,33 @@ def resolve_models(
     )
 
     def _canonical(specs: List[str]) -> List[str]:
-        """Resolve every entry once, against this call's anchor (§9.3.d)."""
-        resolved = []
+        """Resolve every entry once, against this call's anchor (§9.3.d), then
+        collapse exact duplicates and refuse a filename-stem collision.
+
+        **This closure is the choke point, which is why the gate lives in it.**
+        Every leg of the priority ladder below returns through ``_canonical`` —
+        ``--models``, the interactive picker, ``quick_models`` and
+        ``defaults.models`` alike — so a check placed here covers all four,
+        whereas one placed on the ``cli_models`` branch would leave a colliding
+        pair sitting in a project's ``providers.yaml`` completely unguarded. It
+        is also the only point at which the specs are canonical, and the stems
+        are computed from the canonical form: a bare ``sonnet`` and an explicit
+        ``cursor-agent:sonnet`` in one list are the same model and must collapse
+        rather than fan out twice under one file name.
+
+        Deduplication comes first and is order-preserving, because the two cases
+        are genuinely different. ``--models p:a.b p:a.b`` is a user typing the
+        same thing twice: there is one model, one stem, one file, and nothing to
+        refuse. ``--models p:a.b p:a_b`` is two models and one file, which is the
+        defect :func:`_refuse_colliding_stems` exists to stop.
+        """
+        resolved: List[str] = []
         for spec in specs:
             provider_name, model_name = parse_model_spec(spec, anchor=anchor)
-            resolved.append(f"{provider_name}:{model_name}")
+            canonical = f"{provider_name}:{model_name}"
+            if canonical not in resolved:
+                resolved.append(canonical)
+        _refuse_colliding_stems(resolved)
         return resolved
 
     # 0. Row 15, second layer: `--models ""` is never "use the defaults".

@@ -77,6 +77,7 @@ from .retry_ladder import (
     STATUS_OK,
     STATUS_RATE_LIMITED,
     STATUS_RUNNER_ERROR,
+    STATUS_SALVAGE_UNRECOVERABLE,
     STATUS_SPAWN_FAILED,
     STATUS_TIMEOUT,
     budget_exhausted_reason,
@@ -331,6 +332,125 @@ def dispatch_subagent_tasks(
         sys.exit(failure.exit_code)
 
 
+#: Why a salvage pair stopped being outstanding work. The word lands in the
+#: retired filename, so ``ls`` on a phase dir says which of the two rules moved
+#: it: ``superseded`` — a fresh attempt for that model began, so the request
+#: describes an answer that no longer exists; ``unrecoverable`` — the executor
+#: read the subagent's ``{"salvage_failed": true, …}`` sentinel and filed the
+#: dispatch ``salvage_unrecoverable``, a verdict that is in none of the ladder's
+#: retry sets and will therefore never change.
+RETIRE_SUPERSEDED = "superseded"
+RETIRE_UNRECOVERABLE = "unrecoverable"
+
+
+def retired_salvage_name(name: str, reason: str, stamp: str) -> str:
+    """The name a retired ``salvage_*.json`` takes: ``retired_`` + why + when.
+
+    The prefix is load-bearing rather than decorative. Three globs decide what
+    is still outstanding — ``dispatch_salvage_tasks``'s ``salvage_task_*.json``
+    below, ``code_review_orchestrator``'s ``salvage_*.json`` end-of-run scan,
+    and the ``salvage_task_`` filter it applies to that scan — and every one of
+    them is prefix-anchored, so anything still *starting* ``salvage_`` is still
+    outstanding no matter what is appended to it. Renaming to
+    ``salvage_<model>.retired.json`` would keep the artifact in all three and
+    hand the end-of-run block a model called ``<model>.retired`` on top.
+    Conversely every reaggregation glob excludes a basename *containing*
+    ``salvage`` (here at ``reaggregate_from_existing_files`` and in
+    ``code_review_orchestrator.reaggregate_from_existing_files``), so keeping
+    the word inside the new name is what stops a retired request being read back
+    as a model result — which, since a salvage request is a JSON object rather
+    than a suggestion array, is a crash rather than a miscount.
+    """
+    stem = name[: -len(".json")] if name.endswith(".json") else name
+    return f"retired_{stem}.{reason}.{stamp}.json"
+
+
+def retire_salvage_artifacts(
+    phase_dir: str,
+    sanitized_model: str,
+    *,
+    reason: str,
+    quiet: bool = False,
+) -> List[Tuple[str, str]]:
+    """Take one model's ``salvage_<model>.json`` + ``salvage_task_<model>.json`` out of play.
+
+    A salvage task's ``output_name`` **is** the model's own result file
+    (``utils/subagent_tasks.write_salvage_task_file``), so anything persisted
+    there becomes that model's review and reaggregation scores it as one more
+    model that flagged a finding (``SuggestionGroup._recalculate_priority`` sums
+    ``len(self.models)``). ``has_salvageable_json`` decides whether *this*
+    attempt asks for a salvage at all, and the ``salvage_failed`` sentinel
+    decides that a dispatched one recovered nothing — but neither of them can
+    see an *earlier* attempt's pair still lying in the phase dir. ``get_phase_dir``
+    is stable per plan, the two globs above take whatever is in it, and
+    ``--force`` clears only the state file's phase-completion marker; it deletes
+    nothing from disk. So the pair outlives the decision that produced it, and
+    the phantom participant walks in by a route the gate never sees.
+
+    Retiring is a **rename, never a delete**: the request holds the raw output
+    the model actually produced, which is the evidence an operator needs to tell
+    a truncated answer from a dead account, and the run that supersedes it is
+    usually the run that wants to compare. The new name is
+    :func:`retired_salvage_name`'s, whose prefix is what removes it from the
+    globs.
+
+    Deliberately non-fatal, and loud when it fails. Refusing to run a fan-out
+    because a bookkeeping rename failed would cost the operator every model's
+    review over a file permission; leaving the failure silent would put the
+    phantom back with nothing on screen to connect it to. So a failed rename
+    warns on stderr naming the file that survived, and the run continues.
+
+    Args:
+        phase_dir: The phase directory both artifacts live in.
+        sanitized_model: ``sanitize_model_name(model_spec)`` — the stem both
+            filenames are built from, and the stem of the model result file the
+            salvage would write to.
+        reason: :data:`RETIRE_SUPERSEDED` or :data:`RETIRE_UNRECOVERABLE`.
+        quiet: Suppress the per-file ``[SALVAGE_RETIRED]`` line. Set by the
+            attempt-start caller, where the interesting event is the attempt and
+            a retirement line per re-run model would drown the fan-out.
+
+    Returns:
+        ``(old_path, new_path)`` for each artifact actually renamed, in
+        request-then-task order. Empty when there was nothing to retire, which
+        is the ordinary case: most attempts follow an attempt that parsed.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    retired: List[Tuple[str, str]] = []
+    for name in (
+        f"salvage_{sanitized_model}.json",
+        f"salvage_task_{sanitized_model}.json",
+    ):
+        source = os.path.join(phase_dir, name)
+        if not os.path.exists(source):
+            continue
+        target = os.path.join(phase_dir, retired_salvage_name(name, reason, stamp))
+        # Two attempts for the same model inside one second is not a scenario
+        # anybody plans, but the second rename would silently destroy the first
+        # artifact — the one thing renaming instead of deleting exists to avoid.
+        suffix = 2
+        while os.path.exists(target):
+            target = os.path.join(
+                phase_dir,
+                retired_salvage_name(name, reason, f"{stamp}-{suffix}"),
+            )
+            suffix += 1
+        try:
+            os.replace(source, target)
+        except OSError as rename_error:  # noqa: PERF203 - one message per file
+            print(
+                f"Warning: could not retire {name} ({rename_error}); it is still "
+                f"in {phase_dir} and will be dispatched and advertised as though "
+                f"it were this run's",
+                file=sys.stderr,
+            )
+            continue
+        retired.append((source, target))
+        if not quiet:
+            print(f"[SALVAGE_RETIRED] {os.path.basename(target)} ({reason})")
+    return retired
+
+
 def dispatch_salvage_tasks(
     args: Any,
     *,
@@ -351,6 +471,15 @@ def dispatch_salvage_tasks(
     "reaggregating a short set" D3i forbids, because the *validation* set is still
     complete. A failed salvage is reported in ``subagent_batch_report.json`` like
     any other task.
+
+    **A salvage the executor declared terminal is retired here**, which is what
+    keeps the caller's end-of-run report honest without teaching it to re-derive
+    the verdict: ``salvage_unrecoverable`` is the one status that says the answer
+    will never change, so its request and task are renamed out of the globs (see
+    :func:`retire_salvage_artifacts`) and the subagent's own reason is printed
+    where the ``[SALVAGE_NEEDED]`` marker would otherwise have been. Every other
+    failed status keeps its request: a timeout or a rate limit is re-runnable,
+    and the documented salvage-then-reaggregate flow is how it gets re-run.
 
     Returns:
         The output paths successfully repaired, in dispatch order.
@@ -390,12 +519,54 @@ def dispatch_salvage_tasks(
         for outcome in report.outcomes:
             if outcome.ok and outcome.output_path:
                 repaired.append(outcome.output_path)
-            else:
-                print(
-                    f"  salvage {outcome.task_id} failed ({outcome.status}): "
-                    f"{outcome.reason or ''}",
-                    file=sys.stderr,
-                )
+                continue
+            print(
+                f"  salvage {outcome.task_id} failed ({outcome.status}): "
+                f"{outcome.reason or ''}",
+                file=sys.stderr,
+            )
+            if outcome.status != STATUS_SALVAGE_UNRECOVERABLE:
+                # Every other failure here is a *transport* failure with a rung
+                # on the ladder — the child never spawned, timed out, was rate
+                # limited, answered something unparseable. Re-running it is the
+                # documented next move, so its request stays on disk and the
+                # caller's end-of-run block goes on advertising it. Only the
+                # sentinel is terminal.
+                continue
+            # `salvage_unrecoverable` is the executor reading the subagent's own
+            # `{"salvage_failed": true, "reason": …}`: the child spawned,
+            # replied and was understood, and what it said was that the raw
+            # output holds no answer. The status is rung-less and in none of
+            # `RETRYABLE_STATUSES` / `BACKOFF_STATUSES` / `FATAL_STATUSES`
+            # (`utils/retry_ladder.py`) precisely because the same raw output
+            # through the same prompt has the same answer — so this request is
+            # not outstanding work, and leaving it on disk would print
+            # `SALVAGE NEEDED` and `record_next` a `--reaggregate` that sends
+            # the operator, or an automated host following that command, round a
+            # loop that cannot make progress and buries the one diagnostic that
+            # matters. The verdict is applied here, at the single point it is
+            # known, rather than re-derived by each reporting block out of
+            # `subagent_batch_report.json`.
+            #
+            # The stem comes from the task file this iteration globbed, not from
+            # `outcome.task_id`: `write_salvage_task_file` materializes exactly
+            # one task per `salvage_task_<stem>.json`, from exactly one
+            # `salvage_<stem>.json`, so the filename is what actually pairs the
+            # two artifacts — `task_id` merely echoes the same stem.
+            stem = os.path.basename(task_file)[
+                len("salvage_task_"): -len(".json")
+            ]
+            # On stdout, beside the `[SALVAGE_NEEDED]` marker it replaces, and in
+            # the run's own output rather than only in the batch report: the
+            # operator's next move is the provider, not a JSON repair, and the
+            # reason is the only thing on screen that says so.
+            print(
+                f"[SALVAGE_UNRECOVERABLE] {stem}: "
+                f"{outcome.reason or 'the salvage subagent recovered nothing'}"
+            )
+            retire_salvage_artifacts(
+                phase_dir, stem, reason=RETIRE_UNRECOVERABLE
+            )
     return repaired
 
 
@@ -1348,6 +1519,21 @@ async def run_all_models(
         return None
 
     async def per_model(model_spec: str, index: int) -> Dict[str, Any]:
+        # The review-plan / review-tasks half of the same rule
+        # `code_review_orchestrator.run_single_review` states at length: a
+        # fresh attempt for this model retires the salvage pair an earlier
+        # attempt left in this phase dir, because `save_model_result` below
+        # decides whether *this* attempt writes one and nothing else decides
+        # whether the last one is still lying there. Reached only when
+        # `skip_existing_result` declined to answer from the existing
+        # `<model>.json`, which is what keeps a resumed run's *skipped* models —
+        # models that began no attempt — holding on to theirs.
+        retire_salvage_artifacts(
+            str(get_phase_dir(Path(plan_path), phase_name)),
+            sanitize_model_name(model_spec),
+            reason=RETIRE_SUPERSEDED,
+            quiet=True,
+        )
         prompt_context = prompt_context_factory(model_spec)
         return await run_single_model(
             model_spec, plan_path, prompt_template, prompt_context,

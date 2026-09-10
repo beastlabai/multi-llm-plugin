@@ -50,7 +50,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
-    from .json_extractor import extract_json_from_text
+    from .json_extractor import extract_json_from_text, is_answer_shaped
     from .llm_client import (
         _CMD_UNSAFE_CHARS,
         _resolve_executable,
@@ -90,6 +90,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_RATE_LIMITED,
         STATUS_REJECTED,
         STATUS_RUNNER_ERROR,
+        STATUS_SALVAGE_UNRECOVERABLE,
         STATUS_SCHEMA_INVALID,
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
@@ -114,7 +115,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
-    from utils.json_extractor import extract_json_from_text
+    from utils.json_extractor import extract_json_from_text, is_answer_shaped
     from utils.llm_client import (
         _CMD_UNSAFE_CHARS,
         _resolve_executable,
@@ -154,6 +155,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_RATE_LIMITED,
         STATUS_REJECTED,
         STATUS_RUNNER_ERROR,
+        STATUS_SALVAGE_UNRECOVERABLE,
         STATUS_SCHEMA_INVALID,
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
@@ -193,6 +195,7 @@ __all__ = [
     "STATUS_AUTH_FAILED",
     "STATUS_BUDGET_EXHAUSTED",
     "STATUS_INCOMPLETE",
+    "STATUS_SALVAGE_UNRECOVERABLE",
     "STATUS_PARTIAL",
     "STATUS_POLICY_VIOLATION",
     "WRITE_APPLIED",
@@ -1924,7 +1927,30 @@ def _validation_result_errors(data: Any) -> List[str]:
 
 
 def _salvage_result_errors(data: Any) -> List[str]:
-    """A salvaged model result is the same array shape a model review produces."""
+    """A salvaged model result is the same array shape a model review produces.
+
+    Which is also why the *other* thing a salvage can print — the
+    ``{"salvage_failed": true, "reason": ...}`` sentinel — has to fail here. The
+    sentinel is not a document any consumer can read; it is this dispatch saying
+    it found none. It is recognised **before** validation, by
+    :func:`_salvage_gave_up`, and turned into a failed outcome that writes
+    nothing. Should one ever reach the disk anyway, keeping it invalid is what
+    stops :func:`task_is_complete` from reading the file back and calling the
+    task done.
+
+    An empty array stays valid. From here it is indistinguishable from a model
+    whose review really was empty, and that ambiguity is precisely why the
+    negative was given a shape of its own rather than being refused here.
+
+    The non-array clause below also happens to catch a relayed
+    ``{"error": …}`` body or an ``opencode``/``codex`` ``{"type": "error", …}``
+    event a salvage subagent "recovered" out of a truncated stream, but that is
+    not this function's job and must not be relied on as it: by the time such a
+    reply gets here :func:`_salvage_gave_up` has already turned it down with a
+    reason that names what actually happened, where "expected a JSON array"
+    would have sent the reader back to the repair pass instead of to the
+    provider's login. This clause is the floor under that rule, not the rule.
+    """
     if not isinstance(data, list):
         return [f"expected a JSON array of suggestions, got {type(data).__name__}"]
     errors = []
@@ -1934,6 +1960,124 @@ def _salvage_result_errors(data: Any) -> List[str]:
     return errors
 
 
+#: The key ``build_salvage_prompt`` tells a salvage subagent to set when the raw
+#: output it was handed holds nothing recoverable. A recovered salvage result is
+#: an *array*, so no genuine recovery can carry it.
+SALVAGE_FAILED_KEY = "salvage_failed"
+
+
+def _salvage_gave_up(kind: str, data: Any) -> Optional[str]:
+    """Why this salvage recovered nothing, or ``None`` if it recovered a result.
+
+    A salvage task's ``output_name`` **is** the model result file it repairs, so
+    whatever a salvage dispatch persists *becomes* that model's review. The
+    subagent therefore cannot report the negative as an empty array: it would
+    validate, be written over the model's own result path, and reaggregation
+    would read it as "this model reviewed the input and found nothing". A model
+    that never produced a parseable word would join the aggregate as a phantom
+    participant — and since finding priority is scored partly by how many models
+    flagged something, its silence would count as agreement.
+
+    A salvage arrives here having recovered nothing two ways, read in this order:
+
+    1. **It said so.** ``build_salvage_prompt`` asks for
+       ``{"salvage_failed": true, "reason": …}`` and this is the one place that
+       shape is read. The reason travels into the outcome because it is the
+       diagnostic the empty array threw away — "the raw output was an
+       authentication error" is what a reader of ``subagent_batch_report.json``
+       needs, and it costs one string to keep. It is checked **first** for
+       exactly that: the subagent read the raw output and named what was in it,
+       which is a better diagnostic than anything clause 2 can reconstruct from
+       the reply alone.
+    2. **It did not say so, and what came back is not an answer.** A subagent
+       handed a truncated stream that turns out to hold a relayed
+       ``{"error": {"code": 401, "message": "User not found"}}`` body, or the
+       ``{"type": "error", "message": …}`` envelope an ``opencode``/``codex``
+       run prints as an event, can "recover" that object perfectly faithfully
+       and never print the sentinel — it believes it found something. Today
+       :func:`_salvage_result_errors` stops that object at the door anyway, on
+       the narrow ground that it is not an array. What it cannot do is say what
+       happened: "does not match the salvage result shape" reads as a botched
+       repair pass and invites another one, when what the model actually hit was
+       an authentication failure and the fix is the provider's login — the exact
+       mis-direction ``has_salvageable_json`` exists to prevent one step
+       earlier. So the rule is stated *here*, where the phantom-participant
+       argument lives, instead of being left to rest on an array check written
+       for the consumer's benefit: were the salvage result shape ever to grow a
+       wrapper-object form (the way :func:`_validation_result_errors` tolerates
+       ``{"groups": [ … ]}``), an error envelope would sail through that check
+       and onto the model's result path with nothing left to stop it. The
+       predicate is ``json_extractor.is_answer_shaped``, the one behind
+       ``has_salvageable_json``, imported rather than restated: the gate asks
+       "is there an answer in this raw output to ask a repair pass for?", this
+       asks "is what the repair pass came back with an answer?", and one rule
+       spelled once at both ends cannot drift apart from itself.
+
+    Both invokers call this immediately before the point where they would
+    validate and persist, and both answer a non-``None`` result the same way:
+    ``STATUS_SALVAGE_UNRECOVERABLE``, nothing written, never retried.
+
+    Deliberately **not** folded into :func:`validate_result`: that answers "is
+    this a document this kind's consumer can read", and the sentinel must keep
+    failing that question for the reason :func:`_salvage_result_errors` gives.
+
+    Scoped to ``kind == "salvage"``; every other kind is judged by its own result
+    shape alone. A bare ``[]`` from a salvage still persists — clause 2 lets it
+    through because ``is_answer_shaped([])`` is True on purpose: refusing it
+    cannot tell "salvage found nothing" from "the model's review was genuinely
+    empty", and the sentinel is what carries that distinction. Nor does clause 2
+    swallow a *near-miss*: an object naming a field the answer schemas require is
+    answer-shaped, so a subagent that returned a single record where an array was
+    asked for still falls through to :func:`validate_result` and is reported as
+    "does not match the salvage result shape" — the accurate diagnostic for a
+    recovery that found an answer and mis-packaged it. Only replies with no
+    answer anywhere in them are "recovered nothing".
+
+    The truth test on the sentinel is deliberately loose: a subagent that spelled
+    the flag ``"true"`` is still read as the negative, and every reading that
+    errs errs towards writing nothing — and clause 2 is the backstop in any case,
+    since the sentinel object names no answer field either.
+
+    Args:
+        kind: The task's kind. Anything but ``salvage`` returns ``None``.
+        data: The extracted result, before validation.
+
+    Returns:
+        The reason for the outcome row, or ``None``.
+    """
+    if kind != "salvage":
+        return None
+    if isinstance(data, dict) and data.get(SALVAGE_FAILED_KEY):
+        reason = data.get("reason")
+        reason = reason.strip() if isinstance(reason, str) else ""
+        return (
+            f"salvage recovered no result from the raw output: "
+            f"{reason or 'the subagent gave no reason'}"
+        )
+    if is_answer_shaped(data):
+        return None
+    # Name the shape, never the payload: the keys are what diagnoses this (an
+    # `error` or a `type`/`message` pair says "the stream relayed a provider
+    # failure" at a glance), while the values are the raw output this dispatch
+    # was handed and have no business in a batch report. Bounded, because
+    # nothing here promises the object is small.
+    if isinstance(data, dict):
+        names = sorted(str(key) for key in data)
+        listed = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+        shape = (
+            f"an object naming no answer field and holding no array "
+            f"({listed or 'no keys at all'}). A relayed provider error or event "
+            f"envelope reads as a recovery to the subagent that faithfully "
+            f"pulled it out of the stream; it is not this model's review"
+        )
+    else:
+        shape = (
+            f"a bare {type(data).__name__} where an array of suggestions was "
+            f"the answer; there is nothing in it to write as this model's review"
+        )
+    return f"salvage recovered no result from the raw output: it returned {shape}"
+
+
 def validate_result(kind: str, data: Any) -> List[str]:
     """Validate an extracted result against its kind's result shape (D3f).
 
@@ -1941,6 +2085,12 @@ def validate_result(kind: str, data: Any) -> List[str]:
     wrong object fails the task instead of writing garbage that reaggregation
     accepts. Shipped JSON Schemas are used where they exist; the two kinds with
     no schema get the structural check their consumer actually depends on.
+
+    One kind can also reply with something that is not a document at all:
+    ``salvage``'s ``salvage_failed`` sentinel, and the relayed error envelope a
+    salvage subagent can "recover" in perfectly good faith. Neither is decided
+    here — :func:`_salvage_gave_up` intercepts both a step earlier — and the
+    sentinel stays invalid against this function on purpose.
     """
     if kind in ("validation", "revalidation"):
         return _validation_result_errors(data)
@@ -1968,6 +2118,11 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
     under its original ``task_id``. Orphans are defined by artifacts, never by
     memory: there is no in-memory queue to recover and no "running" state to
     trust.
+
+    A salvage that recovered nothing writes no file at all, so it is not complete
+    here — and a ``salvage_failed`` sentinel that reached the disk by some other
+    route is not complete either, because it fails :func:`validate_result` the
+    way any other non-document would.
     """
     try:
         target = resolve_output_target(task, phase_dir)
@@ -2986,13 +3141,28 @@ def _classify_pre_parse(capture: _Capture) -> Tuple[str, str]:
 def _parse_and_validate(
     provider: Any, capture: _Capture, *, kind: str, prefer_arrays: bool
 ) -> Tuple[str, str, Any]:
-    """Ladder rungs 4–6. Returns ``(status, error, data)``."""
+    """Ladder rungs 4–6, plus the two ways a salvage answers with no answer.
+
+    Returns ``(status, error, data)``. Every caller persists ``data`` only on
+    ``STATUS_OK``, which is what makes this the place to recognise a salvage that
+    recovered nothing: :func:`_salvage_gave_up` runs between extraction and
+    validation, so both the ``salvage_failed`` sentinel and a reply that is not
+    answer-shaped at all — the provider error a subagent faithfully pulled out of
+    a truncated stream — leave here as failures, and no invented review is ever
+    written over the model's result file. Its status is not a rung — the
+    dispatch itself worked (see ``STATUS_SALVAGE_UNRECOVERABLE``) — and it is in
+    none of the ladder's policy sets, so ``record()`` files it under "never
+    retried": the same raw output through the same prompt has the same answer.
+    """
     try:
         data = extract_result(
             provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays
         )
     except ResultRejected as exc:
         return exc.status, exc.message, None
+    gave_up = _salvage_gave_up(kind, data)
+    if gave_up is not None:
+        return STATUS_SALVAGE_UNRECOVERABLE, gave_up, data
     errors = validate_result(kind, data)
     if errors:
         return (
@@ -3745,6 +3915,17 @@ def simulate_native_invoker(
                 report.outcomes.append(outcome)
                 continue
             data = extracted["data"]
+        gave_up = _salvage_gave_up(task_kind, data)
+        if gave_up is not None:
+            # The same rule the executor lane applies in `_parse_and_validate`,
+            # at the same point: after extraction, before validation, and before
+            # anything can be written over the model's own result file. Two call
+            # sites because the D3a contract is two invokers, not one loop — the
+            # predicate they share is what keeps them equivalent.
+            outcome.status = STATUS_SALVAGE_UNRECOVERABLE
+            outcome.reason = gave_up
+            report.outcomes.append(outcome)
+            continue
         errors = validate_result(task_kind, data)
         if errors:
             outcome.status = STATUS_SCHEMA_INVALID

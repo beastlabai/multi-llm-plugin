@@ -1554,6 +1554,351 @@ class TestEveryKindReachesItsConsumer:
 
 
 # ---------------------------------------------------------------------------
+# A salvage that recovered nothing
+# ---------------------------------------------------------------------------
+
+class TestSalvageFoundNothing:
+    """A salvage that found nothing fails the task instead of inventing a review.
+
+    A salvage task's ``output_name`` **is** the model result file it repairs, so
+    anything a salvage persists becomes that model's review. An empty array was
+    the old "nothing recoverable" answer and it validated, was written over the
+    model's own path, and reaggregated as "this model reviewed the input and
+    found nothing" — a model that never produced a parseable word counted as a
+    participant, in an aggregate whose priority scoring weighs how many models
+    flagged something.
+
+    Two ways a salvage recovers nothing, and ``_salvage_gave_up`` reads both. The
+    subagent can **say so** — the ``{"salvage_failed": true, "reason": …}``
+    sentinel ``build_salvage_prompt`` asks for — or it can hand back something it
+    genuinely believes it recovered that is not an answer at all: the relayed
+    ``{"error": {"code": 401, …}}`` body or the ``{"type": "error", …}`` event
+    envelope a truncated ``opencode``/``codex`` stream leaves behind. The second
+    is the same shape ``json_extractor.is_answer_shaped`` already keeps out of
+    the salvage *gate*, asked again of what came back, so that a provider's
+    authentication failure is reported as one at both ends instead of being
+    filed as a malformed repair pass.
+    """
+
+    SENTINEL_REASON = "the raw output was an authentication error, not a review"
+
+    #: The two shapes a subagent can "recover" out of a truncated stream in
+    #: perfectly good faith: a relayed provider error body, and the error record
+    #: an `opencode`/`codex` run prints as a JSON event. Both parse, neither is
+    #: an answer, and neither carries the sentinel — nothing about them says
+    #: "salvage failed" except their shape.
+    PROVIDER_ERROR_BODY = {"error": {"code": 401, "message": "User not found"}}
+    EVENT_ENVELOPE = {"type": "error", "message": "Unauthorized"}
+
+    def _request(self, tmp_path):
+        return {
+            "model": "codex:gpt-5.5",
+            "phase": "review_plan",
+            "raw_output": "error: not logged in. Run `codex login`.",
+            "expected_type": "array",
+            "expected_schema": {
+                "fields": ["title", "desc", "importance", "reference", "type"]
+            },
+            "output_path": str(tmp_path / "codex_gpt-5_5.json"),
+        }
+
+    def _salvage_task_file(self, tmp_path):
+        from utils.subagent_tasks import write_salvage_task_file
+
+        request = self._request(tmp_path)
+        request_path = tmp_path / "salvage_codex_gpt-5_5.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        return write_salvage_task_file(
+            salvage_request=request,
+            salvage_request_path=str(request_path),
+            phase_dir=str(tmp_path),
+        )
+
+    def _run(self, tmp_path, runner_env, monkeypatch, response, **driver):
+        runner_env.use("codex:gpt-5.5", **driver)
+        monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps({"response": response}))
+        task_file = self._salvage_task_file(tmp_path)
+        return executor.run_task_file(task_file, phase_dir=str(tmp_path))
+
+    def _sentinel(self, reason=None):
+        return {
+            "salvage_failed": True,
+            "reason": self.SENTINEL_REASON if reason is None else reason,
+        }
+
+    def test_the_sentinel_fails_the_task_and_writes_nothing(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The model stays failed rather than acquiring an invented clean review."""
+        report = self._run(tmp_path, runner_env, monkeypatch, self._sentinel())
+
+        assert not report.ok
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        # `output_path` is the destination the dispatch resolved, set for every
+        # task before a child is spawned; what matters is that nothing landed on
+        # it — the model's result file stays absent, exactly as it was.
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+    def test_the_sentinel_is_terminal_and_never_retried(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Re-running the same raw output through the same prompt has one answer."""
+        report = self._run(
+            tmp_path, runner_env, monkeypatch, self._sentinel(), subagent_retries=3
+        )
+
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert len(outcome.attempts) == 1
+        # In none of the three policy sets, so the ladder files it under
+        # "never retried" without a fourth set having to name it.
+        for policy in (
+            executor.RETRYABLE_STATUSES,
+            executor.BACKOFF_STATUSES,
+            executor.FATAL_STATUSES,
+        ):
+            assert executor.STATUS_SALVAGE_UNRECOVERABLE not in policy
+        # And no rung: nothing about the dispatch failed, so there is no
+        # position on the transport ladder to put it on.
+        assert outcome.rung is None
+
+    def test_the_subagents_own_reason_reaches_the_batch_report(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The diagnostic the empty array threw away is the point of the shape."""
+        report = self._run(tmp_path, runner_env, monkeypatch, self._sentinel())
+
+        assert self.SENTINEL_REASON in report.outcomes[0].reason
+        written = json.loads(
+            (tmp_path / executor.BATCH_REPORT_FILENAME).read_text(encoding="utf-8")
+        )
+        assert written["counts"] == {"salvage_unrecoverable": 1}
+        assert self.SENTINEL_REASON in written["tasks"][0]["reason"]
+
+    def test_a_sentinel_with_no_reason_still_fails_and_says_so(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        report = self._run(tmp_path, runner_env, monkeypatch, {"salvage_failed": True})
+
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert "no reason" in outcome.reason
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+    def test_a_recovered_array_still_persists(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        recovered = [{
+            "title": "Recovered suggestion",
+            "desc": "Pulled out of the model's malformed reply.",
+            "importance": "MEDIUM",
+            "reference": "## Step 1",
+            "type": "addition",
+        }]
+        report = self._run(tmp_path, runner_env, monkeypatch, recovered)
+
+        assert report.ok, report.failure_summary()
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == recovered
+
+    def test_a_bare_empty_array_from_salvage_still_persists(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Refusing `[]` was the second-choice fix, and it is not what shipped.
+
+        From the executor's side an empty array from a salvage cannot be told
+        apart from a model whose review genuinely was empty, so refusing it would
+        trade a phantom participant for a discarded real review. The sentinel is
+        what carries the distinction.
+        """
+        report = self._run(tmp_path, runner_env, monkeypatch, [])
+
+        assert report.ok, report.failure_summary()
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == []
+
+    def test_only_salvage_reads_the_sentinel(self, tmp_path, runner_env, monkeypatch):
+        """D8: any other kind's result is judged by its own shape alone."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
+            {"response": {"salvage_failed": True, "reason": "not a salvage task"}}
+        ))
+        outcome = executor.dispatch_task(
+            _validation_batch(tmp_path),
+            phase_dir=str(tmp_path),
+            runner="codex:gpt-5.5",
+            sleep=lambda _s: None,
+        )
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_the_native_invoker_answers_the_sentinel_identically(self, tmp_path):
+        """D3a: the two invokers agree on the negative as well as on a result."""
+        from utils.subagent_tasks import tasks_of
+
+        task_file = self._salvage_task_file(tmp_path)
+        tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
+
+        report = executor.simulate_native_invoker(
+            tasks, phase_dir=str(tmp_path), kind="salvage",
+            respond=lambda _t: self._sentinel(),
+        )
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert self.SENTINEL_REASON in outcome.reason
+        assert outcome.output_path is None
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+        # ... and it still persists the two answers that ARE results.
+        assert executor.simulate_native_invoker(
+            tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
+        ).ok
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == []
+
+    def test_a_sentinel_on_disk_never_makes_the_task_look_complete(self, tmp_path):
+        """Nothing writes one, but --resume must not adopt one if anything did."""
+        from utils.subagent_tasks import tasks_of
+
+        task_file = self._salvage_task_file(tmp_path)
+        task = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))[0]
+        (tmp_path / "codex_gpt-5_5.json").write_text(
+            json.dumps(self._sentinel()), encoding="utf-8"
+        )
+
+        assert executor.task_is_complete(task, str(tmp_path)) is False
+        assert executor.validate_result("salvage", self._sentinel())
+
+    # -- the other door: a salvage that recovered something that is not an answer
+
+    @pytest.mark.parametrize("envelope_name", ["PROVIDER_ERROR_BODY", "EVENT_ENVELOPE"])
+    def test_a_recovered_error_envelope_is_unrecoverable_and_writes_nothing(
+        self, tmp_path, runner_env, monkeypatch, envelope_name
+    ):
+        """The subagent believed it recovered something; the shape says otherwise.
+
+        Neither envelope carries the sentinel — the subagent pulled a well-formed
+        JSON object out of the stream it was handed and reported success. What
+        makes it a non-recovery is that there is no answer anywhere in it, which
+        is exactly the judgement ``is_answer_shaped`` makes at the gate, so the
+        model stays failed and its result path stays empty.
+        """
+        report = self._run(
+            tmp_path, runner_env, monkeypatch, getattr(self, envelope_name)
+        )
+
+        assert not report.ok
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+    def test_the_reason_for_an_envelope_names_the_shape_not_the_payload(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """"Recovered nothing" beats "wrong document shape" for the same reply.
+
+        The old outcome for this reply was ``schema_invalid`` on the narrow
+        ground that an object is not an array, which reads as a botched repair
+        pass and sends the operator back to the JSON. The diagnostic has to name
+        what came back concretely enough to point at the provider's login
+        instead — and it names the *keys*, never the values, because the values
+        are the raw output this dispatch was handed and have no business in a
+        batch report.
+        """
+        report = self._run(
+            tmp_path, runner_env, monkeypatch, self.PROVIDER_ERROR_BODY
+        )
+
+        reason = report.outcomes[0].reason
+        assert "recovered no result" in reason
+        assert "error" in reason
+        assert "User not found" not in reason and "401" not in reason
+
+    def test_a_recovered_single_record_is_a_near_miss_and_not_a_giving_up(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The rule must not swallow the salvage case it exists to serve.
+
+        A model that emitted one record where an array was asked for produced an
+        answer and mis-packaged it — ``is_answer_shaped`` says so on the schema
+        field names — so it falls through to `validate_result` and is reported
+        against the salvage result shape, which is the true diagnostic. Only
+        replies with no answer anywhere in them are "recovered nothing".
+        """
+        report = self._run(tmp_path, runner_env, monkeypatch, {
+            "title": "Recovered suggestion",
+            "desc": "The model emitted the record without its array.",
+            "importance": "MEDIUM",
+            "reference": "## Step 1",
+            "type": "addition",
+        })
+
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+    def test_only_salvage_reads_the_answer_shape_rule(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """D8 again: no other kind's result is judged by the salvage rule.
+
+        A validation batch that came back as an error envelope is a validation
+        result that does not match its shape. It is not "salvage recovered
+        nothing" — there is no model result file underneath it to protect.
+        """
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.setenv(
+            "MOCK_LLM_CONFIG", json.dumps({"response": self.PROVIDER_ERROR_BODY})
+        )
+        outcome = executor.dispatch_task(
+            _validation_batch(tmp_path),
+            phase_dir=str(tmp_path),
+            runner="codex:gpt-5.5",
+            sleep=lambda _s: None,
+        )
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_the_native_invoker_answers_a_recovered_envelope_identically(
+        self, tmp_path
+    ):
+        """D3a: two invokers, one shared predicate, therefore one answer.
+
+        The equivalence is by construction — both lanes call `_salvage_gave_up`
+        after extraction and before validation — and this is what keeps it from
+        quietly becoming a convention again.
+        """
+        from utils.subagent_tasks import tasks_of
+
+        task_file = self._salvage_task_file(tmp_path)
+        tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
+
+        for envelope in (self.PROVIDER_ERROR_BODY, self.EVENT_ENVELOPE):
+            report = executor.simulate_native_invoker(
+                tasks, phase_dir=str(tmp_path), kind="salvage",
+                respond=lambda _t, body=envelope: body,
+            )
+            outcome = report.outcomes[0]
+            assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+            assert "recovered no result" in outcome.reason
+            assert outcome.output_path is None
+            assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+        # ... and a genuine recovery still lands on the model's result path, so
+        # the rule is not simply refusing everything this lane hands it.
+        assert executor.simulate_native_invoker(
+            tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
+        ).ok
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == []
+
+
+# ---------------------------------------------------------------------------
 # Flag off ⇒ nothing changes
 # ---------------------------------------------------------------------------
 

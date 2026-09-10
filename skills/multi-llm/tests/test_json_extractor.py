@@ -1,16 +1,33 @@
 """Tests for JSON extractor utilities."""
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.json_extractor import (
+    build_unsanitize_map,
     extract_json_from_text,
     generate_output_path,
     has_salvageable_json,
     sanitize_model_name,
 )
+
+
+def _checkpoint(phase_dir: Path, **fields) -> Path:
+    """Write a ``.status.json`` by hand, which is the shape under test.
+
+    ``--reaggregate`` reads this file and resolves nothing, so the pre-dispatch
+    gate in ``resolve_models`` (``utils/interactive.py``) never runs for it. A
+    checkpoint written before that gate existed — or written by hand, which is a
+    recovery the stem-attribution warning actively recommends — is therefore the
+    only way a colliding pair can still reach ``build_unsanitize_map``, and
+    writing the bytes directly is the only honest way to reproduce it.
+    """
+    path = phase_dir / ".status.json"
+    path.write_text(json.dumps(fields), encoding="utf-8")
+    return path
 
 
 class TestSanitizeModelName:
@@ -260,8 +277,12 @@ class TestHasSalvageableJson:
             '{"theme": "Add validation", "suggestions": [{"title": "Test"'
         ) is True
 
-    def test_an_unquoted_key_is_salvageable(self):
-        """Mechanical damage is precisely what the salvage prompt repairs."""
+    def test_an_unquoted_key_inside_a_started_structure_is_salvageable(self):
+        """Mechanical damage is precisely what the salvage prompt repairs.
+
+        The opening `{"` is what admits this document; the unquoted key is the
+        damage sitting behind it, and repairing that is salvage's whole job.
+        """
         assert has_salvageable_json(
             '{"title": "Test", desc: "Missing quotes on key"}'
         ) is True
@@ -269,3 +290,265 @@ class TestHasSalvageableJson:
     def test_an_empty_array_is_a_document_the_model_really_wrote(self):
         """`[]` reaching salvage is a model saying nothing, not a model missing."""
         assert has_salvageable_json("[]") is True
+
+    def test_a_json_error_envelope_is_not_salvageable(self):
+        """Well-formed JSON, and not one word of it is an answer.
+
+        Parsing is not the test — this document parses. A provider that answers
+        its own failure in JSON must land on the same failed-model path as one
+        that answers in prose.
+        """
+        assert has_salvageable_json(
+            '{"error": {"code": 401, "message": "User not found"}}'
+        ) is False
+
+    def test_a_provider_error_event_is_not_salvageable(self):
+        """The record opencode and codex print on their event stream.
+
+        `type` is a required field of both answer schemas, which is exactly why
+        the schema-field set leaves it out: it is the one name this envelope and
+        a review record share.
+        """
+        assert has_salvageable_json(
+            '{"type":"error","message":"Unauthorized"}'
+        ) is False
+
+    def test_a_colon_tagged_log_line_is_not_a_started_structure(self):
+        """`[ERROR: …]` balances and looks like an unquoted key. It is neither."""
+        assert has_salvageable_json("[ERROR: User not found]") is False
+
+    def test_this_tools_own_provider_model_prefix_is_not_salvageable(self):
+        """`[provider:model]` is the format this skill prints its own lines in.
+
+        The provider that motivated the gate announces its failure behind one,
+        so a rule that reads the prefix as a started structure re-admits the
+        defect through the front door.
+        """
+        assert has_salvageable_json(
+            "[kilocode:openrouter/moonshotai/kimi-k3] Agent failed"
+        ) is False
+
+    def test_a_brace_dict_written_by_something_other_than_json(self):
+        """`{code: 401, …}` never parses, and never held an answer either."""
+        assert has_salvageable_json('{code: 401, message: "x"}') is False
+
+    def test_an_envelope_followed_by_a_truncated_array_is_salvageable(self):
+        """A parsed-and-turned-down candidate must not end the search.
+
+        The envelope closed; the array after it did not. Clause 2 has to reach
+        that second opening, which it only does by treating the envelope's own
+        span — and nothing else — as already settled.
+        """
+        assert has_salvageable_json(
+            '{"type":"error","message":"rate limited"}\n'
+            '[{"title": "Race in worker", "severity": "high"'
+        ) is True
+
+    def test_a_truncated_array_carrying_severity_is_salvageable(self):
+        """`severity` is the near-miss a model writes for `importance`."""
+        assert has_salvageable_json(
+            '[{"title": "Race in worker", "severity": "high"'
+        ) is True
+
+    def test_a_balanced_object_wrapping_the_array_is_salvageable(self):
+        """The wrapped array, closed rather than truncated: still the answer."""
+        assert has_salvageable_json(
+            '{"suggestions": [{"title": "x", "desc": "y", "importance": "high"}]}'
+        ) is True
+
+    def test_a_wrapper_whose_array_is_empty_is_still_an_answer(self):
+        """Same document as `[]`, one key deep: a model that found nothing."""
+        assert has_salvageable_json('{"issues": []}') is True
+
+    def test_a_single_record_where_an_array_was_asked_for_is_salvageable(self):
+        """No array anywhere, and the schema's own field names all over it."""
+        assert has_salvageable_json(
+            '{"title": "Race in worker", "desc": "Two writers", "importance": "high"}'
+        ) is True
+
+
+class TestBuildUnsanitizeMapReportsStemCollisions:
+    """Two specs, one stem, in a checkpoint the pre-dispatch gate never saw.
+
+    ``sanitize_model_name`` is lossy in one direction only, so the map this
+    function returns is an *inverse* only while it is one-to-one. Two colliding
+    specs make one entry and the loop is a plain dict write, so the spec listed
+    last wins in silence and every group under that stem is then attributed to a
+    model that may not have produced it — a misattribution, not an omission, and
+    the report reads as plausible either way.
+
+    **The posture under test is warn-and-continue, not refuse**, and that is a
+    decision rather than an oversight. It matches ``warn_stem_attribution``
+    (``code_review_orchestrator.py``), which lets a phase dir whose checkpoint
+    records no models at all reaggregate while saying attribution has fallen back
+    to stems. The two degradations arrive from the same lossy function and have
+    to tell the operator one story; refusing here would also discard a completed
+    fan-out's results in order to protect the naming of them, which is the wrong
+    trade at this end of the run. Fail-closed belongs at ``resolve_models``,
+    before the spend — see
+    ``tests/test_provider_registry.py::TestCollidingModelStemsAreRefusedBeforeDispatch``.
+    """
+
+    def test_two_colliding_specs_in_models_requested_are_reported_on_stderr(
+        self, tmp_path, capsys
+    ):
+        """The core case: the warning names both specs and the stem they share.
+
+        All three are asserted because all three are what the operator acts on.
+        The stem is the string that appears nowhere in anything they typed, so
+        without it the message describes a file name they cannot search for; the
+        two specs are what tells them *which* pair of a longer list collided.
+        """
+        _checkpoint(tmp_path, models_requested=["p:a.b", "p:a_b"])
+
+        mapping = build_unsanitize_map(str(tmp_path))
+
+        err = capsys.readouterr().err
+        assert "p:a.b" in err and "p:a_b" in err, (
+            f"the warning has to name both colliding specs; got: {err}"
+        )
+        assert "p_a_b" in err, (
+            f"the warning has to name the stem they share; got: {err}"
+        )
+        # And the consequence, not merely the fact: a message that says two specs
+        # collided without saying what the report will now claim leaves the
+        # operator with a curiosity rather than a decision.
+        assert "attributed" in err, (
+            f"the warning never says what happens to the groups: {err}"
+        )
+        # The mapping itself is deliberately unchanged — last spec still wins.
+        # Returning `{}` or dropping the entry would turn a misattribution into a
+        # *total* attribution failure for every other model in the dir, which is
+        # strictly worse than the thing being reported.
+        assert mapping == {"p_a_b": "p:a_b"}
+
+    def test_the_warning_goes_to_stderr_and_never_to_stdout(self, tmp_path, capsys):
+        """stdout is the reaggregate path's machine-readable channel.
+
+        ``[PARTIAL_RESULTS: ...]`` and ``[REAGGREGATE_AFTER_SALVAGE]`` are parsed
+        off it by hosts, and a degradation nobody chose does not belong in a
+        stream something else is parsing. Same rule ``warn_stem_attribution``
+        follows for the sibling case, asserted here because the two warnings are
+        emitted by different modules and nothing else would keep them aligned.
+        """
+        _checkpoint(tmp_path, models_requested=["p:a.b", "p:a_b"])
+
+        build_unsanitize_map(str(tmp_path))
+
+        captured = capsys.readouterr()
+        assert captured.out == "", (
+            f"the collision warning leaked into the parsed stream: {captured.out}"
+        )
+        assert "p_a_b" in captured.err
+
+    def test_a_collision_split_across_the_two_keys_is_reported_identically(
+        self, tmp_path, capsys
+    ):
+        """The shape a resumed run really has.
+
+        The function unions ``models_requested`` with ``models_completed``, and a
+        run that resumed lists its models under both — so a colliding spec's twin
+        is as likely to sit in the other key as beside it. Detecting per key
+        would miss the commonest real shape entirely while passing the test
+        above.
+        """
+        _checkpoint(
+            tmp_path,
+            models_requested=["p:a.b"],
+            models_completed=["p:a_b"],
+        )
+
+        mapping = build_unsanitize_map(str(tmp_path))
+
+        err = capsys.readouterr().err
+        assert "p:a.b" in err and "p:a_b" in err and "p_a_b" in err, (
+            f"a cross-key collision went unreported; got: {err}"
+        )
+        assert mapping == {"p_a_b": "p:a_b"}
+
+    def test_the_same_spec_in_both_keys_is_the_union_doing_its_job(
+        self, tmp_path, capsys
+    ):
+        """The negative that matters most: the ordinary checkpoint.
+
+        Every completed run lists each model under ``models_requested`` and again
+        under ``models_completed``. That is one spec written twice, not two specs
+        sharing a stem, and a check keyed on arrival rather than on identity
+        would warn on literally every reaggregation in the suite.
+        """
+        _checkpoint(
+            tmp_path,
+            models_requested=["cursor-agent:auto", "gemini:gemini-2.5-flash"],
+            models_completed=["cursor-agent:auto", "gemini:gemini-2.5-flash"],
+        )
+
+        mapping = build_unsanitize_map(str(tmp_path))
+
+        assert capsys.readouterr().err == ""
+        assert mapping == {
+            "cursor-agent_auto": "cursor-agent:auto",
+            "gemini_gemini-2_5-flash": "gemini:gemini-2.5-flash",
+        }
+
+    def test_distinct_specs_whose_stems_differ_are_not_reported(
+        self, tmp_path, capsys
+    ):
+        """The other negative: lossy stems are normal, collisions are not.
+
+        Nearly every real spec sanitizes to something it cannot be recovered
+        from on its own — that is the whole reason the checkpoint records the
+        originals. Losing separators is not the defect; two specs landing on one
+        stem is.
+        """
+        _checkpoint(
+            tmp_path,
+            models_requested=[
+                "claude-code:sonnet-4.6",
+                "cursor-agent:cursor-grok-4.6-xhigh",
+            ],
+        )
+
+        mapping = build_unsanitize_map(str(tmp_path))
+
+        assert capsys.readouterr().err == ""
+        assert mapping == {
+            "claude-code_sonnet-4_6": "claude-code:sonnet-4.6",
+            "cursor-agent_cursor-grok-4_6-xhigh": "cursor-agent:cursor-grok-4.6-xhigh",
+        }
+
+    def test_three_specs_on_one_stem_produce_one_warning_naming_all_three(
+        self, tmp_path, capsys
+    ):
+        """Reporting per stem rather than per arrival, and why it matters.
+
+        Warning inside the loop would chain this into two pairwise warnings, the
+        second of which has already forgotten ``p:a.b``. An operator cannot act
+        on "these two collided" twice; they can act on "these three are one
+        file".
+        """
+        _checkpoint(tmp_path, models_requested=["p:a.b", "p:a_b", "p:a/b"])
+
+        mapping = build_unsanitize_map(str(tmp_path))
+
+        err = capsys.readouterr().err
+        assert err.count("WARNING:") == 1, (
+            f"one colliding stem must produce exactly one warning; got: {err}"
+        )
+        for spec in ("p:a.b", "p:a_b", "p:a/b"):
+            assert spec in err, f"the warning dropped {spec!r}: {err}"
+        assert mapping == {"p_a_b": "p:a/b"}
+
+    def test_a_missing_checkpoint_still_returns_an_empty_map_in_silence(
+        self, tmp_path, capsys
+    ):
+        """The collision report must not disturb the file-absent contract.
+
+        ``{}`` for a missing or unreadable ``.status.json`` is what the callers
+        branch on to decide whether to emit the *other* stem warning
+        (``code_review_orchestrator.py`` keys that on this function's result, not
+        on the file's existence). A stray diagnostic here would double up with
+        it.
+        """
+        assert build_unsanitize_map(str(tmp_path)) == {}
+        assert capsys.readouterr().err == ""
+

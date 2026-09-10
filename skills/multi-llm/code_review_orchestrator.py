@@ -68,15 +68,25 @@ from utils.state_manager import (
 from utils.output_handler import get_phase_dir
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
+    RETIRE_SUPERSEDED,
     dispatch_salvage_tasks,
     dispatch_subagent_tasks,
     exec_subagents_requested,
     maybe_detach,
     merge_validation_batches,
     resolve_result_files_by_model,
+    retire_salvage_artifacts,
     update_status,
     write_status,
 )
+# The read side is named from the module that owns it rather than through the
+# base's re-export. That re-export exists because every existing caller and test
+# already spelled `write_status`/`update_status` through the base
+# (`utils/review_orchestrator_base.py`, "Status file helpers"); there is no such
+# legacy for `read_status`, and `utils/detach.py` reaches for `status_file`
+# directly too. Its one use below is the read-back that turns a silently failed
+# checkpoint write into a warning.
+from utils.status_file import read_status
 from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
@@ -115,6 +125,91 @@ from utils.html_report_generator import generate_html_report, write_html_report,
 def derive_prefix(plan_path: Path) -> str:
     """Derive output prefix from plan file path."""
     return sanitize_prefix(plan_path.name)
+
+
+# ---------------------------------------------------------------------------
+# One story about a phase dir whose checkpoint records no models
+# ---------------------------------------------------------------------------
+#
+# Two moments can discover that `models_requested` is not on disk, and neither
+# can repair it. The fan-out discovers it immediately after `write_status`,
+# which is best-effort *by contract* — it wraps the temp write and the
+# `os.replace` in a bare `except Exception: pass` (`utils/status_file.py`),
+# returns `None`, and so cannot report a read-only or full filesystem, a phase
+# dir made unwritable between the mkdir and the write, a checkpoint lock it
+# could not take, or an `os.replace` across a boundary that refuses it.
+# `--reaggregate` discovers it later, arriving at a dir whose checkpoint was
+# lost that way, was never written (every dir whose fan-out predates the write),
+# or was hand-merged without the field. Same defect from either end, so both
+# sites print the same consequence and the same two recoveries instead of two
+# paraphrases the operator has to reconcile into one.
+#
+# Warning, never refusal, at both. In the fan-out this sits below the detach
+# boundary, after the models are resolved and immediately before dispatch:
+# raising there would trade a checkpoint that could not be written for a fan-out
+# that never ran — the expensive half of the run, on the machine where nobody is
+# watching the terminal. At reaggregation a pre-checkpoint dir plus
+# `--skip-validation` produces a report *today*, so failing closed would break a
+# path that currently completes and would need an override flag to hand back.
+# Fail-closed belongs at `resolve_models` (`utils/interactive.py`), where
+# refusing costs a correct run nothing; it is wrong at both of these.
+
+#: What is actually lost, in the operator's terms rather than the mechanism's.
+#: `sanitize_model_name` (`utils/json_extractor.py`) is one
+#: `re.sub(r'[^a-zA-Z0-9\-_]', '_', model)`, so it is lossy in one direction
+#: only and the checkpoint is the sole record of the other.
+_STEM_ATTRIBUTION_CONSEQUENCE = (
+    "--reaggregate over this phase dir attributes issues by filename stem "
+    "instead of by model spec: sanitize_model_name flattens every separator a "
+    "spec carries, so 'cursor-agent_cursor-grok-4_6-xhigh' can never be turned "
+    "back into 'cursor-agent:cursor-grok-4.6-xhigh'. The report then names a "
+    "stem where a model belongs, and nothing downstream contradicts it."
+)
+
+#: Both recoveries, each with its cost named, because the choice is the
+#: operator's: one costs money and reviews a diff that has moved on, the other
+#: costs nothing but needs the specs from a source that still holds them.
+_STEM_ATTRIBUTION_RECOVERIES = (
+    "Recover either way: re-run the fan-out with --force, which writes the "
+    "checkpoint on the way through, at the cost of a second round of model "
+    "spend against whatever the diff is by then; or write .status.json in the "
+    "phase dir by hand — build_unsanitize_map reads nothing but the canonical "
+    "specs listed under models_requested / models_completed."
+)
+
+
+def warn_stem_attribution(
+    headline: str, model_specs: Optional[List[str]] = None
+) -> None:
+    """Print the stem-attribution warning to stderr. Never raises, never exits.
+
+    *headline* is the only part that differs between the two sites: it says
+    which moment found the gap and in what tense. The consequence and the
+    recoveries are shared verbatim so the fan-out's warning and the
+    reaggregation's warning are recognisably the same story.
+
+    *model_specs* is passed by the fan-out alone, where the specs are still in
+    hand. Printing them makes this warning itself the canonical source the
+    hand-written-checkpoint recovery needs — otherwise the operator has to
+    reconstruct it from console scrollback, and a stem copied out of an old
+    report is exactly the thing that cannot be inverted.
+
+    stderr, not stdout: stdout is this phase's machine-readable channel (the
+    `[VALIDATION_BATCHES_PENDING]`, `[PARTIAL_RESULTS: ...]` and
+    `[REAGGREGATE_AFTER_SALVAGE]` markers a host parses), and a degradation
+    nobody chose does not belong in it.
+    """
+    lines = [
+        headline,
+        f"  {_STEM_ATTRIBUTION_CONSEQUENCE}",
+        f"  {_STEM_ATTRIBUTION_RECOVERIES}",
+    ]
+    if model_specs:
+        lines.append(
+            "  This run's canonical specs, for that second recovery: "
+            + ", ".join(model_specs)
+        )
+    print("\n".join(lines), file=sys.stderr)
 
 
 def save_model_result(
@@ -600,6 +695,49 @@ async def run_single_review(
     phase_dir.mkdir(parents=True, exist_ok=True)
     log_file = phase_dir / f"log_{sanitized_model}.txt"
 
+    # This model's attempt starts *here*, so any salvage pair an earlier attempt
+    # left in the phase dir stops being outstanding work *here* — before the
+    # provider is invoked, and whatever this attempt goes on to do.
+    #
+    # `get_phase_dir` is stable per plan (`utils/output_handler.py`), so every
+    # run for this plan writes into the same directory, and `--force` clears
+    # only the state file's phase-completion marker (see main()) — it deletes
+    # nothing from disk. Without this call the exact P2 rerun still reproduces
+    # P2: kilocode dies on `User not found.`, `has_salvageable_json` correctly
+    # writes nothing, and the *previous* run's `salvage_task_<stem>.json` is
+    # still dispatched by `dispatch_salvage_tasks`'s glob and still advertised
+    # by main()'s end-of-run `salvage_*.json` scan. A salvage task's
+    # `output_name` IS this model's result file, so what that repairs is a run
+    # that no longer exists, over a slot this run recorded as failed — the
+    # phantom participant the gate exists to prevent, arriving by the one route
+    # the gate cannot see. Confirmed on disk: a real `code-review` phase dir
+    # holds request/task pairs from three separate runs that are long over.
+    #
+    # **Retire-by-rename rather than run-stamping**, deliberately, and the
+    # resumed run is what decides it. Retiring belongs to *the attempt that
+    # would replace the artifact*, and this function is only ever reached by a
+    # model that is actually re-running: `run_all_reviews` answers a resume
+    # (`skip_existing`, i.e. no `--rerun-all`) from the existing
+    # `<model>.json` and returns before calling here, so a skipped model keeps
+    # its pair and a re-run model loses one that can only describe an answer it
+    # is about to replace. That is the whole of the shared-phase-dir case a run
+    # stamp was wanted for, without a run id to thread through two writers, two
+    # globs and two reporting blocks — and without the question a stamp cannot
+    # answer, which is what to do with the unstamped pairs already on disk.
+    # What this shape does *not* cover is a model dropped from the selection
+    # between runs: it begins no attempt, so nothing retires its pair. That is
+    # the same residual as its stale `<model>.json`, which the fan-out also
+    # leaves for reaggregation to pick up (see the `--rerun-all` note at the
+    # salvage dispatch in main()), and it belongs to whatever eventually scopes
+    # the phase dir by run rather than to the gate.
+    #
+    # Quiet: the fan-out already prints a line per model per phase, and one
+    # `[SALVAGE_RETIRED]` per re-run model would bury them. The audit trail is
+    # the renamed file, which is not deleted.
+    retire_salvage_artifacts(
+        str(phase_dir), sanitized_model, reason=RETIRE_SUPERSEDED, quiet=True
+    )
+
     # Format tracked files for the prompt
     tracked_files_list = format_tracked_files_for_prompt(tracked_files or [])
 
@@ -680,9 +818,53 @@ async def run_single_review(
         # `has_salvageable_json` subsumes the old condition: a `stdout_error`
         # with empty stderr only ever produced a salvage request whose
         # `raw_output` was the empty string.
+        #
+        # WHICH CHANNEL THE ANSWER IS ON, and this branch used to look at only
+        # one of them. `if not result["success"]` is not merely "the provider
+        # never spoke": it also covers the provider that wrote a truncated or
+        # fenced array and *then* exited non-zero — a kill at the deadline, a
+        # crash on teardown — and that array is on **stdout**, never on stderr.
+        # Gating on stderr alone therefore printed "Provider failed before
+        # producing any JSON — nothing to salvage" about a run that had produced
+        # JSON, and threw a recoverable review away without a word. The
+        # JSON-erroring providers press the same point from the other side:
+        # `opencode run --format json` puts its failure shape on stdout with
+        # stderr empty, and a relayed `{"error": {"code": 401, ...}}` body is
+        # indistinguishable from any HTTP-backed CLI — those reached the
+        # predicate as `""`, so even the verdicts it reached correctly were
+        # reached for the wrong reason. The pre-gate code was equally blind (its
+        # `raw_output` was the empty string), so this closes a latent hole rather
+        # than a regression; it is closed here because site A is the one place
+        # the gate above could make a real loss *visible*.
+        #
+        # **Precedence, not concatenation.** The first non-empty channel wins and
+        # the other is not appended, because `raw_output` is handed to a subagent
+        # as *the* damaged answer to repair (`build_salvage_prompt` in
+        # `utils/subagent_prompts.py`), and gluing a launch banner or an auth
+        # notice onto a truncated array gives that subagent two documents and no
+        # way to tell which one it was asked about — with the same empty-array
+        # fallback waiting when it guesses wrong. stdout is the one that can hold
+        # an answer, so stdout is the one that is asked first.
+        #
+        # `utils/llm_client.py`'s `_attach_stdout_excerpt` (:413) is what makes
+        # the falsy test below sufficient: it attaches `stdout_excerpt` on all
+        # three losing paths — non-zero exit, timeout kill, and the zero exit
+        # whose output would not parse — already `_redact`ed and `_bound_stream`ed
+        # in that order (§4.5/§4.4), and it **omits the key entirely** when
+        # nothing survived rather than setting `""`. So absent and empty mean the
+        # same thing here, no second emptiness check is owed, and stderr still
+        # answers for the provider that died before printing a byte.
+        #
+        # Whatever this picks is also what gets persisted: the gate below judges
+        # `raw_content` and the salvage request stores `raw_content`, so the text
+        # a subagent is asked to repair is the text the decision was made on.
+        # Gating on one string and writing another would let a request be written
+        # for evidence nobody ever saw.
         raw_content = ""
-        details = result.get("details", {})
-        if details.get("stderr"):
+        details = result.get("details", {}) or {}
+        if details.get("stdout_excerpt"):
+            raw_content = details["stdout_excerpt"]
+        elif details.get("stderr"):
             raw_content = details["stderr"]
 
         if has_salvageable_json(raw_content):
@@ -1248,6 +1430,28 @@ async def reaggregate_from_existing_files(
     # Restore original model specs (with colons) from .status.json
     unsanitize = build_unsanitize_map(str(phase_dir))
 
+    # An empty map is not "this dir has no models" — `result_files` is non-empty
+    # or the function has already returned above. It is a phase dir whose
+    # checkpoint records none, and from here on every group in the report is
+    # attributed to a stem that no longer names a model. That outcome was
+    # previously reached in complete silence, and on the `--skip-validation` leg
+    # it still completes and still writes a report, so nothing downstream ever
+    # contradicts it either.
+    #
+    # The condition is `build_unsanitize_map`'s *result*, deliberately, not
+    # `.status.json`'s existence: the helper returns `{}` for a missing file, an
+    # unreadable one, and one carrying neither `models_requested` nor
+    # `models_completed` — and a hand-merged checkpoint holding `phase` and
+    # `state` and nothing else inverts exactly as little as no file at all. Same
+    # field-not-file rule as the fan-out's read-back below.
+    if not unsanitize:
+        warn_stem_attribution(
+            f"WARNING: {phase_dir} holds {len(result_files)} model result "
+            f"file(s), but its checkpoint records no models_requested — either "
+            f"no .status.json at all, or one that never got the field. This "
+            f"reaggregation continues."
+        )
+
     # One file per logical model (W3): a phase dir that straddles the L1 anchor
     # upgrade holds both `<model>.json` and `<provider>_<model>.json` for the same
     # model, and reading both double-counts every issue. `results` matters as much
@@ -1321,19 +1525,92 @@ async def reaggregate_from_existing_files(
             json.dump(all_issues, f, indent=2)
         print(f"Issues JSON saved to: {issues_path}")
 
-        # Group similar issues
-        grouped = group_similar_suggestions(all_issues)
-        # Stamp stable content-based hashes on groups and suggestions
-        grouped_list = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
-        stamp_stable_ids(grouped_list)
+        # Group similar issues — or, on the path where it matters most, do not.
+        #
+        # This function is the one that *checks* `grouped.json`'s bytes: a few
+        # lines below it hands `build_inputs(..., grouped_file=grouped_path)` to
+        # `read_task_file`, which compares the hash against the
+        # `inputs.grouped_sha256` `validation_tasks.json` was materialized with
+        # (`check_task_file_inputs`, `utils/subagent_tasks.py`). Regrouping
+        # unconditionally meant it broke that binding and then audited it — the
+        # file it hashes is the file it has just rewritten — so
+        #
+        #     ERROR: Refusing task file .../validation_tasks.json: the inputs it
+        #     was materialized from have changed (grouped_sha256: ...)
+        #
+        # was this command refusing itself, and review-code's documented
+        # validate-then-reaggregate flow could not complete at all.
+        #
+        # Making the round trip byte-identical (the canonical
+        # `model`-then-`source_model` insertion order stamped above) fixes the
+        # instance, not the class: it holds only while regrouping is perfectly
+        # reproducible out of two separate dict literals in two functions. A
+        # field added to an issue on one path, a reorder inside
+        # `SuggestionGroup.to_dict` (`utils/suggestion_processor.py`), a changed
+        # argument to this `json.dump`, or a grouping change that reorders the
+        # array re-opens it — and none of those reads as a hash-binding change at
+        # review time, which is how the original got in. So the bound file is not
+        # rewritten at all, and byte-identity survives as the regression guard it
+        # is good at being rather than as the thing the flow rests on.
+        #
+        # The branch is `utils/review_orchestrator_base.reaggregate_from_existing_files`'s,
+        # ported — "preserves validation alignment", in its own printed words —
+        # with each half of its guard meaning here what it means there:
+        #
+        #   * `validation.json` counts only when this run will *use* it, hence
+        #     the `--skip-validation` half: a run told to ignore validation has
+        #     no alignment to preserve. In this phase that disjunct is close to
+        #     subsumed, since code-review only ever writes `validation.json`
+        #     after merging batches and so `validation_tasks.json` was there
+        #     first; it is kept because a hand-copied or partially cleaned dir
+        #     carrying only the merged file is still a dir whose groups are
+        #     spoken for.
+        #   * `validation_tasks.json` counts *regardless* of the flag, and that
+        #     asymmetry is deliberate: it is a binding on this file's bytes that
+        #     outlives the invocation. A `--skip-validation` reaggregate that
+        #     rewrote `grouped.json` would leave the refusal armed for the next
+        #     run that does consume validation — the same defect, one command
+        #     later, with nothing on screen to connect them.
+        #
+        # Both are ANDed with `grouped.json` actually existing, because
+        # `--reaggregate` is also the path that completes a run interrupted
+        # *before* grouping: `main` sends exactly that dir here ("Found N
+        # per-model result file(s) but no grouped.json"). With nothing on disk
+        # there is nothing bound and nothing to preserve, so that run groups and
+        # writes as it always did.
         grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
-        with open(grouped_path, 'w', encoding='utf-8') as f:
-            json.dump(save_groups_payload(grouped_list), f, indent=2)
-        print(f"Grouped issues saved to: {grouped_path}")
-
-        validated_groups_for_report = None
         validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
         validation_tasks_path = phase_dir / "validation_tasks.json"
+
+        has_existing_validation = (
+            (validation_path.exists() and not args.skip_validation)
+            or validation_tasks_path.exists()
+        )
+
+        if has_existing_validation and grouped_path.exists():
+            print("Using existing grouped.json (preserves validation alignment)")
+            with open(grouped_path, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+            grouped = load_groups_payload(raw_data)
+        else:
+            raw_grouped = group_similar_suggestions(all_issues)
+            # The two branches are made to agree on shape *here* rather than at
+            # each consumer: `load_groups_payload` yields plain dicts (a v1 bare
+            # array, or the v2 envelope's `groups`), so the regroup branch hands
+            # on its stamped dict list too instead of the `SuggestionGroup`s it
+            # used to. Everything below already tolerates dicts — `len(grouped)`,
+            # the `[g.to_dict() if hasattr(g, 'to_dict') else g ...]` re-entries,
+            # `merge_validation_batches` — and passing the stamped list moves no
+            # group id, because `generate_group_id` reads `theme` and each
+            # suggestion's `type`/`section`/`details` and never the stamped keys.
+            grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
+            # Stamp stable content-based hashes on groups and suggestions
+            stamp_stable_ids(grouped)
+            with open(grouped_path, 'w', encoding='utf-8') as f:
+                json.dump(save_groups_payload(grouped), f, indent=2)
+            print(f"Grouped issues saved to: {grouped_path}")
+
+        validated_groups_for_report = None
 
         # Check if we're merging validation batch results
         if not args.skip_validation and validation_tasks_path.exists():
@@ -1738,6 +2015,37 @@ async def main(argv: Optional[List[str]] = None) -> int:
         "models_requested": list(model_specs),
         "error": None,
     })
+    # ...and read it straight back, because the write above cannot tell us it
+    # failed. `write_status` is best-effort by contract (see the module note
+    # beside `warn_stem_attribution`): no return value to check and no exception
+    # to catch, so every way it can fail leaves this run proceeding *exactly* as
+    # it did before the write existed, and leaves the operator with no signal at
+    # all until a `--reaggregate` days later reports stems where models belong —
+    # by which time the run that could have been re-done cheaply is gone.
+    #
+    # The probe is on `models_requested`, not on the file: that field alone is
+    # what `build_unsanitize_map` needs to invert a stem, and a torn or
+    # half-merged `.status.json` carrying `phase` and `state` without it is worth
+    # exactly as little as no file. `read_status` returns `{}` for absent,
+    # unreadable and torn alike and is documented never to raise; the try is
+    # belt-and-braces so this diagnostic can never become the thing that stops
+    # the dispatch it is warning about.
+    #
+    # Scoped to this one write. The `update_status` after the fan-out (below)
+    # runs once the models have already finished, so losing it costs a resume
+    # path some completion detail rather than the identity map, and does not earn
+    # a second probe.
+    try:
+        recorded_specs = read_status(str(detach_phase_dir)).get("models_requested")
+    except Exception:  # pragma: no cover - read_status is documented not to raise
+        recorded_specs = None
+    if not recorded_specs:
+        warn_stem_attribution(
+            f"WARNING: this run's checkpoint {detach_phase_dir / '.status.json'} "
+            f"records no models_requested — the write is best-effort and cannot "
+            f"report why. The fan-out below is unaffected and continues.",
+            model_specs=list(model_specs),
+        )
     if unattended and not args.models and not args.quick:
         # D6 row 2, recorded rather than merely applied (see review base): an
         # auto-selection nobody can see afterwards is indistinguishable from a
