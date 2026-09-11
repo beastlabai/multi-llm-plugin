@@ -852,7 +852,39 @@ async def run_single_model(
         prefix: Optional prefix for log file names
 
     Returns:
-        Dict with keys: success, output, error, prompt, stdout, stderr, duration_seconds, model_spec, source
+        Dict with keys: success, output, error, prompt, stdout, stderr,
+        duration_seconds, model_spec, source.
+
+        ``output`` and ``stdout`` are **not** two names for one thing, and the
+        failure returns below are the only place the difference is load-bearing.
+        ``output`` means *the answer produced by a run that completed*: it is
+        what :func:`save_model_result` parses, validates and writes to
+        ``{model}.json``, so it stays ``None`` on every losing path however much
+        text the child left behind. ``stdout`` means *the text a failed run left
+        behind, which only salvage may read* — the truncated or fenced array a
+        provider streamed before it was killed at the deadline or crashed on
+        teardown, which is the single most salvageable failure this skill has.
+
+        Widening ``output`` to carry that text instead is the obvious fix and it
+        is the wrong one. ``save_model_result`` would then fall through to its
+        parse block, and a hard failure whose stdout happened to hold a
+        well-formed suggestions array would be written to ``{model}.json`` and
+        counted as that model's completed review — a crashed run recorded as a
+        result, which is :func:`retire_salvage_artifacts`'s phantom participant
+        arriving through a door the salvage gate never sees. Keeping the two
+        keys distinct here is what lets ``save_model_result`` distinguish "no
+        output" from "output only salvage may read".
+
+        The text itself is ``details["stdout_excerpt"]``, which
+        ``utils/llm_client._attach_stdout_excerpt`` (:413) attaches on all three
+        losing paths — non-zero exit, timeout kill, and the zero exit whose
+        output would not parse — already ``_redact``ed then ``_bound_stream``ed
+        in that order (§4.5/§4.4). That is the only copy of the stream that has
+        been through the redactor, and a salvage request is an artifact a human
+        reads, so it is the copy that travels. Returns that had no child to
+        produce it keep ``""`` and say so in place, rather than attaching an
+        always-empty key that later readers would have to re-derive the
+        emptiness of.
     """
     import time
     start_time = time.time()
@@ -929,9 +961,15 @@ async def run_single_model(
                 return {
                     "success": False,
                     "output": None,
+                    # `details` is this very invocation's, read off `result` a
+                    # dozen lines up, so a provider that streamed an array to
+                    # stdout and then exited non-zero has its answer here. The
+                    # older of the two dispatch paths, but it loses the same way
+                    # and the fix is the same one — see `Returns:` above for why
+                    # this is `stdout` and not `output`.
                     "error": result.get("error", "Unknown error"),
                     "prompt": prompt,
-                    "stdout": "",
+                    "stdout": details.get("stdout_excerpt", ""),
                     "stderr": stderr_text,
                     "duration_seconds": duration,
                     "model_spec": model_spec,
@@ -939,6 +977,15 @@ async def run_single_model(
                 }
         except Exception as e:
             duration = time.time() - start_time
+            # `stdout` stays `""` here, and deliberately. This handler catches
+            # *our* exception, not the child's — `error` names a Python failure
+            # in this coroutine, and there is no losing-run excerpt that belongs
+            # beside it. Reading one would also be unsafe: `details` is assigned
+            # inside the `try`, *after* `invoke_with_provider` returns, so on the
+            # likeliest arrival here (the invocation itself raising) the name is
+            # unbound and the module-level initialiser further down has not run
+            # for this path. That would trade a recorded exception for a
+            # `NameError`, which is the one outcome worse than a missing excerpt.
             return {
                 "success": False,
                 "output": None,
@@ -1086,6 +1133,14 @@ async def run_single_model(
                 ladder, target=display_name, timeout=effective_timeout
             )
             print(f"[{display_name}] {reason}")
+            # `stdout` stays `""`, and this one is not a hole. `result is None`
+            # means `next_attempt()` refused the slot before the first dispatch,
+            # so no child ever ran and there is no stream to excerpt. `details`
+            # is safe to read — it is initialised to `{}` above the `try` — but
+            # it is guaranteed empty, and `details.get("stdout_excerpt", "")`
+            # here would be an always-empty key dressed as a live one: a reader
+            # would have to re-derive that it can never hold anything, and a
+            # later edit to this branch would inherit the pretence.
             return {
                 "success": False, "output": None,
                 "error": reason,
@@ -1114,7 +1169,14 @@ async def run_single_model(
             return {
                 "success": False, "output": None,
                 "error": f"Rate limited (429) - {action.reason}{budget_note}",
-                "prompt": prompt, "stdout": "", "stderr": stderr_text,
+                # A 429 is usually announced before a byte of answer, but "usually"
+                # is not "always": a CLI that streamed most of a review and was then
+                # cut off by the vendor mid-response ends the slot here, and the
+                # partial array is on stdout. `details` is the last attempt's — the
+                # same attempt `stderr_text` and `source` are taken from — so the
+                # three fields describe one run rather than three.
+                "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source
             }
@@ -1131,7 +1193,13 @@ async def run_single_model(
             return {
                 "success": False, "output": None,
                 "error": context_length_message(model_spec),
-                "prompt": prompt, "stdout": "", "stderr": stderr_text,
+                # Terminal, never re-dispatched (§7.6(a)) — which is exactly why
+                # whatever the model managed to emit before the window closed is
+                # the only copy anyone will ever get. An overflow hit part-way
+                # through a long array is the shape that matters: there is no
+                # second attempt to produce it again.
+                "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source
             }
@@ -1162,7 +1230,20 @@ async def run_single_model(
             return {
                 "success": False, "output": None,
                 "error": error_details, "prompt": prompt,
-                "stdout": "", "stderr": stderr_text,
+                # The return residual item 5 is about. Every ordinary loss lands
+                # here: the non-zero exit, the timeout kill, and
+                # `invoke_with_file_output`'s "JSON parsing failed from both file
+                # and stdout" — all three of which `_attach_stdout_excerpt` has
+                # already populated. A `review-plan` or `review-tasks` provider
+                # that streams a truncated array and is then killed at the
+                # deadline used to lose it here without a word, because this dict
+                # hardcoded `""` and `save_model_result` short-circuited on
+                # `if not success or not output:` before its salvage gate could
+                # run — the gate was unreachable on a hard failure, not merely
+                # gated to False. It is reachable now because this line carries
+                # the evidence to it.
+                "stdout": details.get("stdout_excerpt", ""),
+                "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source
             }
@@ -1175,6 +1256,16 @@ async def run_single_model(
             prompt_for_log = prompt
         except NameError:
             prompt_for_log = prompt_template if 'prompt_template' in dir() else "(unavailable)"
+        # `stdout` stays `""` for the same reason as the stdout-only lane's own
+        # handler above: this is *our* exception. Every child failure the ladder
+        # understands has already returned through one of the branches above, so
+        # what reaches here is the orchestrator itself breaking — a prompt that
+        # would not format, a ladder misuse, an `asyncio` teardown. `details` is
+        # in scope (initialised to `{}` before the `try`) and may even hold a
+        # completed attempt's excerpt, which is precisely the argument against
+        # reading it: `error` names a failure that attempt did not cause, and
+        # pairing the two would offer salvage a document with no relationship to
+        # the error recorded beside it.
         return {
             "success": False, "output": None,
             "error": error_msg, "prompt": prompt_for_log,
@@ -1552,6 +1643,129 @@ async def run_all_models(
 # Result saving
 # ---------------------------------------------------------------------------
 
+def failure_output_from_result(result: Dict[str, Any]) -> str:
+    """The text a losing run left behind, stdout first and stderr second.
+
+    One rule, one place. ``code_review_orchestrator.run_single_review``'s
+    salvage site A states the same precedence for the ``review-code`` fan-out —
+    ``if details.get("stdout_excerpt") … elif details.get("stderr")`` — and this
+    is that rule for the ``review-plan`` / ``review-tasks`` fan-out, whose result
+    dicts have already flattened those two ``details`` keys into ``stdout`` and
+    ``stderr`` by the time :func:`run_single_model` returns. Two lanes, two
+    plumbing shapes, one sentence about which channel answers first; spelling it
+    twice in two paraphrases is how the two lanes would come to disagree without
+    anybody editing either.
+
+    **Why stdout wins, rather than both being used.** The branch this feeds is
+    not only "the provider never spoke": it also covers the provider that wrote a
+    truncated or fenced array and *then* died — a kill at the deadline, a crash
+    on teardown — and that array is on **stdout**, never on stderr. A gate shown
+    stderr alone therefore reports "nothing to salvage" about a run that produced
+    a recoverable review, and drops it silently.
+
+    **Precedence, not concatenation.** The winner is handed to a salvage subagent
+    as *the* damaged answer to repair (``utils.subagent_prompts.build_salvage_prompt``),
+    so gluing a launch banner, a progress spinner or an auth notice onto a
+    truncated array would give that subagent two documents and no way to tell
+    which one it was asked about — with ``build_salvage_prompt``'s
+    "found nothing" sentinel waiting when it guesses wrong. stdout is the channel
+    that can hold an answer, so stdout is asked first and stderr is not appended.
+    stderr stays reachable as a fall-through, which is what still routes a
+    provider that died before printing a byte.
+
+    Note that this reads the result dict rather than ``details`` because the
+    lane's plumbing already moved the excerpt onto ``result["stdout"]``; see
+    :func:`run_single_model`'s ``Returns:`` for why that key is not ``output``.
+
+    Args:
+        result: One model's entry from :func:`run_all_models`.
+
+    Returns:
+        The first non-empty of ``stdout`` then ``stderr``, or ``""``. On a run
+        that *succeeded* ``stdout`` is the answer itself, which is harmless:
+        :func:`save_model_result` only consults this value on the branch where
+        there is no usable ``output`` to parse.
+    """
+    return result.get("stdout") or result.get("stderr") or ""
+
+
+def _write_salvage_request(
+    *,
+    model: str,
+    sanitized_model: str,
+    raw_output: str,
+    phase_dir: str,
+    phase_name: str,
+) -> str:
+    """Write one model's salvage request **and** its task file, and announce both.
+
+    Factored out because :func:`save_model_result` now asks for salvage from two
+    different branches — the parse failure of a run that completed, and the
+    leftover stdout of a run that did not — and this is ~35 lines of record
+    shape, marker protocol and best-effort pairing. Two copies in one function
+    is the forward-maintenance hazard this module argues against everywhere else
+    (see :func:`retired_salvage_name` on the three prefix-anchored globs, and
+    ``utils/llm_client._attach_stdout_excerpt`` on "a rule spelled three times is
+    a rule that drifts twice"): a field added to the request, or a change to the
+    ``expected_schema`` the salvage prompt is built from, would land on one
+    branch and not the other, and the divergence would only show up in an
+    artifact a human reads after the run that needed it is over.
+
+    The request is written *before* the task file on purpose: the task binds to
+    the request by ``inputs.salvage_request_sha256``, so the request must exist
+    and be final first. Materializing the task is best-effort — a request that
+    cannot be paired with a task is still recoverable by hand, and must not mask
+    the failure that produced it — which is why its exception is caught, named
+    and dropped rather than raised.
+
+    Args:
+        model: The model spec, as the operator typed it.
+        sanitized_model: ``sanitize_model_name(model)`` — the stem every artifact
+            in the pair is named from, and the stem of the result file the
+            salvage would write to.
+        raw_output: The damaged answer. Whatever the gate judged, so that the
+            text a subagent is asked to repair is the text the decision was made
+            on; gating on one string and persisting another would let a request
+            be written for evidence nobody ever saw.
+        phase_dir: Where the pair lands.
+        phase_name: Salvage metadata phase (``review_plan`` / ``review_tasks``).
+
+    Returns:
+        The path of the salvage request.
+    """
+    salvage_request = {
+        "model": model,
+        "phase": phase_name,
+        "raw_output": raw_output,
+        "expected_type": "array",
+        "expected_schema": {
+            "fields": list(REQUIRED_FIELDS),
+            "importance_values": list(VALID_IMPORTANCE),
+            "type_values": list(VALID_TYPES),
+        },
+        "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
+        "timestamp": datetime.now().isoformat()
+    }
+    salvage_path = os.path.join(phase_dir, f"salvage_{sanitized_model}.json")
+    with open(salvage_path, 'w', encoding='utf-8') as f:
+        json.dump(salvage_request, f, indent=2)
+
+    print(f"[SALVAGE_NEEDED] {salvage_path}")
+    # The salvage prompt is materialized in Python (D2/D2i) instead of being
+    # assembled from references/salvage-handling.md, so any invoker can run it.
+    try:
+        salvage_task_path = write_salvage_task_file(
+            salvage_request=salvage_request,
+            salvage_request_path=salvage_path,
+            phase_dir=phase_dir,
+        )
+        print(f"[SALVAGE_TASK] {salvage_task_path}")
+    except Exception as task_error:  # noqa: BLE001 - diagnostics only
+        print(f"[{model}] Warning: could not materialize salvage task: {task_error}")
+
+    return salvage_path
+
+
 def save_model_result(
     prefix: str,
     model: str,
@@ -1561,8 +1775,28 @@ def save_model_result(
     out_dir: str,
     phase_dir: str,
     phase_name: str,
+    *,
+    failure_output: Optional[str] = None,
 ) -> bool:
     """Save model result to appropriate file.
+
+    Two kinds of text can arrive here and they are not interchangeable.
+    ``output`` is the answer of a run that **completed**: it is parsed,
+    validated, and — if it survives that — written to ``{model}.json``, which is
+    what makes the model a participant in the review. ``failure_output`` is the
+    text a run that **did not** complete left behind, and salvage is the only
+    thing allowed to read it. The branch below never parses it and never writes
+    a result file from it; it decides one question, "is there an answer in here
+    worth repairing", and answers it by writing a salvage request or not.
+
+    That separation is the whole of this parameter's reason to exist. Feeding the
+    leftover stdout into ``output`` instead would be one line shorter and would
+    reintroduce the defect it closes: a hard failure whose stdout happened to
+    hold a well-formed suggestions array would fall through to the parse block
+    and be recorded as that model's completed review, so a crashed run would
+    count toward ``SuggestionGroup._recalculate_priority``'s ``len(self.models)``
+    exactly like a run that answered. See :func:`run_single_model`'s ``Returns:``
+    for the plumbing half of the same argument.
 
     Args:
         prefix: Output file prefix
@@ -1573,20 +1807,77 @@ def save_model_result(
         out_dir: Output directory (base folder)
         phase_dir: Phase-specific directory for output files
         phase_name: Phase name for salvage metadata (e.g., 'review_plan', 'review_tasks')
+        failure_output: Keyword-only, and defaulting to ``None`` so that every
+            existing caller — ``review_plan_orchestrator``'s backward-compatible
+            wrapper, and the fourteen-odd test call sites — keeps working
+            untouched and keeps today's behaviour exactly. Production callers
+            build it with :func:`failure_output_from_result`, which owns the
+            stdout-then-stderr precedence.
 
     Returns:
-        True if result was saved successfully, False otherwise
+        True if result was saved successfully, False otherwise. A salvage request
+        written from ``failure_output`` does **not** make this ``True``: the run
+        failed, the model stays failed, and D6 row 3 aggregates the slots that
+        answered.
     """
     sanitized_model = sanitize_model_name(model)
 
     if not success or not output:
+        # The hard-failure branch, and until residual item 5 was paid it was a
+        # dead end: it short-circuited on the condition above, wrote the log and
+        # returned, which made the salvage block in the `except` below not merely
+        # gated to False on a crashed run but **unreachable**. A `review-plan` or
+        # `review-tasks` provider that streamed a truncated array and was then
+        # killed at the deadline lost that answer without a word — the same
+        # defect `code_review_orchestrator`'s salvage site A carries one lane
+        # over, by a different mechanism, which is why site A's fix does not
+        # reach here and this one had to be made separately.
+        #
+        # What changes is only *what the gate is shown*, never what gets parsed.
+        # `has_salvageable_json` runs over `failure_output` — the leftover
+        # stream, not an answer — and on a hit this writes the same request/task
+        # pair the parse branch writes, from the same helper, so the two cannot
+        # drift. Then it returns `False` **unconditionally**: this branch must
+        # never reach `json.loads`, and must never write `{model}.json`. A hard
+        # failure whose stdout happened to parse would otherwise be recorded as
+        # that model's completed review, which is a worse defect than the silent
+        # loss — the phantom participant of `retire_salvage_artifacts`'s
+        # docstring, inverted.
+        #
+        # Unsalvageable is not fatal, exactly as in the parse branch: the model
+        # was already failed on arrival here, so the error log is written on both
+        # paths and only its wording moves.
+        salvageable = has_salvageable_json(failure_output or "")
+        if salvageable:
+            _write_salvage_request(
+                model=model,
+                sanitized_model=sanitized_model,
+                raw_output=failure_output or "",
+                phase_dir=phase_dir,
+                phase_name=phase_name,
+            )
+
         error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
         with open(error_path, 'w', encoding='utf-8') as f:
             f.write(f"Model: {model}\n")
             f.write(f"Timestamp: {datetime.now().isoformat()}\n")
             f.write(f"Error: {error or 'Unknown error'}\n")
+            if salvageable:
+                # Named in the log as well as on stdout: the marker scrolls past
+                # in a fan-out of eight models, and this file is what an operator
+                # reads afterwards to tell "the provider died with an answer
+                # half-written" from "the provider died".
+                f.write(
+                    "Salvage: requested \u2014 the run failed, but the output it "
+                    "left behind still holds an answer to repair.\n"
+                )
             if output:
                 f.write(f"\nRaw output:\n{output}\n")
+            elif failure_output:
+                # Under its own heading, because it is not the model's answer:
+                # it is whichever stream `failure_output_from_result` chose, and
+                # nothing downstream of here treats it as a result.
+                f.write(f"\nRaw output (failed run):\n{failure_output}\n")
         print(f"[{model}] Error logged to: {error_path}")
         return False
 
@@ -1636,38 +1927,18 @@ def save_model_result(
         # error log below is written on both paths and only its wording moves.
         salvageable = has_salvageable_json(output)
         if salvageable:
-            salvage_request = {
-                "model": model,
-                "phase": phase_name,
-                "raw_output": output,
-                "expected_type": "array",
-                "expected_schema": {
-                    "fields": list(REQUIRED_FIELDS),
-                    "importance_values": list(VALID_IMPORTANCE),
-                    "type_values": list(VALID_TYPES),
-                },
-                "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
-                "timestamp": datetime.now().isoformat()
-            }
-            salvage_path = os.path.join(phase_dir, f"salvage_{sanitized_model}.json")
-            with open(salvage_path, 'w', encoding='utf-8') as f:
-                json.dump(salvage_request, f, indent=2)
-
-            print(f"[SALVAGE_NEEDED] {salvage_path}")
-            # The salvage prompt is materialized in Python (D2/D2i) instead of
-            # being assembled from references/salvage-handling.md, so any invoker
-            # can run it. Best-effort: a salvage request that cannot be paired
-            # with a task file is still recoverable by hand, and must not mask
-            # the parse error that produced it.
-            try:
-                salvage_task_path = write_salvage_task_file(
-                    salvage_request=salvage_request,
-                    salvage_request_path=salvage_path,
-                    phase_dir=phase_dir,
-                )
-                print(f"[SALVAGE_TASK] {salvage_task_path}")
-            except Exception as task_error:  # noqa: BLE001 - diagnostics only
-                print(f"[{model}] Warning: could not materialize salvage task: {task_error}")
+            # The same writer the hard-failure branch above uses, and the reason
+            # it is a function: the two branches ask for salvage about different
+            # text for different reasons, but the request they produce is one
+            # record shape and one marker protocol, and a second copy of it here
+            # would drift the first time either is extended.
+            _write_salvage_request(
+                model=model,
+                sanitized_model=sanitized_model,
+                raw_output=output,
+                phase_dir=phase_dir,
+                phase_name=phase_name,
+            )
 
         error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
         with open(error_path, 'w', encoding='utf-8') as f:
@@ -2812,7 +3083,20 @@ async def run_review_orchestration(
         output = result["output"]
         error = result["error"]
 
-        if not save_model_result(prefix, model_spec, success, output, error, out_dir, phase_dir, salvage_phase_name):
+        # `output` is the answer of a run that completed and is `None` on every
+        # losing path; `failure_output` is the text a losing run left behind, and
+        # only salvage may read it. Keeping them separate across this call is
+        # what stops a crashed provider whose stdout happened to parse from being
+        # written to `{model}.json` and counted as a completed review — see
+        # `save_model_result`'s docstring, and `run_single_model`'s `Returns:`
+        # for where the two keys diverge. The stdout-then-stderr precedence lives
+        # in `failure_output_from_result`, which is the same rule
+        # `code_review_orchestrator`'s salvage site A applies to the other lane.
+        if not save_model_result(
+            prefix, model_spec, success, output, error, out_dir, phase_dir,
+            salvage_phase_name,
+            failure_output=failure_output_from_result(result),
+        ):
             failed_models[model_spec] = error or "Unknown error"
 
     # §3.6: which model actually served each slot. The per-model `{model}.json`

@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import code_review_orchestrator as cro
 from utils import subagent_executor as executor
 from utils.llm_client import invoke_with_provider
+from utils import review_orchestrator_base as base
 from utils.review_orchestrator_base import save_model_result as base_save_model_result
 from utils.subagent_tasks import tasks_of
 
@@ -2431,3 +2432,528 @@ class TestAStaleSalvagePairDoesNotSurviveTheNextAttempt:
         assert (phase_dir / f"salvage_{stem}.json").exists()
         assert (phase_dir / f"salvage_task_{stem}.json").exists()
         assert list(phase_dir.glob("retired_salvage_*.json")) == []
+
+
+# ---------------------------------------------------------------------------
+# The same loss in the fan-out base — residual item 5
+# ---------------------------------------------------------------------------
+#
+# `code_review_orchestrator`'s salvage site A was closed by reading
+# `details["stdout_excerpt"]` ahead of `details["stderr"]`. The fan-out base —
+# which serves **`review-plan` and `review-tasks`** — carried the identical loss
+# by a *different* mechanism, so that fix did not reach it and could not have:
+# `stdout_excerpt` appeared zero times in `utils/review_orchestrator_base.py`.
+# `run_single_model`'s failure returns hardcoded `"output": None, "stdout": ""`
+# and carried only `stderr_text`; `save_model_result` then short-circuited on
+# `if not success or not output:`, wrote the error log and returned `False` — so
+# the salvage block in its `except (JSONDecodeError, ValueError)` handler was not
+# merely gated to `False` on a hard failure, it was **unreachable**. A provider
+# that streamed a truncated array and was then killed at the deadline lost that
+# answer silently, in two phases at once.
+#
+# The fix is deliberately *not* "assign the excerpt to `output`", which is the
+# one-line version and is worse than the bug: `save_model_result` would then
+# parse it, and a hard failure whose stdout happened to hold a well-formed
+# suggestions array would be written to `{model}.json` and counted as that
+# model's completed review — the phantom participant inverted, a crashed run
+# recorded as a result. `output` keeps meaning "the answer produced by a run that
+# completed"; the excerpt travels on `stdout` and reaches `save_model_result`
+# through the keyword-only `failure_output`, which only salvage may read. The
+# last test in this class is the one that pins that distinction, and it is the
+# reason the change was deferred out of site A's pass rather than ridden in.
+
+#: The three names that differ between the two lanes this base serves, and
+#: nothing else does: `run_review_orchestration` is called with exactly this
+#: triple by `review_plan_orchestrator.main` and `review_tasks_orchestrator.main`.
+#: Every test below runs twice because "for **both** `review-plan` and
+#: `review-tasks`" is the close condition's wording, and a shared base is
+#: precisely the place where a lane silently stops being covered.
+REVIEW_PLAN_LANE = ("review-plan", "plan_review", "review_plan")
+REVIEW_TASKS_LANE = ("review-tasks", "task_review", "review_tasks")
+
+#: Minimal, and it is the template's whole job here: `invoke_with_file_output`
+#: formats it with the context plus `output_json_path`/`output_location`, and
+#: what is under test is which *stream* survives a dead child, not what the
+#: child was asked. The real templates are exercised by the review-plan and
+#: review-tasks suites.
+FAN_OUT_PROMPT = "Review {plan_path}. Write to {output_json_path}.\n{output_location}"
+
+#: An answer the model really finished — valid against `validate_suggestion`'s
+#: `REQUIRED_FIELDS` / `VALID_IMPORTANCE` / `VALID_TYPES` — sitting on the stdout
+#: of a run that then exited non-zero. This is the payload that makes the wrong
+#: fix visible, and `_it_would_really_have_been_written` below proves it is not a
+#: straw man by feeding the same bytes in as `output` and watching them land.
+COMPLETE_SUGGESTIONS = json.dumps([
+    {
+        "title": "Retry ladder has no deadline",
+        "desc": "Each retry re-issues the full per-slot timeout.",
+        "importance": "high",
+        "reference": "Section 7.5",
+        "type": "modification",
+    }
+])
+
+
+def _killed_after_streaming(stdout: str, stderr: str = ""):
+    """A `subprocess.run` stand-in that kills the provider CLI **and nothing else**.
+
+    `patch("utils.llm_client.subprocess.run", ...)` does not patch a name private
+    to `llm_client`: `utils.llm_client.subprocess` *is* the stdlib module, so the
+    patch is global for its duration, and `run_single_model` shells out through
+    it before it ever spawns a provider — `utils/git_utils.get_project_root` runs
+    `git rev-parse` on the very first line of the function. The sibling helpers
+    above get away with a blanket `return_value` because a `CompletedProcess` with
+    a non-zero code is something `get_project_root` already tolerates; a blanket
+    `side_effect` does not get away with it, and would kill the repo-root probe
+    instead of the model — a green test about a code path that never ran.
+
+    So `git` is delegated to the real `subprocess.run` and everything else is
+    killed the way the kernel kills a child at the deadline: `TimeoutExpired`
+    carrying the bytes already read off the pipe. Those arrive as **bytes even
+    under `text=True`**, which is why `invoke_with_provider` takes its excerpt
+    from the decoded local rather than from `e.stdout` — encoding that here keeps
+    the fixture honest about the shape the production decode has to handle.
+    """
+    real_run = subprocess.run
+
+    def _run(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", [])
+        if argv and str(argv[0]) == "git":
+            return real_run(*args, **kwargs)
+        raise subprocess.TimeoutExpired(
+            cmd=list(argv),
+            timeout=kwargs.get("timeout") or 1,
+            output=stdout.encode("utf-8"),
+            stderr=stderr.encode("utf-8"),
+        )
+
+    return _run
+
+
+def _drive_real_fanout_failure(
+    tmp_path: Path,
+    lane,
+    *,
+    stdout: str,
+    stderr: str = "",
+    model_spec: str = KILOCODE_SPEC,
+    timing_out: bool = False,
+):
+    """Run one fan-out slot and persist it, with only the process boundary faked.
+
+    Both halves of the change under test, joined the way production joins them.
+    `run_single_model` is the shipping coroutine — real adapter, real argv, real
+    `invoke_with_provider`, real `_attach_stdout_excerpt`, real retry ladder — and
+    the two lines after it are a verbatim copy of what
+    `review_orchestrator_base.run_review_orchestration` does with each entry of
+    `run_all_models`' result dict, `failure_output_from_result` included. Nothing
+    canned passes between them.
+
+    That seam is the point. Every other fan-out test in this file hands
+    `save_model_result` a string directly, which is the right seam for a question
+    about what the *writer* decides; it is the wrong one for this question,
+    because the defect was that the writer was never shown the evidence at all.
+    A canned `details` — or a canned result dict — is free to carry keys the
+    plumbing does not produce, and would assert the two modules agree on
+    `stdout_excerpt` by construction, going on passing after either side moved.
+
+    Args:
+        tmp_path: The test's directory; the plan, the `out_dir` and the phase dir
+            all hang off it.
+        lane: `REVIEW_PLAN_LANE` or `REVIEW_TASKS_LANE`.
+        stdout: What the CLI printed before it lost.
+        stderr: ...and what it wrote to the other channel.
+        model_spec: Resolved for real, so the adapter's own `describe_failure`
+            verdict rides out in `error` exactly as it would live.
+        timing_out: Kill the child at the deadline instead of letting it exit
+            non-zero — the "streamed the answer, then died" case the plan names,
+            and a different branch of `invoke_with_provider`.
+
+    Returns:
+        `(result, phase_dir, saved)` — the `run_single_model` record, the phase
+        directory every artifact lands in, and `save_model_result`'s verdict,
+        which is what `run_review_orchestration` turns into `failed_models`.
+    """
+    phase_name, invoke_phase, salvage_phase_name = lane
+    plan_path = _plan_file(tmp_path)
+    out_dir = tmp_path / "out"
+
+    if timing_out:
+        run_patch = patch(
+            "utils.llm_client.subprocess.run",
+            side_effect=_killed_after_streaming(stdout, stderr),
+        )
+    else:
+        run_patch = patch(
+            "utils.llm_client.subprocess.run",
+            return_value=_dead_process(stdout, stderr),
+        )
+
+    # The ladder retries a timeout, so the sleep between attempts has to be the
+    # test-mode 10 ms rather than the real backoff; every other path here is
+    # terminal and never reaches it.
+    with run_patch, \
+         patch("shutil.which", return_value="/usr/bin/stub-cli"), \
+         patch.dict(os.environ, {"MULTI_LLM_TEST_FAST_BACKOFF": "1"}):
+        result = asyncio.run(base.run_single_model(
+            model_spec=model_spec,
+            plan_path=str(plan_path),
+            prompt_template=FAN_OUT_PROMPT,
+            prompt_context={"plan_path": str(plan_path), "prefix": "plan"},
+            phase_name=phase_name,
+            invoke_phase=invoke_phase,
+            # kilocode's slot has to be wide enough that §7.5 rule 4 dispatches
+            # it: a budget too small for one worst-case attempt of the declared
+            # envelope is refused with nothing spawned, and a refused slot is a
+            # different return with no child output by construction.
+            timeout=1800,
+            out_dir=str(out_dir),
+            prefix="plan",
+        ))
+
+    phase_dir = base.get_phase_dir(plan_path, phase_name)
+    saved = base.save_model_result(
+        "plan", model_spec, result["success"], result["output"], result["error"],
+        str(out_dir), str(phase_dir), salvage_phase_name,
+        failure_output=base.failure_output_from_result(result),
+    )
+    return result, phase_dir, saved
+
+
+class TestTheFanOutBaseReadsTheAnswerTheProviderLeftOnStdout:
+    """Residual item 5, both lanes: `review-plan` and `review-tasks`.
+
+    The sibling class `TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout`
+    asks the same question of `review-code`. This one asks it of the base the
+    other two phases share, where the answer used to be "the gate is never
+    reached" rather than "the gate decides wrongly" — a strictly worse shape,
+    because no gate verdict was printed at all and the operator saw only an error
+    log for a run that had produced a recoverable review.
+
+    Every test drives the real chain through `_drive_real_fanout_failure`, and
+    runs on both lanes, because the base is exactly the kind of code where one
+    lane keeps working and the other quietly stops being covered.
+    """
+
+    def test_a_review_plan_provider_that_streamed_an_array_and_then_died_is_salvaged(
+        self, tmp_path, capsys
+    ):
+        """The case the base was structurally unable to see, on the first lane.
+
+        stdout holds a review array cut off mid-object, stderr holds nothing, the
+        exit code is 1. The assertion is on the salvage request's `raw_output`
+        rather than merely on the `[SALVAGE_NEEDED]` marker, for the reason the
+        site A sibling gives: a marker printed over an empty `raw_output` is worse
+        than no marker, because `build_salvage_prompt`'s "found nothing" fallback
+        is then the only honest answer a subagent can give.
+
+        The model stays **failed** — `save_model_result` returns `False`, which is
+        what `run_review_orchestration` turns into a `failed_models` entry and a
+        `[PARTIAL_RESULTS: ...]` line. Salvage is an offer of repair, never a
+        result.
+        """
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE, stdout=TRUNCATED_ARRAY,
+        )
+
+        assert result["success"] is False
+        # `output` is what gets parsed and written; it must stay empty however
+        # much text the run left behind. `stdout` is that text.
+        assert result["output"] is None
+        assert result["stdout"] == TRUNCATED_ARRAY
+        assert saved is False
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"]
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert request["expected_type"] == "array"
+        assert request["phase"] == "review_plan"
+        assert (phase_dir / f"salvage_task_{stem}.json").exists()
+
+        # The error log is still written, and still names the failure rather than
+        # the salvage: the operator's record of a dead slot does not move because
+        # a repair was offered for it.
+        logged = (phase_dir / f"error_{stem}.log").read_text(encoding="utf-8")
+        assert "kilocode exited with code 1" in logged
+        assert "Salvage: requested" in logged
+
+        # And no result file, on the branch that wrote the request.
+        assert not (phase_dir / f"{stem}.json").exists()
+
+    def test_a_review_tasks_provider_that_streamed_an_array_and_then_died_is_salvaged(
+        self, tmp_path, capsys
+    ):
+        """The second lane, and not a copy for symmetry's sake.
+
+        `review-tasks` reaches the same `run_single_model` and the same
+        `save_model_result` with a different `phase_name`, a different
+        `invoke_phase` and a different salvage `phase` stamp, and those three
+        names are what route the artifacts: the phase dir they land in, the
+        output path `invoke_with_file_output` generates, and the `phase` a salvage
+        subagent reads back out of the request. A fix wired through one lane's
+        constants and not the base would pass the test above and fail here.
+        """
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_TASKS_LANE, stdout=TRUNCATED_ARRAY,
+        )
+
+        assert (result["success"], result["output"], saved) == (False, None, False)
+        assert result["stdout"] == TRUNCATED_ARRAY
+        assert phase_dir.name == "review-tasks"
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" in output
+        assert "[SALVAGE_TASK]" in output
+
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert request["phase"] == "review_tasks"
+        # `output_path` IS the model's result file, which is what makes a
+        # dispatched salvage able to turn this slot into a participant — and what
+        # makes it matter that the branch writing this request never wrote that
+        # file itself.
+        assert request["output_path"] == str(phase_dir / f"{stem}.json")
+        assert (phase_dir / f"salvage_task_{stem}.json").exists()
+        assert not (phase_dir / f"{stem}.json").exists()
+
+    def test_the_kilocode_auth_text_on_stderr_alone_salvages_nothing_in_review_plan(
+        self, tmp_path, capsys
+    ):
+        """The negative, and the proof that stdout-first is a fall-through.
+
+        kilocode's dead account is ANSI-coloured prose on stderr from a CLI that
+        never emitted a byte of answer, so `_attach_stdout_excerpt` omits
+        `stdout_excerpt` entirely rather than setting `""`. Reading stdout *ahead
+        of* stderr must therefore leave stderr reachable: a precedence written as
+        a replacement would blank the gate's input for every provider that dies
+        before speaking, and the right verdict would then be reached for a reason
+        that has nothing to do with the payload — which is the failure mode this
+        whole class exists to stop repeating.
+
+        The error log is still written. That is the half of the close condition
+        that is easy to lose: "no salvage" must not become "no record".
+        """
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE, stdout="", stderr=KILOCODE_AUTH_FAILURE,
+        )
+
+        assert (result["success"], result["output"], saved) == (False, None, False)
+        assert result["stdout"] == ""
+        # The adapter's own `describe_failure` read the dead account off stderr,
+        # so the operator's next move is auth rather than a JSON repair — exactly
+        # the move a salvage request would have stolen.
+        assert "User not found." in result["error"]
+
+        output = capsys.readouterr().out
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        logged = (phase_dir / f"error_{stem}.log").read_text(encoding="utf-8")
+        assert "kilocode exited with code 1" in logged
+        assert "Salvage: requested" not in logged
+        # The stream the gate turned down is in the log, under a heading that
+        # says it is not the model's answer — it is the evidence an operator
+        # needs to tell a dead account from a truncated review.
+        assert "Raw output (failed run):" in logged
+        assert "User not found." in logged
+
+    def test_the_kilocode_auth_text_on_stderr_alone_salvages_nothing_in_review_tasks(
+        self, tmp_path, capsys
+    ):
+        """The negative on the second lane; see the sibling above for the argument."""
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_TASKS_LANE, stdout="", stderr=KILOCODE_AUTH_FAILURE,
+        )
+
+        assert (result["success"], result["output"], saved) == (False, None, False)
+        assert capsys.readouterr().out.count("[SALVAGE_NEEDED]") == 0
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        assert (phase_dir / f"error_{stem}.log").exists()
+        assert not (phase_dir / f"{stem}.json").exists()
+
+    def test_a_banner_on_stderr_does_not_join_the_array_stdout_carried(
+        self, tmp_path, capsys
+    ):
+        """Precedence, not concatenation — the rule stated once, checked in this lane.
+
+        A provider that dies mid-answer usually leaves something on *both*
+        channels: the truncated array on stdout, its launch banner or a teardown
+        traceback on stderr. The obvious repair is to feed the gate
+        `stdout + stderr`, and it is wrong twice: `has_salvageable_json` would see
+        a document whose spans no longer line up, and — worse, because it is
+        silent — `raw_output` would reach the salvage subagent as two documents
+        with no marker saying which one it was asked to repair.
+
+        `failure_output_from_result` is the one place that rule lives for this
+        lane, and its docstring points at `code_review_orchestrator`'s site A as
+        the same rule in the other one. This test is what stops the two drifting.
+        """
+        _, phase_dir, _ = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE,
+            stdout=TRUNCATED_ARRAY, stderr=KILOCODE_AUTH_FAILURE,
+        )
+
+        assert "[SALVAGE_NEEDED]" in capsys.readouterr().out
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert "User not found." not in request["raw_output"]
+
+    def test_a_provider_killed_at_the_deadline_keeps_the_array_it_had_streamed(
+        self, tmp_path, capsys
+    ):
+        """The timeout, which is the case the plan actually names for this site.
+
+        A non-zero exit and a deadline kill reach `run_single_model` by different
+        branches of `invoke_with_provider` — one reads `CompletedProcess.stdout`,
+        the other decodes the bytes `subprocess.run` populates onto the re-raised
+        `TimeoutExpired` — and only the first is covered above. The timeout is
+        also the branch where the loss was most likely in practice: a run killed
+        at the deadline is the run most likely to have emitted most of its answer,
+        and the ladder retries it, so the excerpt that survives must be the *last*
+        attempt's rather than a stale one from the first.
+        """
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE, stdout=TRUNCATED_ARRAY, timing_out=True,
+        )
+
+        assert (result["success"], result["output"], saved) == (False, None, False)
+        assert "timed out" in result["error"]
+        assert result["stdout"] == TRUNCATED_ARRAY
+
+        assert "[SALVAGE_NEEDED]" in capsys.readouterr().out
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8")
+        )
+        assert request["raw_output"] == TRUNCATED_ARRAY
+        assert not (phase_dir / f"{stem}.json").exists()
+
+    def test_a_hard_failure_whose_stdout_parses_is_not_written_as_the_models_review(
+        self, tmp_path, capsys
+    ):
+        """The test the close condition does not name, and the reason this change waited.
+
+        Take the archetype and make the answer *complete*: a provider that
+        finished a well-formed, schema-valid suggestions array on stdout and then
+        exited non-zero anyway — a crash on teardown, a wrapper that mistranslates
+        an exit code, a kill that landed one byte after the closing bracket.
+
+        The one-line fix for residual item 5 is to put the excerpt in `output`.
+        Under it this run parses, validates and is written to `{model}.json`, and
+        reaggregation reads a **crashed** run as a model that reviewed the plan —
+        counted by `SuggestionGroup._recalculate_priority`'s `len(self.models)`
+        exactly like a model that answered. That is the phantom participant of
+        `retire_salvage_artifacts`'s docstring arriving inverted, and it is worse
+        than the silent loss it replaces, because a lost review is visibly absent
+        while an invented one is not.
+
+        So: no result file, and the model still recorded failed. A salvage request
+        is legitimate here and is asserted to exist — the whole point of the split
+        is that the *request* is what a failed run may produce, while the *result*
+        is not. If this test ever goes green by writing `{model}.json`, the change
+        it guards has introduced a worse defect than the one it fixed.
+        """
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_TASKS_LANE, stdout=COMPLETE_SUGGESTIONS,
+        )
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+
+        # The consequence first, deliberately: this is the assertion whose
+        # failure means the defect is back, and a test that trips on a contract
+        # detail three lines earlier reports the wrong thing to whoever broke it.
+        assert not (phase_dir / f"{stem}.json").exists()
+        # Stated as the whole set rather than one `exists()`, because the failure
+        # this guards against is a file *appearing*, and it can appear under a
+        # name this test did not think to check.
+        assert {p.name for p in phase_dir.glob("*.json")} == {
+            f"salvage_{stem}.json", f"salvage_task_{stem}.json",
+        }
+        # Still failed, which is how `run_review_orchestration` keeps it out of
+        # `completed_models`, out of `grouped.json` and in `Failed Reviews`.
+        assert saved is False
+        assert (phase_dir / f"error_{stem}.log").exists()
+        assert "[SALVAGE_NEEDED]" in capsys.readouterr().out
+
+        # And the contract underneath it: the run did not complete, so it has no
+        # `output`; what it left behind travels on `stdout` instead.
+        assert result["success"] is False
+        assert result["output"] is None
+        assert result["stdout"] == COMPLETE_SUGGESTIONS
+
+    def test_the_same_payload_is_one_save_model_result_really_would_have_written(
+        self, tmp_path
+    ):
+        """The proof that the test above is not a straw man.
+
+        `COMPLETE_SUGGESTIONS` has to be a payload `save_model_result` accepts —
+        `extract_json_array` finds it, `json.loads` takes it, and every entry
+        survives `validate_suggestion`'s required fields and value sets. If it did
+        not, "no `{model}.json` was written" would be a statement about a malformed
+        fixture and would keep passing under the very fix it is there to refuse.
+
+        Same bytes, same function, one argument moved: passed as `output` — the
+        answer of a run that *completed* — they land on disk. Passed as
+        `failure_output` they do not. That is the whole distinction residual item
+        5's close condition asks for, in two calls.
+        """
+        phase_dir = tmp_path / "review-tasks"
+        phase_dir.mkdir()
+        stem = base.sanitize_model_name(KILOCODE_SPEC)
+
+        assert base_save_model_result(
+            "plan", KILOCODE_SPEC, True, COMPLETE_SUGGESTIONS, None,
+            str(tmp_path), str(phase_dir), "review_tasks",
+        ) is True
+        written = json.loads(
+            (phase_dir / f"{stem}.json").read_text(encoding="utf-8")
+        )
+        assert len(written) == 1
+        assert written[0]["title"] == "Retry ladder has no deadline"
+
+    def test_the_default_none_leaves_every_existing_caller_exactly_as_it_was(
+        self, tmp_path, capsys
+    ):
+        """`failure_output` is keyword-only and defaults to `None`, and that is load-bearing.
+
+        `review_plan_orchestrator.save_model_result`'s backward-compatible wrapper
+        and every test call site in this suite pass the eight positional arguments
+        and nothing else. For them the hard-failure branch must behave exactly as
+        it did before the parameter existed: the error log, `False`, and not one
+        salvage artifact — because a caller that supplies no failure output is
+        saying "I have no evidence", which is not the same as "there is none to
+        find" and must never be guessed at from `error`.
+        """
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+
+        saved = base_save_model_result(
+            "plan", GEMINI_SPEC, False, None, "gemini exited with code 1",
+            str(tmp_path), str(phase_dir), "review_plan",
+        )
+
+        assert saved is False
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        assert "[SALVAGE_NEEDED]" not in capsys.readouterr().out
+        logged = (phase_dir / "error_gemini_gemini-2_5-flash.log").read_text(
+            encoding="utf-8"
+        )
+        assert "gemini exited with code 1" in logged
+        assert "Salvage: requested" not in logged
+        assert "Raw output" not in logged
