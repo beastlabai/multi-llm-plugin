@@ -14,6 +14,7 @@ path the runner may be unable to open. ``plan_file``, ``grouped_file`` and
 import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -164,6 +165,16 @@ def _prompts():
             plan_text=PLAN_TEXT, repo_root="/repo", plan_name="fixture-plan.md"
         ),
     }
+
+
+def _unwrapped(text: str) -> str:
+    """``text`` with every run of whitespace collapsed to one space.
+
+    Prompt bodies are hard-wrapped, so a test that asserts on a whole sentence
+    would otherwise have to re-encode the wrapping and would break on a reflow
+    that changed no words.
+    """
+    return " ".join(text.split())
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +438,78 @@ class TestEmbeddedContextAndReply:
         assert "never for a claim you could have checked but did not look at" in prompt
         # Capability-neutral: still correct for a runner that cannot read.
         assert "If\nyou cannot read the repository, judge from the records" in prompt
+
+    def test_validation_judges_a_plan_omission_against_the_plan_not_the_tree(self):
+        """"The plan does not specify X" is a claim about the plan text, so a
+        working tree that already does X does not refute it.
+
+        A 2026-09-13 run is the evidence: the same validator called "Car.reset()
+        should clear boost state" *invalid* because "Car.reset() ... already
+        resets boost state", while correctly calling its twin — "the plan should
+        document that reset() grants maxCharges immediately" — valid. Both
+        claims are about what the plan omits; only the verdicts differed. A
+        partially implemented tree is the situation a plan review exists for, so
+        the code already doing X makes the suggestion "document or decide it",
+        not a false positive.
+        """
+        prompt = _unwrapped(build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        ))
+        assert "A claim that the plan or the tasks omit something" in prompt
+        assert (
+            "is judged against the plan or tasks text above, not against the "
+            "working tree"
+        ) in prompt
+        assert "Code that already does X does not make such a claim invalid" in prompt
+        assert "the reason should say that the code already does X" in prompt
+
+    def test_the_omission_rule_keeps_the_read_the_repository_rule(self):
+        """The new rule narrows the old one, it does not replace it: a claim
+        about existing code (a name, a line, current behaviour) is still checked
+        by reading the repository."""
+        prompt = _unwrapped(build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        ))
+        assert "open it and check the claim before answering" in prompt
+        assert "A claim that the plan or the tasks omit something" in prompt
+
+    def test_the_omission_rule_does_not_misstate_the_code_review_case(self):
+        """Code review reuses this generator with CODE_REVIEW_VALIDATION_GUIDANCE
+        and a plan excerpt as context, but there the artifact under review is the
+        diff — so the rule names that case rather than telling a code reviewer to
+        judge a diff against the plan."""
+        prompt = _unwrapped(build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT,
+            suggestion_records=SUGGESTION_RECORDS,
+            extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+        ))
+        assert (
+            "Where the artifact under review is a diff or a code change rather "
+            "than a plan, that change is the text such a claim is judged against."
+        ) in prompt
+        # And the code-review guidance still follows the rule, unchanged.
+        assert _unwrapped(CODE_REVIEW_VALIDATION_GUIDANCE) in prompt
+
+    def test_the_reply_template_offers_no_group_index_number_to_copy(self):
+        """The reply schema shows `group_index` as an unfillable placeholder.
+
+        A literal `"group_index": 0` there gets copied rather than filled in: 18
+        of 32 verdicts in one run, and 41 of 46 in the run before it, came back
+        numbered 0,1,2,3… The hash join absorbs the damage, but the template is
+        where the habit starts.
+        """
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        reply = prompt.split("## Reply", 1)[1]
+        assert '"group_index": <the group\'s group_index value>' in reply
+        assert '"group_index": 0' not in reply
+        assert re.search(r'"group_index":\s*\d', reply) is None
+        # The placeholder replaces a number, not the rule that explains it.
+        assert (
+            "The `group_index` you echo is advisory; the hash is what the "
+            "results are joined on"
+        ) in _unwrapped(reply)
 
     def test_reply_contract_tells_the_subagent_to_echo_each_groups_group_index(self):
         """The reply contract explicitly names `group_index` as the value to

@@ -53,8 +53,14 @@ def generate_group_id(group: Dict[str, Any]) -> str:
     Returns:
         A 16-character hex string identifier
     """
-    # Extract stable identifying fields
-    theme = group.get("theme", "")
+    # Extract stable identifying fields. The theme enters the hash at the
+    # 50-character cut the grouper used to apply when it *built* themes: every
+    # group persisted before 2026-09-13 carries a theme of at most 50 characters
+    # (so this is the identity on it), and a theme built since — cut at a word
+    # boundary within 60, with an ellipsis — hashes to what the old cut would
+    # have produced. A theme is display text; a display change is not an
+    # identity change, and the container goldens bake these ids in.
+    theme = str(group.get("theme", ""))[:50]
     suggestions = group.get("suggestions", group.get("issues", []))
 
     # Normalize suggestions for hashing

@@ -1968,6 +1968,109 @@ class TestCeilings:
         )["effective"] == 1
 
 
+class TestLongestFirstDispatch:
+    """D3i: the biggest batch is dispatched first, and nothing else reorders.
+
+    The tail this removes was measured on the 2026-09-13 review-plan run: eleven
+    validation batches at parallelism 4, per-batch 237/960/1123/895/671/811/610/
+    486/478/545/1076 s, ideal packing 1973 s against an actual 2594 s — the gap
+    being the 1076 s batch running alone at the end because it happened to sit
+    last in ``validation_tasks.json``.
+    """
+
+    #: Prompt sizes in file order. Dispatch must be 5,4,3,2,1 — i.e. tasks
+    #: 1,4,2,3,0 — while everything the caller reads stays 0..4.
+    SIZES = (1, 5, 3, 2, 4)
+
+    def _sized_batches(self, phase_dir: Path):
+        tasks = []
+        for index, size in enumerate(self.SIZES):
+            task = _validation_batch(phase_dir, batch_index=index)
+            # Padding only: the prompt stays a valid validation prompt, and only
+            # its *length* — what `_estimated_cost` ranks on — differs.
+            task["prompt"] += "\n" + ("# pad\n" * (size * 100))
+            tasks.append(task)
+        return tasks
+
+    def test_the_estimate_ranks_on_the_prompt_then_falls_back(self):
+        assert executor._estimated_cost({"prompt": "abcd"}) == 4
+        # No prompt (or an empty one): the coarser proxy for the same quantity.
+        assert executor._estimated_cost({"groups_count": 7}) == 7
+        assert executor._estimated_cost({"prompt": "", "groups_count": 3}) == 3
+        # Nothing to rank on: last, and never above a task that has a size.
+        assert executor._estimated_cost({}) == 0
+
+    def test_equal_costs_keep_the_file_order(self):
+        """A stable tie-break, so a uniform batch dispatches exactly as before."""
+        tasks = [{"task_id": f"t{i}", "prompt": "xxxx"} for i in range(4)]
+        assert [t["task_id"] for t in executor._dispatch_order(tasks)] == [
+            "t0", "t1", "t2", "t3"
+        ]
+
+    def test_the_biggest_batch_goes_first_and_the_report_keeps_file_order(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """One document, two orders: dispatch by size, everything else by file.
+
+        ``dispatch_task`` is replaced by a recorder so the dispatch sequence is
+        observable and deterministic; the ceiling is pinned to one lane for the
+        same reason. Preflight still runs against the real mock CLI, so the
+        batch reaches the gate exactly as a real one does.
+        """
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
+        tasks = self._sized_batches(tmp_path)
+        dispatched = []
+
+        def recording_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+            dispatched.append(task["task_id"])
+            return executor.TaskOutcome(
+                task_id=task["task_id"],
+                kind=task["kind"],
+                runner=runner,
+                status=executor.STATUS_OK,
+                output_path=str(Path(phase_dir) / task["output_name"]),
+            )
+
+        monkeypatch.setattr(executor, "dispatch_task", recording_dispatch)
+        report = executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation", resume=False,
+        )
+
+        ids = [f"validation-batch-{i}" for i in range(5)]
+        # Dispatch: longest first — sizes 5,4,3,2,1 are tasks 1,4,2,3,0.
+        assert dispatched == [ids[1], ids[4], ids[2], ids[3], ids[0]]
+        # The report — and so the merge that reads it — is in the file's order.
+        assert [o.task_id for o in report.outcomes] == ids
+        document = json.loads(
+            (tmp_path / "subagent_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert [row["task_id"] for row in document["tasks"]] == ids
+        # …as is the per-task runner listing, with the schedule on its own line.
+        out = capsys.readouterr().out
+        listed = [
+            line.split("]", 1)[1].strip().split(" ->")[0]
+            for line in out.splitlines()
+            if line.startswith("[exec-subagents]   ")
+        ]
+        assert listed == ids
+        assert (
+            "[exec-subagents] dispatch order (longest first): "
+            + ", ".join(dispatched)
+        ) in out
+
+    def test_output_paths_and_batch_indices_are_untouched(self, tmp_path):
+        """Reordering is a schedule, not a rewrite: the task objects are the same."""
+        tasks = self._sized_batches(tmp_path)
+        before = copy.deepcopy(tasks)
+        ordered = executor._dispatch_order(tasks)
+        assert sorted(id(t) for t in ordered) == sorted(id(t) for t in tasks)
+        assert tasks == before
+        for task in ordered:
+            index = task["batch_index"]
+            assert task["task_id"] == f"validation-batch-{index}"
+            assert task["output_path"].endswith(f"validation_batch_{index}.json")
+
+
 class TestUsageMetrics:
     """D3j: a normalized shape where the provider reports it, absent otherwise."""
 
@@ -2391,6 +2494,41 @@ class TestStructuralModelSpecRefusal:
         # Downgraded to "no warning", never to an exit.
         assert "configured catalog" not in capsys.readouterr().err
 
+    def test_the_session_rung_is_exempt_from_the_configured_catalog_warning(
+        self, runner_env, capsys
+    ):
+        """The configured catalog is the operator's fan-out list; the session's
+        model is one the host is already running.
+
+        Measured 2026-09-13: a `--quick` review from an opencode session on
+        `opencode/nemotron-3-ultra-free` printed `driver.subagent_runner
+        (session) names model 'opencode/nemotron-3-ultra-free', which is not in
+        opencode's configured catalog — dispatching anyway` on every run, which
+        told the user their selected model was suspect. The live catalog leg
+        still judges it; only the advisory providers.yaml warning is silenced,
+        and only for the `session` layer.
+        """
+        runner_env.use("opencode:stub/stub-model")
+        capsys.readouterr()
+        info = executor.preflight_runner(
+            "opencode:stub/stub-model",
+            key="driver.subagent_runner (session)",
+            layer=executor.SESSION_LAYER,
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert info["model"] == "stub/stub-model"
+        assert "configured catalog" not in capsys.readouterr().err
+
+        # Any other layer keeps the warning verbatim.
+        capsys.readouterr()
+        executor.preflight_runner(
+            "opencode:stub/stub-model",
+            key="driver.subagent_runner (project)",
+            layer="project",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert "not in opencode's configured catalog" in capsys.readouterr().err
+
     def test_a_bare_codex_model_is_not_refused(self, tmp_path, runner_env):
         """`provider/model` is opencode's addressing scheme, not a general one."""
         runner_env.use("codex:stub-model")
@@ -2575,6 +2713,50 @@ class TestNestedExecPreflight:
         runner_env.use("codex:gpt-5.5")
         info = executor.preflight_runner("codex:gpt-5.5")
         assert info["nested_exec"] == "allowed"  # default host: claude-code
+
+    def test_the_deadline_is_thirty_seconds_and_is_what_the_probe_waits(
+        self, monkeypatch
+    ):
+        """The probe's dead time is bounded at 30 s, and the spawn is told so.
+
+        A slow free-tier rung cannot buy a verdict by waiting: past this deadline
+        every outcome is ``unknown`` + dispatch anyway, so the only thing a longer
+        budget spends is the batch's wall clock (the 2026-09-13 run paid 120 s of
+        it between the reviewer fan-out and the first validation dispatch).
+        """
+        assert executor.NESTED_PROBE_TIMEOUT_S == 30.0
+        _state, spawned = self._probe(monkeypatch, stdout="ok", exit_code=0)
+        assert spawned[0]["timeout"] == executor.NESTED_PROBE_TIMEOUT_S
+
+    def test_a_timed_out_probe_names_the_deadline_it_waited(
+        self, monkeypatch, capsys
+    ):
+        """The warning renders the constant, so the log never claims a stale 120s."""
+        state, _ = self._probe(monkeypatch, timed_out=True)
+        assert state == "unknown"
+        assert "did not finish within 30s" in capsys.readouterr().err
+
+    def test_a_fast_runner_is_untouched_by_the_shorter_deadline(
+        self, runner_env, monkeypatch
+    ):
+        """A real spawn against the mock CLI still records `allowed` well inside 30 s.
+
+        Fix 1 is a cut to dead time only: a runner that can answer the throwaway
+        turn at all reaches the same verdict it always did. Driven on `codex` the
+        *host* — whose declared legs are unresolved — so the probe really runs,
+        rather than on the default host whose data has already answered.
+        """
+        runner_env.use("opencode:opencode/big-pickle")
+        monkeypatch.setenv("MULTI_LLM_HOST", "codex")
+        executor.reset_version_cache()
+        started = time.monotonic()
+        state = executor._detect_nested_exec(
+            "opencode", "opencode/big-pickle",
+            key="driver.subagent_runner", spec="opencode:opencode/big-pickle",
+        )
+        elapsed = time.monotonic() - started
+        assert state == "allowed"
+        assert elapsed < executor.NESTED_PROBE_TIMEOUT_S
 
 
 @pytest.mark.config_override

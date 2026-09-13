@@ -11,6 +11,7 @@ Tests the following behaviors:
 """
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -414,6 +415,32 @@ class TestBatchPreparationWithGroupId:
         # `"index"` key the reply never asked for.
         assert '"index":' not in prompt
 
+    def test_the_reply_half_of_a_batch_prompt_offers_no_index_to_copy(self, temp_dir):
+        """The request records carry real `group_index` numbers; the reply
+        template must carry none.
+
+        With a literal `"group_index": 0` in the reply schema, models copy the
+        *example* rather than echoing their group's value — 18 of 32 verdicts in
+        one run and 41 of 46 in the run before it came back numbered 0,1,2,3…
+        The hash join absorbs it, but the template is where the habit starts,
+        so the schema now shows an unfillable placeholder.
+        """
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(2)]
+        result = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+        )
+        prompt = result["batches"][0]["prompt"]
+        request_half, reply_half = prompt.split("## Reply", 1)
+        # The records keep their numbers — that is the value to echo ...
+        assert '"group_index": 0' in request_half
+        # ... and the reply template offers no number to copy instead.
+        assert re.search(r'"group_index":\s*\d', reply_half) is None
+        assert '"group_index": <the group\'s group_index value>' in reply_half
+        assert "the hash is what the" in reply_half
+
 
 # ============================================================================
 # Tests for merge_batched_validation_results() with group_id
@@ -560,6 +587,155 @@ class TestMergeBatchedWithGroupId:
 
         assert out.count("[merge] Warning: Batch") == 0
         assert "4 of 8 verdicts echoed a different group_index; all joined by hash" in out
+
+    def test_merge_survives_a_verdict_that_copied_the_reply_placeholder(
+        self, temp_dir, capsys
+    ):
+        """A `group_index` that is not an index joins by hash and is counted,
+        never crashes.
+
+        The reply template shows `group_index` as `<the group's group_index
+        value>` so there is no number to copy; a model that copies the
+        *placeholder* sends that string instead. The echo is advisory, so the
+        merge must treat an unparseable one as "matches nothing" and let the
+        hash do the join.
+        """
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(3)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+        )
+        batch = batch_metadata["batches"][0]
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
+            json.dump({
+                "groups": [
+                    {
+                        "group_index": "<the group's group_index value>",
+                        "group_hash": batch["group_ids"][local_idx],
+                        "status": "valid",
+                        "reason": "OK",
+                        "confidence": 0.9,
+                    }
+                    for local_idx in range(len(batch["group_indices"]))
+                ],
+                "metadata": {"model": "test", "schema_version": "2.1"},
+            }, f)
+
+        capsys.readouterr()
+        merged = merge_batched_validation_results(
+            output_dir=temp_dir, batch_metadata=batch_metadata, total_groups=len(groups)
+        )
+        out = capsys.readouterr().out
+
+        for i, result in enumerate(merged):
+            assert result["group_index"] == i  # repaired from the hash
+            assert result["status"] == "valid"
+        assert "3 of 3 verdicts echoed a different group_index; all joined by hash" in out
+
+    def test_merge_survives_a_placeholder_group_index_with_no_hash(
+        self, temp_dir, capsys
+    ):
+        """Same non-index echo, but with no hash to fall back on: the verdict
+        is unusable, and the merge says so instead of raising TypeError.
+
+        Without a hash the result reaches the index-based fallbacks, whose last
+        one compares the echo against `0 <= i < len(...)` — a comparison a raw
+        string would have blown up on.
+        """
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(4)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+        )
+        batch = batch_metadata["batches"][0]
+        # Two verdicts for a four-group batch, so neither the global-index nor
+        # the positional strategy can claim them: Strategy 4 is what runs.
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
+            json.dump({
+                "groups": [
+                    {
+                        "group_index": "<the group's group_index value>",
+                        "status": "valid",
+                        "reason": "OK",
+                        "confidence": 0.9,
+                    }
+                    for _ in range(2)
+                ],
+                "metadata": {"model": "test", "schema_version": "2.1"},
+            }, f)
+
+        capsys.readouterr()
+        merged = merge_batched_validation_results(
+            output_dir=temp_dir, batch_metadata=batch_metadata, total_groups=len(groups)
+        )
+        out = capsys.readouterr().out
+
+        # Nothing was placed; every group stays revalidatable.
+        assert [r["group_index"] for r in merged] == [0, 1, 2, 3]
+        for result in merged:
+            assert result["status"] == "validation_failed"
+            assert result["recoverable"] is True
+        assert "[merge] Warning: Index -1 out of range" in out
+
+    @pytest.mark.parametrize("echoed,expected", [
+        (3, 3),
+        ("3", 3),
+        (" 3 ", 3),
+        (3.0, 3),
+        (3.5, -1),
+        ("<the group's group_index value>", -1),
+        ("", -1),
+        (None, -1),
+        (True, -1),            # bools are ints in Python; an index they are not
+        ({"group_index": 3}, -1),
+    ])
+    def test_reported_group_index_coercion_table(self, echoed, expected):
+        """Every shape an echo can arrive in resolves to an int or to -1."""
+        from utils.validation import _reported_group_index
+
+        assert _reported_group_index({"group_index": echoed}) == expected
+
+    def test_reported_group_index_falls_back_to_index_then_to_minus_one(self):
+        from utils.validation import _reported_group_index
+
+        assert _reported_group_index({"index": 2}) == 2
+        assert _reported_group_index({}) == -1
+
+    def test_merge_accepts_a_group_index_echoed_as_a_numeric_string(self, temp_dir):
+        """`"2"` is a transcription of a real index, not a copied placeholder,
+        so the index-based fallback still routes on it."""
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(3)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+        )
+        batch = batch_metadata["batches"][0]
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
+            json.dump({
+                "groups": [
+                    {
+                        "group_index": str(gidx),
+                        "status": "valid",
+                        "reason": f"OK {gidx}",
+                        "confidence": 0.9,
+                    }
+                    for gidx in batch["group_indices"]
+                ],
+                "metadata": {"model": "test", "schema_version": "2.1"},
+            }, f)
+
+        merged = merge_batched_validation_results(
+            output_dir=temp_dir, batch_metadata=batch_metadata, total_groups=len(groups)
+        )
+        for i, result in enumerate(merged):
+            assert result["group_index"] == i
+            assert result["reason"] == f"OK {i}"
 
 
 # ============================================================================
