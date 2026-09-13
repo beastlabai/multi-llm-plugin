@@ -582,19 +582,48 @@ def extract_section_contexts(
 
 
 def extract_plan_section_order(plan_content: str) -> List[str]:
-    """Return an ordered list of ``###`` section headers as they appear in the plan.
+    """Return every section header of the plan, in the order it is written.
 
     This captures the plan's original narrative order so the HTML report can
-    offer a "Plan Order" view alongside the priority-sorted view.
+    offer a "Plan Order" view alongside the priority-sorted view — and the
+    report orders *whatever it buckets by*, so a heading the report can bucket
+    under must appear here. Restricted to ``###``, it listed only the numbered
+    task headings: a real 8-task review had six further buckets (Overview,
+    Design Requirements, Implementation Tasks, File Changes, Testing,
+    Priority) carrying 31 suggestion references between them, none of which
+    the "natural" sort could place, so they fell to the arbitrary tail the
+    template appends.
+
+    ``##`` and deeper are the sections; a lone top-level ``#`` is the plan's
+    title, and a section whose text is the whole document is not a section —
+    so level 1 is used only by a plan that has no other heading level.
+    Fenced code is skipped, because a shell comment is not a heading. Repeats
+    are dropped, keeping the first, so the result is usable as a bucket key
+    list.
     """
     if not plan_content:
         return []
-    order: List[str] = []
+    deep: List[str] = []
+    top: List[str] = []
+    fence = ""
     for line in plan_content.splitlines():
         stripped = line.strip()
-        if stripped.startswith("### "):
-            order.append(stripped)
-    return order
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not fence:
+                fence = marker
+            elif fence == marker:
+                fence = ""
+            continue
+        if fence or not stripped.startswith("#"):
+            continue
+        level = len(stripped) - len(stripped.lstrip("#"))
+        if level > 6 or not stripped[level:].startswith(" "):
+            continue  # "#hashtag" and "####### deeper than markdown goes"
+        (top if level == 1 else deep).append(stripped)
+    order = deep or top
+    seen: Set[str] = set()
+    return [ref for ref in order if not (ref in seen or seen.add(ref))]
 
 
 def embed_log_snippets(

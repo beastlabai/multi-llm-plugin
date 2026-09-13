@@ -1,5 +1,6 @@
 """Tests for suggestion processor module."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -7,15 +8,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.suggestion_processor import (
+    DEFAULT_SIMILARITY_THRESHOLD,
     SuggestionGroup,
     extract_suggestions_from_review,
     compute_similarity,
+    compute_section_weights,
     compute_token_weights,
     group_similar_suggestions,
     deduplicate_suggestions,
     merge_suggestions_by_model,
     normalize_tokens,
     filter_by_importance,
+    summarize_theme,
     export_groups_to_json,
     import_groups_from_json,
 )
@@ -172,15 +176,36 @@ class TestComputeSimilarity:
 class TestNormalizeTokens:
     """Tests for token normalization — the input every score is built on."""
 
-    def test_splits_identifiers_and_drops_code_spans(self):
+    def test_splits_identifiers_inside_and_outside_code_spans(self):
         tokens = normalize_tokens(
             "Applying a temporary maxSpeedMultiplier through Physics.integrate() "
             "while `keys.boost` is held"
         )
         assert "max" in tokens and "speed" in tokens and "multiplier" in tokens
         assert "physic" in tokens and "integrat" in tokens
-        # The inline code span is dropped wholesale.
-        assert "keys" not in tokens
+        # A backticked identifier is the most specific thing a reviewer can
+        # name, so it is split like any other identifier rather than dropped.
+        assert "keys" in tokens and "boost" in tokens
+
+    def test_a_code_span_cannot_weld_two_words_together(self):
+        assert normalize_tokens("reset`Car`state") == normalize_tokens(
+            "reset Car state"
+        )
+
+    def test_one_model_backticks_an_identifier_and_another_does_not(self):
+        """The pair the dropped-code-span rule used to keep apart."""
+        quoted = {
+            "title": "Car.reset boost reset not tasked",
+            "desc": "Task 2 does not require resetting boost in `Car.reset()`.",
+        }
+        bare = {
+            "title": "Game-state edge cases not addressed",
+            "desc": "State that Car.reset() clears all boost fields on restart.",
+        }
+        shared = set(normalize_tokens(quoted["desc"])) & set(
+            normalize_tokens(bare["desc"])
+        )
+        assert {"car", "reset"} <= shared
 
     def test_stems_word_families_together(self):
         for surface in ("charge", "charges", "charging", "charged"):
@@ -454,7 +479,7 @@ class TestRealWorldGrouping:
         )
 
         assert real_pair > accidental_pair
-        assert accidental_pair < 0.22 <= real_pair
+        assert accidental_pair < DEFAULT_SIMILARITY_THRESHOLD <= real_pair
 
     def test_grouping_is_order_independent_on_real_data(self):
         """The reaggregate-identity property, on input that actually clusters."""
@@ -466,6 +491,184 @@ class TestRealWorldGrouping:
             shuffled = list(_REAL_ACTIVATION_AND_HUD)
             shuffler.shuffle(shuffled)
             assert self._clusters(group_similar_suggestions(shuffled)) == baseline
+
+
+_TURBO_BOOST = json.loads(
+    (Path(__file__).parent / "fixtures" / "review_plan_turbo_boost.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+class TestTurboBoostReview:
+    """A second real review, audited group by group (2026-09-13).
+
+    Fifty-five suggestions from three reviewers over an eight-task plan. An
+    audit of the shipped 32-group output found fourteen of the sixteen
+    multi-member groups coherent, one mis-merge and a handful of paraphrase
+    pairs left apart; these tests pin the ones the current rules fix, and the
+    coherent groups they had to leave alone.
+    """
+
+    @staticmethod
+    def _clusters(groups):
+        return {frozenset(s["title"] for s in g.suggestions) for g in groups}
+
+    def test_the_whole_review_regroups_to_thirty(self):
+        groups = group_similar_suggestions(_TURBO_BOOST)
+        assert len(_TURBO_BOOST) == 55
+        assert len(groups) == 30
+        assert sum(1 for g in groups if len(g.suggestions) > 1) == 16
+
+    def test_the_particles_finding_leaves_the_nojuice_group(self):
+        """The one mis-merge the audit found, and where the stray belongs.
+
+        "Visual feedback requirements contradict optional particles" asks
+        whether particles are in v1. It was filed with two findings about
+        gating effects behind ``?nojuice`` — it shares "visual" with one of
+        their titles and nothing else — while the two findings that are also
+        about whether particles ship sat in their own group.
+        """
+        clusters = self._clusters(group_similar_suggestions(_TURBO_BOOST))
+
+        assert frozenset({
+            "Particle trail ship criteria missing",
+            "Particle trail under-specified and likely over-scope",
+            "Visual feedback requirements contradict optional particles",
+        }) in clusters
+
+    def test_the_juice_convention_finding_joins_the_nojuice_group(self):
+        """Three models on one question: must boost cosmetics respect ?nojuice."""
+        clusters = self._clusters(group_similar_suggestions(_TURBO_BOOST))
+
+        assert frozenset({
+            "No ?nojuice handling for boost FX",
+            "Visual effects ignore nojuice gating",
+            "Cosmetic boost values bypass the juice convention",
+        }) in clusters
+
+    def test_the_car_reset_findings_merge(self):
+        """One model backticked ``Car.reset()``; the other did not.
+
+        The fifth bullet of "Game-state and track edge cases not addressed" is
+        "that Car.reset() clears all boost fields" — the whole subject of
+        "Car.reset boost reset not tasked".
+        """
+        clusters = self._clusters(group_similar_suggestions(_TURBO_BOOST))
+
+        assert frozenset({
+            "Game-state and track edge cases not addressed",
+            "Pause and reset behavior is underspecified",
+            "Car.reset boost reset not tasked",
+        }) in clusters
+
+    def test_the_coherent_groups_are_left_alone(self):
+        """Every group the audit passed still comes out whole.
+
+        The lap-hook pair is the one to watch: "Boosted lap times invalidate
+        persisted best lap" and "First-lap charge grant unspecified" both share
+        its section and much of its vocabulary, and a threshold a hair lower
+        pulls them in.
+        """
+        clusters = self._clusters(group_similar_suggestions(_TURBO_BOOST))
+
+        for coherent in (
+            {"Activation edge vs. held-key semantics left undefined",
+             "Activation needs edge-trigger semantics",
+             "Activation semantics not defined"},
+            {"Boost key binding still ambiguous",
+             "Shift key cannot reach the input handler",
+             "Shift key conflicts with existing input flow"},
+            {"Opponent balance impact is unresolved",
+             "Opponent parity left as an open coin flip",
+             "Optional opponent boost unresolved"},
+            {"Recharge model left undecided",
+             "Recharge model never actually decided",
+             "Recharge model remains undecided"},
+            {"Acceptance criteria are missing",
+             "No acceptance criteria or definition of determinism"},
+            {"Timing hook integration may break existing behavior",
+             "Wrong lap-completion hook named"},
+        ):
+            assert frozenset(coherent) in clusters, sorted(coherent)
+
+    def test_grouping_is_order_independent_on_the_whole_review(self):
+        import random
+
+        baseline = self._clusters(group_similar_suggestions(_TURBO_BOOST))
+        shuffler = random.Random(20260913)
+        for _ in range(5):
+            shuffled = list(_TURBO_BOOST)
+            shuffler.shuffle(shuffled)
+            assert self._clusters(group_similar_suggestions(shuffled)) == baseline
+
+
+class TestSectionRarity:
+    """The ``reference`` tiebreak is worth what the section is worth."""
+
+    def test_a_rare_section_outweighs_a_crowded_one(self):
+        crowded = [
+            {"title": f"Finding {i}", "desc": f"Body {i}", "reference": "### 4. Physics"}
+            for i in range(10)
+        ]
+        rare = [
+            {"title": "Finding A", "desc": "Body A", "reference": "### 6. HUD"},
+            {"title": "Finding B", "desc": "Body B", "reference": "### 6. HUD"},
+        ]
+        weights = compute_section_weights(crowded + rare)
+
+        assert weights["6. hud"] > weights["4. physics"]
+        # Same texts, same sections shared: only the rarity differs.
+        assert compute_similarity(rare[0], rare[1], {}, weights) > compute_similarity(
+            crowded[0], crowded[1], {}, weights
+        )
+
+    def test_a_bare_slash_inside_a_heading_is_not_a_separator(self):
+        one = {"reference": "### 5. Visual/Audio Effects (Juice)"}
+        weights = compute_section_weights([one, dict(one)])
+
+        assert list(weights) == ["5. visual/audio effects (juice)"]
+
+    def test_a_delimited_slash_still_names_two_sections(self):
+        composite = {"reference": "## Design Requirements / ### 7. Lap Integration"}
+
+        assert set(compute_section_weights([composite])) == {
+            "design requirements",
+            "7. lap integration",
+        }
+
+
+class TestSummarizeTheme:
+    """A theme is a label a reader can use, not a title cut mid-word."""
+
+    def test_a_short_title_is_unchanged(self):
+        assert summarize_theme("Boost key binding still ambiguous") == (
+            "Boost key binding still ambiguous"
+        )
+
+    def test_a_title_that_exactly_fits_keeps_its_last_character(self):
+        title = "T003 does not name the lockout threshold under test"
+        assert summarize_theme(title) == title
+
+    def test_a_long_title_is_cut_at_a_word_boundary(self):
+        theme = summarize_theme(
+            "Activation edge vs. held-key semantics left undefined for opponents"
+        )
+
+        assert theme == "Activation edge vs. held-key semantics left undefined for…"
+        assert not theme.rstrip("…").endswith(" ")
+        # The old hard slice cut "undefined" in half at 50 characters.
+        assert "undefi…" not in theme
+
+    def test_an_empty_title_falls_back(self):
+        assert summarize_theme("") == "Untitled"
+        assert summarize_theme(None) == "Untitled"
+
+    def test_a_title_with_no_usable_boundary_is_still_bounded(self):
+        theme = summarize_theme("x" * 200)
+
+        assert theme.endswith("…")
+        assert len(theme) <= 61
 
 
 class TestDeduplicate:
@@ -528,3 +731,31 @@ class TestExportImport:
         restored = import_groups_from_json(json_str)
 
         assert len(restored) == len(groups)
+
+
+class TestThemeIsDisplayNotIdentity:
+    """`summarize_theme` changed what a theme looks like, not what a group is.
+
+    `state_manager.generate_group_id` hashes the theme at the legacy
+    50-character cut, so a group whose theme grew from `title[:50]` to the
+    word-boundary form keeps the id the container goldens bake in
+    (`coverage_suggestions.json` → `ef911087fcf05304`, measured 2026-09-13).
+    """
+
+    def test_a_longer_theme_hashes_like_its_fifty_char_cut(self):
+        from utils.state_manager import generate_group_id
+
+        title = "T003 does not name the lockout threshold under test"  # 51 chars
+        assert len(title) == 51
+        suggestions = [{"type": "addition", "reference": "T003", "desc": "x"}]
+        new_style = {"theme": title, "suggestions": suggestions}
+        legacy = {"theme": title[:50], "suggestions": suggestions}
+        assert generate_group_id(new_style) == generate_group_id(legacy)
+
+    def test_a_theme_change_inside_the_cut_still_changes_the_id(self):
+        from utils.state_manager import generate_group_id
+
+        suggestions = [{"type": "addition", "reference": "T003", "desc": "x"}]
+        a = {"theme": "Recharge model left undecided", "suggestions": suggestions}
+        b = {"theme": "Recharge model decided", "suggestions": suggestions}
+        assert generate_group_id(a) != generate_group_id(b)

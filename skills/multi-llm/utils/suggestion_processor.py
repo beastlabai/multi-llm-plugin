@@ -158,13 +158,21 @@ def _infer_type(text: str) -> str:
 # explainable — no embeddings, no model call, no corpus but the suggestions
 # being grouped:
 #
-#   1. Text is reduced to *content tokens*: lowercased, inline code spans
-#      dropped, identifiers split on camelCase/dots/underscores
-#      (``maxSpeedMultiplier`` → ``max speed multiplier``), punctuation
-#      stripped, generic English stopwords and review boilerplate removed
-#      ("specify", "undefined", "add", "plan", "task" …, which every review
-#      suggestion says and none of them means), then lightly stemmed
-#      (``charges``/``charging``/``charged`` → ``charg``).
+#   1. Text is reduced to *content tokens*: lowercased, identifiers split on
+#      camelCase/dots/underscores (``maxSpeedMultiplier`` → ``max speed
+#      multiplier``), punctuation stripped, generic English stopwords and
+#      review boilerplate removed ("specify", "undefined", "add", "plan",
+#      "task" …, which every review suggestion says and none of them means),
+#      then lightly stemmed (``charges``/``charging``/``charged`` → ``charg``).
+#      Inline code spans are tokenized like prose rather than dropped: a
+#      backticked identifier is the *most* specific thing a reviewer can name,
+#      and two reviewers who both write ``Car.reset()`` or ``#boost-meter``
+#      agree about something no paraphrase of theirs shares. Dropping them
+#      cost real merges — on the 2026-09-13 racing-game review one model put
+#      ``Car.reset()`` in backticks and the other in prose, and their two
+#      findings about resetting boost state never met. The ubiquitous ones
+#      (``CONFIG``, the plan's own subject) are handled by rule 2, not by a
+#      blanket exclusion.
 #   2. Every token is weighted by how *rare* it is in the set being grouped
 #      (inverse document frequency). In a review of a boost feature, "boost"
 #      is in 43 of 56 suggestions and separates nothing, while "particle" or
@@ -175,12 +183,23 @@ def _infer_type(text: str) -> str:
 #      body's ~40), but the body still has to agree: an accidental title
 #      overlap ("Boost activation semantics undefined" vs. "Opponent boost
 #      scope undefined") is exactly what a title-only score gets wrong.
+#      A *rare* word in both titles gets a small channel of its own (0.04):
+#      two titles that both say "particles", "HUD" or "reset" are naming the
+#      same subject, and dice — which divides by both titles' total mass —
+#      dilutes that signal to nothing when one of the two titles is long.
+#      Only words rarer than roughly a fifth of the set count, so "boost" in
+#      a boost review, or "lap" in a plan with a lap section, never does.
 #   4. ``reference``/``section`` — or, for a code-review finding, the file it
 #      is anchored to — is a weak tiebreak (0.08) and a matching ``type`` is a
 #      weaker one (0.02): types are model-assigned and noisy, so a type match
 #      can only settle a near-tie, never carry a merge (the previous flat 0.2
-#      bonus put half of a 0.4 threshold on it). Two findings naming
-#      *different* files never merge at all.
+#      bonus put half of a 0.4 threshold on it). The section bonus is scaled
+#      by the section's own rarity for the same reason tokens are: "### 4.
+#      Physics Integration", cited by 14 of 55 suggestions, separates nothing,
+#      while "### 6. HUD Updates", cited by three, separates a lot. Flat, it
+#      was a systematic bonus handed to every pair inside the review's biggest
+#      section — which is where the near-threshold false pairs live. Two
+#      findings naming *different* files never merge at all.
 # ---------------------------------------------------------------------------
 
 #: Generic English function words — they say nothing about *what* a
@@ -225,16 +244,30 @@ _WORD_CHUNK = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]*")
 _SUB_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
 
 #: Component weights. They sum to 1.0, so a score is always in [0, 1].
-WEIGHT_TITLE = 0.35
-WEIGHT_BODY = 0.55
+WEIGHT_TITLE = 0.33
+WEIGHT_BODY = 0.53
 WEIGHT_REFERENCE = 0.08
 WEIGHT_TYPE = 0.02
+WEIGHT_TITLE_RARITY = 0.04
 
-#: Tuned on a real 56-suggestion, 3-reviewer plan review (see
-#: ``tests/test_suggestion_processor.py::TestRealWorldGrouping``). The usable
-#: band is wide — 0.19–0.23 produce the same clusters on that data — so this
-#: sits in the middle of a plateau rather than on a cliff.
-DEFAULT_SIMILARITY_THRESHOLD = 0.22
+#: An IDF at or above this counts a shared title word as *naming the subject*
+#: rather than as vocabulary. ``log(1 + N/(1+df)) >= 1.6`` is roughly
+#: "at most a fifth of the set uses it" for a review-sized N, and for a small
+#: set it is unreachable by any word two suggestions share — so the channel is
+#: inert on the handful-of-suggestions inputs where no frequency is meaningful.
+TITLE_RARITY_FLOOR = 1.6
+
+#: The IDF at which a rarity channel saturates — one word this rare is all the
+#: evidence the channel can offer. ``log(1 + N/(1+df))`` reaches 3.0 at about
+#: two occurrences in fifty.
+RARITY_FULL = 3.0
+
+#: Tuned on two real 3-reviewer plan reviews (see
+#: ``tests/test_suggestion_processor.py::TestRealWorldGrouping``). On the
+#: 55-suggestion 2026-09-13 review the band that keeps every coherent group
+#: intact is 0.196–0.205, and this sits in it: below 0.196 a third finding
+#: joins the lap-hook pair, above 0.205 the game-state pair comes apart.
+DEFAULT_SIMILARITY_THRESHOLD = 0.20
 
 
 def _stem(word: str) -> str:
@@ -258,11 +291,19 @@ def _stem(word: str) -> str:
 _REVIEW_STEMS = frozenset(_stem(word) for word in _REVIEW_WORDS)
 
 
+def _uncode(match: "re.Match") -> str:
+    """Unwrap an inline code span, keeping its identifiers as ordinary words.
+
+    Surrounded by spaces so ``foo`bar`baz`` cannot weld two words together.
+    """
+    return " " + match.group(0).strip("`") + " "
+
+
 def normalize_tokens(text: str) -> List[str]:
     """Reduce free text to comparable content tokens (see the note above)."""
     if not text:
         return []
-    text = _CODE_SPAN.sub(" ", text)
+    text = _CODE_SPAN.sub(_uncode, text)
     tokens: List[str] = []
     for chunk in _WORD_CHUNK.findall(text):
         for part in _SUB_WORD.findall(chunk):
@@ -320,11 +361,15 @@ def _reference_tokens(suggestion: Dict[str, Any]) -> set:
     """Each section a suggestion cites, as a normalized set.
 
     A composite reference (``"## Design Requirements / ### 7. Lap Integration"``)
-    names two sections and is split on ``/`` and ``,``, the same way the report
-    buckets it.
+    names two sections and is split on a *delimited* ``/`` or on ``,`` — the
+    same rule ``html_report_generator.split_section_refs`` buckets by, so a
+    bare slash inside a heading (``"### 5. Visual/Audio Effects (Juice)"``)
+    stays one section. Splitting it made a review's single most-cited section
+    look like two, and two suggestions citing it looked like they agreed
+    twice.
     """
     raw = str(suggestion.get("reference", suggestion.get("section", "")) or "")
-    parts = re.split(r"\s*/\s*|\s*,\s*", raw)
+    parts = re.split(r"\s+/\s+|\s*,\s*", raw)
     return {part.strip().lstrip("#").strip().lower() for part in parts if part.strip()}
 
 
@@ -348,6 +393,29 @@ def compute_token_weights(suggestions: Iterable[Dict[str, Any]]) -> Dict[str, fl
     return {
         token: math.log(1.0 + total / (1.0 + count))
         for token, count in document_frequency.items()
+    }
+
+
+def compute_section_weights(
+    suggestions: Iterable[Dict[str, Any]]
+) -> Dict[str, float]:
+    """Inverse document frequency of every cited section across ``suggestions``.
+
+    The same measure as ``compute_token_weights``, over the sections a review
+    cites rather than the words it uses, and it answers the same question: a
+    plan's busiest section is where most of its findings land and says nothing
+    about which of them are the same finding, while a section only three
+    suggestions reach is a strong hint that those three are about one thing.
+    """
+    total = 0
+    document_frequency: Dict[str, int] = {}
+    for suggestion in suggestions:
+        total += 1
+        for section in _reference_tokens(suggestion):
+            document_frequency[section] = document_frequency.get(section, 0) + 1
+    return {
+        section: math.log(1.0 + total / (1.0 + count))
+        for section, count in document_frequency.items()
     }
 
 
@@ -382,6 +450,39 @@ def _overlap(a: set, b: set) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
+def _section_agreement(
+    a: set, b: set, section_weights: Optional[Mapping[str, float]]
+) -> float:
+    """Containment over cited sections, scaled by how rare those sections are.
+
+    With no weights (a one-off ``compute_similarity``) this is the plain
+    containment it has always been — there is no set to measure rarity over.
+    """
+    base = _overlap(a, b)
+    if base <= 0.0 or not section_weights:
+        return base
+    shared = a & b
+    mean = sum(section_weights.get(section, 1.0) for section in shared) / len(shared)
+    return base * min(1.0, mean / RARITY_FULL)
+
+
+def _title_rarity(a: set, b: set, token_weights: Optional[Mapping[str, float]]) -> float:
+    """How much distinctive vocabulary the two titles literally share.
+
+    Only tokens at or above ``TITLE_RARITY_FLOOR`` count, so this fires on
+    "particles" and not on the word the whole review is about. With no weights
+    every token is 1.0, below the floor, and the channel is silent.
+    """
+    if not token_weights:
+        return 0.0
+    mass = sum(
+        weight
+        for weight in (token_weights.get(token, 1.0) for token in (a & b))
+        if weight >= TITLE_RARITY_FLOOR
+    )
+    return min(1.0, mass / RARITY_FULL) if mass > 0 else 0.0
+
+
 def _prepare(suggestion: Dict[str, Any]) -> Tuple[set, set, set, str, str]:
     """Tokenize a suggestion once, for repeated pairwise comparison."""
     title = set(normalize_tokens(str(suggestion.get("title", "") or "")))
@@ -399,6 +500,7 @@ def _similarity(
     a: Tuple[set, set, set, str, str],
     b: Tuple[set, set, set, str, str],
     token_weights: Optional[Mapping[str, float]],
+    section_weights: Optional[Mapping[str, float]] = None,
 ) -> float:
     """Score two prepared suggestions."""
     if _files_disagree(a[4], b[4]):
@@ -418,8 +520,9 @@ def _similarity(
     score = (
         WEIGHT_TITLE * _weighted_dice(a[0], b[0], token_weights)
         + WEIGHT_BODY * _weighted_cosine(a[1], b[1], token_weights)
-        + WEIGHT_REFERENCE * _overlap(a[2], b[2])
+        + WEIGHT_REFERENCE * _section_agreement(a[2], b[2], section_weights)
         + WEIGHT_TYPE * (1.0 if a[3] and a[3] == b[3] else 0.0)
+        + WEIGHT_TITLE_RARITY * _title_rarity(a[0], b[0], token_weights)
     )
     return min(1.0, score)
 
@@ -428,6 +531,7 @@ def compute_similarity(
     s1: Dict[str, Any],
     s2: Dict[str, Any],
     token_weights: Optional[Mapping[str, float]] = None,
+    section_weights: Optional[Mapping[str, float]] = None,
 ) -> float:
     """
     Compute a meaning-tracking similarity score between two suggestions.
@@ -439,12 +543,46 @@ def compute_similarity(
             ``compute_token_weights()`` over the whole set being grouped.
             Omitted (the default), every token counts the same — fine for a
             one-off comparison, weaker for clustering, which is why
-            ``group_similar_suggestions`` always passes one.
+            ``group_similar_suggestions`` always passes one. Without it the
+            title-rarity channel is silent: rarity is a property of a set.
+        section_weights: Optional section → weight map from
+            ``compute_section_weights()``. Omitted, a shared section scores
+            plain containment, as it did before sections were weighted.
 
     Returns:
         Similarity score between 0 and 1
     """
-    return _similarity(_prepare(s1), _prepare(s2), token_weights)
+    return _similarity(_prepare(s1), _prepare(s2), token_weights, section_weights)
+
+
+#: A theme is a label, not a sentence — it goes in a heading, a table cell and
+#: a validation prompt, all of which need it short. Sixty characters is about
+#: what fits without wrapping, and most suggestion titles are shorter.
+THEME_MAX_CHARS = 60
+
+
+def summarize_theme(title: Any) -> str:
+    """A group's theme: its representative's title, cut at a word boundary.
+
+    A title that fits comes through untouched. A longer one is cut back to the
+    last whole word inside the budget and marked with an ellipsis, so the label
+    reads as a shortened title rather than as a typo — a hard ``[:50]`` slice
+    produced "Activation edge vs. held-key semantics left undefi", which is
+    what a reader has to decode before they can use it.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return "Untitled"
+    if len(text) <= THEME_MAX_CHARS:
+        return text
+    cut = text[:THEME_MAX_CHARS]
+    boundary = cut.rfind(" ")
+    # Refuse a boundary that would throw away most of the budget: a title whose
+    # first "word" is longer than that is a path or an identifier, and half of
+    # it still identifies the group better than nothing does.
+    if boundary >= THEME_MAX_CHARS // 2:
+        cut = cut[:boundary]
+    return cut.rstrip(" \t,;:.-–—") + "…"
 
 
 def group_similar_suggestions(
@@ -512,6 +650,7 @@ def group_similar_suggestions(
     count = len(suggestions)
 
     token_weights = compute_token_weights(suggestions)
+    section_weights = compute_section_weights(suggestions)
     prepared = [_prepare(s) for s in suggestions]
 
     # Cluster state. A cluster is identified by the index of its
@@ -532,7 +671,9 @@ def group_similar_suggestions(
 
     for i in range(count):
         for j in range(i + 1, count):
-            score = _similarity(prepared[i], prepared[j], token_weights)
+            score = _similarity(
+                prepared[i], prepared[j], token_weights, section_weights
+            )
             pair_similarity[(i, j)] = score
             _offer(i, j, score)
 
@@ -570,7 +711,7 @@ def group_similar_suggestions(
         representative = suggestions[cluster[0]]
         group = SuggestionGroup(
             category=representative.get("type", "improvement"),
-            theme=representative.get("title", "Untitled")[:50],
+            theme=summarize_theme(representative.get("title", "Untitled")),
         )
         for idx in cluster:
             suggestion = suggestions[idx]

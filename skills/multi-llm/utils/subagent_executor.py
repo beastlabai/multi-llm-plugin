@@ -911,9 +911,24 @@ NESTED_PROBE_PROMPT = (
 )
 
 #: Wall-clock budget for that probe. Long enough for a cold agent CLI start plus
-#: one trivial turn, short enough that a wedged sandbox fails the preflight
-#: rather than consuming the batch's own budget.
-NESTED_PROBE_TIMEOUT_S = 120.0
+#: one trivial turn, short enough that a wedged sandbox — or merely a slow
+#: runner — fails the preflight rather than consuming the batch's own budget.
+#:
+#: **Why 30 s and not the 120 s this used to be.** The deadline only ever decides
+#: how long an *inconclusive* probe is allowed to stall the batch: everything it
+#: can still learn after the first seconds is ``allowed``, and ``allowed`` and
+#: ``unknown`` dispatch identically. The three verdicts that actually refuse — a
+#: launch error (the child never started), a login notice, an egress failure —
+#: are all decided before the runner's first token, so no denial needs a long
+#: window to surface. What a long window buys is dead time, and the 2026-09-13
+#: review-plan run measured it: on ``opencode:opencode/nemotron-3-ultra-free``
+#: (a free-tier rung where a one-word ``opencode run`` reply takes ~62 s idle,
+#: and longer behind a reviewer fan-out) the probe blew the 120 s deadline
+#: anyway, so the run paid 120 s of wall clock between the fan-out and the first
+#: validation dispatch to record the same ``unknown`` a 30 s deadline would have
+#: recorded 90 s sooner. 30 s still clears a cold CLI start plus a trivial turn
+#: on every runner fast enough for the verdict to mean anything.
+NESTED_PROBE_TIMEOUT_S = 30.0
 
 #: Wall-clock budget for the D6 sandbox self-test (`sandbox_probe_command`).
 #: The command is model-free — codex's runs in ~30 ms — so ten seconds is
@@ -1078,6 +1093,7 @@ def preflight_runner(
     key: str = "driver.subagent_runner",
     anchor: Optional[str] = None,
     check_version: bool = True,
+    layer: Optional[str] = None,
     check_auth: bool = True,
     check_nested: bool = True,
     probe_nested: bool = True,
@@ -1177,7 +1193,12 @@ def preflight_runner(
         catalogued = is_model_valid(spec, anchor=anchor)
     except Exception:  # noqa: BLE001 - an advisory read may not end a run
         catalogued = True
-    if not catalogued:
+    # The session rung is exempt: the configured catalog is the operator's list
+    # of fan-out models in providers.yaml, and the session's own model is by
+    # definition one the host is already running — warning that it is "not
+    # configured" told an opencode user their selected model was suspect on
+    # every run. The live catalog leg (`_detect_model`) still judges it.
+    if not catalogued and layer != SESSION_LAYER:
         print(
             f"multi-llm warning: {key} names model {model!r}, which is not in "
             f"{provider_name}'s configured catalog — dispatching anyway.",
@@ -3982,7 +4003,7 @@ def _preflight_batch_runners(
         spec, (task_id, key, layer) = pending[0]
         try:
             versions[spec] = preflight_runner(
-                spec, profile=profile, anchor=anchor, key=key
+                spec, profile=profile, anchor=anchor, key=key, layer=layer
             )["version"]
             continue
         except RunnerRejected as exc:
@@ -4020,6 +4041,66 @@ def _preflight_batch_runners(
             }
 
 
+def _estimated_cost(task: Dict[str, Any]) -> int:
+    """How expensive this task looks *before* it runs, for dispatch order only.
+
+    The prompt's length is the whole of it. A subagent turn is dominated by the
+    tokens the runner has to read and reason over, and for every materialized
+    kind the prompt is where those tokens are: a validation batch's prompt
+    carries its grouped suggestions inline, an implement task's carries its step.
+    Nothing here reads the clock or the provider, so the estimate is free, stable
+    across resumes and identical on every host.
+
+    ``groups_count`` is the fallback for a task whose prompt is absent or
+    non-textual — a coarser proxy for the same quantity — and ``0`` (dispatch it
+    last, order unchanged among its peers) when neither says anything. This is a
+    *ranking*, never a prediction: it is wrong only by mis-ordering a batch that
+    would otherwise have been ordered by an accident of file position.
+    """
+    prompt = task.get("prompt")
+    if isinstance(prompt, str) and prompt:
+        return len(prompt)
+    groups = task.get("groups_count")
+    if isinstance(groups, int) and not isinstance(groups, bool) and groups > 0:
+        return groups
+    return 0
+
+
+def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The same tasks, longest-first, for **dispatch scheduling only** (D3i).
+
+    Longest-processing-time-first is the classic answer to the tail this fixes.
+    The batch runs as ``ceil(tasks / parallelism)`` waves, so whatever is
+    dispatched last runs with the lanes beside it emptying out; dispatch in file
+    order and the last task in the file gets that slot no matter how big it is.
+    The 2026-09-13 review-plan run is the worked example: eleven validation
+    batches at parallelism 4, per-batch 237/960/1123/895/671/811/610/486/478/545/
+    1076 s, ideal packing 1973 s, actual 2594 s — the 621 s gap is almost exactly
+    batch 10 (1076 s) running alone at the end because it happened to be last in
+    ``validation_tasks.json``. Dispatching it first puts it in the first wave,
+    where three lanes run beside it.
+
+    **Only the dispatch order changes.** Task ids, ``batch_index``,
+    ``output_path``, the merge, and ``tasks[]`` in ``subagent_batch_report.json``
+    all keep the task file's own order — :func:`run_tasks` re-indexes the
+    outcomes by ``task_id`` against its original ``selected`` list, so this
+    function's return value never reaches an artifact. The tie-break is the
+    original index, so a batch whose tasks all estimate the same (or that has one
+    task) is dispatched in exactly the order it always was.
+    """
+    ordered = sorted(
+        enumerate(tasks), key=lambda row: (-_estimated_cost(row[1]), row[0])
+    )
+    if [index for index, _ in ordered] != list(range(len(tasks))):
+        print(
+            "[exec-subagents] dispatch order (longest first): "
+            + ", ".join(
+                str(task.get("task_id", index)) for index, task in ordered
+            )
+        )
+    return [task for _index, task in ordered]
+
+
 def run_tasks(
     tasks: Sequence[Dict[str, Any]],
     *,
@@ -4042,6 +4123,13 @@ def run_tasks(
     config that may have changed mid-run. The effective ceilings are logged once
     at batch start alongside each task's runner, so a slow batch is diagnosable
     from the log rather than inferred.
+
+    Tasks are *dispatched* longest-first (:func:`_dispatch_order`) so the biggest
+    one never runs alone in the final wave. Everything the caller can observe
+    stays in the task file's order: ``report.outcomes`` below is rebuilt by
+    walking ``selected``, so ``tasks[]`` in the report, the merge that reads it
+    and the per-task runner listing on stdout are all in the order the tasks were
+    materialized.
     """
     selected = list(tasks)
     if only_task_ids is not None:
@@ -4085,12 +4173,16 @@ def run_tasks(
         f"host={report.ceilings['host_max_concurrent_subagents']}, "
         f"provider={report.ceilings['provider_max_concurrent']})"
     )
+    # Listed in the task file's own order — this is the batch's runner map, not
+    # its schedule, and a reader matching it against `validation_tasks.json` or
+    # against `tasks[]` in the report must find the same sequence in all three.
+    # The schedule is the separate line `_dispatch_order` prints when it differs.
     for task_id, spec in runners.items():
         version = report.runner_versions.get(spec, "unknown")
         print(f"[exec-subagents]   {task_id} -> {spec} (version {version})")
 
     outcomes = _run_sync(_gather(
-        selected,
+        _dispatch_order(selected),
         runners=runners,
         phase_dir=phase_dir,
         anchor=anchor,

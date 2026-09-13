@@ -335,14 +335,35 @@ class TestSaveValidationResults:
             output_path = Path(tmpdir) / "validation.json"
             validation_results = [
                 {"group_index": 0, "status": "valid", "reason": "A", "_source_model": "opencode/big-pickle"},
-                {"group_index": 1, "status": "valid", "reason": "B", "_source_model": "big-pickle"},
+                {"group_index": 1, "status": "valid", "reason": "B", "_source_model": "claude-code:sonnet"},
             ]
             save_validation_results(validation_results, output_path)
 
             with open(output_path, 'r', encoding="utf-8") as f:
                 data = json.load(f)
 
-            assert data["metadata"]["model"] == "big-pickle,opencode/big-pickle"
+            assert data["metadata"]["model"] == "claude-code:sonnet,opencode/big-pickle"
+
+    def test_model_derivation_collapses_a_bare_spelling_into_its_prefixed_sibling(self):
+        """A subagent names its own model free-hand: the same runner answered
+        one batch as `nemotron-3-ultra-free` and the next as
+        `opencode/nemotron-3-ultra-free` (measured 2026-09-13). A bare name that
+        is the model half of a prefixed sibling is that sibling, not a second
+        model, so the merged metadata names one model."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "A", "_source_model": "opencode/nemotron-3-ultra-free"},
+                {"group_index": 1, "status": "valid", "reason": "B", "_source_model": "nemotron-3-ultra-free"},
+                {"group_index": 2, "status": "valid", "reason": "C", "_source_model": "big-pickle"},
+            ]
+            save_validation_results(validation_results, output_path)
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            # `big-pickle` has no prefixed sibling here, so it stays as reported.
+            assert data["metadata"]["model"] == "big-pickle,opencode/nemotron-3-ultra-free"
 
     def test_model_falls_back_to_unknown_with_no_provenance_at_all(self):
         """No `_source_model` anywhere and no explicit model -> "unknown", the

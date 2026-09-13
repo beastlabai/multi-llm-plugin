@@ -1,0 +1,387 @@
+[
+  {
+    "title": "Shift key cannot reach the input handler",
+    "desc": "The plan proposes 'Shift or Space' as the activation key, but Input.init() in index.html (~line 936) returns early on every lone-modifier keydown (`if (e.key === 'Shift' || 'Control' || 'Alt' || 'Meta') return;`) before _onKey() runs. A `case 'ShiftLeft'/'ShiftRight'` in _onKey therefore never sets the key true on press (only keyup, which is ungated, would clear it) — boost would be permanently unusable. The plan must (a) pick ONE key definitively rather than 'e.g. Shift or Space', and (b) if Shift is chosen, specify the exact carve-out in the modifier guard (e.g. allow ShiftLeft/ShiftRight through to _onKey while still not treating them as a start gesture or Help dismissal). If Space is chosen instead, the plan must specify e.preventDefault() for Space (page scroll), and how Space interacts with Help.visible (currently the next key dismisses the panel and is swallowed) and with the `ready` start-gesture path.",
+    "importance": "HIGH",
+    "reference": "### 3. Input Handling",
+    "type": "modification"
+  },
+  {
+    "title": "Activation edge vs. held-key semantics left undefined",
+    "desc": "Task 3 defines `Input.boost` as a per-frame 0/1 level sampled from a held key, while Task 4 says 'activate boost on key press'. These are different things. With a level-triggered check (`if (Input.boost && charges > 0 && !active)`), holding the key means every recharged charge fires instantly and automatically, destroying the strategic choice the feature exists for. Specify rising-edge detection explicitly: store `prevBoost` on Input (or a `boostLatch` in Car), fire only on 0→1 transitions, and clear the latch in `Input.reset()` (called on blur and on pause) so a key held across a pause/blur does not auto-fire on resume. Also state whether re-pressing during an active boost re-triggers/extends it (recommended: ignored).",
+    "importance": "HIGH",
+    "reference": "### 3. Input Handling / ### 4. Physics Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Boosting maxSpeed silently changes steering handling",
+    "desc": "Task 4 says to 'apply multipliers to accel and maxSpeed in Physics.integrate()', but `cfg.maxSpeed` is not only the forward clamp — Physics.integrate uses it as the steering normalizer: `speedN = min(|fwd0|/cfg.maxSpeed, 1)` and `falloff = 1 - steerSpeedFalloff * speedN`. Inflating maxSpeed to 66 means that at 55 m/s speedN drops from 1.0 to 0.83, so falloff goes 0.40 → 0.50: the car gains ~25% more steering authority while boosting, and loses it abruptly when boost ends. That is an unintended physics change hidden inside a 'speed boost' feature. Specify the intent: either pass boost as a separate forward-clamp/accel scalar (e.g. add `speedCap` and `accelScale` to the integrator's input or cfg, leaving `maxSpeed` as the normalization reference), or explicitly accept the sharper-steering behavior, document it as intended, and add a handling test.",
+    "importance": "HIGH",
+    "reference": "### 4. Physics Integration",
+    "type": "modification"
+  },
+  {
+    "title": "No taper when boost expires causes velocity snap",
+    "desc": "Physics.integrate hard-clamps `if (vForward > cfg.maxSpeed) vForward = cfg.maxSpeed;`. The moment the boost timer hits zero the cap drops from 66 to 55 m/s, so the car loses ~11 m/s in a single 16.7 ms step — a visible teleport-like deceleration, a jolt in the FOV kick and engine audio that read speed, and an unphysical instant momentum loss. Specify the expiry behavior: ramp the effective cap (and/or accel multiplier) back to baseline over ~0.5–1 s with a documented easing, or explicitly decide the snap is acceptable and note the cosmetic consequences. Add a test case asserting the per-step speed delta after expiry stays within a stated bound.",
+    "importance": "HIGH",
+    "reference": "### 4. Physics Integration",
+    "type": "addition"
+  },
+  {
+    "title": "Recharge model never actually decided",
+    "desc": "The plan offers 'Cooldown: ~10 seconds recharge (or 1 charge per lap)' in requirements, both options again in Task 4, and 'Or implement time-based recharge' in Task 7 — no decision is ever made, and the CONFIG block ships both `rechargeTime` and `maxCharges: 1` with the comment '1 per lap or fixed'. An implementer cannot build this. Pick one model as the v1 behavior and state the other as a follow-up. If time-based: specify whether the cooldown starts on activation or on expiry (these differ by the 3 s duration), whether it ticks while off-track/respawning, and what happens if a lap completes mid-cooldown. If lap-based: specify behavior on the first lap (start with a charge?), on Timing's return-to-track assist, and whether unused charges accumulate beyond maxCharges.",
+    "importance": "HIGH",
+    "reference": "## Design Requirements / ### 4. Physics Integration / ### 7. Lap Integration",
+    "type": "modification"
+  },
+  {
+    "title": "Test plan not implementable against the existing harness",
+    "desc": "Task 'Testing' says to add unit tests in `Tests.run()`, but the existing harness (index.html ~line 2895) is explicitly DOM-free and Three-free: it tests `formatTime`, `Physics.integrate`, and drives the Timing machine via `Object.create(Timing)` with isolated state. Boost logic as planned lives inline in `Car.physicsStep()`, which requires Input, Track, SkidMarks, Opponents and a Three group — it cannot be unit-tested there. Mirror the codebase's own convention: extract a pure helper, e.g. `stepBoost({charges, active, timer, cooldown}, boostPressedEdge, dt, cfg) -> next state`, and have Car delegate to it. Then enumerate the actual cases: activation with/without charges, no re-trigger while active, exact expiry step, cooldown → charge grant, clamp at maxCharges, activation ignored at 0 charges, and reset state.",
+    "importance": "HIGH",
+    "reference": "## Testing",
+    "type": "modification"
+  },
+  {
+    "title": "Cosmetic boost values bypass the juice convention",
+    "desc": "The codebase has an explicit, documented invariant (CONFIG comment at ~line 347): every cosmetic effect lives under `CONFIG.juice`, is gated behind the `juiceEnabled` flag (?nojuice), and 'none of these values feed back into physics or timing'. The plan places `fovKick`, `audioPitchShift` (and, in the current working-tree code, `screenShake`) under `CONFIG.boost` alongside gameplay values, and Task 5 never says the new camera/audio/particle effects must be gated by `juiceEnabled`. State explicitly that all boost cosmetics are `juiceEnabled`-gated and no-op under ?nojuice, and either nest them as `CONFIG.boost.juice = {...}` or move them into `CONFIG.juice` so the gameplay/cosmetic split stays legible.",
+    "importance": "HIGH",
+    "reference": "### 1. CONFIG Changes / ### 5. Visual/Audio Effects (Juice)",
+    "type": "modification"
+  },
+  {
+    "title": "Screen shake will corrupt the chase camera",
+    "desc": "Task 5 says 'small camera position jitter in Camera.update()'. Camera.update computes a desired pose and does `this.cam.position.lerp(this._pos, a)` with a=0.1 — the camera's current position is the state that gets smoothed forward each frame. Writing jitter directly into `cam.position` feeds that offset back into the next frame's lerp, so the shake is integrated and smeared rather than applied cleanly, and residual offset persists after the boost ends. Specify the mechanism: compute the smoothed base pose first, then add a per-frame shake offset derived from elapsed time (not frame count, so it is frame-rate independent) to the final position or to the look-at target, and reset to zero when boost ends. Also give the missing numbers: amplitude in metres, frequency, and decay envelope. The requirements list screen shake but the plan's CONFIG block has no shake parameter at all.",
+    "importance": "HIGH",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "modification"
+  },
+  {
+    "title": "audioPitchShift value has no defined unit",
+    "desc": "`audioPitchShift: 0.3` is described only as 'engine pitch increase' — ratio, semitones, or an addend to the normalized speed? This matters because `EngineAudio.update(speed, active)` receives a speed already clamped by `Math.min(|vForward|/CONFIG.maxSpeed, 1)` at the call site (~line 1335), so the extra 11 m/s of boost speed produces zero extra pitch on its own. Specify: whether the call site passes an unclamped/boost-aware speed or EngineAudio takes a new `boost` argument; the exact frequency mapping (e.g. f *= 1 + audioPitchShift, or normalized speed + 0.3 clamped to 1); whether the filter cutoff and gain also shift; and the setTargetAtTime time-constant used for ramping in and back out so boost end does not click.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "FOV kick interaction and convergence unspecified",
+    "desc": "Camera.update already applies a speed FOV kick (base 60 + up to 12) eased at a fixed 0.1 per render frame, guarded by `Math.abs(nf - cam.fov) > 0.01` before rebuilding the projection matrix. The plan adds `fovKick: 8` without saying whether it is additive on top of the speed kick (total 80 deg — noticeably fisheye) or replaces it, what the ease rate is, or whether the 0.1-per-frame ease can even converge within a 3 s boost at low frame rates (it is frame-rate dependent today). Specify the target FOV formula, the ease constant, the maximum FOV, and that the existing updateProjectionMatrix guard is preserved.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "prevCharges puts view state inside physics state",
+    "desc": "Task 2 adds `prevCharges` to `Car.boost` 'for HUD change detection'. HUD already owns its own redundant-write caches (`_txt` / `_dsp`, ~line 2526) precisely so that view-diffing stays in the view layer; duplicating that into the car's physics state means the field must be reset in Car.reset(), can drift out of sync, and will pollute any pure boost-state helper and its tests. Drop `prevCharges` from the Car state and let HUD diff via its existing cache, or state explicitly why a physics-side copy is needed.",
+    "importance": "MEDIUM",
+    "reference": "### 2. Car Module State",
+    "type": "deletion"
+  },
+  {
+    "title": "HUD task lacks markup, placement, and behavior detail",
+    "desc": "Task 6 says 'add boost meter element to HTML (#boost-meter)' with no detail an implementer can act on. Specify: where in the existing `#hud` tree it sits (relative to #timers, #speedo, #position at lines 261–293) and its CSS; that a new `els.boost` entry is added in HUD.init(); the exact visual for maxCharges=1 (a single pip vs. a cooldown progress bar) and how it generalizes if maxCharges > 1; what is shown while boost is active vs. cooling down vs. ready; that writes go through the existing cached-write pattern so unchanged frames touch no DOM; visibility during ready/countdown/paused/finished and under the results overlay; and behavior under ?nojuice (the meter is gameplay information, so it should presumably stay visible even when cosmetics are off — say so).",
+    "importance": "MEDIUM",
+    "reference": "### 6. HUD Updates",
+    "type": "addition"
+  },
+  {
+    "title": "No feature flag or clean degrade path",
+    "desc": "This codebase consistently supports clean opt-out — `opponents.count: 0` 'cleanly degrades to the classic time-trial', `?nojuice` disables every cosmetic, and the HUD keeps the time-trial layout byte-for-byte unchanged when there is no field. The boost plan has no equivalent. Add an explicit off switch (`boost.enabled: false` or `maxCharges: 0`) that produces exactly the pre-boost physics, hides the boost meter node, and skips the added per-step work — this makes A/B comparison, lap-time regression checks, and rollback trivial instead of requiring a revert.",
+    "importance": "MEDIUM",
+    "reference": "### 1. CONFIG Changes",
+    "type": "addition"
+  },
+  {
+    "title": "Game-state and track edge cases not addressed",
+    "desc": "The plan never states how boost interacts with the existing state machine and track assists. Specify at minimum: (1) boost timers only advance on racing fixed steps (physicsStep runs only when Game.update returns true), so cooldown freezes during pause/countdown/finished — confirm that is intended; (2) whether `respawnOnTrack()` (out-of-bounds / off-track assist, which zeroes velocity) cancels an active boost and whether the charge is refunded; (3) whether boost is usable off-track, where grassFriction bleeds speed every step; (4) whether the first key press in the `ready` state (which is consumed as `Game.startGesture()`) may also leak a boost activation at GO; (5) that Car.reset() clears all boost fields on R / countdown restart.",
+    "importance": "MEDIUM",
+    "reference": "### 4. Physics Integration / ### 7. Lap Integration",
+    "type": "addition"
+  },
+  {
+    "title": "Boosted lap times invalidate persisted best lap",
+    "desc": "Best lap time is persisted (localStorage, via the composed Timing.onLap hook) and surfaced as 'NEW BEST!' and in the results overlay. After this change, boosted laps are 3+ seconds of +20% top speed faster and are no longer comparable with times recorded before the feature — and existing stored bests may become effectively unbeatable-adjacent or trivially beaten depending on tuning. Decide and document: bump/namespace the storage key so pre-boost bests are retired, or explicitly accept mixed-era times. Also state which side of a race-lap boundary the lap-charge grant lands relative to the onLap hook, since Race.onPlayerLap and best-lap persistence are composed on the same hook.",
+    "importance": "MEDIUM",
+    "reference": "### 7. Lap Integration",
+    "type": "addition"
+  },
+  {
+    "title": "Opponent parity left as an open coin flip",
+    "desc": "Task 8 offers 'give opponents a small chance to use boost' or 'keep player-only' with no decision or criteria. This is a balance question with concrete numbers available: opponents cap at maxSpeed 50 vs. the player's 55, rising to 66 while boosting, with `rubberBand: 0.0` (off) and a 5-car field over 3 laps. Make a call for v1 (player-only is the simpler, safer choice), state the expected difficulty shift, and say explicitly whether `opponents.maxSpeed`, `cornering`, or `rubberBand` need retuning as part of this work or are deliberately left alone. If opponents ever get boost, note that they use a separate kinematic rail-follower step, not Physics.integrate, so the implementation does not carry over.",
+    "importance": "MEDIUM",
+    "reference": "### 8. Opponent Parity (Optional)",
+    "type": "clarification"
+  },
+  {
+    "title": "No acceptance criteria or definition of determinism",
+    "desc": "The plan has no measurable definition of done, and 'verify boost doesn't break physics determinism' is undefined for an input-driven sim with no replay or ghost system. Add concrete acceptance criteria: the existing ?test suite passes with no regressions; boost state advances only on fixed steps (never per render frame), so behavior is identical at 30 and 144 FPS; a scripted input sequence yields an identical final pose across runs; target FPS is unchanged with boost effects on; and a stated expected lap-time delta range (e.g. 'a boosted lap is 1.5–3 s faster') so tuning has a target rather than being judged by feel.",
+    "importance": "MEDIUM",
+    "reference": "## Testing",
+    "type": "addition"
+  },
+  {
+    "title": "Per-step config cloning is avoidable allocation",
+    "desc": "Applying the multipliers by spreading CONFIG into a new object each physics step (the approach the working-tree code took for Task 4) allocates a fresh config object 60 times per second and shallow-copies the nested juice/opponents references along with it. Prefer either two precomputed frozen config objects (baseline and boosted) built once at init, or — better, and consistent with fixing the steering-normalizer issue — pass boost as explicit scalar arguments to Physics.integrate rather than by cloning the whole config. State the chosen mechanism in the plan so it is not left to the implementer.",
+    "importance": "LOW",
+    "reference": "### 4. Physics Integration",
+    "type": "modification"
+  },
+  {
+    "title": "Overview states a feature, not a problem",
+    "desc": "The Overview describes what to build but never says what gameplay problem it solves (races feel flat? no comeback mechanic? no risk/reward decision?), lists no non-goals, and considers no alternatives. Without a stated objective there is no way to judge whether the tuning is right or whether a cheaper mechanic would serve better — e.g. a slipstream/draft bonus behind opponents (reuses the existing per-step opponent distance data already computed for avoidance and collision), or track boost pads keyed to the existing checkpoint gates. Add a short problem statement, explicit non-goals, and one or two rejected alternatives with the reason.",
+    "importance": "LOW",
+    "reference": "## Overview",
+    "type": "addition"
+  },
+  {
+    "title": "Particle trail under-specified and likely over-scope",
+    "desc": "Task 5 lists 'add boost trail effect (optional, new SkidMarks-like system)' as a single line, yet it is by far the largest item — SkidMarks is a ~80-line fixed-capacity ring-buffer with careful streak-breaking and bounded vertex uploads specifically to protect the 60 FPS target. Either cut it from this plan and track it separately, or specify it properly: buffer capacity, emission rate, lifetime/fade approach, how it is broken on reset/respawn (SkidMarks.break equivalent), and the per-frame upload budget. The Priority list already places it last, which supports cutting it from v1.",
+    "importance": "LOW",
+    "reference": "### 5. Visual/Audio Effects (Juice) / ## Priority",
+    "type": "modification"
+  },
+  {
+    "title": "File Changes section carries no useful information",
+    "desc": "'index.html - All changes in the single-file game' is true of every change to this repo. Replace it with the specific integration points and the conventions to follow: CONFIG (~line 326), Input.init/_onKey/update/reset (~924), Car state/reset/physicsStep (~1588), Camera.update (~2484), HUD.init/update (~2522), EngineAudio.update (~2791), Tests.run (~2919), and the #hud markup (~261). Also note that this file documents every module with a header comment block and cross-references numbered spec sections (§4.4 etc.) — new boost code is expected to carry equivalent commentary, and the plan should say which section number the mechanic is assigned.",
+    "importance": "LOW",
+    "reference": "## File Changes",
+    "type": "modification"
+  },
+  {
+    "title": "Recharge model left undecided",
+    "desc": "The plan alternates between time-based recharge (~10s) and per-lap recharge in Design Requirements, Task 4, Task 7, and Priority without choosing one or defining a config switch. Implementing both paths as written risks double replenishment (lap hook + cooldown timer). Add an explicit `rechargeMode: 'time' | 'lap'` (or pick one default) and state mutual-exclusion rules: when lap mode is active, skip cooldown-based charge grants; when time mode is active, do not hook lap completion.",
+    "importance": "HIGH",
+    "reference": "## Design Requirements / ### 4. Physics Integration / ### 7. Lap Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Wrong lap-completion hook named",
+    "desc": "Task 7 suggests replenishing charges in `Timing.step()` or `Race.onPlayerLap()`. `Race.onPlayerLap` only handles final-lap race finish (lapCount >= CONFIG.race.laps), not every completed lap. Lap recharge should compose onto `Timing.onLap(lapTime, lapCount)` in `boot()` the same way best-lap persistence and `Race.onPlayerLap` are already chained—without replacing the existing handler.",
+    "importance": "HIGH",
+    "reference": "### 7. Lap Integration",
+    "type": "modification"
+  },
+  {
+    "title": "No explicit problem or success criteria",
+    "desc": "The plan lists mechanics but lacks a problem statement (why boost exists), player-facing goals (strategic overtakes, comeback tool, etc.), and measurable acceptance criteria (e.g., boost lasts 3s ± fixed-step tolerance, restores one charge per lap or after 10s, visible HUD state matches sim state). Add a 'Problem & Objectives' section and a checklist of pass/fail behaviors for implementers and QA.",
+    "importance": "HIGH",
+    "reference": "## Overview / ## Testing",
+    "type": "addition"
+  },
+  {
+    "title": "Boost tests are unspecified",
+    "desc": "Testing only says 'add unit tests' and 'verify determinism' without concrete cases. Specify pure tests in `Tests.run()` for: activation consumes a charge; blocked at 0 charges; duration expiry clears `active` and starts cooldown; time recharge restores a charge; lap recharge restores a charge (per chosen mode); multipliers produce expected `accel`/`maxSpeed` in the `physCfg` passed to `Physics.integrate`; `Car.reset()` restores initial boost state. Cosmetic effects should be excluded from determinism checks.",
+    "importance": "HIGH",
+    "reference": "## Testing",
+    "type": "addition"
+  },
+  {
+    "title": "Activation semantics not defined",
+    "desc": "Task 3 adds a per-frame `Input.boost` boolean but does not specify tap-to-fire vs hold-to-sustain, or whether holding Shift after a boost ends should immediately consume the next charge. The current pattern (level-triggered input, one-shot while `!boost.active`) can surprise players who keep Shift held. Document intended behavior and whether edge-triggered activation is required.",
+    "importance": "HIGH",
+    "reference": "### 3. Input Handling / ### 4. Physics Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Missing architecture decisions section",
+    "desc": "Technical choices are scattered across tasks with no consolidated rationale: player-only vs AI boost, discrete charges vs continuous meter, cfg-override vs editing `Physics.integrate`, and which juice effects are MVP vs polish. Add a short 'Technical Approach' section documenting these decisions and integration points (`Car.physicsStep`, `Camera.update`, `EngineAudio.update`, `HUD.update`, `Timing.onLap` composition).",
+    "importance": "MEDIUM",
+    "reference": "## Overview",
+    "type": "addition"
+  },
+  {
+    "title": "Help panel omits boost control",
+    "desc": "The plan adds Shift/Space activation but does not include updating the `#help` controls panel (`WASD / Arrows — drive`, etc.). Players will not discover boost without in-game documentation. Add a task to update Help HTML copy and verify it matches the final bound key.",
+    "importance": "MEDIUM",
+    "reference": "### 3. Input Handling / ## File Changes",
+    "type": "addition"
+  },
+  {
+    "title": "Boost key binding still ambiguous",
+    "desc": "Design Requirements say 'Shift or Space' but Task 3 only implies a single binding. Space is unused today; Shift is already wired. Pick one primary key (recommend Shift to avoid conflict with future actions) or document both bindings explicitly in Input._onKey.",
+    "importance": "MEDIUM",
+    "reference": "## Design Requirements / ### 3. Input Handling",
+    "type": "clarification"
+  },
+  {
+    "title": "Car.reset boost reset not tasked",
+    "desc": "Task 2 defines initial boost state but does not require resetting boost in `Car.reset()` / `Game.toCountdown()`. Without this, charges, active flag, timers, and cooldown can leak across R-reset or new races. Add an explicit reset task tied to the existing race-restart flow.",
+    "importance": "MEDIUM",
+    "reference": "### 2. Car Module State",
+    "type": "addition"
+  },
+  {
+    "title": "Camera FOV stacking unclear",
+    "desc": "Task 5 adds boost FOV kick in `Camera.update()`, but the camera already applies speed-based FOV via `CONFIG.juice.camFovKick`. The plan does not say whether `CONFIG.boost.fovKick` is additive on top of speed FOV, replaces it during boost, or uses a separate envelope. Clarify the formula and smoothing so implementers do not double-apply or fight the existing speed kick.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "EngineAudio integration unspecified",
+    "desc": "Task 5 says to pitch-shift in `EngineAudio.update()` when boost is active, but the current API is `update(speed, active)` and has no boost parameter. Specify whether EngineAudio reads `Car.boost.active` directly or receives a third argument, how `audioPitchShift` maps to Hz (additive offset vs multiplier), and that changes must remain wrapped in try/catch like existing juice.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "CONFIG snippet missing screenShake",
+    "desc": "Task 1 CONFIG block lists fovKick and audioPitchShift but omits `screenShake`, which Task 5 references and which already exists in the codebase (`screenShake: 0.15`). Include all boost-related juice constants in one CONFIG block so implementers have a single source of truth.",
+    "importance": "MEDIUM",
+    "reference": "### 1. CONFIG Changes / ### 5. Visual/Audio Effects (Juice)",
+    "type": "modification"
+  },
+  {
+    "title": "Physics multiplier approach ambiguous",
+    "desc": "Task 4 says to apply multipliers 'in Physics.integrate() call', which could be misread as modifying the pure integrator. Clarify the intended pattern: build a per-step `physCfg` by spreading `CONFIG` and overriding `accel`/`maxSpeed` only, leaving `Physics.integrate` unchanged. Note that only those two fields change today; drag, steering, and grip are unaffected unless intentionally in scope.",
+    "importance": "MEDIUM",
+    "reference": "### 4. Physics Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "HUD meter behavior underspecified",
+    "desc": "Task 6 adds `#boost-meter` and mentions charges or cooldown bar, but does not define layout, units, or states: empty vs ready vs active vs recharging; whether to show fractional cooldown; how `prevCharges` drives DOM updates; or placement relative to `#speedo`. Add wireframe-level HUD spec (e.g., segmented charge pips + cooldown fill) and CSS placement.",
+    "importance": "MEDIUM",
+    "reference": "### 6. HUD Updates",
+    "type": "addition"
+  },
+  {
+    "title": "No ?nojuice handling for boost FX",
+    "desc": "The game gates juice via `juiceEnabled` / `?nojuice` for skid marks, FOV kick, and engine audio. The plan does not state that boost screen shake, extra FOV, pitch shift, and particles must respect the same flag. Document that core boost physics always apply, but cosmetic boost effects are disabled under `?nojuice`.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "addition"
+  },
+  {
+    "title": "Task dependencies not documented",
+    "desc": "Tasks are numbered but lack an explicit dependency graph. For example: Input + CONFIG before physics; physics before juice/HUD; recharge-mode decision before lap hook and HUD cooldown display; Car.reset before testing race restart. Add a short dependency note or ordered DAG so parallel work does not block on unresolved design forks.",
+    "importance": "MEDIUM",
+    "reference": "## Implementation Tasks / ## Priority",
+    "type": "addition"
+  },
+  {
+    "title": "Multi-charge cooldown rules missing",
+    "desc": "With `maxCharges > 1`, the plan does not define whether cooldown starts per use, whether multiple charges can be spent back-to-back while a cooldown runs, or whether lap recharge caps at `maxCharges`. Specify charge accounting for multi-charge configs to avoid inconsistent implementations.",
+    "importance": "MEDIUM",
+    "reference": "### 1. CONFIG Changes / ### 4. Physics Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Priority order conflicts with recharge fork",
+    "desc": "Priority lists lap recharge (item 4) after HUD (item 3), but HUD design depends on whether the meter shows lap-based charges or time-based cooldown. Reorder so recharge-mode selection and core charge logic precede HUD, or mark HUD as showing both states behind a mode flag.",
+    "importance": "MEDIUM",
+    "reference": "## Priority",
+    "type": "modification"
+  },
+  {
+    "title": "Screen shake scaffold unused",
+    "desc": "The codebase already declares `Camera._shakeOffset` and `_shakeTime` but `Camera.update()` does not apply shake. Task 5 should reference initializing/applying these fields, using deterministic or render-only noise (not physics), and decaying shake when boost ends—otherwise implementers may add duplicate state.",
+    "importance": "LOW",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "Optional opponent boost unresolved",
+    "desc": "Task 8 leaves AI boost as an open choice without a default. For scope control, default to player-only (matches 'player-only temporary speed boost' in CONFIG comments) and move opponent parity to a follow-up. Otherwise specify probability, timing, and whether AI boost affects ranking fairness.",
+    "importance": "LOW",
+    "reference": "### 8. Opponent Parity (Optional)",
+    "type": "clarification"
+  },
+  {
+    "title": "Particle trail ship criteria missing",
+    "desc": "Boost particles are marked optional with no MVP boundary. Define whether v1 ships without particles (reuse/enhance SkidMarks during boost) or requires a new system, and note the SkidMarks ring-buffer pattern as the preferred lightweight approach if particles are in scope.",
+    "importance": "LOW",
+    "reference": "### 5. Visual/Audio Effects (Juice) / ## Priority",
+    "type": "clarification"
+  },
+  {
+    "title": "First-lap charge grant unspecified",
+    "desc": "The plan does not state whether the player starts each race with `maxCharges` immediately (recommended) or must complete a lap first in lap-recharge mode. Clarify initial charge on `Car.reset()` / race start to avoid off-by-one confusion in tests and HUD.",
+    "importance": "LOW",
+    "reference": "### 2. Car Module State / ### 7. Lap Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Recharge model remains undecided",
+    "desc": "The plan repeatedly says boost recharges either over time or per lap, but never chooses one or defines precedence. Pick a single v1 model, or add an explicit config such as `rechargeMode: \"time\" | \"lap\"` and specify whether both modes can ever be enabled together.",
+    "importance": "HIGH",
+    "reference": "## Overview / ### 4. Physics Integration / ### 7. Lap Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Shift key conflicts with existing input flow",
+    "desc": "The current input handler ignores lone modifier keydown events before routing them through `_onKey`, so using Shift as the boost key will not reliably activate boost. The plan should either choose a non-modifier key or explicitly update the modifier handling path and prevent unwanted browser defaults for any chosen key such as Space.",
+    "importance": "HIGH",
+    "reference": "### 3. Input Handling",
+    "type": "modification"
+  },
+  {
+    "title": "Activation needs edge-trigger semantics",
+    "desc": "Using `Input.boost` as a held boolean can cause a newly replenished charge to fire immediately while the key is still held. Specify a `boostPressed` or previous-key-state check so boost consumes a charge only on a fresh key press.",
+    "importance": "HIGH",
+    "reference": "### 3. Input Handling / ### 4. Physics Integration",
+    "type": "addition"
+  },
+  {
+    "title": "Timing hook integration may break existing behavior",
+    "desc": "Lap recharge is assigned to `Timing.step()` or `Race.onPlayerLap()`, but `Timing.onLap` is already used for best-lap persistence and race finish handling, and `Race.onPlayerLap()` is only relevant when opponents are enabled. Specify that boost lap recharge must be composed into the existing `Timing.onLap` chain without overwriting persistence or finish logic, and must work in time-trial mode too if lap recharge is chosen.",
+    "importance": "HIGH",
+    "reference": "### 7. Lap Integration",
+    "type": "modification"
+  },
+  {
+    "title": "Boost logic is not unit-testable as planned",
+    "desc": "`Tests.run()` is focused on pure logic, while the proposed boost state lives inside `Car.physicsStep()` with singleton state and Three-dependent setup. Add a pure helper such as `stepBoostState(state, input, dt, cfg)` and test that directly, then have `Car.physicsStep()` delegate to it.",
+    "importance": "MEDIUM",
+    "reference": "## Testing / ### 2. Car Module State / ### 4. Physics Integration",
+    "type": "addition"
+  },
+  {
+    "title": "Acceptance criteria are missing",
+    "desc": "The testing section lists broad checks but does not define pass/fail outcomes. Add concrete criteria such as charge consumption on one press, exactly one active boost for the configured duration, no auto-reactivation while held, recharge behavior for the chosen mode, max speed cap during and after boost, pause/reset behavior, and HUD meter states.",
+    "importance": "MEDIUM",
+    "reference": "## Testing",
+    "type": "addition"
+  },
+  {
+    "title": "Pause and reset behavior is underspecified",
+    "desc": "The game only advances physics while racing, so boost timers and cooldowns will naturally freeze during pause unless implemented elsewhere. State this explicitly, and define what happens on countdown, pause, blur, reset, respawn, and finished states.",
+    "importance": "MEDIUM",
+    "reference": "### 4. Physics Integration",
+    "type": "clarification"
+  },
+  {
+    "title": "Visual effects ignore nojuice gating",
+    "desc": "The existing polish systems are guarded by the `?nojuice` master switch. The plan should require boost FOV, audio pitch, particles, and screen shake to respect that switch, while keeping the core speed boost functional.",
+    "importance": "MEDIUM",
+    "reference": "### 5. Visual/Audio Effects (Juice)",
+    "type": "addition"
+  },
+  {
+    "title": "HUD work omits CSS and help text",
+    "desc": "The plan says to add `#boost-meter`, but does not mention CSS placement, DOM wiring in `HUD.init()`, cached updates in `HUD.update()`, or updating the controls help panel to show the boost key. Add these tasks so the feature is discoverable and visually integrated.",
+    "importance": "MEDIUM",
+    "reference": "### 6. HUD Updates",
+    "type": "addition"
+  },
+  {
+    "title": "Visual feedback requirements contradict optional particles",
+    "desc": "Particle trail is listed as required visual feedback, then later marked optional. Decide whether particles are part of v1; if not, move them to a polish phase and make FOV/audio/HUD the required feedback for acceptance.",
+    "importance": "MEDIUM",
+    "reference": "## Design Requirements / ### 5. Visual/Audio Effects (Juice)",
+    "type": "clarification"
+  },
+  {
+    "title": "Opponent balance impact is unresolved",
+    "desc": "Player-only boost changes race balance against opponents whose speed and rubber-band tuning were built around the current player cap. Either state that boost is intentionally player-only and update balance acceptance criteria, or define deterministic opponent boost behavior and tests.",
+    "importance": "MEDIUM",
+    "reference": "### 8. Opponent Parity (Optional)",
+    "type": "clarification"
+  },
+  {
+    "title": "Plan contains stray line-number artifacts",
+    "desc": "The markdown includes fragments such as `10|`, `20|`, `30|`, and `40|` inside headings and code blocks. Remove these artifacts so examples can be copied safely and section references remain clear.",
+    "importance": "LOW",
+    "reference": "## Design Requirements / ### 1. CONFIG Changes / ### 2. Car Module State",
+    "type": "modification"
+  }
+]

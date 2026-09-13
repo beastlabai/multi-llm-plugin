@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from utils.html_report_generator import (
     get_model_metadata,
+    extract_plan_section_order,
     extract_section_contexts,
     embed_log_snippets,
     generate_html_report,
@@ -1459,6 +1460,87 @@ class TestBuildSectionView:
         result = build_section_view([])
 
         assert result == {}
+
+
+class TestExtractPlanSectionOrder:
+    """The declared order has to cover every bucket the report renders.
+
+    ``sectionOrder`` is what the template's "natural" sort walks; a section
+    missing from it falls to the arbitrary tail appended after it.
+    """
+
+    PLAN = "\n".join([
+        "# Turbo Boost Mode - Implementation Plan",
+        "",
+        "## Overview",
+        "Add a boost.",
+        "",
+        "## Implementation Tasks",
+        "",
+        "### 1. CONFIG Changes",
+        "```bash",
+        "# not a heading, a shell comment",
+        "```",
+        "",
+        "### 2. Car Module State",
+        "",
+        "## Testing",
+        "",
+        "## Priority",
+    ])
+
+    def test_lists_every_heading_in_document_order(self):
+        assert extract_plan_section_order(self.PLAN) == [
+            "## Overview",
+            "## Implementation Tasks",
+            "### 1. CONFIG Changes",
+            "### 2. Car Module State",
+            "## Testing",
+            "## Priority",
+        ]
+
+    def test_the_numbered_task_headings_keep_their_exact_strings(self):
+        """The ``### N. Title`` spelling other code matches on is unchanged."""
+        order = extract_plan_section_order(self.PLAN)
+
+        assert "### 1. CONFIG Changes" in order
+        assert "### 2. Car Module State" in order
+
+    def test_a_shell_comment_in_a_fence_is_not_a_section(self):
+        assert "# not a heading, a shell comment" not in extract_plan_section_order(
+            self.PLAN
+        )
+
+    def test_the_document_title_is_not_a_section(self):
+        assert "# Turbo Boost Mode - Implementation Plan" not in (
+            extract_plan_section_order(self.PLAN)
+        )
+
+    def test_a_plan_written_entirely_in_level_one_still_has_an_order(self):
+        assert extract_plan_section_order("# Overview\ntext\n# Testing") == [
+            "# Overview",
+            "# Testing",
+        ]
+
+    def test_repeats_are_dropped_and_non_headings_ignored(self):
+        assert extract_plan_section_order(
+            "## Testing\n#hashtag\n####### too deep\n## Testing"
+        ) == ["## Testing"]
+
+    def test_empty_plan(self):
+        assert extract_plan_section_order("") == []
+
+    def test_every_section_a_real_plan_cites_is_ordered(self):
+        """The bug: six of a real plan's fourteen sections had no order."""
+        plan = (
+            Path(__file__).parent / "fixtures" / "e2e" / "plans" / "auth-feature.md"
+        ).read_text(encoding="utf-8")
+        order = extract_plan_section_order(plan)
+
+        assert order[0] == "## Overview"
+        assert "## Security Considerations" in order
+        assert "### Step 1: Database Schema" in order
+        assert len(order) == len(set(order))
 
 
 class TestCompositeSectionReferences:

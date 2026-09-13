@@ -64,6 +64,16 @@ def _json_block(value: Any) -> str:
 # validation / revalidation
 # ===========================================================================
 
+#: The reply shape every validation/revalidation batch must print.
+#:
+#: ``group_index`` is shown as an unfillable placeholder rather than a literal
+#: ``0`` on purpose: with a numeric example there, models copy the example
+#: instead of echoing the group's own value (18 of 32 verdicts in one run, 41 of
+#: 46 in another, echoed 0,1,2,3…). The hash join absorbs it —
+#: ``merge_batched_validation_results`` routes by ``group_hash`` and only counts
+#: the mismatch — but the cheaper fix is a template with no number to copy. A
+#: model that copies the placeholder *text* is tolerated too: the merge coerces a
+#: non-integer echo to "matches nothing" rather than crashing.
 _VALIDATION_REPLY_CONTRACT = '''## Reply
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
@@ -71,7 +81,7 @@ explanation. Do not write any file; whoever invoked you persists your reply.
 
 {
   "groups": [
-    {"group_index": 0, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0}
+    {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0}
   ],
   "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"}
 }
@@ -176,6 +186,15 @@ context above alone when the code itself is one read away. Reserve
 trade-off), never for a claim you could have checked but did not look at. If
 you cannot read the repository, judge from the records and the context above
 alone.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — is judged against the plan or tasks text
+above, not against the working tree: the plan is what an implementer follows,
+and a partially implemented tree is exactly the situation this review exists
+for. Code that already does X does not make such a claim invalid; it makes it
+valid — document or decide it — and the reason should say that the code already
+does X. Where the artifact under review is a diff or a code change rather than a
+plan, that change is the text such a claim is judged against.
 {guidance}
 {_VALIDATION_REPLY_CONTRACT}'''
 

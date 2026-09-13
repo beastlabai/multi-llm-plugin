@@ -226,6 +226,39 @@ def _classify_validation_error(error: str, http_status: Optional[int] = None) ->
     return _CATEGORY_TO_ERROR_TYPE.get(category, ERROR_TYPE_UNKNOWN)
 
 
+def _reported_group_index(result: Dict[str, Any]) -> int:
+    """The ``group_index`` a verdict echoed, as an int, or ``-1`` when it is not one.
+
+    The echo is advisory — ``group_hash`` is what results are joined on — so an
+    echo that is not an index must degrade to "matches nothing", never to a
+    ``TypeError`` inside the index-based fallbacks that compare it against real
+    indices. The reply contract now shows ``group_index`` as an unfillable
+    placeholder (``<the group's group_index value>``) precisely so a model cannot
+    copy a literal ``0``; a model that copies the *placeholder* instead sends a
+    string, which is exactly the input this function absorbs. A numeric string
+    (``"3"``) is a transcription of a real index and is accepted as one.
+
+    Args:
+        result: One verdict record as the subagent returned it.
+
+    Returns:
+        The echoed index, or ``-1`` for an absent, null or unparseable one.
+    """
+    raw = result.get("group_index", result.get("index", -1))
+    if isinstance(raw, bool):  # bools are ints in Python; an index they are not
+        return -1
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else -1
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return -1
+    return -1
+
+
 VALIDATION_PROMPT_TEMPLATE = '''You are validating review suggestions/issues for accuracy.
 
 ## Context
@@ -399,7 +432,10 @@ async def validate_groups(
     valid_statuses = {"valid", "invalid", "needs-human-decision"}
 
     for item in data:
-        group_index = item.get("group_index", -1)
+        # Coerced, not read raw: an echo that is not an index (a copied reply
+        # placeholder, a null) must not reach the `0 <= group_index` comparison
+        # below or the sort at the end of this function as a string.
+        group_index = _reported_group_index(item)
         status = item.get("status", "needs-human-decision")
         reason = item.get("reason", "No reason provided")
         # `.get(..., 0.5)`'s default only fires when the key is absent; an LLM
@@ -616,6 +652,14 @@ def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Opti
     models = {r["_source_model"] for r in validation_results if r.get("_source_model")}
     if not models:
         return None
+    # A subagent reports its own model name free-hand, and the same runner
+    # answers as both ``nemotron-3-ultra-free`` and
+    # ``opencode/nemotron-3-ultra-free`` across batches. A bare name that is
+    # the model half of a prefixed sibling is that sibling, not a second model.
+    bare = {m for m in models if "/" not in m}
+    for prefixed in {m for m in models if "/" in m}:
+        bare.discard(prefixed.rsplit("/", 1)[1])
+    models = bare | {m for m in models if "/" in m}
     return ",".join(sorted(models))
 
 
@@ -1496,7 +1540,7 @@ def merge_batched_validation_results(
                     continue
                 if result_hash in hash_to_original_index:
                     original_index = hash_to_original_index[result_hash]
-                    reported_idx = result.get("group_index", result.get("index", -1))
+                    reported_idx = _reported_group_index(result)
                     hash_join_total += 1
                     if reported_idx != original_index:
                         hash_join_mismatched += 1
@@ -1531,7 +1575,7 @@ def merge_batched_validation_results(
             # group_index matches an expected global index (ignore extras)
             matched_globals: Dict[int, Dict] = {}
             for result in batch_results:
-                result_index = result.get("group_index", result.get("index", -1))
+                result_index = _reported_group_index(result)
                 if result_index in global_indices_set:
                     matched_globals[result_index] = result
 
@@ -1570,7 +1614,7 @@ def merge_batched_validation_results(
 
             # Strategy 4: Legacy local index fallback
             for result in batch_results:
-                result_index = result.get("group_index", result.get("index", -1))
+                result_index = _reported_group_index(result)
                 if 0 <= result_index < len(group_indices):
                     original_index = group_indices[result_index]
                     result["group_index"] = original_index
