@@ -414,6 +414,37 @@ class TestEmbeddedContextAndReply:
         # Reply is the validation result array in today's shape.
         assert '"schema_version": "2.1"' in prompt
 
+    def test_validation_tells_the_subagent_to_check_code_claims_when_it_can_read(self):
+        """A validator that can read its own repository is told to use that,
+        rather than answering a claim about existing code from the plan
+        excerpt alone — and to reserve needs-human-decision for genuine
+        judgment calls, not for claims it simply did not check."""
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        assert "existing code" in prompt
+        assert "open it and check the claim before answering" in prompt
+        assert "never for a claim you could have checked but did not look at" in prompt
+        # Capability-neutral: still correct for a runner that cannot read.
+        assert "If\nyou cannot read the repository, judge from the records" in prompt
+
+    def test_reply_contract_tells_the_subagent_to_echo_each_groups_group_index(self):
+        """The reply contract explicitly names `group_index` as the value to
+        echo back, rather than leaving the subagent to guess which of the
+        request record's fields the reply's `group_index` refers to.
+
+        The request record itself carries the group's position under that same
+        `group_index` key in production (`build_validation_batch_records`,
+        tested via `prepare_batched_validation_tasks` in
+        test_validation_group_id.py) — this generator treats records as
+        opaque, so that key rename is verified at the producer, not here.
+        """
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        assert "echo that group's" in prompt
+        assert "`group_index` value back into its result" in prompt
+
     def test_revalidation_only_changes_the_framing_sentence(self):
         first = build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS

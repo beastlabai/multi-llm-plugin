@@ -312,10 +312,14 @@ providers:
     # Variant names are provider-specific (OpenAI: none/minimal/low/medium/high/xhigh;
     # Anthropic: high/max); unknown variants are resolved/ignored server-side.
     models:
+      # `opencode/*` ids are Zen's server-side catalog and vanish between
+      # releases: `opencode/sonnet`, `opencode/deepseek-v4-flash-free` and
+      # `opencode/hy3-free` were all gone from `opencode models` on 1.18.30
+      # (probed 2026-09-11). `opencode/big-pickle` is the one id measured
+      # answering with no credential present (hosts/capabilities.yaml carries
+      # the dated probe); the container lane's catalog diff flags the next
+      # removal.
       - opencode/big-pickle
-      - opencode/sonnet
-      - opencode/deepseek-v4-flash-free
-      - opencode/hy3-free
       - opencode/nemotron-3-ultra-free
       - google/gemini-3.1-pro-preview
       - openai/gpt-5.5

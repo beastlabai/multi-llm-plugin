@@ -727,7 +727,7 @@ def _build_group_data(
             validation_status = val_result.get("status")
         if not validation_reason:
             validation_reason = val_result.get("reason", "")
-        if validation_confidence == 0.0:
+        if validation_confidence in (0.0, None):
             validation_confidence = val_result.get("confidence", 0.0)
 
     # Build suggestions list
@@ -1196,13 +1196,15 @@ def generate_html_report(
 
     template = template_path.read_text(encoding='utf-8')
 
-    # Gather all section references from suggestions
+    # Gather all section references from suggestions. A composite reference
+    # is split into the sections it names: those are the sectionView's bucket
+    # keys, and the whole composite string matches no header in the plan, so
+    # collecting it unsplit left every one of them without context.
     section_refs: Set[str] = set()
     for group in effective_groups:
         for sugg in group.get("suggestions", group.get("issues", [])):
             ref = sugg.get("reference", sugg.get("section", ""))
-            if ref:
-                section_refs.add(ref)
+            section_refs.update(split_section_refs(ref))
 
     # Read plan content for section contexts
     plan_content = ""
@@ -1706,32 +1708,64 @@ def _get_group_file_path(group: Dict[str, Any]) -> str:
     return ""
 
 
-def _get_group_section_ref(group: Dict[str, Any]) -> str:
-    """Determine the primary section reference for a group.
+#: A reviewer that cites two places writes one composite reference —
+#: ``"## Design Requirements / ### 7. Lap Integration"``, occasionally
+#: comma-joined. Split on a *delimited* separator only: a bare slash is part
+#: of a heading (``### 5. Visual/Audio Effects (Juice)``) and splitting there
+#: would invent two sections that the plan does not have.
+_SECTION_REF_SEPARATOR = re.compile(r"\s+/\s+|,\s+")
 
-    Uses the first non-empty ``sectionRef`` among the group's suggestions.
-    Returns ``""`` if no suggestion has a ``sectionRef``.
+
+def split_section_refs(section_ref: str) -> List[str]:
+    """Split a composite section reference into the sections it names.
+
+    ``"## Design Requirements / ### 7. Lap Integration"`` names two sections;
+    a plain ``"### 7. Lap Integration"`` names one. Order is preserved and
+    repeats are dropped, so a reference can be used directly as a bucket key
+    list.
     """
-    for suggestion in group.get("suggestions", []):
-        section_ref = suggestion.get("sectionRef", "")
-        if section_ref:
-            return section_ref
-    return ""
+    if not section_ref:
+        return []
+    refs: List[str] = []
+    seen: Set[str] = set()
+    for part in _SECTION_REF_SEPARATOR.split(str(section_ref)):
+        part = part.strip()
+        if part and part not in seen:
+            seen.add(part)
+            refs.append(part)
+    return refs
 
 
-def _get_group_task_ref(group: Dict[str, Any]) -> str:
-    """Determine the primary task reference for a group.
+def _get_group_section_refs(group: Dict[str, Any]) -> List[str]:
+    """Every section a group's suggestions cite, deduped, in first-seen order.
 
-    Uses the first non-empty ``sectionRef`` among the group's suggestions
-    (task review stores the task ID in the ``sectionRef`` / ``reference``
-    field, which maps to ``sectionRef`` in camelCase report data).
-    Returns ``""`` if no suggestion has a ``sectionRef``.
+    A group is counted under *each* section it names rather than under the
+    whole reference string. Bucketing by the raw string made every composite
+    reference its own bucket — a real 8-section plan review rendered 23
+    section buckets, and the section a composite named second was invisible
+    in the one that carried its name.
+
+    Returns ``[]`` if no suggestion has a ``sectionRef``.
     """
+    refs: List[str] = []
+    seen: Set[str] = set()
     for suggestion in group.get("suggestions", []):
-        section_ref = suggestion.get("sectionRef", "")
-        if section_ref:
-            return section_ref
-    return ""
+        for ref in split_section_refs(suggestion.get("sectionRef", "")):
+            if ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+    return refs
+
+
+def _get_group_task_refs(group: Dict[str, Any]) -> List[str]:
+    """Every task a group's suggestions cite, deduped, in first-seen order.
+
+    Task review stores the task ID in the ``sectionRef`` / ``reference``
+    field (which maps to ``sectionRef`` in camelCase report data), and a
+    suggestion that spans two tasks writes both. Returns ``[]`` if no
+    suggestion has a ``sectionRef``.
+    """
+    return _get_group_section_refs(group)
 
 
 def _collect_all_suggestions(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1817,8 +1851,17 @@ def build_section_view(
 ) -> Dict[str, Any]:
     """Build a section-based index from the flat groups list.
 
-    Groups suggestions by ``sectionRef`` for plan-review PR view.
-    Groups with no ``sectionRef`` are placed under the ``_global`` key.
+    Groups suggestions by ``sectionRef`` for plan-review PR view. A composite
+    reference (``"## Overview / ### 7. Lap Integration"``) is split, and the
+    group is counted under **each** section it names — so a section's bucket
+    holds everything that cited it, however the citing reviewer spelled the
+    citation. Groups with no ``sectionRef`` are placed under the ``_global``
+    key.
+
+    A group naming two sections appears in two buckets, so the bucket counts
+    sum to more than the group count. That is the point: the view answers
+    "what did reviewers say about this section?", and a suggestion about two
+    sections is an answer for both.
 
     Args:
         groups: List of processed group dicts (post ``_build_group_data()``).
@@ -1835,9 +1878,8 @@ def build_section_view(
     section_buckets: Dict[str, List[Dict[str, Any]]] = {}
 
     for group in groups:
-        section_ref = _get_group_section_ref(group)
-        key = section_ref if section_ref else "_global"
-        section_buckets.setdefault(key, []).append(group)
+        for key in _get_group_section_refs(group) or ["_global"]:
+            section_buckets.setdefault(key, []).append(group)
 
     result: Dict[str, Any] = {}
     for key, bucket_groups in section_buckets.items():
@@ -1858,8 +1900,11 @@ def build_task_view(
     """Build a task-based index from the flat groups list.
 
     Groups suggestions by task ID (from the ``sectionRef`` / ``reference``
-    field) for task-review PR view.  Suggestions whose reference is
-    ``"Plan Coverage"`` are routed to the ``_coverageGaps`` bucket.
+    field) for task-review PR view.  A composite reference naming more than
+    one task (``"T003 / T004"``, ``"T003, T004"``) is split and the group is
+    counted under each task it names.  Suggestions whose reference is
+    ``"Plan Coverage"`` are routed to the ``_coverageGaps`` bucket — a
+    composite naming ``"Plan Coverage"`` alongside a task lands in both.
     Groups with no reference at all go to the ``_unanchored`` bucket.
 
     Args:
@@ -1887,14 +1932,16 @@ def build_task_view(
     unanchored: List[Dict[str, Any]] = []
 
     for group in groups:
-        task_ref = _get_group_task_ref(group)
-        if task_ref == "Plan Coverage":
-            coverage_gaps.append(group)
-        elif task_ref:
-            task_buckets.setdefault(task_ref, []).append(group)
-        else:
+        task_refs = _get_group_task_refs(group)
+        if not task_refs:
             # Groups with no reference — unanchored findings
             unanchored.append(group)
+            continue
+        for task_ref in task_refs:
+            if task_ref == "Plan Coverage":
+                coverage_gaps.append(group)
+            else:
+                task_buckets.setdefault(task_ref, []).append(group)
 
     result: Dict[str, Any] = {}
 

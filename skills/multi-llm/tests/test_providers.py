@@ -2352,6 +2352,39 @@ class TestOpenCodeRealSchema:
             "the 'apiKey' parameter or the GOOGLE_GENERATIVE_AI_API_KEY environment variable."
         )
 
+    def test_real_capture_invalid_model_composes_the_stderr_cause(self, provider):
+        """Verbatim capture from a live opencode 1.18.x `--model opencode/sonnet`.
+
+        stdout carries only a wrapper — an `err_…` ref and no cause — and the
+        `ProviderModelNotFoundError` with its "Did you mean" list is on stderr
+        under `--print-logs --log-level ERROR`. This pins D5's whole contract:
+        the composed **return value** of `describe_failure`. It does not pin the
+        exit-3 line for this capture, which D4 owns (the classifier's verdict
+        replaces this text there; see `test_subagent_executor.py`).
+        """
+        fixtures = Path(__file__).parent / "fixtures" / "opencode"
+        stdout = (fixtures / "invalid-model.stdout.txt").read_text(encoding="utf-8")
+        stderr = (fixtures / "invalid-model.stderr.txt").read_text(encoding="utf-8")
+
+        assert provider.describe_failure(stdout, stderr) == (
+            "UnknownError: Unexpected server error. Check server logs for details. "
+            "(ProviderModelNotFoundError: Model not found: opencode/sonnet. Did you "
+            "mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?)"
+        )
+        # The stdout-only behaviour is kept when stderr has no such line.
+        assert provider.describe_failure(stdout, "") == (
+            "UnknownError: Unexpected server error. Check server logs for details."
+        )
+        assert provider.describe_failure(stdout, "level=INFO error=\"nope\"\n") == (
+            "UnknownError: Unexpected server error. Check server logs for details."
+        )
+        # And a non-wrapper stdout message is never decorated.
+        auth = _oc_event("error", error={"name": "ProviderAuthError",
+                                         "data": {"message": "API key is missing."}})
+        assert provider.describe_failure(auth, stderr) == (
+            "ProviderAuthError: API key is missing."
+        )
+
 
 class TestKiloCodeProvider:
     """Tests for the KiloCodeProvider class."""
@@ -5901,7 +5934,7 @@ class TestDeclaredOutputChannel:
     """
 
     #: Pinned like the `agent-write` roster is pinned, and for the mirror-image
-    #: reason: five of the six are here because of a *mode the adapter chose*, so
+    #: reason: five of the seven are here because of a *mode the adapter chose*, so
     #: an adapter joining or leaving it is a deliberate change to how that CLI is
     #: invoked, never a passing thought. Those five name the argv atom that causes
     #: it, and `TestReadOnlyArgvMatchesTheDeclaration` in
@@ -5927,8 +5960,22 @@ class TestDeclaredOutputChannel:
     #: cannot see a default, so its adjudication lives in that same file's third
     #: table, `NO_WRITE_TOOL_AT_ALL`, which feeds the same derived-roster
     #: assertion.
-    CANNOT_WRITE_FILES = {"aider", "copilot", "cursor-agent", "gemini", "qwen-code",
-                          "vibe"}
+    #:
+    #: THE SEVENTH IS NEITHER A MODE NOR A MISSING TOOL (D6, 2026-09-11):
+    #:
+    #:   codex       `--sandbox workspace-write`  writes only through bubblewrap
+    #:
+    #: codex CAN write a file — wherever bubblewrap can start. On a stock Ubuntu
+    #: 24.04 (`kernel.apparmor_restrict_unprivileged_userns=1`) it cannot, and a
+    #: review asked for a file spent seven minutes twice, failed three writes
+    #: and returned no JSON, with `--ephemeral` keeping nothing to salvage. The
+    #: array was always the final `agent_message`, which `parse_output` reads,
+    #: so the fan-out asks for stdout and never bets a slot on the sandbox. Its
+    #: adjudication is the `STOPS_FILE_WRITES` row under that atom;
+    #: `supports_file_edits` stays True (the agent-write profile really edits,
+    #: and the sandbox probe that gates it is D6 step 3).
+    CANNOT_WRITE_FILES = {"aider", "codex", "copilot", "cursor-agent", "gemini",
+                          "qwen-code", "vibe"}
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_every_adapter_declares_a_bool(self, name):
@@ -5981,8 +6028,20 @@ class TestDeclaredOutputChannel:
     def test_a_file_capable_adapter_is_still_the_default(self):
         from utils.provider_registry import get_provider
 
-        assert get_provider("codex").supports_file_output is True
         assert get_provider("claude-code").supports_file_output is True
+        assert get_provider("opencode").supports_file_output is True
+
+    def test_codex_moves_the_review_off_its_sandbox_and_keeps_its_edits(self):
+        """D6 step 1: the review channel no longer depends on bubblewrap, and
+        nothing else about the adapter moves — the agent-write profile still
+        edits, and the `--output-schema` sidecar is still a path."""
+        from utils.provider_registry import get_provider
+
+        codex = get_provider("codex")
+
+        assert codex.supports_file_output is False
+        assert codex.supports_file_edits is True
+        assert codex.structured_output_transport == "file"
 
     @pytest.mark.parametrize("name", sorted(CANNOT_WRITE_FILES))
     def test_a_read_only_adapter_is_asked_for_stdout(self, name):
@@ -6085,8 +6144,18 @@ class TestClassifyFailure:
 #: ``tests/test_stderr_diagnosis.py`` makes the same assertion over the literals
 #: that file commits — the declared channel is graded either way, and the row is
 #: what stops the override landing without declaring one.
+#: ``opencode`` is the third shape (D5): ``stdout`` is still the declared
+#: channel — blanking it yields ``None`` — but since 1.18.x the stdout event can
+#: be a wrapper (``UnknownError: Unexpected server error``) whose cause is a
+#: ``level=ERROR … error="…"`` line on stderr, and ``describe_failure`` appends
+#: that value in parentheses. So stderr is declared *enrichment* that may change
+#: the text: blanking it must leave a non-``None`` answer that is a **prefix** of
+#: the composed one. Encoded as a value rather than an exemption, so the row
+#: stays graded against ``tests/fixtures/opencode/invalid-model.*``.
+STDOUT_THEN_STDERR = "stdout-then-stderr"
+
 _DESCRIBE_FAILURE_CHANNELS = {
-    "opencode": "stdout",
+    "opencode": STDOUT_THEN_STDERR,
     "muse": "stdout",
     "pi": "stderr",
     "gemini": "stderr",
@@ -6135,6 +6204,11 @@ class TestDescribeFailureChannels:
     false in the most direct way available — by adding the two adapters that are
     its mirror image — so what is pinned here is the channel each override
     declares, measured, rather than one stream's name.
+
+    D5 added the third shape the table has to name: ``stdout-then-stderr``,
+    where the declared channel is still one stream (blanking it is ``None``)
+    and the other is enrichment that may *extend* the answer but never replace
+    it — blanking the enrichment leaves a prefix of the composed text.
     """
 
     @pytest.mark.parametrize("name", _envelope_sweep_names())
@@ -6187,6 +6261,22 @@ class TestDescribeFailureChannels:
 
         for row, stdout, stderr in rows:
             both = provider.describe_failure(stdout, stderr)
+            if declared == STDOUT_THEN_STDERR:
+                # The declared channel alone still answers, and the composed
+                # answer only ever extends it; the enrichment alone is nothing.
+                stdout_only = provider.describe_failure(stdout, "")
+                assert both is not None and stdout_only is not None, (
+                    f"{name}/{row}: the declared stdout channel recovered nothing"
+                )
+                assert both.startswith(stdout_only), (
+                    f"{name}/{row}: stderr enrichment replaced the stdout answer "
+                    f"instead of extending it"
+                )
+                assert provider.describe_failure("", stderr) is None, (
+                    f"{name}/{row}: a reason was recovered from stderr alone, "
+                    f"which is enrichment and not the declared channel"
+                )
+                continue
             if declared == "stdout":
                 declared_only, other_only = (stdout, ""), ("", stderr)
             else:
@@ -6706,7 +6796,7 @@ class TestMuseProvider:
         cmd = provider.build_command("Analyze this", "muse-spark-1.2")
 
         assert cmd == [
-            "muse", "exec", "--json", "--disable-approval",
+            "muse", "exec", "--json", "--disable-approval", "--disable-sandbox",
             "--model", "muse-spark-1.2",
             "Analyze this",
         ]
@@ -6717,12 +6807,24 @@ class TestMuseProvider:
 
         assert "--disable-approval" in cmd
 
+    def test_muse_build_command_disables_sandbox(self, provider):
+        """D6: muse's shell sandbox is bubblewrap, which a stock Ubuntu 24.04
+        cannot start, so every sandboxed write died on `bwrap: loopback`.
+        `--disable-sandbox` turns it off; `--yolo` would also grant workspace
+        trust, which stays the user's own store."""
+        cmd = provider.build_command("Analyze this", "muse-spark-1.2")
+
+        assert "--disable-sandbox" in cmd
+        assert cmd.index("--disable-sandbox") == cmd.index("--disable-approval") + 1
+        assert "--yolo" not in cmd
+        assert "--trust-workspace" not in cmd
+
     def test_muse_build_command_effort_suffix(self, provider):
         """A whitelisted :effort suffix becomes --reasoning-effort."""
         cmd = provider.build_command("Analyze this", "muse-spark-1.2:xhigh")
 
         assert cmd == [
-            "muse", "exec", "--json", "--disable-approval",
+            "muse", "exec", "--json", "--disable-approval", "--disable-sandbox",
             "--model", "muse-spark-1.2",
             "--reasoning-effort", "xhigh",
             "Analyze this",
@@ -6734,7 +6836,7 @@ class TestMuseProvider:
         cmd = provider.build_command("Analyze this", "muse-spark-1.2:turbo")
 
         assert cmd == [
-            "muse", "exec", "--json", "--disable-approval",
+            "muse", "exec", "--json", "--disable-approval", "--disable-sandbox",
             "--model", "muse-spark-1.2:turbo",
             "Analyze this",
         ]
@@ -8440,8 +8542,8 @@ PRE_L5_ARGV = {
         "kimi", "--output-format", "stream-json", "-p", PRE_L5_ARGV_PROMPT,
     ],
     "muse": [
-        "muse", "exec", "--json", "--disable-approval", "--model",
-        "muse-spark-1.2", PRE_L5_ARGV_PROMPT,
+        "muse", "exec", "--json", "--disable-approval", "--disable-sandbox",
+        "--model", "muse-spark-1.2", PRE_L5_ARGV_PROMPT,
     ],
     "opencode": [
         "opencode", "run", "--format", "json", "--print-logs",
@@ -9360,3 +9462,85 @@ class TestClassifyLadderOrder:
 
         doc = classify_streams.__doc__ or ""
         assert "invalid model, then server" in doc
+
+
+class TestOpenCodeStreamCapturesAcrossThePin:
+    """D3 step 5: the parser is graded on BOTH shipped opencode captures.
+
+    `OpenCodeProvider.verified_version` stays `1.18.12` — it is a floor other
+    files are asserted against (`test_opencode_package.py` pins `engines.opencode`
+    between it and the container pin), and moving it is a support-window decision
+    with its own checklist. What D3 adds instead is evidence: a real 1.18.30
+    `opencode run --format json` stream captured beside the 1.18.8 auth-error
+    fixture, so a stream-shape break on a newer release surfaces as a red test
+    rather than as a version number nobody moved.
+
+    `run_review.1.18.30.jsonl` is the reviewer's own stdout from the D3
+    validation-batch gate (2026-09-11, zero-credential HOME, `opencode/big-pickle`,
+    `--pure` under the hermetic redirect): four `step_start`/`step_finish` pairs,
+    four `tool_use`/`tool` pairs, two `text` parts, no `error` event. The review
+    itself went to a file, so the text is prose and `parse_output` reports no
+    JSON — which is the correct reading of that stream, not a parser miss.
+    """
+
+    @pytest.fixture
+    def provider(self):
+        from utils.provider_registry import get_provider
+
+        return get_provider("opencode")
+
+    @pytest.fixture
+    def stream_1_18_30(self):
+        path = Path(__file__).parent / "fixtures" / "opencode" / "run_review.1.18.30.jsonl"
+        return path.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def stream_1_18_8(self):
+        path = Path(__file__).parent / "fixtures" / "opencode" / "provider_auth_error.jsonl"
+        return path.read_text(encoding="utf-8")
+
+    def test_the_1_18_30_capture_is_a_real_event_stream(self, stream_1_18_30):
+        events = [json.loads(line) for line in stream_1_18_30.splitlines() if line]
+        kinds = [event["type"] for event in events]
+        assert kinds.count("step_start") == 4
+        assert kinds.count("step_finish") == 4
+        assert kinds.count("tool_use") == 4
+        assert kinds.count("text") == 2
+        assert "error" not in kinds
+
+    def test_usage_is_summed_over_every_step_on_1_18_30(self, provider, stream_1_18_30):
+        """Reading the last step alone would under-report a multi-step run."""
+        usage = provider.parse_usage(stream_1_18_30, "")
+        assert usage == {
+            "input_tokens": 11489,
+            "output_tokens": 1764,
+            "cached_input_tokens": 28928,
+            "cost_usd": 0.0,
+            "total_tokens": 13253,
+            "tool_uses": 4,
+        }
+
+    def test_the_text_parts_are_read_in_order_on_1_18_30(self, provider, stream_1_18_30):
+        result = provider.parse_output(stream_1_18_30, "")
+        raw = str(result.get("raw") or "")
+        assert raw.startswith("Now let me explore the codebase")
+        assert "JSON written to" in raw
+        # Prose, not an answer: the review went to the file the prompt named.
+        assert result["success"] is False
+        assert "No valid JSON" in str(result.get("error"))
+
+    def test_a_clean_1_18_30_stream_reports_no_failure(self, provider, stream_1_18_30):
+        assert provider.describe_failure(stream_1_18_30, "") is None
+        assert provider.classify_failure(stream_1_18_30, "", 0) is None
+
+    def test_the_1_18_8_auth_error_is_still_read(self, provider, stream_1_18_8):
+        """Both pins graded in one place: the older capture keeps its verdict."""
+        assert provider.describe_failure(stream_1_18_8, "") == (
+            "ProviderAuthError: Google Generative AI API key is missing. Pass it using "
+            "the 'apiKey' parameter or the GOOGLE_GENERATIVE_AI_API_KEY environment variable."
+        )
+        assert provider.classify_failure(stream_1_18_8, "", 1) == STATUS_AUTH_FAILED
+
+    def test_the_pin_did_not_move(self, provider):
+        """The capture is evidence beside the pin, never a reason to move it."""
+        assert provider.verified_version == "1.18.12"

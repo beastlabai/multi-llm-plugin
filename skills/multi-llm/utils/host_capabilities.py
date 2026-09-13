@@ -67,8 +67,8 @@ EXECUTOR_PROFILES: Tuple[str, ...] = ("agent-readonly", "agent-write")
 #: here, in ``utils/host_install.py``, in ``hosts/render_capabilities.py`` and in
 #: the executor. It is the schema's own ``definitions.host.required`` list, minus
 #: nothing: ``schemas/host_capabilities.schema.json`` requires every field except
-#: ``shim_max_lines`` and ``headless_invocation``, both of which govern a lint or
-#: a generated document rather than a dispatch. Restated here as a plain tuple
+#: ``shim_max_lines``, ``headless_invocation`` and ``package``, each of which
+#: governs a lint or a generated document rather than a dispatch. Restated here as a plain tuple
 #: because :func:`load` must not need ``jsonschema`` — a dev-only extra — nor a
 #: second file present to give a clean error; ``tests/test_host_capabilities.py``
 #: asserts the two lists still agree, so the drift is caught at test time and the
@@ -89,6 +89,7 @@ REQUIRED_HOST_KEYS: Tuple[str, ...] = (
     "provenance",
     "reload",
     "runners",
+    "session_runner_provider",
     "shim",
     "subagent_tiers",
     "subagents",

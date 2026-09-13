@@ -193,6 +193,39 @@ def _isolate_provider_config(request, monkeypatch):
         _reset_cache()
 
 
+@pytest.fixture(autouse=True)
+def _pin_opencode_model_catalog(request, monkeypatch):
+    """Keep the default suite from spawning `opencode models` (D3 step 4).
+
+    `preflight_runner` now asks the adapter's ``describe_unlisted_model`` for
+    the CLI's own listing, and only ``OpenCodeProvider`` overrides the base's
+    ``known=None`` default with a real subprocess. Any registry or executor
+    test that preflights a real opencode spec would otherwise spawn the CLI —
+    or, under the mock launcher, log a phantom dispatch. So the override is
+    pinned to ``known=None`` (unknown: refuses nothing, exactly the base
+    posture) for every test that does not opt out with
+    ``@pytest.mark.model_catalog``. The stub providers other suites build
+    inherit the base default and need nothing.
+    """
+    if "model_catalog" in request.keywords:
+        yield
+        return
+    try:
+        from utils.providers import opencode as oc
+        from utils.providers.base import ModelVerdict
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        oc.OpenCodeProvider,
+        "describe_unlisted_model",
+        lambda self, model, *, anchor=None, profile="agent-readonly": ModelVerdict(
+            known=None
+        ),
+    )
+    yield
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""

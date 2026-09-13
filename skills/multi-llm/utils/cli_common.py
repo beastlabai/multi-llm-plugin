@@ -52,7 +52,7 @@ import shlex
 import sys
 from pathlib import Path
 from typing import (
-    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Union,
+    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union,
 )
 
 # Absolute, symlinks preserved. Module-level because it is a pure string
@@ -174,9 +174,70 @@ def reaggregate_command(
     return dispatcher_command(mode, plan_file, "--reaggregate", base=base)
 
 
+#: The verbs a retry adds to a recorded invocation. ``retry_command`` strips
+#: every spelling of these out of the replayed flag list before appending the
+#: one(s) the caller asked for, so a recorded ``--force`` cannot double and a
+#: ``--reaggregate`` run that failed is not replayed as ``--reaggregate
+#: --reaggregate``.
+#:
+#: The two consolidation pass selectors ride along for the same reason: the
+#: review-plan main tries ``--consolidate`` before ``--reaggregate-consolidation``
+#: (``review_orchestrator_base.main``), so a replay that kept the recorded
+#: ``--consolidate`` beside the new verb would re-prepare the batch it means to
+#: merge.
+RETRY_VERBS: FrozenSet[str] = frozenset({
+    "--force", "--reaggregate", "--rerun-all",
+    "--consolidate", "--consolidate-dry-run", "--reaggregate-consolidation",
+})
+
+
+def retry_command(
+    mode: str,
+    *args: Union[str, Path],
+    flags: Optional[Sequence[str]] = None,
+    base: Optional[Path] = None,
+) -> str:
+    """``dispatcher_command`` with the caller's recorded flags spliced in (D2).
+
+    *args* are the positionals (the plan, an ``ask`` question) followed by the
+    retry verb(s) — ``--force``, ``--reaggregate``, ``--rerun-all``,
+    ``--reaggregate-consolidation``. *flags* is the replay list
+    (:func:`replay_flags`, or a document's stored ``replay_flags``); it is
+    spliced in **behind the positionals and ahead of the verbs**, verbatim,
+    minus every retry verb it already carried, so ``--quick`` survives a retry
+    and ``--force`` never doubles. With no flags the output is byte-identical
+    to ``dispatcher_command(mode, *args)``, which is what every pre-D2 test
+    pins.
+
+    The name deliberately matches the ``retry_command=`` keyword argument of
+    ``dispatch_subagent_tasks``/``continue_past_marker``/``retry_instruction``
+    — this function's return value is what that argument should carry — so
+    import it as ``cli_common.retry_command`` and never bind the bare name in a
+    module that also takes the kwarg.
+
+    **Never sanitized.** A stored flag today's parser no longer knows is emitted
+    as recorded: argparse then names it on stderr and the dispatcher maps that
+    to exit 3, which is a better failure than the silently widened panel that
+    dropping a selector produces.
+    """
+    positionals: List[Union[str, Path]] = []
+    verbs: List[Union[str, Path]] = []
+    for arg in args:
+        if verbs or str(arg).startswith("-"):
+            verbs.append(arg)
+        else:
+            positionals.append(arg)
+    drop = set(RETRY_VERBS) | {str(v).split("=", 1)[0] for v in verbs}
+    kept = [
+        str(token) for token in (flags or [])
+        if str(token).split("=", 1)[0] not in drop
+    ]
+    return dispatcher_command(mode, *positionals, *kept, *verbs, base=base)
+
+
 def durable_reaggregate_fields(
     orchestrator_script: str, plan_file: Union[str, Path]
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """What a *persisted* checkpoint may store about its follow-up command.
 
     Never the resolved command: the Claude plugin cache is keyed by commit hash,
@@ -185,9 +246,19 @@ def durable_reaggregate_fields(
     movement is **rebindable** — unlike a content hash — so the durable form is the
     mode word plus the plan path, and the reader rebuilds the command from the
     *running* skill dir (``utils/detach.resolved_reaggregate_command``).
+
+    The third element, ``replay_flags``, is the caller's own selection flags
+    (:func:`replay_flags` over this process's :func:`invocation`), stored as a
+    **list** — never a resolved command — so a reader in some later process can
+    splice them back in through :func:`retry_command` and a ``--quick`` review
+    stays a ``--quick`` review across the retry (D2).
     """
     mode = _modes().mode_for_script(orchestrator_script) or orchestrator_script
-    return {"reaggregate_mode": mode, "plan_file": str(plan_file)}
+    return {
+        "reaggregate_mode": mode,
+        "plan_file": str(plan_file),
+        "replay_flags": current_replay_flags(mode=mode),
+    }
 
 
 def reaggregate_command_for_script(
@@ -259,15 +330,26 @@ UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
 #: well as of ``dist/cli-surface.json``.
 DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
 
+#: The fourth template token: the decision rule for exit 3.
+#:
+#: "Exit 3 means stop, report, and never do the phase's work by hand" is a
+#: *rule* the same way the default mode is, and :data:`modes.NEEDS_HUMAN_RULE`
+#: owns it. Every shim template and the plugin's command body state it once —
+#: through this token, never as a literal — so the file routes cannot drift
+#: from the plugin's own exit-3 message, which is composed from the same
+#: constant's sibling.
+NEEDS_HUMAN_RULE_TOKEN = "{NEEDS_HUMAN_RULE}"
+
 
 def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     """Substitute every template placeholder in instruction/shim text.
 
-    Three tokens, one rule: ``{SKILL_DIR}`` (and its host-expanded spellings)
+    Four tokens, one rule: ``{SKILL_DIR}`` (and its host-expanded spellings)
     becomes *base*, :data:`UV_RUN_FLAGS_TOKEN` becomes the ``uv run`` flag list,
-    and :data:`DEFAULT_MODE_TOKEN` becomes ``modes.DEFAULT_MODE``. The skill dir
-    is an argument so a test can render against a fixture path containing a
-    space; the other two are read from their owners rather than passed, for the
+    :data:`DEFAULT_MODE_TOKEN` becomes ``modes.DEFAULT_MODE`` and
+    :data:`NEEDS_HUMAN_RULE_TOKEN` becomes ``modes.NEEDS_HUMAN_RULE``. The skill
+    dir is an argument so a test can render against a fixture path containing a
+    space; the others are read from their owners rather than passed, for the
     same reason :func:`dispatcher_prefix` reads the flag list — a caller given
     the chance to supply one is a caller that can supply a different one.
     Substituting at read time from the *running* skill dir and the *running* flag
@@ -281,7 +363,8 @@ def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     for token in _SKILL_DIR_TOKENS:
         rendered = rendered.replace(token, str(base))
     rendered = rendered.replace(UV_RUN_FLAGS_TOKEN, " ".join(uv_run_args()))
-    return rendered.replace(DEFAULT_MODE_TOKEN, _modes().DEFAULT_MODE)
+    rendered = rendered.replace(DEFAULT_MODE_TOKEN, _modes().DEFAULT_MODE)
+    return rendered.replace(NEEDS_HUMAN_RULE_TOKEN, _modes().NEEDS_HUMAN_RULE)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +619,279 @@ def clear_invocation() -> None:
 
 def invocation() -> Optional[Dict[str, Any]]:
     return _INVOCATION
+
+
+# ---------------------------------------------------------------------------
+# The replay-argv contract (D2): what a retry carries forward
+# ---------------------------------------------------------------------------
+
+def _option_table(dests: Iterable[str]) -> Dict[str, "Tuple[Tuple[str, ...], bool]"]:
+    """``dest → (every option spelling, takes a value)`` off the parent parser.
+
+    Derived, never hand-typed: ``--yes`` is also ``-y`` and ``--non-interactive``
+    (one action, three spellings), and whether a token swallows the one after
+    it is what argparse says its action does. A literal list here would be
+    wrong the day it was written and wrong again at the next alias.
+    """
+    wanted = set(dests)
+    table: Dict[str, Tuple[Tuple[str, ...], bool]] = {}
+    for action in build_parent_parser()._actions:
+        if action.dest in wanted:
+            table[action.dest] = (tuple(action.option_strings), action.nargs != 0)
+    missing = wanted - set(table)
+    if missing:  # pragma: no cover - guarded by the parser definition
+        raise RuntimeError(f"replay drop set names unknown dests: {sorted(missing)}")
+    return table
+
+
+#: The re-entry flags, dropped from every replay: the worker is re-executed with
+#: them and a follow-up command must never carry one (``INTERNAL_FLAG_PREFIX``).
+_REPLAY_DROP_ALWAYS = _option_table(("internal_worker", "internal_run_id"))
+
+#: Dropped only when *implied*: ``--detach`` writes ``--yes`` and
+#: ``--exec-subagents`` out explicitly (``multi_llm._apply_flag_implications``),
+#: and ``build_worker_argv`` does the same under ``--internal-worker``, so in an
+#: argv carrying either implier a typed spelling and an implied one are the same
+#: token. The replay keeps the implier, whose re-dispatch re-implies both, and
+#: drops the pair; without an implier every spelling is the caller's and stays.
+_REPLAY_DROP_IMPLIED = _option_table(("yes", "exec_subagents"))
+_REPLAY_IMPLIERS = _option_table(("detach", "internal_worker"))
+
+#: The positional-derived flags. Not parent-parser options, so named here next
+#: to the derived half, pointing at their single producer:
+#: ``multi_llm._normalize_positionals`` turns ``POS_PLAN`` into ``--plan-file``
+#: and ``POS_QUESTION`` into ``--question``/``--question-file``
+#: (``multi_llm._question_flags``). Every replay re-emits the plan from its own
+#: argument; ``ask`` re-emits the question from ``.status.json``'s ``question``
+#: field, never from the argv — the long form names a temp file the dispatcher
+#: already unlinked, and the short form would make free text durable.
+#: ``POS_HOST`` is forwarded as a positional and is not a flag at all.
+_REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
+    "plan_file": (("--plan-file",), True),
+    "question": (("--question",), True),
+    "question_file": (("--question-file",), True),
+}
+
+
+def _matches_any(head: str, table: Dict[str, Tuple[Tuple[str, ...], bool]]) -> Optional[bool]:
+    """``takes_value`` for the table entry ``head`` binds to, else ``None``."""
+    for names, takes_value in table.values():
+        for name in names:
+            if _flag_matches(head, name):
+                return takes_value
+    return None
+
+
+def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
+    """The flags a retry of *argv* carries forward, verbatim (D2 step 1).
+
+    ``invocation()["argv"]`` is the dispatcher's **normalized** argv — the plan
+    positional already spelled ``--plan-file <abs>``, ``--detach``'s
+    implications written out — and, in a detached worker, the re-entry flags
+    ``build_worker_argv`` appended. A naive slice yields a command with the plan
+    named twice and an internal flag left in. This drops exactly:
+
+    * the two re-entry flags (``--internal-run-id`` with its value);
+    * the positional-derived flags, which every replay re-emits from its own
+      arguments (``--plan-file``, ``--question``, ``--question-file``);
+    * the dispatcher's own injections for this mode (``modes.injected_flags``
+      and every alias's ``alias_flags``), which the replay's mode word
+      re-derives;
+    * ``--yes``/``--exec-subagents`` when an implier is present (see
+      :data:`_REPLAY_DROP_IMPLIED`).
+
+    Everything else stays, in the spelling it was typed, values with spaces
+    included: ``--quick``, ``-q``, ``--models=a,b``, ``--host``, ``--detach``.
+    Matching goes through :func:`_flag_matches`, so an argparse abbreviation is
+    recognized rather than passed through as an unknown token. **Flags only**:
+    no positional is ever recorded, by construction.
+    """
+    modes = _modes()
+    injected = set(getattr(modes.resolve(mode), "injected_flags", ()) or ())
+    for word, flags in getattr(modes, "ALIAS_FLAGS", {}).items():
+        target = modes.resolve(word)
+        if target is not None and target.name == mode:
+            injected.update(flags)
+    tokens = [str(t) for t in argv]
+    implied = any(
+        _matches_any(t.split("=", 1)[0], _REPLAY_IMPLIERS) is not None
+        for t in tokens
+    )
+    out: List[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        head = token.split("=", 1)[0]
+        takes_value = _matches_any(head, _REPLAY_DROP_ALWAYS)
+        if takes_value is None:
+            takes_value = _matches_any(head, _REPLAY_DROP_POSITIONAL)
+        if takes_value is None and implied:
+            takes_value = _matches_any(head, _REPLAY_DROP_IMPLIED)
+        if takes_value is None and head in injected:
+            takes_value = False
+        if takes_value is None:
+            out.append(token)
+            index += 1
+            continue
+        index += 2 if (takes_value and "=" not in token) else 1
+    return out
+
+
+def current_replay_flags(
+    stored: Any = None, *, mode: Optional[str] = None
+) -> List[str]:
+    """The replay flags this producer should print: **the live source wins**.
+
+    When :func:`invocation` is populated *for the mode being replayed* the
+    printing process is the run whose retry is being named, and its own argv is
+    the truth — a ``--models a,b`` run resuming a phase whose document was
+    written by yesterday's ``--quick`` run prints ``--models a,b``. Only a
+    reader in some other process or mode (the file route; ``status`` on a run
+    it did not launch, whose own ``--view run`` argv must never win; ``full``
+    driving a phase in-process) falls through to *stored*, a document's
+    ``replay_flags`` list, which is emitted as recorded and never sanitized
+    against today's parser. Absent or malformed decodes to ``[]``.
+    """
+    record = invocation()
+    if record and record.get("mode") and (mode is None or record["mode"] == mode):
+        return replay_flags(str(record["mode"]), record.get("argv") or [])
+    if isinstance(stored, (list, tuple)):
+        return [str(token) for token in stored]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# The retry's shape (D2 step 4): classification, never a count
+# ---------------------------------------------------------------------------
+
+#: A config or credential fault — a ``RunnerRejected`` reason code, or a fatal
+#: per-task status such as ``invalid_model``. The repair is named first; the
+#: single tool call (recorded flags + ``--reaggregate``) is offered *after* it.
+SHAPE_REPAIR = "repair"
+#: Transient or retryable — timeout, rate limit, spawn failure, an unclassified
+#: parse failure. Nothing to edit: the same ``--reaggregate`` call, plus its cost.
+SHAPE_REAGGREGATE = "reaggregate"
+#: The fan-out's own artifacts are unusable — the one shape in which ``--force``
+#: is a *command* rather than a sentence, because the reviewer pass really is
+#: what has to run again.
+SHAPE_FORCE = "force"
+
+
+def retry_shape(
+    *,
+    reason_code: Optional[str] = None,
+    statuses: Iterable[str] = (),
+    artifacts_ok: bool = True,
+) -> str:
+    """Which of the three exit-3 shapes a failure gets. Takes values, never paths.
+
+    It opens no file, so no producer can quietly acquire a classification by
+    going to look for a document — the stale-report hazard D4 step 5 names.
+    Each site supplies what it legitimately holds: ``continue_past_marker`` the
+    statuses of the report *it* was returned plus artifact validity; the
+    ``except ExecutorError`` handler the refusal's ``reason_code``; ``status``
+    the run record's close-out or the ``progress.subagents`` mirror. Neither a
+    success count nor ``report.ok`` decides anything here: both are equally
+    consistent with a dead model id and a rate limit.
+    """
+    from .retry_ladder import FATAL_STATUSES
+
+    if not artifacts_ok:
+        return SHAPE_FORCE
+    if reason_code:
+        return SHAPE_REPAIR
+    if set(statuses) & FATAL_STATUSES:
+        return SHAPE_REPAIR
+    return SHAPE_REAGGREGATE
+
+
+#: What a fatal per-task status asks to be repaired, in one clause each. Keyed
+#: by the ``retry_ladder.FATAL_STATUSES`` spellings; an unknown fatal status
+#: falls back to naming itself.
+_FATAL_STATUS_REPAIR: Dict[str, str] = {
+    "invalid_model": "the runner's model id is not one its CLI accepts — fix "
+                     "driver.subagent_runner (or the provider's model list)",
+    "auth_failed": "the runner's CLI is installed but not logged in — no retry "
+                   "can supply a missing credential",
+    "spawn_failed": "the runner's CLI could not be started — check the binary "
+                    "is on PATH and executable",
+    "sandbox_unavailable": "the runner's own sandbox cannot write on this "
+                           "machine — run `multi_llm.py doctor` for the repair",
+}
+
+
+def repair_sentence(
+    *,
+    reason_code: Optional[str] = None,
+    explanation: Optional[str] = None,
+    counts: Optional[Dict[str, int]] = None,
+    statuses: Iterable[str] = (),
+) -> str:
+    """Shape 1's lead sentence: what must change before the retry is worth it.
+
+    A reason code names the refusal (with ``_REASON_EXPLANATION``'s sentence
+    when the caller supplies it); otherwise the fatal statuses present are
+    named, with their counts when known. Takes values, never paths.
+    """
+    from .retry_ladder import FATAL_STATUSES
+
+    if reason_code:
+        return f"{reason_code}: {explanation}" if explanation else str(reason_code)
+    tally: Dict[str, int] = dict(counts or {})
+    for status in statuses:
+        tally.setdefault(status, 0)
+    parts = []
+    for status in sorted(s for s in tally if s in FATAL_STATUSES):
+        n = tally.get(status) or 0
+        head = f"{n} task(s) ended {status}" if n else f"tasks ended {status}"
+        parts.append(f"{head} — {_FATAL_STATUS_REPAIR.get(status, 'fix the runner it names')}")
+    return "; ".join(parts) or "fix what the message names"
+
+
+def retry_options(
+    shape: str,
+    *,
+    reaggregate: str,
+    force: str,
+    repair: Optional[str] = None,
+    redispatch: Optional[int] = None,
+    kept: Optional[int] = None,
+) -> List[str]:
+    """The numbered option sentences one shape prints, in rank order.
+
+    One renderer for every in-process site, so the two shapes that demote
+    ``--force`` to a sentence do so in the same words. *reaggregate* and
+    *force* are the two commands already built through :func:`retry_command`;
+    *repair* is the sentence shape 1 leads with (``_REASON_EXPLANATION`` for a
+    reason code, or the fatal status by name). Only the ranked-first command
+    is spelled as a runnable string in shapes 1 and 2, which is what keeps a
+    host's option scrape (``toolCallsFor``) to one retry tool call.
+    """
+    cost = ""
+    if redispatch is not None:
+        cost = f" — it re-dispatches {redispatch} task(s)"
+        if kept is not None:
+            cost += f" and keeps the {kept} valid result(s) already on disk"
+    options: List[str] = []
+    if shape == SHAPE_FORCE:
+        options.append(
+            f"The fan-out's own results are unusable, so the reviewer pass has "
+            f"to run again: re-invoke with `{force}`."
+        )
+        return options
+    if shape == SHAPE_REPAIR:
+        options.append(f"Repair first: {repair or 'fix what the message names'}.")
+        options.append(
+            f"Then re-invoke with `{reaggregate}`{cost}; --force is not needed "
+            f"and would re-run the reviewer panel."
+        )
+        return options
+    options.append(f"Re-invoke with `{reaggregate}`{cost}.")
+    options.append(
+        "Add --force only if you also want the reviewer panel re-run; the "
+        "existing reviewer results are fine."
+    )
+    return options
 
 
 def parse_result_line(text: str) -> Optional[Dict[str, Any]]:

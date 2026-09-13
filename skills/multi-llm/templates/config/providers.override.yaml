@@ -167,9 +167,6 @@
 #     hermetic: on
 #     models:
 #       - opencode/big-pickle
-#       - opencode/sonnet
-#       - opencode/deepseek-v4-flash-free
-#       - opencode/hy3-free
 #       - opencode/nemotron-3-ultra-free
 #       - google/gemini-3.1-pro-preview
 #       - openai/gpt-5.5

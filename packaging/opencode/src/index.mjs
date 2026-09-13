@@ -90,7 +90,7 @@ const TOOL_NAME = "multi_llm"
 const SKILL_DIR_TOKEN = "{SKILL_DIR}"
 
 /** Bumped in lockstep with build.py's SURFACE_SCHEMA_VERSION. */
-const SUPPORTED_SURFACE_VERSION = 1
+const SUPPORTED_SURFACE_VERSION = 3
 
 // ---------------------------------------------------------------------------
 // The generated surface
@@ -158,6 +158,11 @@ function buildDescription(surface) {
   }
   lines.push("")
   lines.push(`The default mode is ${surface.default_mode}.`)
+  // The outcomes line sits after the mode block, so a model reading the
+  // listing meets the exit codes — and what exit 3 decides — in the same
+  // glance as the modes, rather than buried in the opening sentence.
+  lines.push("")
+  lines.push(surface.outcomes_line)
   lines.push("")
   lines.push("Examples:")
   for (const example of workedExamples(surface)) {
@@ -660,6 +665,75 @@ function resolveAnchor(ctx) {
     }
   }
   return process.cwd()
+}
+
+/**
+ * How long the session-model lookup may take before the run goes on without it.
+ *
+ * It is a nicety, not a prerequisite: the ladder has three more rungs under it,
+ * so a slow or wedged `client` must cost a moment and never a dispatch.
+ */
+const SESSION_MODEL_BUDGET_MS = 3000
+
+/**
+ * The model the OpenCode session is itself running on, as `provider/model`.
+ *
+ * WHY THE PLUGIN HAS TO ASK. `resolve_subagent_runner`'s ladder had no rung for
+ * "what the operator selected": an explicit `driver.subagent_runner` won, else
+ * the host's shipped credential-free floor did. So a run launched from a session
+ * whose picker said one model dispatched all of its batches on another, with
+ * nothing on screen to say so. The `ToolContext` carries no model — only
+ * `sessionID`, `messageID`, `agent`, `directory`, `worktree` and `abort` — but
+ * the plugin factory's own input carries the SDK `client`, and the session's
+ * newest assistant message records the `providerID`/`modelID` it was produced
+ * with. That is the observation; what it *means* is Python's to decide, which is
+ * why this returns a string and sets no policy.
+ *
+ * Best effort by construction, and every failure is swallowed (rule 4): an old
+ * host with no `client`, a route that moved, a hang. `Promise.race` against a
+ * timer rather than an `AbortSignal`, because the budget has to hold even
+ * against a client that ignores one — and the timer is deliberately NOT
+ * `unref`'d: a hung client leaves nothing else on the loop, and an unref'd timer
+ * would let node drain and exit with the await still pending instead of letting
+ * the budget expire. `clearTimeout` in the `finally` is what keeps the ordinary
+ * path from paying for it.
+ */
+async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_MS) {
+  const sessionID = ctx?.sessionID
+  if (typeof sessionID !== "string" || !sessionID) return null
+  const fetch = client?.session?.messages
+  if (typeof fetch !== "function") return null
+  let timer = null
+  try {
+    const answered = await Promise.race([
+      fetch.call(client.session, { path: { id: sessionID } }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), budgetMs)
+      }),
+    ])
+    const messages = Array.isArray(answered?.data)
+      ? answered.data
+      : Array.isArray(answered)
+        ? answered
+        : []
+    // Newest first: the run is about to dispatch on whatever the session is
+    // using *now*, which is the last assistant turn, not the first.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const info = messages[i]?.info
+      if (!info || info.role !== "assistant") continue
+      const provider = typeof info.providerID === "string" ? info.providerID.trim() : ""
+      const model = typeof info.modelID === "string" ? info.modelID.trim() : ""
+      if (provider && model) return `${provider}/${model}`
+    }
+    return null
+  } catch (error) {
+    // Never fatal: the ladder's remaining rungs are the fallback, and they are
+    // the behaviour every run had before this lookup existed.
+    warn(`could not read the session model: ${describe(error)}`)
+    return null
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /** A plan path normalized against the anchor. Resolving is not quoting. */
@@ -1531,6 +1605,8 @@ function terminalResult(child, context) {
     // the block a human is being asked to read and comes back parsed in
     // `result` instead.
     const payload = redactCommand(child.result ?? null, null, surface)
+    const output = humanOutput(child, null, surface)
+    const stderr = redactCommand(child.stderr, null, surface)
     return {
       ...base,
       state: "needs-human",
@@ -1540,18 +1616,25 @@ function terminalResult(child, context) {
       // taken from the raw one would put back, in its own field, the very
       // command the field beside it just removed.
       error: payload?.error ?? null,
-      output: humanOutput(child, null, surface),
-      stderr: redactCommand(child.stderr, null, surface) || undefined,
+      output,
+      stderr: stderr || undefined,
       next: null, // following `next` stops here
-      options: toolCallsFor(child, surface),
+      // The retries the child printed, then — always last, and only on this
+      // branch — the one option that is a legal exit rather than a retry. One
+      // key, `human`, read off the surface: a consumer branching on
+      // `"tool" in option` takes the human branch, and `isMechanical` already
+      // answers false for anything without `args`, so the continuation loop
+      // can never auto-follow it. Exit 1 (`errorResult`) does not get it: an
+      // error result with nothing scraped still reports no `options` key.
+      options: [
+        ...toolCallsFor(child, surface),
+        { human: surface.needs_human_option },
+      ],
       nested_exec: nestedExecReason(child, surface),
-      message:
-        "The dispatcher needs a human. Its output is included as it was " +
-        "rendered, except that every runnable command in it was replaced by a " +
-        "pointer and spelled as a tool call in `options`, in the order it " +
-        "appeared, and its result line is in `result` instead. Do not " +
-        "paraphrase the output; to enact one of its commands, send back that " +
-        "tool call rather than running anything yourself.",
+      // Composed from the surface's template and clauses, never authored
+      // here: this file holds no message of its own (the same rule that keeps
+      // the uv preflight text in `hosts/uv-missing.txt`).
+      message: needsHumanMessage({ payload, output, stderr, values, surface }),
     }
   }
 
@@ -1608,6 +1691,78 @@ function terminalResult(child, context) {
     next: nextAsToolCall(raw, surface),
     output: humanOutput(child, raw, surface),
   }
+}
+
+/**
+ * The exit-3 `message`, filled from the surface's template.
+ *
+ * `needs_human_message` is a template with `{phase}` and `{error}` tokens plus
+ * the clause alternatives they are filled with; this function only *selects*
+ * a clause for each and substitutes. It authors no wording, not even a
+ * fallback, so the one sentence a model reads on the path this incident turned
+ * on is Python's.
+ *
+ * The phase word comes from the **launch**, not from the payload: the call's
+ * validated mode word, resolved through the surface's mode table. A poll's
+ * result line is `status`'s own and declares no phase, so on a detached
+ * worker's death the payload cannot name the phase that died; `result.phase`
+ * is consulted only to *confirm* what the launch says and never to overrule
+ * it. "Did not complete" is claimed only when the result line's `state` is the
+ * needs-human one — and a completed `review-code --fail-on-high`, which
+ * carries that same state, is recognised from the launch and gets the
+ * completed-review clause instead.
+ *
+ * With no result line at all — a child that died before it emitted one, or a
+ * line that was not JSON — nothing names the phase, and the last non-blank
+ * line of the *redacted* output (else stderr) stands in for the error line.
+ * Never a line off `child.stdout`: a tail taken from the raw stream would put
+ * a runnable command back into the message beside the fields that just
+ * removed it.
+ */
+function needsHumanMessage({ payload, output, stderr, values, surface }) {
+  const text = surface.needs_human_message
+  const fill = (clause, vars) =>
+    clause.replace(/\{(phase|error)\}/g, (_, key) => vars[key] ?? "")
+
+  const row = values?.word ? resolveMode(values.word, surface) : null
+  const launched = row?.phase ?? null
+  const gate = surface.dispatcher.review_gate
+  const held =
+    row?.name === gate.mode && (values?.extraFlags ?? []).includes(gate.flag)
+
+  let phase
+  if (!payload) {
+    phase = text.phase_unknown
+  } else if (launched && held) {
+    phase = fill(text.review_completed, { phase: launched })
+  } else if (launched) {
+    const incomplete = payload.state === surface.dispatcher.states.needs_human
+    phase = fill(incomplete ? text.phase_incomplete : text.phase_known, {
+      phase: launched,
+    })
+  } else {
+    phase = text.phase_unnamed
+  }
+
+  let line = null
+  if (payload) {
+    line = typeof payload.error === "string" && payload.error.trim()
+      ? payload.error.trim()
+      : null
+  } else {
+    line = lastNonBlankLine(output) ?? lastNonBlankLine(stderr)
+  }
+  const error = line
+    ? fill(text.error_known, { error: `"${line}"` })
+    : text.error_unknown
+
+  return fill(text.template, { phase, error })
+}
+
+function lastNonBlankLine(text) {
+  if (typeof text !== "string") return null
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean)
+  return lines.length ? lines[lines.length - 1] : null
 }
 
 /** Where a redacted `next` went, and where any other redacted command went. */
@@ -1721,8 +1876,12 @@ function scrubValue(value, commands, pattern) {
  */
 function runnablePattern(surface) {
   const script = escapeRegExp(surface.dispatcher.script)
+  // A command ends at the line, a double quote or a backtick: the exit-3
+  // option blocks quote the command inline (``re-invoke with `uv run …` — it
+  // re-dispatches …``), and a scrape that ran to the end of the line handed
+  // back the closing backtick and the rest of the sentence as extra flags.
   return new RegExp(
-    `[^\\s"]*\\buv(?:\\.exe)?\\b\\s+run\\b[^\\n"]*${script}[^\\n"]*`,
+    `[^\\s"\`]*\\buv(?:\\.exe)?\\b\\s+run\\b[^\\n"\`]*${script}[^\\n"\`]*`,
     "g",
   )
 }
@@ -1750,7 +1909,10 @@ function toolCallsFor(child, surface) {
   for (const command of commands) {
     if (seen.has(command)) continue
     seen.add(command)
-    calls.push(nextAsToolCall(command, surface))
+    const call = nextAsToolCall(command, surface)
+    // Never a `null` beside the human entry: the needs-human branch appends
+    // that entry after this list, and "the last option" has to mean it.
+    if (call) calls.push(call)
   }
   return calls
 }
@@ -2084,7 +2246,7 @@ function splitFrontmatter(text) {
  * unregistered tool is a warned, degraded plugin; a throw out of the factory
  * takes OpenCode's whole plugin load with it.
  */
-function buildToolHook(surface) {
+function buildToolHook(surface, client) {
   if (!surface) {
     warn(
       `the ${TOOL_NAME} tool is not registered: the generated CLI surface ` +
@@ -2105,7 +2267,7 @@ function buildToolHook(surface) {
         // prose blob (and an error branch, which has no `output` at all, into
         // an `undefined` one). One JSON string keeps every field.
         execute: async (args, ctx) =>
-          JSON.stringify(await execute(args, ctx, surface)),
+          JSON.stringify(await execute(args, ctx, surface, client)),
       },
     }
   } catch (error) {
@@ -2118,7 +2280,13 @@ function buildToolHook(surface) {
   }
 }
 
-export const MultiLlmPlugin = async () => {
+// The factory input is opencode's own `PluginInput` — `{ client, app, $,
+// directory, worktree, … }`. Destructured with a default so a host that calls
+// the factory with no argument at all (every one of this suite's `await
+// MultiLlmPlugin()` calls, and any older loader) still gets a working plugin:
+// `client` is then `undefined`, `resolveSessionModel` returns null, and the run
+// resolves its runner exactly as it did before this existed (rule 4).
+export const MultiLlmPlugin = async ({ client } = {}) => {
   // Read once at load. A null surface degrades the plugin rather than crashing
   // OpenCode; `execute` reports it, and the command still injects.
   const surface = loadSurface()
@@ -2135,13 +2303,13 @@ export const MultiLlmPlugin = async () => {
       }
     },
 
-    tool: buildToolHook(surface),
+    tool: buildToolHook(surface, client),
   }
 }
 
 
 /** The whole contract, in one function. Returns; never throws. */
-async function execute(args, ctx, surface) {
+async function execute(args, ctx, surface, client) {
   try {
     const env = { ...process.env }
     const anchor = resolveAnchor(ctx)
@@ -2169,6 +2337,16 @@ async function execute(args, ctx, surface) {
     // re-resolves to it instead of re-probing a PATH it may not share.
     env[surface.uv.env] = uv
 
+    // The session's own model, on the environment the launcher AND every poll
+    // run with — the detached worker inherits it through `utils/detach.py`'s
+    // `child_env`, which copies `os.environ`. The variable's name is generated
+    // (Python owns it); this file only supplies the value, and only when the
+    // lookup succeeded, so an unanswered lookup is byte-for-byte the old
+    // behaviour rather than an empty variable the ladder has to special-case.
+    const sessionModel = await resolveSessionModel(client, ctx)
+    const sessionModelEnv = surface.dispatcher?.session_model_env
+    if (sessionModel && sessionModelEnv) env[sessionModelEnv] = sessionModel
+
     const values = {
       // The word as sent, so an alias reaches the dispatcher unexpanded.
       word: args.mode,
@@ -2189,6 +2367,10 @@ async function execute(args, ctx, surface) {
       })
       if (instructions) outcome.instructions = instructions
     }
+    // Echoed for the same reason `anchor` is: a wrong one is otherwise
+    // invisible, surfacing as "why did it review with THAT model" rather than
+    // as anything anyone can point at.
+    if (sessionModel) outcome.session_model = sessionModel
     return outcome
   } catch (error) {
     // The last line of defence for rule 4. A throw here would be a silent
@@ -2219,16 +2401,19 @@ const __testing = {
   findUv,
   flagMatches,
   injectCommand,
+  isMechanical,
   loadSurface,
   nextAsToolCall,
   normalizePlan,
   parseDispatcherCommand,
   reservedHit,
   resolveAnchor,
+  resolveSessionModel,
   runChild,
   resolveMode,
   splitFrontmatter,
   splitPosix,
+  terminalResult,
   uvMissingText,
   validateArgs,
   workedExamples,

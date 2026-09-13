@@ -453,6 +453,7 @@ entries:
     options:
       "--base-url": "<base-url>"
       "--disable-approval": null
+      "--disable-sandbox": null
       "--json": null
       "--model": "<model>"
     tail: ["<prompt>"]

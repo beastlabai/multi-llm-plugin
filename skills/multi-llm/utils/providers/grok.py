@@ -87,6 +87,12 @@ class GrokProvider(LLMProvider):
     prompt_argv_index = -1
 
     version_cmd = ("grok", "--version")
+    #: D6 step 6 — an open question, recorded as such. `grok inspect` reports
+    #: `Project trusted: no` for an untrusted repo and `build_command` passes
+    #: `--always-approve` with no trust flag; whether that gate blocks a
+    #: headless write is unmeasured. `multi_llm.py doctor` prints this verbatim
+    #: until a measurement either way lands under Phase 5.
+    trust_status = "untested"
     #: 0.2.93 is where every fixture in ``tests/fixtures/grok/`` was captured —
     #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
     #: running inside the container, no credential — and the only release this

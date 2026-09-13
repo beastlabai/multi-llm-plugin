@@ -60,10 +60,12 @@ FIXTURE_SKILL_DIR = "/tmp/multi llm fixture/skill dir"
 #: Every template token that must not survive rendering — the skill-dir
 #: spellings, the verb slots, the uv flag list (which a shim carries as
 #: ``{UV_RUN_FLAGS}`` so its dispatcher cannot disagree with
-#: ``dispatcher_prefix()`` about ``--frozen --no-dev``), and the default mode
-#: (``{DEFAULT_MODE}``, rendered from ``modes.DEFAULT_MODE``).
+#: ``dispatcher_prefix()`` about ``--frozen --no-dev``), the default mode
+#: (``{DEFAULT_MODE}``, rendered from ``modes.DEFAULT_MODE``) and the exit-3
+#: decision rule (``{NEEDS_HUMAN_RULE}``, rendered from
+#: ``modes.NEEDS_HUMAN_RULE``).
 PLACEHOLDERS = ("{SKILL_DIR}", "${SKILL_DIR}", "$SKILL_DIR", "$ARGUMENTS",
-                "{UV_RUN_FLAGS}", "{DEFAULT_MODE}",
+                "{UV_RUN_FLAGS}", "{DEFAULT_MODE}", "{NEEDS_HUMAN_RULE}",
                 "{{spawn_subagents}}", "{{ask_user}}", "{{run_detached}}")
 
 UV_COMMAND_RE = re.compile(r"^(PYTHONUNBUFFERED=1\s+)?uv\s+run\b")
@@ -130,6 +132,82 @@ def _command_units(text: str):
 def test_at_least_the_reference_shim_is_shipped():
     assert SHIM_IDS, "no shim files found; the parametrization would be vacuous"
     assert "claude-code" in SHIM_IDS
+
+
+def test_needs_human_rule_has_one_owner():
+    """"Exit 3 means stop, report, never do the phase's work" is spelled once.
+
+    The same shape ``test_default_mode_has_one_owner`` uses for the default-mode
+    rule, for the same reason: four hand-typed paraphrases of the decision an
+    incident turned on are how two hosts come to contradict each other on it.
+    ``modes.NEEDS_HUMAN_RULE`` owns the sentence; every template carries it as
+    the ``{NEEDS_HUMAN_RULE}`` token and never as a literal, asserted on the
+    template *and* on ``host_install.render``'s output; and the one shim nobody
+    renders — Claude Code's ``SKILL.md``, read verbatim by its host — carries a
+    literal that this row holds to the constant.
+    """
+    from utils import cli_common, host_install
+
+    rule = " ".join(mode_table.NEEDS_HUMAN_RULE.split())
+    work = mode_table.NEEDS_HUMAN_WORK_SENTENCE
+    checked = []
+    for host_id, path in SHIMS:
+        entry = caps.entry(host_id)
+        source = path.read_text(encoding="utf-8")
+        collapsed_source = " ".join(source.split())
+        if entry["shim"]["template"]:
+            assert source.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1, (
+                f"{path.name} must state the exit-3 rule exactly once, as the "
+                f"{cli_common.NEEDS_HUMAN_RULE_TOKEN} token"
+            )
+            assert work not in collapsed_source, (
+                f"{path.name} spells the rule by hand; render it from "
+                "modes.NEEDS_HUMAN_RULE instead"
+            )
+        else:
+            assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in source, (
+                f"{path.name} is read verbatim by its host; a token there "
+                "reaches the agent unsubstituted"
+            )
+            assert rule in collapsed_source, (
+                f"{path.name}: the exit-3 rule is not the one "
+                "modes.NEEDS_HUMAN_RULE dictates"
+            )
+        rendered = " ".join(
+            host_install.render(
+                host_id, skill=FIXTURE_SKILL_DIR, template=source
+            ).split()
+        )
+        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in rendered
+        assert rule in rendered, (
+            f"{path.name}: the rendered exit-3 rule is not the one "
+            "modes.NEEDS_HUMAN_RULE dictates"
+        )
+        assert rendered.count(work) == 1
+        checked.append(host_id)
+    assert checked == ["claude-code", "codex", "opencode"], (
+        f"the shim corpus moved ({checked}); this row must keep covering the "
+        "unrendered SKILL.md as well as every template"
+    )
+
+
+def test_no_shim_runs_next_verbatim_without_qualifying_exit_3():
+    """``next`` runs verbatim on 0 and 2; on 3 it waits for the user.
+
+    ``next`` and the plugin's ``options`` are one object under two names, and an
+    unqualified "run `next` verbatim when it is not `null`" beside a stop rule
+    is a shim that contradicts itself — and tells the agent to run the retry the
+    moment exit 3 hands it one, which is what the incident's agent did twice.
+    """
+    unqualified = "run `next` verbatim when it is not `null`."
+    for host_id, path in SHIMS:
+        collapsed = " ".join(_rendered(host_id, path).split()).lower()
+        assert unqualified not in collapsed, (
+            f"{path.name} still tells the agent to run `next` verbatim without "
+            "qualifying exit 3"
+        )
+        assert "`next` verbatim when it is not `null` on `0` and `2`" in collapsed
+        assert "on `3` stop" in collapsed
 
 
 @pytest.mark.parametrize("host_id,path", SHIMS, ids=SHIM_IDS)

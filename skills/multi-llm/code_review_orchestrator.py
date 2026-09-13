@@ -50,11 +50,11 @@ from utils import (
     PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils import cli_common
 from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     EXIT_OK,
     build_parent_parser,
-    dispatcher_command,
     dispatcher_prefix,
     reaggregate_command,
     record_next,
@@ -76,6 +76,7 @@ from utils.review_orchestrator_base import (
     merge_validation_batches,
     resolve_result_files_by_model,
     retire_salvage_artifacts,
+    retire_stale_validation,
     update_status,
     write_status,
 )
@@ -1606,6 +1607,8 @@ async def reaggregate_from_existing_files(
             grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
             # Stamp stable content-based hashes on groups and suggestions
             stamp_stable_ids(grouped)
+            # D7: a re-group orphans any verdicts on disk, so they leave with it.
+            retire_stale_validation(str(phase_dir), reason="grouped.json rewritten by reaggregate")
             with open(grouped_path, 'w', encoding='utf-8') as f:
                 json.dump(save_groups_payload(grouped), f, indent=2)
             print(f"Grouped issues saved to: {grouped_path}")
@@ -1729,6 +1732,8 @@ async def reaggregate_from_existing_files(
         state = get_or_create_state(plan_path)
         state.mark_phase_completed("code-review")
         state.save()
+        update_status(str(phase_dir), {"state": "complete"})
+        report_progress(str(phase_dir), step="complete")
 
 
 async def main(argv: Optional[List[str]] = None) -> int:
@@ -1804,6 +1809,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # Auto-heal: all artifacts present, just mark complete
                 state_guard.mark_phase_completed("code-review")
                 state_guard.save()
+                update_status(str(phase_dir_check), {"state": "complete"})
+                report_progress(str(phase_dir_check), step="complete")
                 print("Phase 'code-review' was complete but not marked. Auto-healed state.")
                 print(f"Report: {report_path_check}")
                 sys.exit(0)
@@ -2159,8 +2166,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 completed=completed_models,
                 failed=list(failed_models),
                 phase_dir=str(phase_dir),
-                retry_command=dispatcher_command(
-                    "review-code", plan_path, "--force"
+                # D2 row 5: shape 3 by construction (no reviewer produced a
+                # result), so --force stays a command — with the caller's flags.
+                retry_command=cli_common.retry_command(
+                    "review-code", plan_path, "--force",
+                    flags=cli_common.current_replay_flags(mode="review-code"),
                 ),
             ))
         unattended_mod.report_partial_results(
@@ -2215,6 +2225,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
             grouped_list = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
             stamp_stable_ids(grouped_list)
             grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
+            # D7: the previous run's verdicts belong to the grouping this write
+            # replaces; retired in the same step so no later reaggregate finds them.
+            retire_stale_validation(str(grouped_path.parent), reason="grouped.json rewritten by a re-run")
             with open(grouped_path, 'w', encoding='utf-8') as f:
                 json.dump(save_groups_payload(grouped_list), f, indent=2)
             print(f"Grouped issues saved to: {grouped_path}")
@@ -2257,7 +2270,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # Fully resolved: a skill-dir placeholder no shell expands is
                 # the bug. Still starts with `uv run`, so Claude Code's
                 # Bash(uv:*) allow rule keeps matching.
-                reaggregate_cmd = reaggregate_command('review-code', plan_path)
+                reaggregate_cmd = cli_common.retry_command(
+                    'review-code', plan_path, '--reaggregate',
+                    flags=cli_common.current_replay_flags(mode='review-code'),
+                )
 
                 # D3b: self-contained mode dispatches and merges here rather than
                 # exiting for a host to drive a second turn.
@@ -2320,6 +2336,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # Mark phase as completed in state
         state.mark_phase_completed("code-review")
         state.save()
+        # And the in-phase machine's terminal word, which `status` renders.
+        update_status(str(phase_dir), {"state": "complete"})
+        report_progress(str(phase_dir), step="complete")
 
     # Summary
     high_count = len([i for i in all_issues if i.get("importance") == "high"])
@@ -2393,7 +2412,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
         # Print the reaggregate command for the host to use after salvage.
         # Fully resolved (see above) and still `uv run …`-prefixed.
-        salvage_reaggregate_cmd = reaggregate_command('review-code', plan_path)
+        salvage_reaggregate_cmd = cli_common.retry_command(
+            'review-code', plan_path, '--reaggregate',
+            flags=cli_common.current_replay_flags(mode='review-code'),
+        )
         print("")
         print(f"[REAGGREGATE_AFTER_SALVAGE] {salvage_reaggregate_cmd}")
         record_next(salvage_reaggregate_cmd)

@@ -1,8 +1,10 @@
 """Suggestion processor module for handling multi-LLM review suggestions."""
 
+import heapq
 import json
+import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
 class SuggestionGroup:
@@ -149,50 +151,327 @@ def _infer_type(text: str) -> str:
     return "improvement"
 
 
-def compute_similarity(s1: Dict[str, Any], s2: Dict[str, Any]) -> float:
+# ---------------------------------------------------------------------------
+# Similarity
+#
+# The rules below are deliberately small, dependency-free (stdlib only) and
+# explainable — no embeddings, no model call, no corpus but the suggestions
+# being grouped:
+#
+#   1. Text is reduced to *content tokens*: lowercased, inline code spans
+#      dropped, identifiers split on camelCase/dots/underscores
+#      (``maxSpeedMultiplier`` → ``max speed multiplier``), punctuation
+#      stripped, generic English stopwords and review boilerplate removed
+#      ("specify", "undefined", "add", "plan", "task" …, which every review
+#      suggestion says and none of them means), then lightly stemmed
+#      (``charges``/``charging``/``charged`` → ``charg``).
+#   2. Every token is weighted by how *rare* it is in the set being grouped
+#      (inverse document frequency). In a review of a boost feature, "boost"
+#      is in 43 of 56 suggestions and separates nothing, while "particle" or
+#      "lerp" is in two and separates everything. That weighting is what a
+#      hand-maintained per-project stopword list would otherwise have to do.
+#   3. Title and body are scored separately. A shared title token is worth
+#      roughly ten times a shared body token (a title is ~5 tokens against a
+#      body's ~40), but the body still has to agree: an accidental title
+#      overlap ("Boost activation semantics undefined" vs. "Opponent boost
+#      scope undefined") is exactly what a title-only score gets wrong.
+#   4. ``reference``/``section`` — or, for a code-review finding, the file it
+#      is anchored to — is a weak tiebreak (0.08) and a matching ``type`` is a
+#      weaker one (0.02): types are model-assigned and noisy, so a type match
+#      can only settle a near-tie, never carry a merge (the previous flat 0.2
+#      bonus put half of a 0.4 threshold on it). Two findings naming
+#      *different* files never merge at all.
+# ---------------------------------------------------------------------------
+
+#: Generic English function words — they say nothing about *what* a
+#: suggestion is about.
+_STOPWORDS = frozenset("""
+a about above across after again against all almost already also although always am among an and
+another any anything are around as at be because been before being below beside between both but by
+can cannot could did do does doing done down during each either else enough etc even ever every few
+for from further had has have having he her here hers herself him himself his how however if in
+inside instead into is it its itself just least less like made make many may me might more most much
+must my myself neither never no nor not nothing now of off often on once one only onto or other
+others ought our ours out over own per perhaps rather same she should since so some something still
+such than that the their theirs them themselves then there therefore these they thing things this
+those though through thus to too under until up upon us use used using very via was way we well
+were what when where whether which while who whom whose why will with within without would yet you
+your yours
+""".split())
+
+#: Review boilerplate: the vocabulary of *critiquing a document* rather than
+#: of the subject under review. These show up in nearly every suggestion of
+#: every review ("the plan does not specify…", "add a section that defines…"),
+#: so shared occurrences are evidence of the genre, not of agreement.
+_REVIEW_WORDS = frozenset("""
+specify specifies specified specifying specification specifications unspecified underspecified
+define defines defined defining definition undefined
+document documents documented documenting undocumented
+describe describes described mention mentions mentioned
+clarify clarifies clarified clarification unclear ambiguous vague
+add adds added adding note noted notes
+consider considers ensure ensures provide provides recommend recommends
+suggest suggests suggested propose proposes proposed
+plan plans section sections task tasks
+""".split())
+
+#: Suffix stripping, longest first. Deliberately cruder than a real stemmer:
+#: both sides of every comparison get the same treatment, so the only cost of
+#: a crude rule is an occasional missed match.
+_SUFFIX_RULES = (("ies", "y"), ("ing", ""), ("ed", ""), ("s", ""))
+
+_CODE_SPAN = re.compile(r"`[^`]*`")
+_WORD_CHUNK = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]*")
+_SUB_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
+
+#: Component weights. They sum to 1.0, so a score is always in [0, 1].
+WEIGHT_TITLE = 0.35
+WEIGHT_BODY = 0.55
+WEIGHT_REFERENCE = 0.08
+WEIGHT_TYPE = 0.02
+
+#: Tuned on a real 56-suggestion, 3-reviewer plan review (see
+#: ``tests/test_suggestion_processor.py::TestRealWorldGrouping``). The usable
+#: band is wide — 0.19–0.23 produce the same clusters on that data — so this
+#: sits in the middle of a plateau rather than on a cliff.
+DEFAULT_SIMILARITY_THRESHOLD = 0.22
+
+
+def _stem(word: str) -> str:
+    """Reduce a word to a form its whole family shares.
+
+    Strip one plural/participle suffix, collapse a doubled consonant, then
+    drop a trailing "e" — which is what puts ``charge``, ``charges``,
+    ``charging`` and ``charged`` on one token instead of two.
     """
-    Compute similarity score between two suggestions.
+    for suffix, replacement in _SUFFIX_RULES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            word = word[: -len(suffix)] + replacement
+            break
+    if len(word) >= 5 and word[-1] == word[-2] and word[-1] not in "lsz":
+        word = word[:-1]  # "dragged" -> "dragg" -> "drag"
+    if len(word) >= 4 and word.endswith("e"):
+        word = word[:-1]  # "charge" -> "charg", matching "charging"
+    return word
+
+
+_REVIEW_STEMS = frozenset(_stem(word) for word in _REVIEW_WORDS)
+
+
+def normalize_tokens(text: str) -> List[str]:
+    """Reduce free text to comparable content tokens (see the note above)."""
+    if not text:
+        return []
+    text = _CODE_SPAN.sub(" ", text)
+    tokens: List[str] = []
+    for chunk in _WORD_CHUNK.findall(text):
+        for part in _SUB_WORD.findall(chunk):
+            word = "".join(ch for ch in part.lower() if ch.isalnum())
+            if len(word) < 3 or word in _STOPWORDS or word in _REVIEW_WORDS:
+                continue
+            word = _stem(word)
+            if len(word) < 3 or word in _STOPWORDS or word in _REVIEW_STEMS:
+                continue
+            tokens.append(word)
+    return tokens
+
+
+def _body_text(suggestion: Dict[str, Any]) -> str:
+    """The suggestion's prose body, under whichever key this phase uses."""
+    for key in ("desc", "details", "description"):
+        value = suggestion.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+_LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
+
+
+def _file_anchor(suggestion: Dict[str, Any]) -> str:
+    """The file a code-review finding is anchored to, as a comparable path.
+
+    Line ranges are dropped and separators normalized, so
+    ``"src\\security.py:120-134"`` becomes ``"src/security.py"``. Plan-review
+    suggestions have no file and get ``""``.
+    """
+    raw = str(suggestion.get("file", suggestion.get("fileRef", "")) or "").strip()
+    if not raw:
+        return ""
+    raw = _LINE_SUFFIX.sub("", raw.replace("\\", "/")).strip().lower()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw.strip("/")
+
+
+def _files_disagree(a: str, b: str) -> bool:
+    """True when two anchors name files that cannot be the same file.
+
+    One anchor may be a suffix of the other — models spell the same file as
+    ``src/security.py`` and ``security.py`` — but only at a path boundary, so
+    ``a/utils.py`` and ``b/utils.py`` stay two files.
+    """
+    if not a or not b or a == b:
+        return False
+    return not (a.endswith("/" + b) or b.endswith("/" + a))
+
+
+def _reference_tokens(suggestion: Dict[str, Any]) -> set:
+    """Each section a suggestion cites, as a normalized set.
+
+    A composite reference (``"## Design Requirements / ### 7. Lap Integration"``)
+    names two sections and is split on ``/`` and ``,``, the same way the report
+    buckets it.
+    """
+    raw = str(suggestion.get("reference", suggestion.get("section", "")) or "")
+    parts = re.split(r"\s*/\s*|\s*,\s*", raw)
+    return {part.strip().lstrip("#").strip().lower() for part in parts if part.strip()}
+
+
+def compute_token_weights(suggestions: Iterable[Dict[str, Any]]) -> Dict[str, float]:
+    """Inverse document frequency of every token across ``suggestions``.
+
+    ``log(1 + N / (1 + df))``: across fifty-odd suggestions a token every one
+    of them uses bottoms out near 0.7, one used by two lands near 3.3 — so a
+    rare word is worth several common ones, without any word being silenced
+    outright. Order-independent, so a re-grouping of the same set produces
+    identical weights (and identical ``group_hash``es).
+    """
+    total = 0
+    document_frequency: Dict[str, int] = {}
+    for suggestion in suggestions:
+        total += 1
+        seen = set(normalize_tokens(str(suggestion.get("title", "") or "")))
+        seen |= set(normalize_tokens(_body_text(suggestion)))
+        for token in seen:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+    return {
+        token: math.log(1.0 + total / (1.0 + count))
+        for token, count in document_frequency.items()
+    }
+
+
+def _mass(tokens: Iterable[str], token_weights: Optional[Mapping[str, float]]) -> float:
+    """Total weight of a token set (its count when no weights are supplied)."""
+    if token_weights is None:
+        return float(len(list(tokens)))
+    return sum(token_weights.get(token, 1.0) for token in tokens)
+
+
+def _weighted_dice(a: set, b: set, token_weights) -> float:
+    """Symmetric overlap — the right shape for two short, comparable titles."""
+    total = _mass(a, token_weights) + _mass(b, token_weights)
+    if total <= 0:
+        return 0.0
+    return 2.0 * _mass(a & b, token_weights) / total
+
+
+def _weighted_cosine(a: set, b: set, token_weights) -> float:
+    """Length-tolerant overlap — bodies differ wildly in length by model."""
+    mass_a = _mass(a, token_weights)
+    mass_b = _mass(b, token_weights)
+    if mass_a <= 0 or mass_b <= 0:
+        return 0.0
+    return _mass(a & b, token_weights) / math.sqrt(mass_a * mass_b)
+
+
+def _overlap(a: set, b: set) -> float:
+    """Unweighted containment, used only for the reference tiebreak."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _prepare(suggestion: Dict[str, Any]) -> Tuple[set, set, set, str, str]:
+    """Tokenize a suggestion once, for repeated pairwise comparison."""
+    title = set(normalize_tokens(str(suggestion.get("title", "") or "")))
+    body = set(normalize_tokens(_body_text(suggestion))) | title
+    return (
+        title,
+        body,
+        _reference_tokens(suggestion),
+        str(suggestion.get("type", "") or ""),
+        _file_anchor(suggestion),
+    )
+
+
+def _similarity(
+    a: Tuple[set, set, set, str, str],
+    b: Tuple[set, set, set, str, str],
+    token_weights: Optional[Mapping[str, float]],
+) -> float:
+    """Score two prepared suggestions."""
+    if _files_disagree(a[4], b[4]):
+        # A code-review finding is anchored to a file, and its fix lands in
+        # that file. Two findings naming different files are two fixes — one
+        # validation verdict cannot speak for both, and a report that merges
+        # them hides one of the two places that needs work. Word-identical
+        # findings in two files are the *most* likely pair to be merged by
+        # text alone, and the most certainly distinct.
+        #
+        # The rule is deliberately one-sided: a *shared* file is no evidence
+        # of sameness (one module hosts a dozen unrelated findings), where a
+        # shared plan section — one of eight a reviewer chose deliberately —
+        # is, which is why that one earns the weak positive below and this one
+        # only refuses. Plan-review suggestions declare no file at all.
+        return 0.0
+    score = (
+        WEIGHT_TITLE * _weighted_dice(a[0], b[0], token_weights)
+        + WEIGHT_BODY * _weighted_cosine(a[1], b[1], token_weights)
+        + WEIGHT_REFERENCE * _overlap(a[2], b[2])
+        + WEIGHT_TYPE * (1.0 if a[3] and a[3] == b[3] else 0.0)
+    )
+    return min(1.0, score)
+
+
+def compute_similarity(
+    s1: Dict[str, Any],
+    s2: Dict[str, Any],
+    token_weights: Optional[Mapping[str, float]] = None,
+) -> float:
+    """
+    Compute a meaning-tracking similarity score between two suggestions.
 
     Args:
         s1: First suggestion
         s2: Second suggestion
+        token_weights: Optional token → weight map from
+            ``compute_token_weights()`` over the whole set being grouped.
+            Omitted (the default), every token counts the same — fine for a
+            one-off comparison, weaker for clustering, which is why
+            ``group_similar_suggestions`` always passes one.
 
     Returns:
         Similarity score between 0 and 1
     """
-    title1 = s1.get("title", "").lower()
-    title2 = s2.get("title", "").lower()
-    desc1 = s1.get("desc", "").lower()
-    desc2 = s2.get("desc", "").lower()
-
-    # Word overlap for titles
-    words1 = set(title1.split())
-    words2 = set(title2.split())
-    if words1 and words2:
-        title_similarity = len(words1 & words2) / max(len(words1), len(words2))
-    else:
-        title_similarity = 0
-
-    # Word overlap for descriptions
-    words1 = set(desc1.split())
-    words2 = set(desc2.split())
-    if words1 and words2:
-        desc_similarity = len(words1 & words2) / max(len(words1), len(words2))
-    else:
-        desc_similarity = 0
-
-    # Type match bonus
-    type_bonus = 0.2 if s1.get("type") == s2.get("type") else 0
-
-    return 0.3 * title_similarity + 0.5 * desc_similarity + type_bonus
+    return _similarity(_prepare(s1), _prepare(s2), token_weights)
 
 
 def group_similar_suggestions(
     suggestions: List[Dict[str, Any]],
-    similarity_threshold: float = 0.4
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 ) -> List[SuggestionGroup]:
     """
     Group similar suggestions together.
+
+    Agglomerative **average-link** clustering: every suggestion starts alone,
+    the two most similar clusters merge, and a merged cluster's similarity to
+    every other is the average over all cross pairs. It stops when no pair
+    reaches ``similarity_threshold``.
+
+    Average-link is what keeps a group about one thing. The previous greedy
+    single-link pass admitted a suggestion that beat the threshold against
+    *any* one member, so A–B–C chained into a group even when C had nothing to
+    do with A — on a real review that put "Boost activation semantics
+    undefined", "Opponent boost scope undefined" and "Opponent parity is left
+    as unresolved scope" in one group, the third having joined at 0.267
+    against the second alone. Under average-link a newcomer must look like the
+    group as a whole, and the merge order is a property of the scores rather
+    than of arrival order.
+
+    Cost is O(n²) similarity computations (each suggestion is tokenized once);
+    merging then walks a heap of the pairs that actually cleared the
+    threshold, which on real inputs is a small fraction of them.
 
     Args:
         suggestions: List of all suggestions from all models
@@ -201,23 +480,17 @@ def group_similar_suggestions(
     Returns:
         List of SuggestionGroup objects
     """
-    groups: List[SuggestionGroup] = []
-    assigned = set()
-
-    # Sort by importance (HIGH first) for better grouping, then by a stable
-    # content signature so the seed order is a pure function of the suggestion
-    # *set* — never of input order.
+    # Rank by importance (HIGH first), then by a stable content signature, so
+    # every tiebreak below — which cluster absorbs which, the representative
+    # whose title names the group, the order members are listed in — is a pure
+    # function of the suggestion *set* and never of input order.
     #
-    # This greedy clusterer is order-sensitive: the first suggestion of a
-    # cluster seeds the group and ties go to the earliest-seen group. With an
-    # importance-only key, ``sorted`` is stable and falls back to input
-    # position, so the same suggestions arriving in a different order (e.g.
-    # ``results.items()`` order in the live review vs. ``glob`` order during
-    # ``--reaggregate``) can split/merge differently — producing a different
-    # group count and different content hashes. That desynchronizes validation
-    # (tasked against the original grouping) from the re-grouped output, which
-    # then mis-joins by stale index. A deterministic secondary key makes
-    # grouping reproducible so both paths emit identical group_hashes.
+    # Clustering itself is already order-independent (average-link merges in
+    # score order), but the ranking still matters: the same suggestions
+    # arriving in a different order (``results.items()`` order in the live
+    # review vs. ``glob`` order during ``--reaggregate``) must produce
+    # byte-identical groups, or validation — tasked against the original
+    # grouping — mis-joins the re-grouped output by stale index.
     importance_order = {"high": 0, "medium": 1, "low": 2}
 
     def _stable_sort_key(item: Tuple[int, Dict[str, Any]]):
@@ -231,37 +504,80 @@ def group_similar_suggestions(
             str(s.get("source_model", s.get("model", ""))),
         )
 
-    sorted_suggestions = sorted(enumerate(suggestions), key=_stable_sort_key)
+    if not suggestions:
+        return []
 
-    for idx, suggestion in sorted_suggestions:
-        if idx in assigned:
+    ranked = [idx for idx, _ in sorted(enumerate(suggestions), key=_stable_sort_key)]
+    rank = {idx: position for position, idx in enumerate(ranked)}
+    count = len(suggestions)
+
+    token_weights = compute_token_weights(suggestions)
+    prepared = [_prepare(s) for s in suggestions]
+
+    # Cluster state. A cluster is identified by the index of its
+    # highest-ranked member; ``members`` holds every index it covers and
+    # ``pair_similarity`` the current average-link score of each live pair.
+    members: Dict[int, List[int]] = {idx: [idx] for idx in range(count)}
+    pair_similarity: Dict[Tuple[int, int], float] = {}
+    candidates: List[Tuple[float, int, int, int, int]] = []
+
+    def _key(a: int, b: int) -> Tuple[int, int]:
+        return (a, b) if a < b else (b, a)
+
+    def _offer(a: int, b: int, score: float) -> None:
+        """Queue a pair that currently clears the threshold."""
+        if score >= similarity_threshold:
+            low, high = (a, b) if rank[a] < rank[b] else (b, a)
+            heapq.heappush(candidates, (-score, rank[low], rank[high], low, high))
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            score = _similarity(prepared[i], prepared[j], token_weights)
+            pair_similarity[(i, j)] = score
+            _offer(i, j, score)
+
+    while candidates:
+        negative_score, _, _, a, b = heapq.heappop(candidates)
+        score = -negative_score
+        # Skip entries superseded by a merge or by a recomputed average.
+        if a not in members or b not in members:
+            continue
+        if pair_similarity.get(_key(a, b)) != score:
             continue
 
-        # Find or create a group
-        best_group = None
-        best_similarity = similarity_threshold
+        keeper, absorbed = (a, b) if rank[a] < rank[b] else (b, a)
+        size_keeper = len(members[keeper])
+        size_absorbed = len(members[absorbed])
 
-        for group in groups:
-            for existing in group.suggestions:
-                sim = compute_similarity(suggestion, existing)
-                if sim > best_similarity:
-                    best_similarity = sim
-                    best_group = group
+        for other in list(members):
+            if other in (keeper, absorbed):
+                continue
+            merged_score = (
+                size_keeper * pair_similarity.get(_key(keeper, other), 0.0)
+                + size_absorbed * pair_similarity.get(_key(absorbed, other), 0.0)
+            ) / (size_keeper + size_absorbed)
+            pair_similarity[_key(keeper, other)] = merged_score
+            pair_similarity.pop(_key(absorbed, other), None)
+            _offer(keeper, other, merged_score)
 
-        if best_group:
-            best_group.add_suggestion(suggestion, suggestion.get("source_model", "unknown"))
-        else:
-            # Create new group
-            group = SuggestionGroup(
-                category=suggestion.get("type", "improvement"),
-                theme=suggestion.get("title", "Untitled")[:50]
-            )
+        members[keeper] = members[keeper] + members[absorbed]
+        del members[absorbed]
+        pair_similarity.pop(_key(keeper, absorbed), None)
+
+    groups: List[SuggestionGroup] = []
+    for cluster_id in sorted(members, key=lambda idx: rank[idx]):
+        cluster = sorted(members[cluster_id], key=lambda idx: rank[idx])
+        representative = suggestions[cluster[0]]
+        group = SuggestionGroup(
+            category=representative.get("type", "improvement"),
+            theme=representative.get("title", "Untitled")[:50],
+        )
+        for idx in cluster:
+            suggestion = suggestions[idx]
             group.add_suggestion(suggestion, suggestion.get("source_model", "unknown"))
-            groups.append(group)
+        groups.append(group)
 
-        assigned.add(idx)
-
-    # Sort groups by priority
+    # Sort groups by priority (stable, so equal scores keep rank order)
     groups.sort(key=lambda g: g.priority_score, reverse=True)
 
     return groups

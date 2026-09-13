@@ -235,6 +235,56 @@ class TestSaveLog:
         assert result is True
         assert Path(log_file).exists()
 
+    def test_save_log_header_is_provider_neutral(self, tmp_path):
+        """The header names the provider from the model spec, not a fixed CLI (§Fix1)."""
+        log_file = tmp_path / "claude_log.txt"
+
+        result = _save_log(
+            log_file=log_file,
+            model="claude-code:opus",
+            prompt="p",
+            stdout="out",
+            stderr="",
+            returncode=0,
+            success=True,
+        )
+
+        assert result is True
+        content = log_file.read_text(encoding="utf-8")
+        assert "CLAUDE-CODE LOG" in content
+        assert "CURSOR-AGENT LOG" not in content
+
+    def test_save_log_new_optional_fields(self, tmp_path):
+        """``result_source``/``stdout_parse_error`` render when given, and only then."""
+        log_file = tmp_path / "log.txt"
+
+        result = _save_log(
+            log_file=log_file,
+            model="claude-code:opus",
+            prompt="p",
+            stdout="out",
+            stderr="",
+            returncode=0,
+            success=True,
+            result_source="file",
+            stdout_parse_error="No valid JSON found in text",
+        )
+
+        assert result is True
+        content = log_file.read_text(encoding="utf-8")
+        assert "Result source: file" in content
+        assert "Stdout parse: failed (No valid JSON found in text)" in content
+
+        # Omitted (the default) renders neither line.
+        log_file_2 = tmp_path / "log2.txt"
+        _save_log(
+            log_file=log_file_2, model="claude-code:opus", prompt="p",
+            stdout="out", stderr="", returncode=0, success=True,
+        )
+        content_2 = log_file_2.read_text(encoding="utf-8")
+        assert "Result source:" not in content_2
+        assert "Stdout parse:" not in content_2
+
 
 class TestInvokeWithProvider:
     """Tests for invoke_with_provider() function."""
@@ -1207,6 +1257,197 @@ class TestInvokeWithFileOutput:
         assert result["error_code"] == "PROMPT_FORMAT_ERROR"
 
 
+class TestInvokeWithFileOutputLogFinalization:
+    """§Fix1: the header is provider-neutral, and the one log entry
+    ``invoke_with_file_output`` writes describes the FINAL outcome — after the
+    file channel and the stdout fallback both had their turn — never the
+    stdout extractor's own verdict frozen before that resolution happened.
+
+    Unlike ``TestInvokeWithFileOutput`` above, these drive the real
+    ``invoke_with_provider`` (only ``subprocess.run`` is mocked) so the
+    deferred-log handoff between the two functions actually runs.
+    """
+
+    @pytest.fixture
+    def mock_subprocess(self):
+        with patch("utils.llm_client.subprocess.run") as mock:
+            yield mock
+
+    @pytest.fixture
+    def mock_provider_available(self):
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"):
+            yield
+
+    def test_log_reflects_file_channel_salvage_after_stdout_parse_failure(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """A run whose stdout never parsed, but whose file did, logs Success: True."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "This is plain text without any JSON"
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log_cursor-agent_auto.txt"
+
+        with patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_read.return_value = {
+                "success": True,
+                "data": [{"suggestion": "ok"}],
+                "source": "file",
+            }
+
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="test_phase",
+                log_file=log_file,
+            )
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+
+        assert log_file.exists()
+        content = log_file.read_text(encoding="utf-8")
+        assert "CURSOR-AGENT LOG" in content
+        assert "Success: True" in content
+        assert "Result source: file" in content
+        assert "Stdout parse: failed" in content
+        # The stale, pre-resolution verdict must never survive as the log's
+        # own claim — this is the exact bug: a completed, salvaged run
+        # recorded as failed because the log was written before the file
+        # channel got a chance to speak.
+        assert "Success: False" not in content
+
+    def test_log_untouched_when_stdout_already_parsed_cleanly(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """A clean stdout parse never defers: the immediate write already
+        said ``Success: True`` and stays the log's one entry, whichever
+        channel (`invoke_with_file_output` here takes the stdout_fallback
+        branch, since the file read is mocked to fail) the caller preferred.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[1, 2]"})
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log.txt"
+
+        with patch("utils.json_extractor.read_json_from_file") as mock_read, \
+             patch("utils.llm_client._save_log", wraps=llm_client._save_log) as spy:
+            mock_read.return_value = {"success": False, "error": "no file"}
+
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="test_phase",
+                log_file=log_file,
+            )
+
+        assert result["success"] is True
+        assert result["source"] == "stdout_fallback"
+        # Written once, by invoke_with_provider's own immediate call — nothing
+        # deferred, so invoke_with_file_output never calls _save_log itself.
+        assert spy.call_count == 1
+        content = log_file.read_text(encoding="utf-8")
+        assert "Success: True" in content
+
+    def test_log_reflects_total_failure_when_neither_channel_resolves(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """Neither file nor stdout parsed: the log still says so, exactly once."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "This is plain text without any JSON"
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log.txt"
+
+        with patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_read.return_value = {"success": False, "error": "no file"}
+
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="test_phase",
+                log_file=log_file,
+            )
+
+        assert result["success"] is False
+        content = log_file.read_text(encoding="utf-8")
+        assert "Success: False" in content
+        assert "Error: JSON parsing failed from both file and stdout" in content
+        assert "Stdout parse: failed" in content
+
+    def test_log_writes_exactly_once_on_parse_failure_path(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """No stray immediate write races the deferred, final one."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "This is plain text without any JSON"
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log.txt"
+
+        with patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_read.return_value = {
+                "success": True, "data": [{"a": 1}], "source": "file",
+            }
+            with patch(
+                "utils.llm_client._save_log", wraps=llm_client._save_log
+            ) as spy:
+                invoke_with_file_output(
+                    prompt_template="Write to {output_json_path}",
+                    model_spec="cursor-agent:auto",
+                    prompt_context={},
+                    output_dir=tmp_path,
+                    phase="test_phase",
+                    log_file=log_file,
+                )
+        assert spy.call_count == 1
+
+    def test_log_header_is_provider_neutral_via_deferred_write(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """The deferred write also names the real provider, not a fixed CLI."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "This is plain text without any JSON"
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log.txt"
+
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_read.return_value = {
+                "success": True, "data": [{"a": 1}], "source": "file",
+            }
+            invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="claude-code:opus",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="test_phase",
+                log_file=log_file,
+            )
+
+        content = log_file.read_text(encoding="utf-8")
+        assert "CLAUDE-CODE LOG" in content
+        assert "CURSOR-AGENT LOG" not in content
+
+
 class TestOutputLocationBlock:
     """The `{output_location}` block is rendered from a declared capability.
 
@@ -1220,16 +1461,27 @@ class TestOutputLocationBlock:
     """
 
     def test_file_capable_provider_is_asked_for_the_file(self):
-        block = render_output_location("/tmp/out/codex_gpt-5_5.json", "codex:gpt-5.5")
+        block = render_output_location(
+            "/tmp/out/claude-code_sonnet.json", "claude-code:sonnet"
+        )
 
         assert block == FILE_OUTPUT_LOCATION.format(
-            path="/tmp/out/codex_gpt-5_5.json"
+            path="/tmp/out/claude-code_sonnet.json"
         )
         assert "Write your JSON output to this file" in block
-        assert "/tmp/out/codex_gpt-5_5.json" in block
+        assert "/tmp/out/claude-code_sonnet.json" in block
 
     @pytest.mark.parametrize(
-        "model_spec", ["cursor-agent:auto", "aider:openrouter/z-ai/glm-5.2"]
+        "model_spec",
+        [
+            "cursor-agent:auto",
+            "aider:openrouter/z-ai/glm-5.2",
+            # D6: codex is not read-only, but its file write goes through a
+            # bubblewrap sandbox that a stock Ubuntu 24.04 cannot start, and
+            # the array was always its final `agent_message` — so the review
+            # asks for stdout and never bets a slot on the sandbox.
+            "codex:gpt-5.5",
+        ],
     )
     def test_read_only_provider_is_asked_for_stdout(self, model_spec):
         block = render_output_location("/tmp/out/result.json", model_spec)
@@ -1292,8 +1544,13 @@ class TestOutputLocationBlock:
         assert result["source"] == "stdout_fallback"
         assert result["output_file"].endswith("cursor-agent_auto.json")
 
-    def test_invoke_with_file_output_still_names_the_file_for_codex(self, tmp_path):
-        """The unchanged half: a file-capable adapter's prompt is untouched."""
+    def test_invoke_with_file_output_still_names_the_file_for_claude_code(
+        self, tmp_path
+    ):
+        """The unchanged half: a file-capable adapter's prompt is untouched.
+
+        claude-code is the example since D6 moved codex to the stdout block.
+        """
         with patch("utils.llm_client.invoke_with_provider") as mock_invoke, \
              patch("utils.json_extractor.read_json_from_file") as mock_read:
             mock_invoke.return_value = {"success": True, "data": [], "details": {}}
@@ -1301,7 +1558,7 @@ class TestOutputLocationBlock:
 
             invoke_with_file_output(
                 prompt_template="Review it.\n\n## Output Location\n{output_location}\n",
-                model_spec="codex:gpt-5.5",
+                model_spec="claude-code:sonnet",
                 prompt_context={},
                 output_dir=tmp_path,
                 phase="code_review",
@@ -1310,7 +1567,7 @@ class TestOutputLocationBlock:
         call_args = mock_invoke.call_args
         prompt = call_args.kwargs.get("prompt") or call_args[0][0]
         assert "Write your JSON output to this file" in prompt
-        assert str(tmp_path / "code-review" / "codex_gpt-5_5.json") in prompt
+        assert str(tmp_path / "code-review" / "claude-code_sonnet.json") in prompt
 
 
 class TestInvokeSubagent:

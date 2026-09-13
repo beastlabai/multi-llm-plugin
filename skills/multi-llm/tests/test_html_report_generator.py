@@ -18,6 +18,7 @@ from utils.html_report_generator import (
     build_file_view,
     build_section_view,
     build_task_view,
+    split_section_refs,
     _extract_file_path,
     _build_suggestion_data,
 )
@@ -1460,6 +1461,99 @@ class TestBuildSectionView:
         assert result == {}
 
 
+class TestCompositeSectionReferences:
+    """A reference naming two sections belongs in both buckets.
+
+    A reviewer that cites two places writes one composite reference
+    (``"## Design Requirements / ### 7. Lap Integration"``). Bucketing by the
+    whole string made each composite its own bucket: a real 8-section plan
+    review rendered 23 section buckets, and "### 7. Lap Integration" showed 3
+    suggestions where 7 had cited it.
+    """
+
+    def test_composite_reference_counts_under_each_named_section(self):
+        groups = [
+            _make_group(1, [_make_suggestion(
+                "S1", section_ref="## Design Requirements / ### 7. Lap Integration")]),
+            _make_group(2, [_make_suggestion("S2", section_ref="### 7. Lap Integration")]),
+        ]
+
+        result = build_section_view(groups)
+
+        assert set(result) == {"## Design Requirements", "### 7. Lap Integration"}
+        assert result["### 7. Lap Integration"]["suggestionCount"] == 2
+        assert result["## Design Requirements"]["suggestionCount"] == 1
+
+    def test_comma_joined_reference_is_split_too(self):
+        groups = [_make_group(1, [_make_suggestion(
+            "S1", section_ref="## Overview, ## Testing")])]
+
+        result = build_section_view(groups)
+
+        assert set(result) == {"## Overview", "## Testing"}
+
+    def test_a_slash_inside_a_heading_is_not_a_separator(self):
+        """``### 5. Visual/Audio Effects (Juice)`` is one section, not two.
+
+        Only a whitespace-delimited ``/`` joins two references; splitting on a
+        bare slash would invent sections the plan does not have.
+        """
+        groups = [_make_group(1, [_make_suggestion(
+            "S1", section_ref="### 5. Visual/Audio Effects (Juice)")])]
+
+        result = build_section_view(groups)
+
+        assert set(result) == {"### 5. Visual/Audio Effects (Juice)"}
+
+    def test_a_group_naming_one_section_twice_is_counted_once(self):
+        """Dedupe: two members citing the same section do not double-list the group."""
+        group = _make_group(1, [
+            _make_suggestion("S1", section_ref="## Testing"),
+            _make_suggestion("S2", section_ref="## Testing / ## Overview"),
+        ])
+
+        result = build_section_view([group])
+
+        assert len(result["## Testing"]["suggestions"]) == 1
+        assert result["## Testing"]["suggestionCount"] == 2
+        assert len(result["## Overview"]["suggestions"]) == 1
+
+    def test_every_member_s_sections_are_represented(self):
+        """A merged group is filed under each section its members cite.
+
+        Bucketing on the *first* non-empty reference hid every other member's
+        section — which is how a group of three could be invisible in two of
+        the three sections it discussed.
+        """
+        group = _make_group(1, [
+            _make_suggestion("S1", section_ref="### 3. Input Handling"),
+            _make_suggestion("S2", section_ref="### 8. Opponent Parity (Optional)"),
+        ])
+
+        result = build_section_view([group])
+
+        assert set(result) == {"### 3. Input Handling", "### 8. Opponent Parity (Optional)"}
+
+    def test_unreferenced_groups_still_go_to_global(self):
+        groups = [
+            _make_group(1, [_make_suggestion("S1")]),
+            _make_group(2, [_make_suggestion("S2", section_ref="## Overview / ## Testing")]),
+        ]
+
+        result = build_section_view(groups)
+
+        assert len(result["_global"]["suggestions"]) == 1
+        assert "## Overview / ## Testing" not in result
+
+    def test_split_helper(self):
+        assert split_section_refs("") == []
+        assert split_section_refs("### Step 1") == ["### Step 1"]
+        assert split_section_refs("## A / ## B") == ["## A", "## B"]
+        assert split_section_refs("## A, ## B") == ["## A", "## B"]
+        assert split_section_refs("## A / ## A") == ["## A"]
+        assert split_section_refs("  ## A  ") == ["## A"]
+
+
 class TestBuildTaskView:
     """Tests for build_task_view function."""
 
@@ -1604,6 +1698,31 @@ class TestBuildTaskView:
         returned_group = result["T001"]["suggestions"][0]
         assert returned_group["suggestions"][0]["title"] == "First"
         assert returned_group["suggestions"][1]["title"] == "Second"
+
+    def test_composite_task_reference_counts_under_each_task(self):
+        """A finding that spans two tasks is filed under both."""
+        groups = [
+            _make_group(1, [_make_suggestion("S1", section_ref="T003 / T004")]),
+            _make_group(2, [_make_suggestion("S2", section_ref="T004")]),
+        ]
+
+        result = build_task_view(groups, {"T003": {"title": "Three"}, "T004": {"title": "Four"}})
+
+        assert len(result["T003"]["suggestions"]) == 1
+        assert len(result["T004"]["suggestions"]) == 2
+        assert result["T004"]["taskMetadata"] == {"title": "Four"}
+
+    def test_composite_naming_plan_coverage_lands_in_both(self):
+        """``"T002, Plan Coverage"`` is a task finding *and* a coverage gap."""
+        groups = [
+            _make_group(1, [_make_suggestion("S1", section_ref="T002, Plan Coverage")]),
+        ]
+
+        result = build_task_view(groups)
+
+        assert len(result["T002"]["suggestions"]) == 1
+        assert len(result["_coverageGaps"]["suggestions"]) == 1
+        assert result["_unanchored"]["suggestions"] == []
 
     def test_empty_groups(self):
         """Handles empty groups list."""

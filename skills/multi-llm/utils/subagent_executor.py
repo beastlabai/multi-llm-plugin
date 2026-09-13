@@ -58,6 +58,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         provider_dispatch_context,
     )
     from .provider_registry import (
+        EXPLICIT_DRIVER_LAYERS,
+        HOST_DEFAULT_LAYER,
+        SESSION_LAYER,
         get_max_concurrent_subagents,
         get_provider,
         get_provider_max_concurrent,
@@ -66,13 +69,16 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         get_subagent_timeout,
         is_model_valid,
         parse_model_spec,
+        resolve_subagent_runner,
     )
     from .providers.base import (
+        LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
         StructuredOutputUnavailable,
         availability_from_failure,
+        split_reasoning_effort,
         build_child_env,
         matches_any,
         version_verdict,
@@ -86,11 +92,13 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
         STATUS_INCOMPLETE,
+        STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
         STATUS_REJECTED,
         STATUS_RUNNER_ERROR,
         STATUS_SALVAGE_UNRECOVERABLE,
+        STATUS_SANDBOX_UNAVAILABLE,
         STATUS_SCHEMA_INVALID,
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
@@ -123,6 +131,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         provider_dispatch_context,
     )
     from utils.provider_registry import (
+        EXPLICIT_DRIVER_LAYERS,
+        HOST_DEFAULT_LAYER,
+        SESSION_LAYER,
         get_max_concurrent_subagents,
         get_provider,
         get_provider_max_concurrent,
@@ -131,13 +142,16 @@ except ImportError:  # pragma: no cover - direct-script import shim
         get_subagent_timeout,
         is_model_valid,
         parse_model_spec,
+        resolve_subagent_runner,
     )
     from utils.providers.base import (
+        LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         ProfileUnsupported,
         StructuredOutputUnavailable,
         availability_from_failure,
+        split_reasoning_effort,
         build_child_env,
         matches_any,
         version_verdict,
@@ -151,11 +165,13 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
         STATUS_INCOMPLETE,
+        STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
         STATUS_REJECTED,
         STATUS_RUNNER_ERROR,
         STATUS_SALVAGE_UNRECOVERABLE,
+        STATUS_SANDBOX_UNAVAILABLE,
         STATUS_SCHEMA_INVALID,
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
@@ -193,6 +209,8 @@ __all__ = [
     "STATUS_REJECTED",
     "STATUS_SPAWN_FAILED",
     "STATUS_AUTH_FAILED",
+    "STATUS_INVALID_MODEL",
+    "STATUS_SANDBOX_UNAVAILABLE",
     "STATUS_BUDGET_EXHAUSTED",
     "STATUS_INCOMPLETE",
     "STATUS_SALVAGE_UNRECOVERABLE",
@@ -477,11 +495,16 @@ class RunnerRejected(ExecutorError):
     """
 
     def __init__(self, message: str, *, key: str = "", spec: str = "",
-                 reason_code: str = "") -> None:
+                 reason_code: str = "", detail: str = "") -> None:
         super().__init__(message)
         self.key = key
         self.spec = spec
         self.reason_code = reason_code
+        #: The provider's own words behind the refusal, already redacted — the
+        #: probe tail carrying a "Did you mean" list, say — kept as a field so
+        #: the exit-3 handler can print it as a line of its own (D4 step 5)
+        #: rather than leaving the reader to find it inside ``message``.
+        self.detail = detail
 
 
 class ResultRejected(ExecutorError):
@@ -634,6 +657,12 @@ class BatchReport:
     outcomes: List[TaskOutcome] = field(default_factory=list)
     ceilings: Dict[str, Any] = field(default_factory=dict)
     runner_versions: Dict[str, str] = field(default_factory=dict)
+    #: The one substitution the resolution ladder is allowed to make silently at
+    #: dispatch time, recorded so it is not silent after the fact:
+    #: ``{"from", "reason", "to", "layer"}`` when the host session's own model
+    #: failed preflight and the batch fell through to the next rung (see
+    #: :func:`_preflight_batch_runners`). ``None`` on every ordinary run.
+    runner_fallback: Optional[Dict[str, str]] = None
     invoker: str = "executor"
 
     @property
@@ -680,6 +709,8 @@ class BatchReport:
             "task_file": self.task_file,
             "ceilings": dict(self.ceilings),
             "runner_versions": dict(self.runner_versions),
+            **({"runner_fallback": dict(self.runner_fallback)}
+               if self.runner_fallback else {}),
             "counts": self.counts(),
             "usage": self.usage_totals(),
             "tasks": [o.to_dict() for o in self.outcomes],
@@ -798,6 +829,17 @@ _REASON_EXPLANATION = {
         "the host's sandbox denied the spawn: the throwaway preflight dispatch "
         "could not start the runner as a child of this host's own shell"
     ),
+    "runner_invalid_model": (
+        "the runner rejected the model id itself during the preflight probe — "
+        "a rejected id is a property of the spec, so every task in the batch "
+        "would fail identically and the fix is a config edit, never a retry"
+    ),
+    "invalid_model_catalog": (
+        "the CLI's own model listing, read in this dispatch's configuration, "
+        "does not contain this model id — the id is a property of the spec, so "
+        "every task in the batch would fail identically and the fix is a config "
+        "edit, never a retry"
+    ),
     "nested_exec_network": (
         "the runner started inside this host but could not reach its provider "
         "API — the host's egress rules, not the runner, are what failed"
@@ -806,6 +848,11 @@ _REASON_EXPLANATION = {
         "the runner started inside this host but could not read its own "
         "credential store — a login notice from inside a sandbox is a host "
         "condition as often as a logged-out CLI, and neither is retryable"
+    ),
+    "sandbox_unavailable": (
+        "the runner's own sandbox cannot write under this repo; on Ubuntu 24.04 "
+        "this is the AppArmor user-namespace restriction, see "
+        "`multi_llm.py doctor`"
     ),
 }
 
@@ -868,6 +915,12 @@ NESTED_PROBE_PROMPT = (
 #: rather than consuming the batch's own budget.
 NESTED_PROBE_TIMEOUT_S = 120.0
 
+#: Wall-clock budget for the D6 sandbox self-test (`sandbox_probe_command`).
+#: The command is model-free — codex's runs in ~30 ms — so ten seconds is
+#: generous; a probe that outlives it is recorded ``unknown`` and dispatches,
+#: exactly like the nested-exec probe's inconclusive branch.
+SANDBOX_PROBE_TIMEOUT_S = 10.0
+
 
 def _availability_detail(spec: str) -> str:
     """The typed availability sentence for ``spec``'s adapter, or ``""`` (M10, §5.1).
@@ -878,13 +931,31 @@ def _availability_detail(spec: str) -> str:
     diagnostic may never be the reason a refusal cannot be printed.
     """
     try:
-        provider_name, _, _ = str(spec or "").partition(":")
+        provider_name, _, model = str(spec or "").partition(":")
         provider = get_provider(provider_name.strip())
         if provider is None:
             return ""
-        return provider.describe_availability().detail
+        return provider.describe_availability(
+            credentials_required=_model_needs_credentials(provider, model.strip())
+        ).detail
     except Exception:  # noqa: BLE001 - a diagnostic may never break a refusal
         return ""
+
+
+def _model_needs_credentials(provider: Any, model: str) -> bool:
+    """``provider.model_needs_credentials(model)``, defaulting to ``True``.
+
+    The base adapter declares the hook; a narrow test double may not, and a
+    missing declaration must read as "needs one" — the exemption is narrow or
+    it is a hole (D3 step 2).
+    """
+    hook = getattr(provider, "model_needs_credentials", None)
+    if not callable(hook):
+        return True
+    try:
+        return bool(hook(model))
+    except Exception:  # noqa: BLE001 - a declaration read may not break a preflight
+        return True
 
 
 def _render_runner_rejection(
@@ -933,14 +1004,71 @@ def resolve_task_runner(
     it is a concrete ``provider:model`` and not ``auto`` → ``capability_tier``
     (``cheap`` → ``driver.subagent_runner_cheap``) → ``driver.subagent_runner``.
     """
+    return resolve_task_runner_source(task, anchor=anchor, recorded=recorded)[0]
+
+
+def resolve_task_runner_source(
+    task: Dict[str, Any],
+    *,
+    anchor: Optional[str] = None,
+    recorded: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
+    """:func:`resolve_task_runner`, plus the ``key`` naming what supplied the spec.
+
+    The second element is what a preflight refusal prints as *the thing to
+    edit* (D3 step 3's ``key=`` repair). Before it, every message said
+    ``driver.subagent_runner`` whatever rung answered — and on the host and base
+    rungs that names a key no file on the user's machine sets, then closes by
+    telling them to edit it. So the source travels with the spec:
+
+    * a runner recorded by a previous attempt → ``tasks[<id>].runner (recorded
+      from a previous attempt)``;
+    * the task's own ``model_hint`` → ``tasks[<id>].model_hint``;
+    * the ladder → ``driver.subagent_runner`` (or ``_cheap``) with the layer
+      :func:`resolve_subagent_runner` reported in parentheses — ``env``,
+      ``project``, ``session``, ``host capabilities`` or ``base``/``default``.
+    """
+    spec, key, _layer = _resolve_task_source(
+        task, anchor=anchor, recorded=recorded
+    )
+    return spec, key
+
+
+def _resolve_task_source(
+    task: Dict[str, Any],
+    *,
+    anchor: Optional[str] = None,
+    recorded: Optional[Dict[str, str]] = None,
+    skip_session: bool = False,
+) -> Tuple[str, str, str]:
+    """:func:`resolve_task_runner_source`, plus the raw ladder *layer* word.
+
+    The layer travels separately from the rendered ``key`` because one rung —
+    ``session`` — is treated differently by :func:`run_tasks` when a preflight
+    refuses it, and re-deriving that from the human-readable key would mean
+    parsing a sentence written for a person. ``""`` is the layer for the two
+    task-level overrides, which come off the task file rather than off the
+    ladder and therefore have no rung of their own.
+
+    ``skip_session`` is forwarded to the ladder so the fallback re-resolution
+    cannot return the session spec that was just refused.
+    """
     task_id = str(task.get("task_id", ""))
     if recorded and task_id in recorded:
-        return recorded[task_id]
+        return (
+            recorded[task_id],
+            f"tasks[{task_id}].runner (recorded from a previous attempt)",
+            "",
+        )
     hint = task.get("model_hint")
     if isinstance(hint, str) and hint.strip() and hint.strip() != "auto" and ":" in hint:
-        return hint.strip()
+        return hint.strip(), f"tasks[{task_id}].model_hint", ""
     tier = str(task.get("capability_tier") or "full")
-    return get_subagent_runner(tier, anchor=anchor)
+    spec, layer = resolve_subagent_runner(
+        tier, anchor=anchor, skip_session=skip_session
+    )
+    driver_key = "driver.subagent_runner_cheap" if tier == "cheap" else "driver.subagent_runner"
+    return spec, f"{driver_key} ({layer})", layer
 
 
 def preflight_runner(
@@ -990,8 +1118,16 @@ def preflight_runner(
     throwaway dispatch — it is what ``--dry-run-subagents`` passes, because the
     probe is a real turn and "start no child" (D3l) means it.
 
+    Between the catalog leg and the host's verdict sits the D6 sandbox
+    self-test: an adapter that puts an OS sandbox between the model and the
+    filesystem (codex, through bubblewrap) declares a model-free
+    ``sandbox_probe_command`` for its write profile, and a non-zero exit is
+    exit 3 here — ``sandbox_unavailable`` — before the first edit-capable
+    dispatch. Cached per host/spec/profile; a timeout is ``unknown`` and
+    dispatches.
+
     Returns:
-        ``{"provider", "model", "version", "auth", "nested_exec",
+        ``{"provider", "model", "version", "auth", "nested_exec", "sandbox",
         "usage_support", "profile"}``.
 
     Raises:
@@ -1056,11 +1192,32 @@ def preflight_runner(
         "version": "unknown",
         "auth": "unknown",
         "nested_exec": "unknown",
+        "sandbox": "unknown",
     }
     if check_version:
         info["version"] = _detect_version(provider_name, key=key, spec=spec, profile=profile)
     if check_auth:
-        info["auth"] = _detect_auth(provider_name, key=key, spec=spec, profile=profile)
+        info["auth"] = _detect_auth(
+            provider_name, model, key=key, spec=spec, profile=profile
+        )
+    # D3 step 3 — the CLI's own catalog, after version and auth and before
+    # nested-exec: a too-old CLI, or a logged-out one running a model that needs
+    # a credential, is already a refusal and neither can produce a trustworthy
+    # listing. A credential-free id exempted by the auth leg does reach here.
+    # Gated on `check_auth` and `check_version` alike, because a caller that
+    # asked for neither probe asked for no CLI spawn at all.
+    if check_version or check_auth:
+        info["model_catalog"] = _detect_model(
+            provider_name, model, key=key, spec=spec, profile=profile, anchor=anchor
+        )
+        # D6 step 3 — the runner's own OS sandbox, asked to write one byte
+        # where the batch would, with no model involved. Only an adapter that
+        # declares a command for this profile is probed (codex, agent-write);
+        # everything else records `not-required`. Same gate as the catalog
+        # leg: a caller that asked for no CLI spawn gets none.
+        info["sandbox"] = _detect_sandbox(
+            provider_name, key=key, spec=spec, profile=profile, anchor=anchor
+        )
     if check_nested:
         info["nested_exec"] = _detect_nested_exec(
             provider_name, model,
@@ -1078,8 +1235,11 @@ def preflight_runner(
 #: dispatch (D3m).
 _VERSION_CACHE: Dict[str, str] = {}
 
-#: The same, for the D3c auth probe: ``ok`` | ``unknown`` per provider. A failed
-#: probe is never cached — it raises, and the run ends.
+#: The same, for the D3c auth probe: ``ok`` | ``unknown`` | ``not-required``,
+#: keyed ``<provider>|<needs-credentials 0/1>`` — NOT by bare provider name
+#: (D3 step 2): one process holding both ``opencode/big-pickle`` and
+#: ``openrouter/deepseek/…`` would otherwise serve one's verdict to the other.
+#: A failed probe is never cached — it raises, and the run ends.
 _AUTH_CACHE: Dict[str, str] = {}
 
 #: The same, for the D3c nested-exec verdict, keyed by ``<host id>|<runner spec>``
@@ -1088,17 +1248,43 @@ _AUTH_CACHE: Dict[str, str] = {}
 #: never cached either — it raises.
 _NESTED_CACHE: Dict[str, str] = {}
 
+#: The same, for the D3 step 3 catalog leg: ``ok`` | ``unknown`` per
+#: ``<provider>|<hermetic on/off>|<config-content digest>|<normalized model>``
+#: — not provider+model, because the effective configuration changes the
+#: answer, and a hermetic and a non-hermetic slot in one process must not share
+#: a verdict. A refusal is never cached — it raises.
+_MODEL_CACHE: Dict[str, str] = {}
+
+#: The same, for the D6 sandbox self-test: ``ok`` | ``unknown`` |
+#: ``not-required`` per ``<host id>|<runner spec>|<profile>`` — the profile is
+#: part of the key because the adapter answers a different command (or none)
+#: per profile. A refusal is never cached — it raises.
+_SANDBOX_CACHE: Dict[str, str] = {}
+
 
 def reset_version_cache() -> None:
-    """Clear the per-process runner-version, auth and nested-exec caches (tests)."""
+    """Clear the per-process runner-version, auth, catalog, nested-exec and
+    sandbox caches (tests)."""
     _VERSION_CACHE.clear()
     _AUTH_CACHE.clear()
     _NESTED_CACHE.clear()
+    _MODEL_CACHE.clear()
+    _SANDBOX_CACHE.clear()
+
+
+def reset_sandbox_cache() -> None:
+    """Clear the per-process sandbox-probe cache (tests)."""
+    _SANDBOX_CACHE.clear()
 
 
 def reset_auth_cache() -> None:
     """Clear the per-process runner-auth cache (tests)."""
     _AUTH_CACHE.clear()
+
+
+def reset_model_cache() -> None:
+    """Clear the per-process model-catalog cache (tests)."""
+    _MODEL_CACHE.clear()
 
 
 def reset_nested_exec_cache() -> None:
@@ -1190,23 +1376,36 @@ def _detect_version(
 
 
 def _detect_auth(
-    provider_name: str, *, key: str, spec: str, profile: str
+    provider_name: str, model: str = "", *, key: str, spec: str, profile: str
 ) -> str:
     """Run ``auth_check`` once per provider and refuse a logged-out CLI (D3c).
 
-    Returns ``"ok"`` or ``"unknown"``; a recognized login/credential notice raises
-    instead, because every sibling task in the batch would fail identically and no
-    retry can fix a missing credential. ``unknown`` is the honest answer for a CLI
-    that declares no probe (claude-code has no non-interactive status subcommand)
-    or whose probe could not be read — never an assumption of success.
-    """
-    if provider_name in _AUTH_CACHE:
-        return _AUTH_CACHE[provider_name]
+    Returns ``"ok"``, ``"unknown"`` or ``"not-required"``; a recognized
+    login/credential notice raises instead, because every sibling task in the
+    batch would fail identically and no retry can fix a missing credential.
+    ``unknown`` is the honest answer for a CLI that declares no probe
+    (claude-code has no non-interactive status subcommand) or whose probe could
+    not be read — never an assumption of success.
 
+    ``model`` is what decides whether a ``False`` verdict is *allowed to refuse*
+    (D3 step 2). On a CLI that fronts several vendors "needs a credential" is a
+    property of the model, not of the binary, so the adapter is asked
+    ``model_needs_credentials(model)``: when it declares the model credential-free
+    the probe still runs and its verdict is still recorded (status keeps its
+    evidence) but the refusal is skipped and the leg reads ``not-required``. A
+    ``True``/``None`` verdict is untouched either way, and a credential-requiring
+    spec on the same provider in the same process still refuses — the cache is
+    keyed on the answer, not on the provider alone.
+    """
     provider = get_provider(provider_name)
+    needs_credentials = _model_needs_credentials(provider, model)
+    cache_key = f"{provider_name}|{1 if needs_credentials else 0}"
+    if cache_key in _AUTH_CACHE:
+        return _AUTH_CACHE[cache_key]
+
     argv = list(getattr(provider, "auth_check", ()) or ())
     if not argv:
-        _AUTH_CACHE[provider_name] = "unknown"
+        _AUTH_CACHE[cache_key] = "unknown"
         return "unknown"
 
     completed = _run_probe(argv)
@@ -1218,6 +1417,12 @@ def _detect_auth(
             )
         except Exception:  # noqa: BLE001 - a probe must never break a preflight
             verdict = None
+    if verdict is False and not needs_credentials:
+        # Measured, not assumed: the adapter declared this model answers with no
+        # credential present, so a logged-out probe is evidence about *other*
+        # models on this CLI and refuses nothing here.
+        _AUTH_CACHE[cache_key] = "not-required"
+        return "not-required"
     if verdict is False:
         login = getattr(provider, "login_cmd", "") or f"{argv[0]} login"
         # The probe's own envelope, redacted at this boundary: cursor-agent's
@@ -1238,7 +1443,280 @@ def _detect_auth(
         )
 
     state = "ok" if verdict else "unknown"
-    _AUTH_CACHE[provider_name] = state
+    _AUTH_CACHE[cache_key] = state
+    return state
+
+
+def _run_sandbox_probe(
+    argv: Sequence[str], *, cwd: Optional[str], timeout: float
+) -> Optional["subprocess.CompletedProcess"]:
+    """Run one ``sandbox_probe_command`` argv (D6 step 3).
+
+    A sibling of :func:`_run_probe` rather than a flag on it — the probe writes
+    a byte, so it has to run with ``cwd`` at the repo root the dispatch would
+    use, and it has its own, shorter budget. ``None`` means the command could
+    not be run at all (the binary vanished between ``is_available`` and here,
+    the interpreter refused the spawn) and every caller reads it as
+    ``unknown``: a preflight probe reports, it never blocks on its own failure.
+    A timeout is ``None`` too, for the same reason.
+    """
+    launcher, _ = _resolve_executable(argv[0])
+    try:
+        return subprocess.run(
+            [*launcher, *argv[1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def sandbox_verdict(
+    provider: Any,
+    profile: str,
+    *,
+    cwd: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> Tuple[str, str]:
+    """``(state, tail)`` for one adapter's sandbox self-test (D6 step 3).
+
+    ``state`` is ``not-required`` when the adapter answers no command for this
+    profile, ``ok`` on exit 0, ``unavailable`` on any other exit, and
+    ``unknown`` when the command could not be run or did not finish. ``tail``
+    is the redacted end of what the command printed — the ``bwrap:`` line, on
+    the machine this was written for. Shared by the executor's preflight and
+    ``multi_llm.py doctor`` so both read the same command the same way.
+    """
+    try:
+        argv = provider.sandbox_probe_command(profile)
+    except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
+        argv = None
+    if not argv:
+        return "not-required", ""
+    if timeout is None:
+        # Resolved at call time so a test can shorten the module constant.
+        timeout = SANDBOX_PROBE_TIMEOUT_S
+    completed = _run_sandbox_probe(list(argv), cwd=cwd, timeout=timeout)
+    if completed is None:
+        return "unknown", ""
+    tail = _redact_probe_tail(completed.stderr or completed.stdout, 500)
+    if completed.returncode == 0:
+        return "ok", tail
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .providers.base import sandbox_probe_inconclusive
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.providers.base import sandbox_probe_inconclusive
+    if sandbox_probe_inconclusive(f"{completed.stdout}\n{completed.stderr}"):
+        # The CLI did not understand the probe (a build older than its
+        # `sandbox` subcommand): nothing about the sandbox was learned.
+        return "unknown", tail
+    return "unavailable", tail
+
+
+def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
+    """Where the sandbox probe writes its byte: the repo root a dispatch pins.
+
+    The anchor is the plan path (or directory) the run discovers its config
+    from; its git root is the ``cwd`` every write dispatch is pinned to, so the
+    probe asks the same question in the same place. Without a resolvable root
+    the process cwd stands in — ``None`` here means "inherit".
+    """
+    try:
+        from .git_utils import get_project_root_from_dir
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.git_utils import get_project_root_from_dir
+    start: Optional[str] = None
+    if anchor:
+        start = anchor if os.path.isdir(anchor) else (os.path.dirname(anchor) or ".")
+    try:
+        root = get_project_root_from_dir(start) if start else get_project_root_from_dir()
+    except Exception:  # noqa: BLE001 - a cwd choice may never end a preflight
+        root = None
+    return root or None
+
+
+def _current_host_id() -> str:
+    """The host id the sandbox cache is keyed under (``unknown-host`` off-data)."""
+    resolved = _host_nested_exec()
+    return resolved[0] if resolved else "unknown-host"
+
+
+def _detect_sandbox(
+    provider_name: str,
+    *,
+    key: str,
+    spec: str,
+    profile: str,
+    anchor: Optional[str] = None,
+) -> str:
+    """Run the adapter's model-free sandbox self-test once per host/spec/profile
+    and refuse a runner whose own sandbox cannot write (D6 step 3).
+
+    Returns ``ok`` | ``unknown`` | ``not-required``; a non-zero exit raises,
+    because bubblewrap failing to start is a property of the machine — every
+    sibling on this runner would fail identically, and the fix (an AppArmor
+    profile ``multi_llm.py doctor`` prints) is never a retry. A timeout or a
+    command that could not run records ``unknown`` and dispatches, exactly
+    like the nested-exec probe's inconclusive branch.
+    """
+    provider = get_provider(provider_name)
+    cache_key = f"{_current_host_id()}|{spec}|{profile}"
+    if cache_key in _SANDBOX_CACHE:
+        return _SANDBOX_CACHE[cache_key]
+
+    state, tail = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
+    if state == "unavailable":
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: "
+            f"sandbox_unavailable) — "
+            f"{_REASON_EXPLANATION['sandbox_unavailable']}. "
+            f"Probe tail: {tail!r}. "
+            f"Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
+            f"prints (or use a runner without an OS sandbox). Nothing was "
+            f"dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="sandbox_unavailable",
+            detail=tail,
+        )
+    if state == "unknown":
+        print(
+            f"multi-llm warning: the sandbox self-test for {spec} ({profile}) "
+            f"could not be read within {SANDBOX_PROBE_TIMEOUT_S:.0f}s — recording "
+            f"sandbox 'unknown'. Dispatching anyway; a broken sandbox will land on "
+            f"the D3k ladder as sandbox_unavailable (rung 1).",
+            file=sys.stderr,
+        )
+    _SANDBOX_CACHE[cache_key] = state
+    return state
+
+
+def _model_cache_key(
+    provider: Any, provider_name: str, model: str, *, profile: str,
+    anchor: Optional[str],
+) -> str:
+    """``<provider>|<hermetic on/off>|<config-content digest>|<normalized model>``.
+
+    The digest is over the adapter's own merged ``providers.<name>`` block —
+    the source every rebuilt ``OPENCODE_CONFIG_CONTENT`` and the hermetic policy
+    are read from — so an edit that would change the listing changes the key.
+    Every leg degrades to a constant rather than raising: a cache key may never
+    be what ends a preflight.
+    """
+    hermetic = "plain"
+    try:
+        module = sys.modules.get(type(provider).__module__)
+        enabled = getattr(module, "hermetic_enabled", None)
+        if callable(enabled) and enabled(profile, anchor):
+            hermetic = "hermetic"
+    except Exception:  # noqa: BLE001
+        hermetic = "plain"
+    digest = "-"
+    try:
+        try:
+            from .provider_registry import load_config
+        except ImportError:  # pragma: no cover
+            from utils.provider_registry import load_config
+        block = (load_config(anchor=anchor).get("providers") or {}).get(provider_name)
+        import hashlib
+
+        digest = hashlib.sha256(
+            json.dumps(block or {}, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001
+        digest = "-"
+    normalized = model
+    try:
+        efforts = provider._accepted_efforts()  # noqa: SLF001 - the base's own hook
+        normalized, _ = split_reasoning_effort(model, efforts)
+    except Exception:  # noqa: BLE001
+        normalized = model
+    return f"{provider_name}|{hermetic}|{digest}|{normalized.strip()}"
+
+
+def _detect_model(
+    provider_name: str,
+    model: str,
+    *,
+    key: str,
+    spec: str,
+    profile: str,
+    anchor: Optional[str] = None,
+) -> str:
+    """Ask the CLI's own catalog whether ``model`` exists — once per slot (D3 step 3).
+
+    The third and last leg about the *runner*, and the only one of the three
+    model checks that spawns anything: ``describe_unresolvable_model`` is the
+    structural, catalog-free refusal and the ``is_model_valid`` line is an
+    advisory warning about *our* configured list; this is the CLI's answer.
+    The adapter's :meth:`describe_unlisted_model` reads the listing inside the
+    same dispatch context the dispatch will use (D3 step 4), under the same
+    30 s ceiling every probe has — a listing that hangs is killed and read as
+    unknown.
+
+    Verdicts: ``known=True`` → ``"ok"``; ``known=False`` → the same
+    ``RunnerRejected`` every other leg raises, reason ``invalid_model_catalog``
+    (deliberately distinct from D4's dispatch-time ``runner_invalid_model``, so
+    a preflight refusal and a dispatch-time one stay separable in a log), with
+    the ``detail`` the adapter composed from the listing it just read;
+    ``known=None`` → ``"unknown"``, printed like every other unknown and
+    **never blocking** — the run proceeds exactly as it would with no probe at
+    all, and D4 is the backstop that catches a real miss one attempt later in
+    the provider's own words.
+
+    **This runs at preflight and nowhere on the resolution ladder**: the ladder
+    stays subprocess-free so ``status`` stays sub-second, and there is no rung
+    fallback — the spec refused is the spec the ladder already finished
+    resolving, whatever rung supplied it, and ``key`` names that rung.
+    """
+    provider = get_provider(provider_name)
+    cache_key = _model_cache_key(
+        provider, provider_name, model, profile=profile, anchor=anchor
+    )
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
+    try:
+        verdict = provider.describe_unlisted_model(
+            model, anchor=anchor, profile=profile
+        )
+    except TypeError:
+        # An adapter (or a narrow double) declaring the plan's minimal
+        # signature, without the profile keyword.
+        try:
+            verdict = provider.describe_unlisted_model(model, anchor=anchor)
+        except Exception:  # noqa: BLE001 - a catalog read may never end a preflight
+            verdict = None
+    except Exception:  # noqa: BLE001 - a catalog read may never end a preflight
+        verdict = None
+
+    known = getattr(verdict, "known", None)
+    if known is False:
+        raise _render_runner_rejection(
+            key=key, spec=spec, reason_code="invalid_model_catalog",
+            profile=profile, detail=str(getattr(verdict, "detail", "") or ""),
+        )
+    state = "ok" if known is True else "unknown"
+    overrides_hook = (
+        getattr(type(provider), "describe_unlisted_model", None)
+        is not LLMProvider.describe_unlisted_model
+    )
+    if state == "unknown" and overrides_hook:
+        # Only an adapter that has a listing to read gets the warning: the
+        # base's typed default is "no catalog here", which is not a failed read.
+        print(
+            f"multi-llm warning: could not confirm {model!r} against "
+            f"{provider_name}'s own model listing — recording 'unknown' and "
+            f"dispatching anyway; a model the runner really rejects is caught "
+            f"on the first attempt in the runner's own words.",
+            file=sys.stderr,
+        )
+    _MODEL_CACHE[cache_key] = state
     return state
 
 
@@ -1488,6 +1966,59 @@ def _probe_nested_exec(
             key=key,
             spec=spec,
             reason_code="nested_exec_credentials",
+        )
+
+    if classified is not None and classified[0] == STATUS_SANDBOX_UNAVAILABLE:
+        # D6 step 4. The path that catches what step 3 has no command for —
+        # any bubblewrap user whose adapter declares no `sandbox_probe_command`
+        # — and, like the D4 branch below, opportunistic: it runs only where a
+        # leg was unresolved and a probe therefore happened. A `bwrap:` line is
+        # a fact about the machine, so every sibling fails identically and the
+        # fix is the AppArmor profile `doctor` prints, never a retry.
+        tail = _redact_probe_tail(capture.stderr or capture.stdout, 500)
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: "
+            f"sandbox_unavailable) — "
+            f"{_REASON_EXPLANATION['sandbox_unavailable']}. "
+            f"Probe tail: {tail!r}. "
+            f"{trailer}"
+            f"Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
+            f"prints, or use a runner without an OS sandbox. Nothing was "
+            f"dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="sandbox_unavailable",
+            detail=tail,
+        )
+
+    if classified is not None and classified[0] == STATUS_INVALID_MODEL:
+        # D4 step 3. Opportunistic by construction: this branch only runs on a
+        # host where a leg was still unresolved and a probe therefore happened.
+        # The unconditional pre-dispatch gate is the preflight catalog leg (D3);
+        # the guarantee when neither can answer is the fatal rung-1 status the
+        # first real batch records. What this buys is zero dispatches where a
+        # billed probe was going to run anyway.
+        #
+        # The window is `_classify_failed_run`'s 2000 bytes rather than the 500
+        # the other legs quote: a login notice is the last thing a CLI prints,
+        # but opencode's `ProviderModelNotFoundError` — the one line with the
+        # "Did you mean" list — sits above a bun stack trace that alone
+        # outruns 500 bytes, and a refusal that quotes only the frames has
+        # thrown away the reason it exists to print.
+        tail = _redact_probe_tail(capture.stderr or capture.stdout, 2000)
+        raise RunnerRejected(
+            f"Refusing to dispatch: {key} is {spec!r} (reason: "
+            f"runner_invalid_model) — "
+            f"{_REASON_EXPLANATION['runner_invalid_model']}. "
+            f"Probe tail: {tail!r}. "
+            f"{trailer}"
+            f"Fix: set `{key}` to a model this CLI lists "
+            f"(`{provider_name} models`), or update the plugin's host default. "
+            f"Nothing was dispatched.",
+            key=key,
+            spec=spec,
+            reason_code="runner_invalid_model",
+            detail=tail,
         )
 
     if matches_any(NETWORK_DENIAL_PATTERNS, streams):
@@ -3296,13 +3827,25 @@ def _parse_with_schema_policy(
 def _classify_failed_run(
     provider: Any, capture: _Capture, model: str = ""
 ) -> Optional[Tuple[str, str]]:
-    """Ladder rung 3 (plus rung-1 auth), consulted only for a run with no result.
+    """Ladder rung 3, plus the two rung-1 verdicts (auth, invalid model) and the
+    rung-less ``context_length_exceeded``, consulted only for a run with no
+    result.
 
     Classification lives in the adapter — it is the only layer that knows the
     provider's error shape — and is deliberately **not** consulted for a run that
     produced a schema-valid result: the patterns match on captured streams, and a
     successful answer routinely quotes plan text containing "rate limit" or
     "unauthorized".
+
+    Of the five ``CATEGORY_*`` names the ladder has no rung for, exactly two are
+    mapped here — ``invalid_model`` (D4) and ``sandbox_unavailable`` (D6) —
+    because a rejected id is a property of the spec and a sandbox that cannot
+    start is a property of the machine, so the batch-wide fatal gate is
+    telling the truth about every sibling on it. ``connection_error`` and ``server_error`` fall through to the
+    parse failure's own retryable status, which is the policy the classifier's
+    table asks for; ``permission_denied`` can fail one task and not its
+    neighbour, so a fatal mapping would be this function's complaint pointed
+    the other way. They return ``None`` on purpose.
     """
     # §7.6(a)'s terminal status is the ladder's, imported here rather than
     # redeclared: `retry_ladder` owns the status vocabulary and this module
@@ -3337,9 +3880,36 @@ def _classify_failed_run(
         except ImportError:  # pragma: no cover - direct-script import shim
             from utils.providers.base import context_length_message
         return STATUS_CONTEXT_LENGTH_EXCEEDED, context_length_message(model)
-    if classified not in (STATUS_AUTH_FAILED, STATUS_RATE_LIMITED):
+    if classified not in (
+        STATUS_AUTH_FAILED, STATUS_RATE_LIMITED, STATUS_INVALID_MODEL,
+        STATUS_SANDBOX_UNAVAILABLE,
+    ):
         return None
     tail = _tail(_redact(capture.stderr or capture.stdout), 2000)
+    if classified == STATUS_SANDBOX_UNAVAILABLE:
+        # D6 step 4. `STATUS_SANDBOX_UNAVAILABLE` *is* the classifier's
+        # `CATEGORY_SANDBOX_UNAVAILABLE` string, on D4's pattern. The stream
+        # tail carries the `bwrap:` line itself, which is the one thing the
+        # reader needs to recognise the machine condition `doctor` repairs.
+        return STATUS_SANDBOX_UNAVAILABLE, (
+            f"the runner's own sandbox could not start — "
+            f"{_REASON_EXPLANATION['sandbox_unavailable']} (a property of the "
+            f"machine, never fixed by a retry). Stream tail: {tail!r}"
+        )
+    if classified == STATUS_INVALID_MODEL:
+        # D4 step 2. `STATUS_INVALID_MODEL` *is* the classifier's
+        # `CATEGORY_INVALID_MODEL` string, so this is the category under its own
+        # name. The verdict ends in the redacted stream tail on purpose: that is
+        # how the provider's "Did you mean" line reaches the log and the report,
+        # and it is what replaces the adapter's composed text on the exit-3 line
+        # (`status, error = reclassified` in `dispatch_task`) — never appended
+        # to it, never deduplicated against it.
+        provider_name = str(getattr(provider, "name", "") or "")
+        spec = f"{provider_name}:{model}" if model else provider_name or "(unknown)"
+        return STATUS_INVALID_MODEL, (
+            f"the runner rejected the model id {spec!r} (the fix is a config "
+            f"edit, never a retry). Stream tail: {tail!r}"
+        )
     if classified == STATUS_AUTH_FAILED:
         return STATUS_AUTH_FAILED, (
             f"the runner is installed but not authenticated (it printed a "
@@ -3358,6 +3928,97 @@ def _classify_failed_run(
 # ---------------------------------------------------------------------------
 # Batch orchestration
 # ---------------------------------------------------------------------------
+
+def _preflight_batch_runners(
+    resolved: Dict[str, Tuple[str, str, str]],
+    task_by_id: Dict[str, Dict[str, Any]],
+    *,
+    profile: str,
+    anchor: Optional[str] = None,
+    recorded: Optional[Dict[str, str]] = None,
+) -> Tuple[Dict[str, str], Optional[Dict[str, str]]]:
+    """Preflight each DISTINCT runner once; return its versions and any fallback.
+
+    Presence, profile, version, auth, the CLI's own catalog and the host's
+    nested-exec verdict, paid once per spec rather than once per task. A refusal
+    is exit 3 before any child is dispatched, and it names the layer that
+    supplied the spec — the first task's source for each distinct spec — rather
+    than a ``driver.*`` key the user may never have written (D3 step 3).
+
+    **One rung is allowed to fall through, and only one**: ``session``. That spec
+    is the model the host session happens to be running on — nobody typed it into
+    a config file, so a refusal is not a config error and refusing the batch over
+    it would make "I switched the session model" a way to break a run that worked
+    a minute ago. Whatever the reason code (``invalid_model_catalog``,
+    ``not_authenticated``, a denied ``nested_exec`` leg, ``sandbox_unavailable``
+    …), every task that was going to run on it is re-resolved with the session
+    rung skipped, one line says so on stdout, and the *next* rung is preflighted
+    under the ordinary rule. Explicit layers keep refusing exactly as before: an
+    opinion an operator really expressed and that cannot be served is a config
+    error, and silently substituting something else is how "I set it and nothing
+    changed" begins.
+
+    ``resolved`` is mutated in place, so the caller's runner map is the map the
+    fallback produced.
+
+    Returns:
+        ``({spec: version}, fallback)`` where *fallback* is ``None`` or
+        ``{"from", "reason", "to", "layer"}`` — the record
+        ``subagent_batch_report.json`` carries so a substitution is visible after
+        the fact. Per-task truth stays in ``tasks[].runner``; this names the
+        first substitution, which in a homogeneous batch is the only one.
+    """
+    versions: Dict[str, str] = {}
+    fallback: Optional[Dict[str, str]] = None
+    while True:
+        sources: Dict[str, Tuple[str, str, str]] = {}
+        for task_id, (spec, key, layer) in resolved.items():
+            sources.setdefault(spec, (task_id, key, layer))
+        pending = [
+            (spec, meta) for spec, meta in sources.items() if spec not in versions
+        ]
+        if not pending:
+            return versions, fallback
+        spec, (task_id, key, layer) = pending[0]
+        try:
+            versions[spec] = preflight_runner(
+                spec, profile=profile, anchor=anchor, key=key
+            )["version"]
+            continue
+        except RunnerRejected as exc:
+            if layer != SESSION_LAYER:
+                raise
+            # Bound out of the `except` block, which deletes `exc` on the way
+            # out: the refusal has to survive to the impossible-branch re-raise.
+            rejection, reason = exc, exc.reason_code or STATUS_REJECTED
+        # Re-resolve every task that was going to run on the refused spec, each
+        # through its own tier, so a `cheap` task lands on the cheap rung rather
+        # than on whatever the first task got.
+        replacement: Optional[Tuple[str, str, str]] = None
+        for other_id, source in list(resolved.items()):
+            if source[0] != spec:
+                continue
+            new_source = _resolve_task_source(
+                task_by_id[other_id], anchor=anchor, recorded=recorded,
+                skip_session=True,
+            )
+            resolved[other_id] = new_source
+            if replacement is None:
+                replacement = new_source
+        if replacement is None:  # pragma: no cover - spec came from `resolved`
+            raise rejection
+        print(
+            f"[exec-subagents] session model {spec} failed preflight "
+            f"({reason}); falling back to {replacement[0]} ({replacement[2]})"
+        )
+        if fallback is None:
+            fallback = {
+                "from": spec,
+                "reason": reason,
+                "to": replacement[0],
+                "layer": replacement[2],
+            }
+
 
 def run_tasks(
     tasks: Sequence[Dict[str, Any]],
@@ -3397,19 +4058,22 @@ def run_tasks(
         return report
 
     recorded = _recorded_runners(phase_dir)
-    runners = {
-        str(task.get("task_id", index)): resolve_task_runner(
-            task, anchor=anchor, recorded=recorded
-        )
+    task_by_id: Dict[str, Dict[str, Any]] = {
+        str(task.get("task_id", index)): task
         for index, task in enumerate(selected)
     }
+    resolved = {
+        task_id: _resolve_task_source(task, anchor=anchor, recorded=recorded)
+        for task_id, task in task_by_id.items()
+    }
 
-    # Preflight, once per DISTINCT runner: presence, profile, version. A refusal
-    # here is exit 3 before any child is dispatched.
     profile = profile_for_kind(str(selected[0].get("kind") or kind))
-    for spec in dict.fromkeys(runners.values()):
-        info = preflight_runner(spec, profile=profile, anchor=anchor)
-        report.runner_versions[spec] = info["version"]
+    versions, fallback = _preflight_batch_runners(
+        resolved, task_by_id, profile=profile, anchor=anchor, recorded=recorded,
+    )
+    report.runner_versions.update(versions)
+    report.runner_fallback = fallback
+    runners = {task_id: spec for task_id, (spec, _key, _layer) in resolved.items()}
 
     report.ceilings = effective_ceiling(
         list(runners.values()), anchor=anchor, host_max=host_max
@@ -3565,7 +4229,12 @@ async def _gather(
     except ImportError:  # pragma: no cover
         from utils.review_orchestrator_base import run_tasks_concurrent
 
-    fatal = {"hit": False}
+    # One flag for the whole batch, consulted at slot-acquisition time — so a
+    # task already inside `dispatch_task` when it flips runs to its own verdict,
+    # and everything that reaches it afterwards spawns nothing. `spec` is the
+    # runner the fatal row resolved: the gate is batch-wide, the claim an
+    # undispatched row is allowed to print is per-spec (D4 step 1).
+    fatal: Dict[str, Any] = {"hit": False, "spec": None}
 
     # The starting slot count per provider: its own `max_concurrent`, bounded by
     # the batch's effective ceiling (a provider limit above it could never be
@@ -3606,15 +4275,26 @@ async def _gather(
 
     async def per_task(task: Dict[str, Any], runner: str, index: int) -> TaskOutcome:
         if fatal["hit"]:
+            failed_spec = fatal["spec"]
+            if runner == failed_spec:
+                reason = (
+                    f"not dispatched: {failed_spec} failed on a rung that fails "
+                    f"the whole batch; every task on that runner would fail "
+                    f"identically"
+                )
+            else:
+                # Predicts nothing: a rejected id on one spec says nothing
+                # about a sibling `model_hint` pinned to another.
+                reason = (
+                    f"not dispatched: the batch stopped after {failed_spec} "
+                    f"failed fatally; this task's runner {runner} was never tried"
+                )
             return TaskOutcome(
                 task_id=str(task.get("task_id", index)),
                 kind=str(task.get("kind", "")),
                 runner=runner,
                 status=STATUS_INCOMPLETE,
-                reason=(
-                    "not dispatched: an earlier task failed on a rung that fails "
-                    "the whole batch (every sibling would fail identically)"
-                ),
+                reason=reason,
             )
         provider_name, _ = parse_model_spec(runner, anchor=anchor)
         await backpressure.acquire(provider_name)
@@ -3629,8 +4309,9 @@ async def _gather(
             )
         finally:
             await backpressure.release(provider_name)
-        if outcome.fatal:
+        if outcome.fatal and not fatal["hit"]:
             fatal["hit"] = True
+            fatal["spec"] = runner
         if _saw_rate_limit(outcome):
             narrowed = await backpressure.narrow(provider_name)
             if narrowed is not None:
@@ -3670,7 +4351,22 @@ async def _gather(
 
 
 def _recorded_runners(phase_dir: str) -> Dict[str, str]:
-    """Runners pinned by a previous batch report, for a re-dispatch (D3o)."""
+    """Runners pinned by a previous batch report, for a re-dispatch (D3o).
+
+    **A recorded runner whose recorded status is fatal is not a pin, it is a
+    rejected assignment** (D4 step 6) — and neither is the same spec on a row
+    the fatal gate stopped before it could be tried. One rule, keyed on the spec
+    rather than the row: every row whose runner equals a spec that *any* row in
+    the same report recorded with a status in ``FATAL_STATUSES`` is dropped, so
+    ``resolve_task_runner`` falls through to the current configuration for
+    exactly the tasks the rejected spec touched, and a config repair takes
+    effect on re-invocation. Rows on a spec that never failed keep their pin.
+    The spec-keyed half is load-bearing: the concurrent gate records
+    undispatched siblings ``incomplete`` (not fatal) while still writing the
+    spec they were about to use, and preflight runs once per *distinct* spec —
+    so one surviving pin would re-refuse the whole batch, repaired config and
+    all.
+    """
     path = Path(phase_dir) / BATCH_REPORT_FILENAME
     if not path.exists():
         return {}
@@ -3678,10 +4374,19 @@ def _recorded_runners(phase_dir: str) -> Dict[str, str]:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    rows = [
+        row for row in document.get("tasks", [])
+        if isinstance(row, dict) and row.get("task_id") and row.get("runner")
+    ]
+    rejected_specs = {
+        str(row["runner"]) for row in rows if row.get("status") in FATAL_STATUSES
+    }
     recorded = {}
-    for row in document.get("tasks", []):
-        if isinstance(row, dict) and row.get("task_id") and row.get("runner"):
-            recorded[str(row["task_id"])] = str(row["runner"])
+    for row in rows:
+        spec = str(row["runner"])
+        if spec in rejected_specs:
+            continue
+        recorded[str(row["task_id"])] = spec
     return recorded
 
 
@@ -4266,8 +4971,100 @@ def continue_past_marker(
         # re-invoke is the host's `multi_turn` answer, not an assumption: a host
         # that ends its run with this command leaves no agent able to follow the
         # instruction, so it is addressed to the human instead.
-        *_retry_instruction(
-            args, failed_ids=failed_ids, retry_command=retry_command
+        #
+        # D2 step 4: the block is *shaped* from this call's own report — the
+        # statuses of `report.failed`, and whether the fan-out's artifacts are
+        # usable — never from a count. A fatal status names its repair above
+        # the command; a transient one names the cost beneath it; unusable
+        # artifacts make --force the command. Only one runnable string either
+        # way, so a host's option scrape yields one retry tool call.
+        *_shaped_retry_block(
+            args, report, phase_dir=phase_dir, document=document,
+            failed_ids=failed_ids, retry_command=retry_command,
         ),
     ]
     raise BatchFailed("\n".join(lines), report)
+
+
+def _artifacts_usable(document: Optional[Dict[str, Any]], phase_dir: str) -> bool:
+    """Whether the fan-out's own artifacts this batch reads still parse.
+
+    The grouped file the task document names (``grouped_file``, recorded
+    beside its hash) is the one artifact a validation/consolidation batch is
+    downstream of; when it is missing or unreadable the reviewer pass itself
+    has to run again, and no ``--reaggregate`` can help. A document naming no
+    such file has nothing to check and is usable by definition.
+    """
+    if not document:
+        return True
+    grouped = document.get("grouped_file")
+    if not grouped:
+        return True
+    path = grouped if os.path.isabs(str(grouped)) else os.path.join(phase_dir, str(grouped))
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            json.load(stream)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _force_variant(command: Optional[str]) -> Optional[str]:
+    """The same retry with ``--force`` as its verb (shape 3 only)."""
+    if not command:
+        return None
+    for verb in ("--reaggregate", "--reaggregate-consolidation", "--yes"):
+        if command.endswith(" " + verb):
+            return command[: -len(verb)] + "--force"
+    return command + " --force"
+
+
+def _shaped_retry_block(
+    args: Any,
+    report: "BatchReport",
+    *,
+    phase_dir: str,
+    document: Optional[Dict[str, Any]],
+    failed_ids: str,
+    retry_command: Optional[str],
+) -> List[str]:
+    """`_retry_instruction` wrapped in the shape `cli_common.retry_shape` picks."""
+    try:
+        from . import cli_common
+    except ImportError:  # pragma: no cover - direct script runs
+        import cli_common  # type: ignore
+    statuses = [o.status for o in report.failed]
+    shape = cli_common.retry_shape(
+        statuses=statuses, artifacts_ok=_artifacts_usable(document, phase_dir)
+    )
+    redispatch = len(report.failed)
+    kept = sum(1 for o in report.outcomes if o.ok)
+    if shape == cli_common.SHAPE_FORCE:
+        return [
+            "The fan-out's own artifacts are unusable (the grouped file this "
+            "batch reads is missing or does not parse), so the reviewer pass "
+            "has to run again — re-invoke with --force:",
+            *_retry_instruction(
+                args, failed_ids=failed_ids,
+                retry_command=_force_variant(retry_command),
+            ),
+        ]
+    lines: List[str] = []
+    if shape == cli_common.SHAPE_REPAIR:
+        counts: Dict[str, int] = {}
+        for status in statuses:
+            counts[status] = counts.get(status, 0) + 1
+        lines.append(
+            "Repair first: "
+            + cli_common.repair_sentence(counts=counts, statuses=statuses)
+            + "."
+        )
+    lines.extend(
+        _retry_instruction(args, failed_ids=failed_ids, retry_command=retry_command)
+    )
+    lines.append(
+        f"  (re-dispatches the {redispatch} failed task(s) and keeps the {kept} "
+        f"valid result(s) already on disk; --force is not needed and would "
+        f"re-run the reviewer panel)"
+    )
+    return lines

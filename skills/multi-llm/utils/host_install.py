@@ -110,7 +110,11 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
 #: template edit still arrives as a question about this constant rather than as
 #: silence: the ``--exec-subagents`` OpenCode's dispatcher line gained shipped
 #: with the counter still at 1, and nothing said so.
-SHIM_VERSION = 2
+#:
+#: 3: :func:`render` gained a fourth token, ``{NEEDS_HUMAN_RULE}``, so a shim
+#: rendered before it carries no exit-3 decision rule at all — a shape change
+#: no template digest sees on its own.
+SHIM_VERSION = 3
 
 #: The key that identifies a file as ours. ``uninstall-host`` removes files by
 #: this block and **never** by filename, so a user's own `multi-llm.md` is safe.
@@ -158,10 +162,13 @@ _BAKED_PREFIX_BARE_RE = re.compile(
 #: a command that runs without ``--no-dev`` and syncs the dev group.
 #: ``{DEFAULT_MODE}`` is another: the rule "no mode flag means ``review-plan``" is
 #: rendered from :data:`modes.DEFAULT_MODE`, so a surviving token would leave the
-#: model reading a brace where a mode word belongs.
+#: model reading a brace where a mode word belongs. ``{NEEDS_HUMAN_RULE}`` is the
+#: same shape for the exit-3 decision rule (:data:`modes.NEEDS_HUMAN_RULE`): a
+#: surviving token would be a shim that never says what exit 3 means.
 FORBIDDEN_IN_INSTALLED: Tuple[str, ...] = (
     "{SKILL_DIR}", "${SKILL_DIR}", "$SKILL_DIR", "$ARGUMENTS",
     "${CLAUDE_SKILL_DIR}", "{UV_RUN_FLAGS}", "{DEFAULT_MODE}",
+    "{NEEDS_HUMAN_RULE}",
 )
 
 #: The one placeholder that is legal in the one shim nobody renders: the reference

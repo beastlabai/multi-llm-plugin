@@ -62,6 +62,7 @@ from utils import (  # noqa: E402
     cli_common,
     host_capabilities as caps,
     host_install,
+    provider_registry,
     unattended,
 )
 
@@ -388,6 +389,29 @@ class TestJavaScriptSource:
                     f"a sentence from {path.name} is duplicated into the JS"
                 )
 
+        # No needs-human prose, no outcomes line, no lede — the surface's own
+        # authored strings. The three scans above walk closed sets (mode words,
+        # aliases, core sentences) that a `modes.py` string constant is in none
+        # of, which is how the exit-3 message sat in this file as a bare literal
+        # for as long as it did. Scanned by *fragment* after joining the file's
+        # `" + "`-concatenated literals: a JS string is wrapped across lines,
+        # so a whole-sentence absence check would match nothing and pass
+        # vacuously.
+        surface = pkg_build.cli_surface()
+        authored = [
+            *surface["needs_human_message"].values(),
+            surface["outcomes_line"],
+            surface["needs_human_option"],
+            mode_table.TOOL_DESCRIPTION_LEDE,
+        ]
+        joined = _joined_literals(body)
+        for clause in authored:
+            for fragment in _prose_fragments(clause):
+                assert fragment not in joined, (
+                    f"needs-human/description prose is a literal in the JS "
+                    f"({fragment!r}); it must be read from cli-surface.json"
+                )
+
     def test_no_flag_name_is_a_js_literal(self):
         """The reserved and baked flags come from the generated table.
 
@@ -418,6 +442,32 @@ def _code_only(text: str) -> str:
         line for line in without_block.splitlines()
         if not line.strip().startswith("//")
     )
+
+
+def _joined_literals(code: str) -> str:
+    """*code* with adjacent ``"a" + "b"`` string literals joined into one.
+
+    A long JS string is spelled as fragments concatenated across lines, so an
+    absence assertion on a whole sentence would never see it. Collapsing the
+    ``" +\\n  "`` seams (and the whitespace around them) makes a wrapped literal
+    read as the one string a model receives.
+    """
+    return re.sub(r'"\s*\+\s*"', "", code)
+
+
+def _prose_fragments(clause: str, minimum: int = 24) -> list:
+    """The sentence-sized pieces of an authored clause, tokens stripped.
+
+    Split at sentence *and* clause boundaries (commas included) so a reworded
+    sentence in the JS is still caught by the clauses it kept, while the
+    ``{phase}``/``{error}`` tokens — which the JS legitimately spells when it
+    substitutes them — never become a fragment of their own.
+    """
+    stripped = re.sub(r"\{(?:phase|error)\}", " ", clause)
+    pieces = re.split(r"(?<=[.;:,])\s+", stripped)
+    return [
+        piece.strip() for piece in pieces if len(piece.strip()) >= minimum
+    ]
 
 
 # ===========================================================================
@@ -545,6 +595,28 @@ class TestBuildArtifacts:
             assert flag not in built, f"baked flag {flag!r} is spelled in prose"
         assert "multi_llm" in built, "the body must name the tool it delegates to"
 
+    def test_needs_human_rule_reaches_the_command_body(self):
+        """The exit-3 decision rule is rendered into ``dist/command.md``.
+
+        The slash-command body is one of the two instruction surfaces this
+        route loads (the other is the tool description), so the rule reaches it
+        through the ``{NEEDS_HUMAN_RULE}`` token — never as a literal in the
+        template, which would be a fourth hand-typed copy of the sentence the
+        incident turned on.
+        """
+        template = (SKILL_ROOT / pkg_build.COMMAND_TEMPLATE).read_text(
+            encoding="utf-8"
+        )
+        assert template.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1
+        assert mode_table.NEEDS_HUMAN_WORK_SENTENCE not in " ".join(
+            template.split()
+        ), "the command template spells the rule by hand; render the token"
+
+        body = " ".join(pkg_build.command_body().split())
+        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in body
+        assert mode_table.NEEDS_HUMAN_RULE in body
+        assert mode_table.NEEDS_HUMAN_WORK_SENTENCE in body
+
     def test_cli_surface_json_matches_render(self, built_package):
         """The generated surface is byte-identical to a fresh generation."""
         built = (built_package / "dist" / "cli-surface.json").read_text("utf-8")
@@ -617,6 +689,75 @@ class TestBuildArtifacts:
             f"the shim corpus moved ({checked}); this row must keep covering "
             "the unrendered SKILL.md as well as every template"
         )
+
+    def test_cli_surface_carries_the_needs_human_prose(self):
+        """The exit-3 message, its option, the outcomes line — all Python's.
+
+        Each is pinned by identity to its ``modes.py`` owner, the way the lede
+        is. The outcomes line spells the four exit codes, so its numbers are
+        held to ``cli_common.EXIT_*`` here — ``modes.py`` imports nothing by
+        design and must not grow an import for it. The message is a template:
+        Python expands neither token, so both must survive into the surface
+        for the plugin to fill.
+        """
+        surface = pkg_build.cli_surface()
+        assert surface["outcomes_line"] == mode_table.TOOL_OUTCOMES_LINE
+        assert surface["needs_human_option"] == mode_table.NEEDS_HUMAN_OPTION
+        assert surface["needs_human_message"] == mode_table.NEEDS_HUMAN_MESSAGE
+
+        numbers = {
+            name: int(code) for code, name in re.findall(
+                r"(\d+) (done|error|nothing to do|needs a human)",
+                surface["outcomes_line"],
+            )
+        }
+        assert numbers == {
+            "done": cli_common.EXIT_OK,
+            "error": cli_common.EXIT_ERROR,
+            "nothing to do": cli_common.EXIT_NOTHING_TO_DO,
+            "needs a human": cli_common.EXIT_NEEDS_HUMAN,
+        }
+
+        message = surface["needs_human_message"]
+        assert "{phase}" in message["template"] and "{error}" in message["template"]
+        for clause in ("phase_incomplete", "phase_known", "review_completed"):
+            assert "{phase}" in message[clause]
+        assert "{error}" in message["error_known"]
+        # The one sentence the incident turned on, in the message itself.
+        assert mode_table.NEEDS_HUMAN_WORK_SENTENCE in message["template"]
+        # The rule's order: stop, report, no other mode, no doing the work,
+        # options only after the user picks one.
+        template = message["template"]
+        order = [
+            template.index("Stop here"),
+            template.index("Report to the user"),
+            template.index("Do not run a different mode"),
+            template.index(mode_table.NEEDS_HUMAN_WORK_SENTENCE),
+            template.index("only after the user has picked one"),
+        ]
+        assert order == sorted(order), "the stop rule's clauses are out of order"
+
+        # What the plugin selects the clauses from, all generated.
+        states = surface["dispatcher"]["states"]
+        assert states["needs_human"] == cli_common._STATE_BY_EXIT[
+            cli_common.EXIT_NEEDS_HUMAN
+        ]
+        assert states["ok"] == cli_common._STATE_BY_EXIT[cli_common.EXIT_OK]
+        for row in surface["modes"]:
+            assert row["phase"] == mode_table.resolve(row["name"]).phase
+        gate = surface["dispatcher"]["review_gate"]
+        assert gate == mode_table.REVIEW_GATE
+        assert mode_table.resolve(gate["mode"]) is not None
+        # The flag is declared by the orchestrator's parser; the two spellings
+        # are held together here rather than by an import modes.py may not
+        # have.
+        orchestrator = (SKILL_ROOT / "code_review_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        assert re.search(
+            r"add_argument\(\s*['\"]" + re.escape(gate["flag"]) + r"['\"]",
+            orchestrator,
+        ), f"code_review_orchestrator.py no longer declares {gate['flag']}"
 
     def test_cli_surface_carries_the_generated_table(self):
         """Mode words, aliases, arity, summaries and detach bits, all derived.
@@ -1174,6 +1315,16 @@ class TestToolDefinition:
             for alias in row["aliases"]:
                 assert alias in description
         assert mode_table.DEFAULT_MODE in description
+        # The outcomes line is the lede's sibling, wired in after the mode
+        # block: `contains`, because the `startswith` pin above cannot see it,
+        # and after the default-mode line so a model meets it beside the modes.
+        assert mode_table.TOOL_OUTCOMES_LINE in description
+        assert description.index(mode_table.TOOL_OUTCOMES_LINE) > (
+            description.index(mode_table.DEFAULT_MODE)
+        )
+        assert description.index(mode_table.TOOL_OUTCOMES_LINE) < (
+            description.index("Examples:")
+        )
 
         # Four properties, each a defined empty value; `mode` a plain string and
         # not an enum, because the fallback schema has no `enum` to carry one.
@@ -1311,7 +1462,8 @@ class TestConfigHook:
         """A surface with the right ``schema_version`` and the wrong shape warns.
 
         ``loadSurface`` checks the *version* and nothing else, so a truncated or
-        hand-edited payload that still declares version 1 sails past it and only
+        hand-edited payload that still declares the current version sails past
+        it and only
         blows up later, inside ``buildDescription``/``buildArgs``, where
         ``surface.modes`` and ``surface.reserved_flags.exact`` are indexed
         unguarded. Unlike ``config``, the ``tool`` hook is a **map built eagerly
@@ -1326,7 +1478,10 @@ class TestConfigHook:
         # The right version, and then nothing else the builders need: no
         # `modes`, no `reserved_flags`, no `dispatcher`.
         (broken / "dist" / "cli-surface.json").write_text(
-            json.dumps({"schema_version": 1, "description_lede": "x"}),
+            json.dumps({
+                "schema_version": pkg_build.SURFACE_SCHEMA_VERSION,
+                "description_lede": "x",
+            }),
             encoding="utf-8",
         )
         result = run_node(
@@ -1582,6 +1737,264 @@ def uv_stub(tmp_path):
 def _dispatcher_argv(call):
     """The dispatcher's own argv, i.e. everything after the ``--`` separator."""
     return call[call.index("--") + 3:]  # skip "--", "python", "<script>"
+
+
+def _terminal(package, child, values):
+    """``terminalResult`` on a synthetic child, under node."""
+    defaults = {
+        "code": 3, "argv": ["uv", "run"], "stdout": "", "stderr": "",
+        "result": None, "resultRaw": None, "truncated": False, "banner": {},
+        "aborted": False, "timedOut": False, "spawnError": None,
+    }
+    return node_json(
+        f"""
+        emit(T.terminalResult(
+          {json.dumps({**defaults, **child})},
+          {{ anchor: "/anchor", surface, values: {json.dumps(values)} }},
+        ))
+        """,
+        package,
+    )
+
+
+def _filled(clause: str, **vars) -> str:
+    """A surface clause with its tokens filled the way the plugin fills them."""
+    for key, value in vars.items():
+        clause = clause.replace("{" + key + "}", value)
+    return clause
+
+
+class TestNeedsHumanMessage:
+    """The exit-3 ``message`` is the surface's template, filled — and true.
+
+    Four paths land in the needs-human branch and exit 3 means something
+    different on each: a foreground gate (the phase never ran), a detached
+    worker's death seen through the poll (the run died, and the poll's own
+    result line names no phase), an unparsable line (nothing ran) and a
+    completed ``review-code --fail-on-high`` (the review finished and wants a
+    decision). The phase word therefore comes from the launch, never the
+    payload, and "did not complete" is claimed only where it holds. The
+    expected fragments are built from ``cli_surface()``'s clauses rather than
+    typed, so a rewording moves these rows with the constant and only a
+    *dropped* clause turns one red.
+    """
+
+    RESULT = {
+        "mode": "review-plan", "phase": "review-plan", "state": "needs-human",
+        "exit": 3, "artifacts": [], "next": None,
+    }
+    VALUES = {
+        "word": "review-plan", "plan": "p.md", "question": "", "extraFlags": [],
+    }
+
+    @staticmethod
+    def _text():
+        return pkg_build.cli_surface()["needs_human_message"]
+
+    @staticmethod
+    def _rule_tail(text):
+        """Everything after the two tokens: the stop/report/never rule."""
+        return text["template"].split("{error}", 1)[1].strip()
+
+    def test_foreground_gate_names_the_phase_and_the_whole_rule(
+        self, built_package
+    ):
+        text = self._text()
+        stdout = "ERROR: the gate refused\n"
+        stderr = "the executor could not resolve the runner\n"
+        result = _terminal(
+            built_package,
+            {"stdout": stdout, "stderr": stderr, "result": self.RESULT},
+            self.VALUES,
+        )
+        message = result["message"]
+        assert result["state"] == "needs-human" and result["ok"] is False
+        # Pinned clause by clause, from the surface: the named phase did not
+        # complete; stop; report to the user; never do the phase's work by
+        # hand; an options entry goes back only after the user picks one.
+        assert message.startswith("Stop here")
+        assert _filled(text["phase_incomplete"], phase="review-plan") in message
+        assert text["error_unknown"] in message
+        assert self._rule_tail(text) in message
+        assert mode_table.NEEDS_HUMAN_WORK_SENTENCE in message
+        assert "only after the user has picked one" in message
+        # No clause claimed that does not hold.
+        assert text["phase_unknown"] not in message
+        assert text["phase_unnamed"] not in message
+        assert _filled(text["review_completed"], phase="review-plan") not in message
+
+    def test_a_dead_worker_seen_through_the_poll_names_the_launched_mode(
+        self, built_package
+    ):
+        """``result.phase`` is null on this path: the poll's result line is
+        ``status``'s own. The message names the launched phase and never
+        attributes the poll's."""
+        text = self._text()
+        poll_line = {
+            "mode": "status", "phase": None, "state": "needs-human", "exit": 3,
+            "artifacts": [], "next": None,
+        }
+        result = _terminal(
+            built_package,
+            {"stdout": "run RID-1 failed\n", "result": poll_line},
+            {**self.VALUES, "extraFlags": ["--run-id", "RID-1"]},
+        )
+        message = result["message"]
+        assert _filled(text["phase_incomplete"], phase="review-plan") in message
+        assert "`status`" not in message
+        assert text["phase_unknown"] not in message
+        assert text["phase_unnamed"] not in message
+
+    def test_a_payload_with_no_phase_degrades_to_the_generic_rule(
+        self, built_package
+    ):
+        """``init`` owns no phase and its payload names none: the message
+        keeps the stop rule and names nothing false."""
+        text = self._text()
+        payload = {
+            "mode": "init", "phase": None, "state": "needs-human", "exit": 3,
+            "artifacts": [], "next": None,
+        }
+        result = _terminal(
+            built_package,
+            {"stdout": "Choose a provider set:\n", "result": payload},
+            {"word": "init", "plan": "", "question": "", "extraFlags": []},
+        )
+        message = result["message"]
+        assert text["phase_unnamed"] in message
+        assert self._rule_tail(text) in message
+        for phase in mode_table.phase_names():
+            assert f"`{phase}`" not in message, f"{phase} named falsely"
+        assert "did not complete" not in message
+
+    def test_a_completed_review_held_on_high_asks_for_a_decision(
+        self, built_package
+    ):
+        """``review-code --fail-on-high`` is exit 3 *after* completing: the
+        message asks for a decision and never claims an unfinished phase."""
+        text = self._text()
+        gate = pkg_build.cli_surface()["dispatcher"]["review_gate"]
+        payload = {
+            "mode": gate["mode"], "phase": mode_table.phase_for(gate["mode"]),
+            "state": "needs-human", "exit": 3, "artifacts": ["review.md"],
+            "next": None,
+        }
+        result = _terminal(
+            built_package,
+            {"stdout": "[HIGH_PRIORITY_ISSUES] 2\n", "result": payload},
+            {"word": gate["mode"], "plan": "p.md", "question": "",
+             "extraFlags": [gate["flag"]]},
+        )
+        message = result["message"]
+        expected = _filled(text["review_completed"], phase=payload["phase"])
+        assert expected in message
+        assert "did not complete" not in message
+        assert self._rule_tail(text) in message
+        # Through the alias too: the launch word is what is resolved.
+        alias = next(
+            word for word, target in mode_table.ALIASES.items()
+            if target == gate["mode"]
+        )
+        via_alias = _terminal(
+            built_package,
+            {"stdout": "", "result": payload},
+            {"word": alias, "plan": "p.md", "question": "",
+             "extraFlags": [gate["flag"]]},
+        )
+        assert expected in via_alias["message"]
+        # Without the flag the same mode is an ordinary unfinished phase.
+        plain = _terminal(
+            built_package,
+            {"stdout": "", "result": payload},
+            {"word": gate["mode"], "plan": "p.md", "question": "",
+             "extraFlags": []},
+        )
+        assert _filled(text["phase_incomplete"], phase=payload["phase"]) in (
+            plain["message"]
+        )
+
+    def test_an_unparsable_result_line_names_no_phase_and_quotes_redacted_text(
+        self, built_package
+    ):
+        """No result parsed, so nothing names the phase; the last printed line
+        is quoted from the *redacted* output, never from the raw stream."""
+        text = self._text()
+        command = (
+            "uv run --frozen --no-dev --project /s -- python /s/multi_llm.py "
+            "init"
+        )
+        raw_line = "MULTI_LLM_RESULT: {not json " + command
+        result = _terminal(
+            built_package,
+            {
+                "stdout": f"Choose:\n  1) {command}\n{raw_line}\n",
+                "result": None,
+                "resultRaw": raw_line,
+            },
+            self.VALUES,
+        )
+        message = result["message"]
+        assert text["phase_unknown"] in message
+        for phase in mode_table.phase_names():
+            assert f"`{phase}`" not in message, f"{phase} named falsely"
+        assert "did not complete" not in message
+        assert text["error_unknown"] not in message
+        # The quoted line is the redacted one: the pointer, not the command.
+        assert "uv run" not in message
+        assert "multi_llm.py" not in message
+        redacted_last = result["output"].rstrip("\n").split("\n")[-1]
+        assert redacted_last in message
+        assert "`log`" in message
+        assert self._rule_tail(text) in message
+
+    def test_no_result_line_and_nothing_printed_points_at_the_log(
+        self, built_package
+    ):
+        """The run left no diagnosis, which is itself what to report."""
+        text = self._text()
+        result = _terminal(
+            built_package,
+            {"stdout": "", "stderr": "", "result": None, "resultRaw": None},
+            self.VALUES,
+        )
+        message = result["message"]
+        assert text["phase_unknown"] in message
+        assert text["error_unknown"] in message
+        assert text["error_known"].split("{error}")[0].strip() not in message
+        for phase in mode_table.phase_names():
+            assert f"`{phase}`" not in message, f"{phase} named falsely"
+        assert "did not complete" not in message
+        assert "`log`" in message and "`argv`" in message
+        assert "uv run" not in message
+        assert self._rule_tail(text) in message
+
+    def test_stderr_stands_in_when_output_is_empty(self, built_package):
+        """With no result and no stdout, the last stderr line is quoted."""
+        text = self._text()
+        result = _terminal(
+            built_package,
+            {"stdout": "", "stderr": "Killed\nworker died: SIGKILL\n",
+             "result": None},
+            self.VALUES,
+        )
+        assert _filled(
+            text["error_known"], error='"worker died: SIGKILL"'
+        ) in result["message"]
+
+    def test_the_message_is_the_surface_and_nothing_else(self, built_package):
+        """Every sentence in the assembled message traces to a surface clause."""
+        text = self._text()
+        result = _terminal(
+            built_package,
+            {"stdout": "x\n", "result": self.RESULT},
+            self.VALUES,
+        )
+        expected = _filled(
+            text["template"],
+            phase=_filled(text["phase_incomplete"], phase="review-plan"),
+            error=text["error_unknown"],
+        )
+        assert result["message"] == expected
 
 
 class TestExecuteStateMachine:
@@ -2568,10 +2981,15 @@ class TestExecuteStateMachine:
             "the dispatcher's own envelope line came back as rendered output"
         )
         # Nothing is dropped by the redaction: the command it replaced is handed
-        # back in the only form this plugin ever hands one back.
+        # back in the only form this plugin ever hands one back — and the
+        # final element is the one option that is not a retry (D2 step 5):
+        # one key, `human`, no `tool`, no `args`, read off the surface.
+        options = result["options"]
         assert [
-            (call["tool"], call["args"]["mode"]) for call in result["options"]
+            (call["tool"], call["args"]["mode"])
+            for call in options if "tool" in call
         ] == [("multi_llm", "init")]
+        assert options[-1] == {"human": mode_table.NEEDS_HUMAN_OPTION}
 
     def test_nested_exec_reasons_are_tool_errors(self, built_package, uv_stub):
         """All four executor refusals become named, structured tool errors.
@@ -2895,6 +3313,70 @@ class TestStaging:
             assert (root / relative).is_file(), f"missing {relative}"
         for tree in payload.REQUIRED_TREES:
             assert any((root / tree).rglob("*")), f"{tree} is empty"
+
+    def test_every_mode_table_target_module_is_staged(self, built_package):
+        """Every ``modes.py`` ``target_module`` is present in the staged payload.
+
+        The regression this guards: ``modes.py`` can name a ``target_module``
+        the static :data:`payload.REQUIRED_INVENTORY` never anticipated, and
+        ``payload.stage``'s allowlist takes its candidate file list from ``git
+        ls-files`` alone — an untracked implementation file is invisible to
+        both, so a build can succeed while shipping a dispatch table that
+        points nowhere. ``utils/doctor.py`` shipped exactly that gap once:
+        ``modes.py`` already routed ``doctor`` to ``utils.doctor`` while
+        ``utils/doctor.py`` itself was untracked. ``pkg_build.target_module_paths``
+        derives the same set the dispatcher resolves lazily at runtime, and
+        ``build()`` now feeds it to ``payload.stage`` as ``required_extra`` — this
+        asserts the set it derives is actually satisfied by what shipped.
+        """
+        root = built_package / "skills" / "multi-llm"
+        derived = pkg_build.target_module_paths()
+        assert derived, "modes.py declared no target_module at all"
+        for relative in derived:
+            assert (root / relative).is_file(), (
+                f"modes.py dispatches to {relative}, but it is missing from "
+                "the staged payload"
+            )
+
+    def test_required_extra_catches_an_untracked_target_module(self, tmp_path):
+        """``required_extra`` closes exactly the gap ``doctor.py`` fell through.
+
+        A target module that exists on disk but was never ``git add``ed is
+        invisible to ``git ls-files``, so it never becomes a staging candidate
+        — the exact shape of the real regression, reproduced independently of
+        the real ``modes.py`` with a minimal synthetic repo staged under
+        ``--allow-dirty`` (the posture ``MULTI_LLM_ALLOW_DIRTY=1`` builds run
+        under, which is what let the real gap ship). ``required`` and
+        ``required_trees`` are passed empty so the raise can only be coming
+        from ``required_extra`` itself, isolating the new parameter from the
+        static defaults it is additive to.
+        """
+        repo = tmp_path / "repo"
+        (repo / "skills" / "multi-llm" / "utils").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "skills" / "multi-llm" / "modes.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "c"], check=True,
+        )
+        # On disk, never `git add`ed — the doctor.py shape.
+        (repo / "skills" / "multi-llm" / "utils" / "doctor.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )
+
+        with pytest.raises(payload.PayloadError, match="utils/doctor.py"):
+            payload.stage(
+                repo,
+                tmp_path / "payload",
+                allow_dirty=True,
+                allowlist=("skills/multi-llm/**",),
+                required=(),
+                required_trees=(),
+                required_extra=("utils/doctor.py",),
+            )
 
     def test_the_staging_sweep_refuses_a_planted_secret(self, tmp_path):
         """A sweep nobody proved catches anything is not a sweep."""
@@ -4097,3 +4579,397 @@ class TestPublishGate:
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, "the publish stamp is not gitignored"
+
+
+# ===========================================================================
+# D2 — the exit-3 options: one retry with the caller's flags, then the human
+# ===========================================================================
+
+class TestNeedsHumanOptions:
+    """Captured stdout through the real Python-to-JavaScript conversion.
+
+    The fixture text is what D2's Python sites print — built with
+    ``cli_common.retry_command`` so the command is a real dispatcher command —
+    and the assertions are on the tool-call side: one ``--reaggregate`` tool
+    call carrying the caller's flags, the human entry last, no ``--force``
+    tool call, and nothing of the sort on exit 1.
+    """
+
+    RESULT = {
+        "mode": "review-plan", "phase": "review-plan", "state": "needs-human",
+        "exit": 3, "artifacts": [], "next": None,
+    }
+    VALUES = {
+        "word": "review-plan", "plan": "/p.md", "question": "", "extraFlags": [],
+    }
+
+    @staticmethod
+    def _captured():
+        retry = cli_common.retry_command(
+            "review-plan", "/p.md", "--reaggregate",
+            flags=["--host", "opencode", "--quick"],
+        )
+        return (
+            "ERROR: runner refused\n"
+            "Refused before dispatch: reason_code=runner_invalid_model\n"
+            "Options (nothing was dispatched; every result already on disk is kept):\n"
+            "  1. Repair first: the runner's model id is not one its CLI accepts.\n"
+            f"  2. Then re-invoke with `{retry}` — it re-dispatches exactly this "
+            "batch; --force is not needed and would re-run the reviewer panel.\n"
+            "  3. Otherwise report this to the user.\n"
+        )
+
+    def test_exit_three_offers_one_reaggregate_call_and_the_human_entry_last(
+        self, built_package
+    ):
+        result = node_json(
+            f"""
+            const child = {json.dumps({
+                "code": 3, "argv": ["uv", "run"], "stdout": "",
+                "stderr": self._captured(), "result": self.RESULT,
+                "resultRaw": None, "truncated": False, "banner": {},
+                "aborted": False, "timedOut": False, "spawnError": None,
+            })}
+            const out = T.terminalResult(
+              child, {{ anchor: "/anchor", surface, values: {json.dumps(self.VALUES)} }},
+            )
+            emit({{
+              options: out.options,
+              mechanical: out.options.map((o) => T.isMechanical(o, surface)),
+            }})
+            """,
+            built_package,
+        )
+        options = result["options"]
+        calls = [o for o in options if "tool" in o]
+        assert len(calls) == 1, options
+        assert calls[0]["args"]["mode"] == "review-plan"
+        assert calls[0]["args"]["plan"] == "/p.md"
+        # The caller's selector rides along; the baked --host is the tool's own
+        # and is stripped by the parser, as every reserved flag is.
+        assert calls[0]["args"]["extra_flags"] == ["--quick", "--reaggregate"]
+        assert not any("--force" in o.get("args", {}).get("extra_flags", [])
+                       for o in calls)
+        assert options[-1] == {"human": mode_table.NEEDS_HUMAN_OPTION}
+        assert set(options[-1]) == {"human"}
+        # The retry is the surface's mechanical continuation; the human entry
+        # never is, so the continuation loop cannot auto-follow it.
+        assert result["mechanical"][-1] is False
+        assert result["mechanical"][0] is True
+
+    def test_exit_one_carries_no_human_entry(self, built_package):
+        for stderr, expect_options in ((self._captured(), True), ("", False)):
+            result = node_json(
+                f"""
+                const child = {json.dumps({
+                    "code": 1, "argv": ["uv", "run"], "stdout": "",
+                    "stderr": stderr, "result": None, "resultRaw": None,
+                    "truncated": False, "banner": {}, "aborted": False,
+                    "timedOut": False, "spawnError": None,
+                })}
+                emit(T.terminalResult(
+                  child, {{ anchor: "/anchor", surface, values: {json.dumps(self.VALUES)} }},
+                ))
+                """,
+                built_package,
+            )
+            assert result["state"] == "error"
+            if expect_options:
+                assert all("tool" in o for o in result["options"])
+                assert not any("human" in o and "tool" not in o for o in result["options"])
+            else:
+                assert "options" not in result
+
+    def test_status_stdout_yields_no_option_missing_the_flags(
+        self, built_package, tmp_path, capsys
+    ):
+        """The JS half of the printed-text carrier: ``toolCallsFor`` over a real
+        ``status`` stdout (log tail inlined) has no ``--reaggregate`` option
+        without ``--quick``."""
+        from utils import detach, run_status, status_file
+
+        plan = tmp_path / "p.md"
+        plan.write_text("# p\n", encoding="utf-8")
+        phase = tmp_path / "p" / "review-plan"
+        phase.mkdir(parents=True)
+        line = cli_common.retry_command(
+            "review-plan", str(plan), "--reaggregate", flags=["--quick"]
+        )
+        Path(detach.log_path(str(phase))).write_text(
+            f"Re-invoke to retry only the failures:\n  {line}\n", encoding="utf-8"
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-js-000001", "state": "failed", "exit_code": 3,
+            "error": "BatchFailed", "log_path": detach.log_path(str(phase)),
+            "detached": True, "mode": "review-plan", "replay_flags": ["--quick"],
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 3
+        stdout = capsys.readouterr().out
+        result = node_json(
+            f"""
+            const child = {json.dumps({
+                "code": 3, "argv": ["uv", "run"], "stdout": stdout,
+                "stderr": "", "result": None, "resultRaw": None,
+                "truncated": False, "banner": {}, "aborted": False,
+                "timedOut": False, "spawnError": None,
+            })}
+            emit(T.terminalResult(
+              child, {{ anchor: "/anchor", surface, values: {json.dumps(self.VALUES)} }},
+            ).options)
+            """,
+            built_package,
+        )
+        calls = [o for o in result if "tool" in o]
+        reaggregates = [o for o in calls if "--reaggregate" in o["args"]["extra_flags"]]
+        assert reaggregates, result
+        assert all("--quick" in o["args"]["extra_flags"] for o in reaggregates)
+        assert result[-1] == {"human": mode_table.NEEDS_HUMAN_OPTION}
+
+
+# ===========================================================================
+# The session model
+# ===========================================================================
+
+#: The shape `client.session.messages` really answers with on SDK 1.18.x: one
+#: `{info, parts}` entry per message, `info.role` telling them apart, and the
+#: assistant entries carrying the `providerID`/`modelID` they were produced with.
+def _messages(*rows):
+    return {"data": [{"info": dict(row), "parts": []} for row in rows]}
+
+
+_ASSISTANT = {"role": "assistant", "providerID": "opencode",
+              "modelID": "nemotron-3-ultra-free"}
+_OLDER_ASSISTANT = {"role": "assistant", "providerID": "opencode",
+                    "modelID": "big-pickle"}
+_USER = {"role": "user"}
+
+
+def _client(js_body: str) -> str:
+    """A stub `client` whose `session.messages` runs *js_body*."""
+    return f"{{ session: {{ messages: async ({{ path }}) => {{ {js_body} }} }} }}"
+
+
+class TestTheSessionModelIsObservedAndHandedToPython:
+    """The plugin observes; the ladder decides (D3o).
+
+    THE DEFECT. A `--review-plan --quick` run launched from a TUI session whose
+    model was `opencode/nemotron-3-ultra-free` validated all sixteen of its
+    batches on `opencode/big-pickle` — the host's credential-free *floor*, which
+    is what `resolve_subagent_runner` falls to when no layer has an opinion. The
+    `ToolContext` this plugin's `execute` receives carries `sessionID`,
+    `messageID`, `agent`, `directory`, `worktree` and `abort`, and no model at
+    all; the *factory* input carries the SDK `client`, and the session's newest
+    assistant message records what produced it. So the plugin reads it there and
+    exports it, and Python's ladder decides what it means.
+    """
+
+    def test_the_surface_carries_the_env_name_from_its_python_owner(self):
+        """The name is generated, like every flag and mode word (rule 2)."""
+        surface = pkg_build.cli_surface()
+        assert (
+            surface["dispatcher"]["session_model_env"]
+            == provider_registry.HOST_SESSION_MODEL_ENV
+        )
+
+    def test_the_env_name_is_not_a_js_literal(self):
+        """A second spelling is a second owner, which is the rule this breaks."""
+        body = _code_only(SRC_MJS.read_text(encoding="utf-8"))
+        assert provider_registry.HOST_SESSION_MODEL_ENV not in body
+
+    def test_the_newest_assistant_message_supplies_the_model(self, built_package):
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client(f"return {json.dumps(_messages(_USER, _OLDER_ASSISTANT, _USER, _ASSISTANT))}")},
+              {{sessionID: "ses_1"}},
+            ))
+            """,
+            built_package,
+        )
+        assert observed == "opencode/nemotron-3-ultra-free"
+
+    def test_an_array_without_the_data_wrapper_is_read_too(self, built_package):
+        """One shape check, not a version sniff."""
+        rows = _messages(_ASSISTANT)["data"]
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client(f"return {json.dumps(rows)}")}, {{sessionID: "ses_1"}},
+            ))
+            """,
+            built_package,
+        )
+        assert observed == "opencode/nemotron-3-ultra-free"
+
+    @pytest.mark.parametrize(
+        "rows, label",
+        [
+            ([_USER], "no assistant message yet"),
+            ([{"role": "assistant", "providerID": "opencode"}], "no modelID"),
+            ([{"role": "assistant", "modelID": "x"}], "no providerID"),
+            ([], "an empty session"),
+        ],
+    )
+    def test_a_session_that_cannot_answer_yields_null(
+        self, built_package, rows, label
+    ):
+        """Null means "the host did not say", which Python reads as no rung."""
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client(f"return {json.dumps({'data': [{'info': r, 'parts': []} for r in rows]})}")},
+              {{sessionID: "ses_1"}},
+            ) ?? "NULL")
+            """,
+            built_package,
+        )
+        assert observed == "NULL", label
+
+    @pytest.mark.parametrize(
+        "client_expr, ctx, label",
+        [
+            ("undefined", '{sessionID: "ses_1"}', "no client at all (old host)"),
+            ("{}", '{sessionID: "ses_1"}', "a client with no session route"),
+            ('{session: {messages: async () => ({data: []})}}', "{}", "no sessionID"),
+        ],
+    )
+    def test_a_missing_channel_is_not_an_error(
+        self, built_package, client_expr, ctx, label
+    ):
+        """Rule 4: never throw. A degraded lookup is the pre-existing behaviour."""
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel({client_expr}, {ctx}) ?? "NULL")
+            """,
+            built_package,
+        )
+        assert observed == "NULL", label
+
+    def test_a_rejecting_client_is_swallowed_and_warned(self, built_package):
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const T = MultiLlmPlugin.__testing
+            const v = await T.resolveSessionModel(
+              {_client('throw new Error("route is gone")')}, {{sessionID: "ses_1"}},
+            )
+            console.log("@@" + JSON.stringify(v ?? "NULL") + "@@")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1)) == "NULL"
+        assert "[multi-llm]" in result.stderr
+
+    def test_a_hanging_client_costs_the_budget_and_no_more(self, built_package):
+        """The lookup is a nicety; three rungs sit under it.
+
+        A `Promise.race` against an unref'd timer rather than an `AbortSignal`,
+        because the budget has to hold against a client that ignores one — which
+        is exactly what this stub is.
+        """
+        started = time.monotonic()
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client("await new Promise(() => {})")}, {{sessionID: "ses_1"}}, 250,
+            ) ?? "NULL")
+            """,
+            built_package,
+        )
+        assert observed == "NULL"
+        # Generous: this bounds a runaway wait, not node's startup.
+        assert time.monotonic() - started < 60
+
+    def test_the_factory_still_works_with_no_input_at_all(self, built_package):
+        """`async ({ client } = {})`: an older loader passes nothing (rule 4)."""
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const p = await MultiLlmPlugin()
+            console.log("@@" + JSON.stringify(Object.keys(p.tool ?? {{}})) + "@@")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        tools = json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1))
+        assert tools == ["multi_llm"]
+
+    def test_the_factory_hands_the_client_down_to_the_tool(
+        self, built_package, tmp_path
+    ):
+        """End to end: the model reaches the child's environment and the result.
+
+        The whole point of reading it at all. The dispatcher's own environment is
+        what the detached worker inherits (`utils/detach.py`'s `child_env` copies
+        `os.environ`), so setting it on the launcher sets it for every poll and
+        for the fan-out itself.
+        """
+        env_log = tmp_path / "child-env.json"
+        stub = tmp_path / "uv-env-stub"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os\n"
+            f"open({json.dumps(str(env_log))}, 'w', encoding='utf-8').write(\n"
+            "    json.dumps({k: v for k, v in os.environ.items()\n"
+            "                if k.startswith('MULTI_LLM_')}))\n"
+            'print(\'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}\')\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        outcome = node_json(
+            f"""
+            const plugin = await MultiLlmPlugin({{
+              client: {_client(f"return {json.dumps(_messages(_ASSISTANT))}")},
+            }})
+            const r = await plugin.tool.multi_llm.execute(
+              {{mode: "init", plan: "", question: "", extra_flags: []}},
+              {{directory: {json.dumps(str(tmp_path))}, sessionID: "ses_1"}},
+            )
+            emit(JSON.parse(r))
+            """,
+            built_package,
+            env={"MULTI_LLM_UV": str(stub)},
+        )
+        assert outcome["session_model"] == "opencode/nemotron-3-ultra-free"
+        child_env = json.loads(env_log.read_text(encoding="utf-8"))
+        assert child_env[provider_registry.HOST_SESSION_MODEL_ENV] == (
+            "opencode/nemotron-3-ultra-free"
+        )
+
+    def test_a_session_with_no_model_leaves_the_variable_unset(
+        self, built_package, tmp_path
+    ):
+        """Unset, never empty: an empty value is a rung the ladder must ignore.
+
+        Python treats blank as "the host did not say", but only because this side
+        never writes one — the two halves agree by construction rather than by a
+        special case on each side.
+        """
+        env_log = tmp_path / "child-env-2.json"
+        stub = tmp_path / "uv-env-stub-2"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os\n"
+            f"open({json.dumps(str(env_log))}, 'w', encoding='utf-8').write(\n"
+            "    json.dumps({k: v for k, v in os.environ.items()\n"
+            "                if k.startswith('MULTI_LLM_')}))\n"
+            'print(\'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}\')\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        outcome = node_json(
+            f"""
+            const plugin = await MultiLlmPlugin({{
+              client: {_client(f"return {json.dumps(_messages(_USER))}")},
+            }})
+            const r = await plugin.tool.multi_llm.execute(
+              {{mode: "init", plan: "", question: "", extra_flags: []}},
+              {{directory: {json.dumps(str(tmp_path))}, sessionID: "ses_1"}},
+            )
+            emit(JSON.parse(r))
+            """,
+            built_package,
+            env={"MULTI_LLM_UV": str(stub)},
+        )
+        assert "session_model" not in outcome
+        child_env = json.loads(env_log.read_text(encoding="utf-8"))
+        assert provider_registry.HOST_SESSION_MODEL_ENV not in child_env

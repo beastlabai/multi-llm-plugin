@@ -57,9 +57,19 @@ class MuseProvider(LLMProvider):
     approval policy is ``on-request``, and a tool call the policy judges risky
     (verified with ``rm -rf``) blocks on a prompt that headless exec can never
     answer — the run writes no further output and burns the entire timeout.
-    The shell sandbox is deliberately left ON (muse's default): it already
-    permits writes under the workspace root, which is where every review
-    output path lives.
+
+    ``--disable-sandbox`` is its sibling (D6, 2026-09-11). muse's shell
+    sandbox is bubblewrap with ``--unshare-net``, and on a stock Ubuntu 24.04
+    (``kernel.apparmor_restrict_unprivileged_userns=1``) bwrap cannot start at
+    all — every sandboxed write dies on ``bwrap: loopback: Failed RTM_NEWADDR:
+    Operation not permitted``, the failure that took codex's reviews, and muse
+    ships no Linux self-test to say so beforehand (``muse sandbox`` is
+    Windows-only). The earlier argument for leaving the sandbox on — "it
+    already permits writes under the workspace root" — is true only where
+    bubblewrap works. The flag is to muse's sandbox what
+    ``--skip-git-repo-check`` is to codex's trust gate: an explicit headless
+    choice over an interactive default. ``--yolo`` is NOT that flag: it also
+    grants workspace trust, which the next paragraph leaves to the user.
 
     Workspace trust is also left at muse's default. An untrusted workspace
     only skips project-local instructions, skills, and hooks — file reads and
@@ -205,6 +215,16 @@ class MuseProvider(LLMProvider):
     #: spells it. ``tests/container/cli-versions.lock`` pins the same build.
     verified_version = "0.1.0-R708.1"
 
+    #: D6 — muse's shell sandbox is bubblewrap with ``--unshare-net``, and
+    #: `build_command` turns it off on every dispatch (``--disable-sandbox``,
+    #: see the class docstring). `doctor` therefore runs the bwrap self-test
+    #: for this adapter but reports a failure as *bypassed*, never as a check
+    #: this adapter fails; `sandbox_probe_command` stays the base ``None``
+    #: because there is no sandbox left in the dispatch path to probe, and
+    #: ``muse sandbox`` is Windows-only in any case.
+    sandbox_mechanism = "bubblewrap"
+    sandbox_disabled_by = "--disable-sandbox"
+
     @property
     def name(self) -> str:
         return "muse"
@@ -224,11 +244,11 @@ class MuseProvider(LLMProvider):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
-        # muse exec --json --disable-approval --model <model>
+        # muse exec --json --disable-approval --disable-sandbox --model <model>
         #     [--reasoning-effort <effort>] "<prompt>"
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         cmd = [
-            "muse", "exec", "--json", "--disable-approval",
+            "muse", "exec", "--json", "--disable-approval", "--disable-sandbox",
             "--model", base_model,
         ]
         if effort is not None:

@@ -2282,3 +2282,181 @@ class TestNoUnanchoredAccessorCall:
             if "anchor" not in inspect.signature(func).parameters:
                 missing.append(name)
         assert not missing, f"declared anchored but takes no anchor=: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# The session rung
+# ---------------------------------------------------------------------------
+
+SESSION_MODEL = "opencode/nemotron-3-ultra-free"
+SESSION_SPEC = f"opencode:{SESSION_MODEL}"
+#: What `hosts/capabilities.yaml` declares for the two hosts these tests use.
+OPENCODE_FLOOR = "opencode:opencode/big-pickle"
+CODEX_FLOOR = "codex:gpt-5.2-codex"
+
+
+def _detected(monkeypatch, available=True):
+    """Pin the opencode/codex adapters' `shutil.which` probe to one verdict.
+
+    The rung is gated on the runner's CLI being *detected*, and whether this
+    machine happens to have `opencode` on PATH is not what any of these rows is
+    about.
+    """
+    from utils.providers import codex as cx
+    from utils.providers import opencode as oc
+
+    monkeypatch.setattr(oc.OpenCodeProvider, "is_available", lambda self: available)
+    monkeypatch.setattr(cx.CodexProvider, "is_available", lambda self: available)
+
+
+class TestTheSessionRung:
+    """The model the host session is running on is a rung of its own (D3o).
+
+    THE DEFECT. A `--review-plan --quick` launched from an OpenCode session whose
+    picker said "Nemotron 3 Ultra Free · OpenCode Zen" validated all sixteen of
+    its batches on `opencode/big-pickle`. Nothing was broken: no config layer had
+    an opinion, so the ladder fell to `hosts/capabilities.yaml`'s
+    `default_subagent_runner` — which is a *credential-free floor*, chosen so a
+    zero-config install dispatches at all, and not a model anybody selected. The
+    session's own model now sits between the explicit layers and that floor.
+    """
+
+    def test_the_session_model_answers_when_the_host_declares_a_provider(
+        self, monkeypatch
+    ):
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            SESSION_SPEC, registry.SESSION_LAYER,
+        )
+
+    def test_an_unset_variable_leaves_the_ladder_exactly_as_it_was(self, monkeypatch):
+        _detected(monkeypatch)
+        monkeypatch.delenv(registry.HOST_SESSION_MODEL_ENV, raising=False)
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            OPENCODE_FLOOR, registry.HOST_DEFAULT_LAYER,
+        )
+
+    @pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+    def test_a_blank_variable_is_the_same_as_unset(self, monkeypatch, value):
+        """"The host did not say" and "the host said nothing" are one case."""
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, value)
+        assert registry.session_runner(host_id="opencode") is None
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            OPENCODE_FLOOR, registry.HOST_DEFAULT_LAYER,
+        )
+
+    def test_a_host_that_declares_no_session_provider_has_no_rung(self, monkeypatch):
+        """`session_runner_provider: null` means exactly that, variable or not.
+
+        Codex's own `session_runner_provider` is `null` — its CLI takes a
+        `--model`, but nothing on that host's surface hands the dispatcher the
+        session's selected model, so there is no value to trust.
+        """
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.session_runner(host_id="codex") is None
+        assert registry.resolve_subagent_runner("full", host_id="codex") == (
+            CODEX_FLOOR, registry.HOST_DEFAULT_LAYER,
+        )
+
+    def test_an_undetected_host_cli_falls_through_instead_of_refusing(
+        self, monkeypatch
+    ):
+        """Same rule as `host_default_runner`: an absent CLI is not a refusal."""
+        _detected(monkeypatch, available=False)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.session_runner(host_id="opencode") is None
+
+    def test_an_unknown_host_id_is_no_rung_rather_than_an_exception(self, monkeypatch):
+        """Capability data never fails a dispatch; it only declines to answer."""
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.session_runner(host_id="no-such-host") is None
+
+    def test_skip_session_drops_to_the_next_rung(self, monkeypatch):
+        """The parameter the preflight fallback re-resolves with."""
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.resolve_subagent_runner(
+            "full", host_id="opencode", skip_session=True
+        ) == (OPENCODE_FLOOR, registry.HOST_DEFAULT_LAYER)
+        assert registry.get_subagent_runner(
+            "full", host_id="opencode", skip_session=True
+        ) == OPENCODE_FLOOR
+
+    def test_the_session_layer_is_not_an_operator_opinion(self):
+        """It is implicit: below a config layer, above a shipped floor."""
+        assert registry.SESSION_LAYER not in registry.EXPLICIT_DRIVER_LAYERS
+
+    def test_the_cheap_tier_takes_the_session_model_too(self, monkeypatch):
+        """One model was selected, not a tier map.
+
+        `subagent_tiers` is the native-host tier split and opencode's is `null`;
+        splitting the *session's* model by tier would mean inventing a cheap
+        sibling for an id the operator picked by hand.
+        """
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        assert registry.resolve_subagent_runner("cheap", host_id="opencode") == (
+            SESSION_SPEC, registry.SESSION_LAYER,
+        )
+
+
+@pytest.mark.config_override
+class TestAnExplicitLayerStillOutranksTheSession:
+    """A value someone wrote into a file beats a value they merely selected."""
+
+    @staticmethod
+    def _project(monkeypatch, tmp_path, body):
+        path = tmp_path / "project-providers.yaml"
+        path.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: path)
+        registry._config = None
+        registry._config_key = None
+        return path
+
+    def test_the_project_layer_wins(self, monkeypatch, tmp_path):
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        self._project(
+            monkeypatch, tmp_path,
+            'driver:\n  subagent_runner: "claude-code:sonnet"\n',
+        )
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            "claude-code:sonnet", "project",
+        )
+
+    def test_the_env_layer_wins(self, monkeypatch, tmp_path):
+        _detected(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        override = tmp_path / "env-providers.yaml"
+        override.write_text(
+            'driver:\n  subagent_runner: "claude-code:sonnet"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv(registry.ENV_CONFIG_VAR, str(override))
+        registry._config = None
+        registry._config_key = None
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            "claude-code:sonnet", "env",
+        )
+
+    def test_an_explicit_cheap_override_wins_for_the_cheap_tier_only(
+        self, monkeypatch, tmp_path
+    ):
+        """The tier keys keep their own precedence above the session rung."""
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
+        self._project(
+            monkeypatch, tmp_path,
+            'driver:\n  subagent_runner_cheap: "claude-code:haiku"\n',
+        )
+        assert registry.resolve_subagent_runner("cheap", host_id="opencode") == (
+            "claude-code:haiku", "project",
+        )
+        # `full` named no key, so the session still answers it.
+        assert registry.resolve_subagent_runner("full", host_id="opencode") == (
+            SESSION_SPEC, registry.SESSION_LAYER,
+        )

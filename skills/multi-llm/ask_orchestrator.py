@@ -47,9 +47,9 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils import cli_common
 from utils.cli_common import (
     build_parent_parser,
-    dispatcher_command,
     dispatcher_prefix,
 )
 from utils.output_handler import get_phase_dir, slugify_question
@@ -1057,7 +1057,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
         completed=completed,
         failed=list(failed_models),
         phase_dir=question_dir,
-        retry_command=dispatcher_command("ask", plan_path, question, "--force"),
+        # D2 row 6: the live question positionally (never a recorded
+        # --question), the caller's flags, then the verb.
+        retry_command=cli_common.retry_command(
+            "ask", plan_path, question, "--force",
+            flags=cli_common.current_replay_flags(mode="ask"),
+        ),
         unattended=unattended,
     )
 

@@ -320,6 +320,18 @@ changes:
       deliberately not mirrored here, since the reaggregation fix needs the
       recorded specs and the honest "the fan-out finished" state, and nothing
       reads a `grouping_complete` from this phase.
+  - pointer: /phases/review-plan/status_steps/1
+    rationale: >
+      The phase machine now reaches the terminal word `utils/status_file.py`
+      always documented (`… → validation_pending → complete`) and nothing ever
+      wrote: `run_review_orchestration`, `reaggregate_from_existing_files` and
+      the code-review orchestrator write `state: complete` right after
+      `mark_phase_completed`, so `status` shows a finished run as finished
+      instead of "grouping, models 3/3". The bundle records the checkpoint's
+      final `state`, so the last step reads `complete` where the baseline's
+      last checkpoint the fan-out wrote was `grouping_complete`. No reader
+      gates resume or reaggregate on the word; `state.json`'s
+      `phases_completed` stays the completion record this guard compares.
 
   # ---------------------------------------------------------------------------
   # The prior-changes id is now serialized WITH the batch.

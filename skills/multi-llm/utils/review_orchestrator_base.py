@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import detach as _detach
 from . import status_file as _status_file
+from . import cli_common
 from .cli_common import (
     dispatcher_command,
     durable_reaggregate_fields,
@@ -65,6 +66,7 @@ from .providers.base import (
     CATEGORY_CONNECTION_ERROR,
     CATEGORY_INVALID_MODEL,
     CATEGORY_PERMISSION_DENIED,
+    CATEGORY_SANDBOX_UNAVAILABLE,
     CATEGORY_SERVER_ERROR,
     LLMProvider,
     classify_streams,
@@ -102,6 +104,7 @@ from .validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
     resolved_reaggregate_command,
+    stale_validation_reason,
 )
 from .subagent_tasks import (
     TaskFileError,
@@ -258,6 +261,73 @@ def exec_subagents_requested(args: Any) -> bool:
     return bool(getattr(args, "exec_subagents", False))
 
 
+def _print_executor_refusal(
+    failure: Any, *, phase_dir: str, retry_command: Optional[str]
+) -> None:
+    """The exit-3 block for a refusal that dispatched nothing (D4 step 5).
+
+    A refused run has no batch report of its own — ``run_tasks`` never assigned
+    an outcome — and a report left by an *earlier* run may still be sitting in
+    the phase dir, so nothing here reads ``subagent_batch_report.json``: the
+    refusal is the whole story, and the document in the directory belongs to
+    another run. What the message carries in prose is printed again as
+    structured lines (the reason code, the runner key and spec, the provider's
+    own words — the "Did you mean" tail), then the option list: the repair
+    first, the command second, the human entry last. ``.status.json`` is given
+    ``{"state": "runner_rejected", "reason_code": …}`` so ``status`` and a
+    detached poll describe this run rather than the one before it.
+    """
+    from .subagent_executor import _REASON_EXPLANATION, RunnerRejected
+
+    print(f"ERROR: {failure.message}", file=sys.stderr)
+    rejected = isinstance(failure, RunnerRejected)
+    reason_code = (getattr(failure, "reason_code", "") or "") if rejected else ""
+    key = (getattr(failure, "key", "") or "") if rejected else ""
+    spec = (getattr(failure, "spec", "") or "") if rejected else ""
+    detail = (getattr(failure, "detail", "") or "") if rejected else ""
+    lines: List[str] = []
+    if rejected:
+        lines.append(
+            f"Refused before dispatch: reason_code={reason_code or 'unknown'}"
+        )
+        lines.append(f"Runner: {key or 'driver.subagent_runner'} = {spec!r}")
+        if detail:
+            lines.append(f"Runner said: {detail}")
+    # A refusal *is* a config fault (D2 step 4): shape 1, the repair first and
+    # the one tool call — the caller's recorded flags plus its retry verb, which
+    # `retry_command` already carries — second. `--force` is a sentence here.
+    shape = cli_common.retry_shape(reason_code=reason_code or type(failure).__name__)
+    explanation = (
+        _REASON_EXPLANATION.get(reason_code, reason_code or "refused") if rejected
+        else "fix what the message names"
+    )
+    if retry_command:
+        options: List[str] = cli_common.retry_options(
+            shape, reaggregate=retry_command, force="", repair=explanation,
+        )
+    else:
+        options = [
+            f"Repair first: {explanation}.",
+            "Then re-invoke this phase with --reaggregate — it re-dispatches "
+            "exactly this batch; --force is not needed and would re-run the "
+            "reviewer panel.",
+        ]
+    options.append(
+        "Otherwise report this to the user: the phase did not complete, and "
+        "doing its work by hand is not a fallback."
+    )
+    lines.append("Options (nothing was dispatched; every result already on disk is kept):")
+    lines.extend(f"  {n}. {text}" for n, text in enumerate(options, 1))
+    for line in lines:
+        print(line, file=sys.stderr)
+    update_status(phase_dir, {
+        "state": "runner_rejected" if rejected else "executor_refused",
+        "reason_code": reason_code or type(failure).__name__,
+        "runner": spec,
+        "runner_key": key,
+    })
+
+
 def dispatch_subagent_tasks(
     args: Any,
     *,
@@ -328,7 +398,9 @@ def dispatch_subagent_tasks(
         update_status(phase_dir, {"state": "subagents_failed"})
         sys.exit(failure.exit_code)
     except ExecutorError as failure:
-        print(f"ERROR: {failure.message}", file=sys.stderr)
+        _print_executor_refusal(
+            failure, phase_dir=phase_dir, retry_command=retry_command
+        )
         sys.exit(failure.exit_code)
 
 
@@ -449,6 +521,51 @@ def retire_salvage_artifacts(
         if not quiet:
             print(f"[SALVAGE_RETIRED] {os.path.basename(target)} ({reason})")
     return retired
+
+
+def retire_stale_validation(phase_dir: str, *, reason: str) -> Optional[str]:
+    """Rename ``validation.json`` to ``validation.<stamp>.stale.json`` (D7).
+
+    A ``validation.json`` is a set of verdicts about one grouping. Two events
+    make it stale: the grouping is rewritten (``grouped.json`` overwritten by a
+    re-run, where this is called *in the same step* as the write), and a
+    reaggregate finds that the file does not bind to the ``grouped.json`` it
+    sits beside (``stale_validation_reason``). Before D7 the file survived both
+    and ``reaggregate_from_existing_files`` trusted it ahead of the batch files
+    it had been superseded by — exit 0, no warning, and a report carrying
+    another grouping's verdicts.
+
+    A rename, never a delete: the verdicts are still evidence of what a model
+    said about the groups it was shown. The new name keeps ``validation`` in
+    its basename, so every reaggregation glob's ``exclude_patterns`` still
+    skips it, and no longer *is* ``validation.json``, so nothing honours it.
+    Non-fatal like ``retire_salvage_artifacts``: a failed rename warns on
+    stderr naming the file that survived.
+
+    Returns:
+        The new path, or ``None`` when there was nothing to retire (or the
+        rename failed).
+    """
+    source = os.path.join(phase_dir, "validation.json")
+    if not os.path.exists(source):
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = os.path.join(phase_dir, f"validation.{stamp}.stale.json")
+    suffix = 2
+    while os.path.exists(target):
+        target = os.path.join(phase_dir, f"validation.{stamp}-{suffix}.stale.json")
+        suffix += 1
+    try:
+        os.replace(source, target)
+    except OSError as rename_error:
+        print(
+            f"Warning: could not retire validation.json ({rename_error}); it is "
+            f"still in {phase_dir} and does not belong to the current grouping",
+            file=sys.stderr,
+        )
+        return None
+    print(f"[VALIDATION_RETIRED] {os.path.basename(target)} ({reason})")
+    return target
 
 
 def dispatch_salvage_tasks(
@@ -638,6 +755,10 @@ _REASON_BY_CATEGORY = {
     STATUS_SPAWN_FAILED:
         "Reason: the runner CLI could not be started (is it installed and in PATH?)",
     CATEGORY_PERMISSION_DENIED: "Reason: Permission denied",
+    CATEGORY_SANDBOX_UNAVAILABLE: (
+        "Reason: the runner's own sandbox (bubblewrap) could not start — "
+        "see `multi_llm.py doctor`"
+    ),
     STATUS_AUTH_FAILED: "Reason: Authentication error (check API key)",
     CATEGORY_INVALID_MODEL: "Reason: Model not found or invalid",
     STATUS_RATE_LIMITED: "Reason: Rate limited",
@@ -658,13 +779,17 @@ _REASON_UNKNOWN = "Reason: Unknown (see tail output below)"
 #:
 #: Everything **absent** from this table reaches :meth:`RetryLadder.record` under
 #: its own name, and that is deliberate rather than an oversight:
-#: ``rate_limited`` and ``timeout`` are already ladder statuses; ``auth_failed``
-#: and ``spawn_failed`` are rung 1; and ``invalid_model``,
-#: ``permission_denied``, ``context_length_exceeded`` and the unrecognized
-#: ``None`` all fall through ``record``'s last branch to "never retried", which
-#: is exactly what the deleted ``failure_category in
-#: RETRYABLE_FAILURE_CATEGORIES`` guard decided. One table, not two.
-#: ``tests/test_lane_a_ladder.py`` pins the two vocabularies in agreement.
+#: ``rate_limited`` and ``timeout`` are already ladder statuses; ``auth_failed``,
+#: ``spawn_failed`` and ``invalid_model`` are rung 1 (``invalid_model`` is the
+#: classifier's own string, so it needs no row here and lands in ``record``'s
+#: ``FATAL_STATUSES`` branch — ``STOP_FATAL``, "invalid_model is fatal to the
+#: batch", zero retries either way, D4; ``sandbox_unavailable`` is the same
+#: arrangement, D6); and ``permission_denied``,
+#: ``context_length_exceeded`` and the unrecognized ``None`` all fall through
+#: ``record``'s last branch to "never retried", which is exactly what the
+#: deleted ``failure_category in RETRYABLE_FAILURE_CATEGORIES`` guard decided.
+#: One table, not two. ``tests/test_lane_a_ladder.py`` pins the two
+#: vocabularies in agreement.
 _LADDER_STATUS_BY_CATEGORY = {
     CATEGORY_CONNECTION_ERROR: STATUS_RUNNER_ERROR,
     CATEGORY_SERVER_ERROR: STATUS_RUNNER_ERROR,
@@ -1957,65 +2082,6 @@ def save_model_result(
 
 
 # ---------------------------------------------------------------------------
-# Agent log saving
-# ---------------------------------------------------------------------------
-
-def save_agent_log(
-    prefix: str,
-    model: str,
-    prompt: str,
-    stdout: str,
-    stderr: str,
-    success: bool,
-    out_dir: str,
-    phase_dir: str,
-    duration_seconds: Optional[float] = None,
-    error: Optional[str] = None
-) -> Optional[str]:
-    """Save full agent output to a log file for debugging."""
-    sanitized_model = sanitize_model_name(model)
-    log_path = os.path.join(phase_dir, f"log_{sanitized_model}.txt")
-
-    lines = [
-        "=" * 80,
-        "CURSOR-AGENT LOG (Plan Review)",
-        "=" * 80,
-        f"Timestamp: {datetime.now().isoformat()}",
-        f"Model: {model}",
-        f"Success: {success}",
-    ]
-
-    if duration_seconds is not None:
-        lines.append(f"Duration: {duration_seconds:.1f}s")
-    if error:
-        lines.append(f"Error: {error}")
-
-    truncated_prompt = prompt[:MAX_LOGGED_PROMPT_LENGTH]
-    if len(prompt) > MAX_LOGGED_PROMPT_LENGTH:
-        truncated_prompt += "..."
-
-    formatted_stdout = _try_pretty_print_json(stdout) if stdout else "(empty)"
-
-    lines.extend([
-        "", "-" * 40, "PROMPT", "-" * 40,
-        truncated_prompt,
-        "", "-" * 40, "STDOUT", "-" * 40,
-        formatted_stdout,
-        "", "-" * 40, "STDERR", "-" * 40,
-        stderr if stderr else "(empty)",
-        "", "=" * 80, "",
-    ])
-
-    try:
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        return log_path
-    except (IOError, OSError) as e:
-        print(f"WARNING: Failed to save log to {log_path}: {e}")
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
 
@@ -2599,6 +2665,8 @@ async def reaggregate_from_existing_files(
         raw_grouped = group_similar_suggestions(all_suggestions)
         grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
         stamp_stable_ids(grouped)
+        # D7: a re-group orphans any verdicts on disk, so they leave with it.
+        retire_stale_validation(phase_dir, reason="grouped.json rewritten by reaggregate")
         with open(grouped_path, 'w', encoding='utf-8') as f:
             json.dump(save_groups_payload(grouped), f, indent=2)
         print(f"Grouped suggestions saved to: {grouped_path}")
@@ -2609,8 +2677,19 @@ async def reaggregate_from_existing_files(
     validation_path = os.path.join(phase_dir, "validation.json")
     validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
 
-    # Check if validation already completed
-    if os.path.exists(validation_path) and not args.skip_validation:
+    # Check if validation already completed. D7: a validation.json is honoured
+    # only when it binds to the grouped.json beside it (or, for a legacy file
+    # without the binding, when no batch file postdates it); otherwise it is
+    # retired — renamed, not deleted — and the batch files decide.
+    honour_validation_file = os.path.exists(validation_path) and not args.skip_validation
+    if honour_validation_file:
+        stale_reason = stale_validation_reason(Path(validation_path), Path(grouped_path))
+        if stale_reason:
+            print(f"\nNot using validation.json: {stale_reason}")
+            retire_stale_validation(phase_dir, reason=stale_reason)
+            honour_validation_file = False
+
+    if honour_validation_file:
         print(f"\nFound existing validation.json, using it for report generation...")
         try:
             from .validation import load_validation_results as load_validation_v2
@@ -2669,6 +2748,10 @@ async def reaggregate_from_existing_files(
                 document=batch_metadata,
                 plan_path=str(plan_path),
                 label="validation",
+                # D2 row 10: this path used to pass none, so its own failure
+                # printed the "re-run the same command" fallback — a flag-less
+                # hint by omission. The document's triple, live flags winning.
+                retry_command=resolved_reaggregate_command(batch_metadata),
             ):
                 # D3b on the reaggregate path: a run resumed with
                 # --exec-subagents dispatches the still-incomplete batches itself
@@ -2793,6 +2876,10 @@ async def reaggregate_from_existing_files(
     state = get_or_create_state(Path(plan_path))
     state.mark_phase_completed(phase_name)
     state.save()
+    # The in-phase machine reaches its terminal word here too: a re-aggregated
+    # phase is as finished as a freshly run one, and `status` reads this field.
+    update_status(str(phase_dir), {"state": "complete"})
+    _detach.report_progress(str(phase_dir), step="complete")
 
 
 # ---------------------------------------------------------------------------
@@ -3134,10 +3221,13 @@ async def run_review_orchestration(
             completed=completed_models,
             failed=list(failed_models),
             phase_dir=phase_dir,
-            retry_command=dispatcher_command(
+            retry_command=cli_common.retry_command(
                 _modes().mode_for_script(orchestrator_script) or phase_name,
                 plan_path,
                 "--force",
+                flags=cli_common.current_replay_flags(
+                    mode=_modes().mode_for_script(orchestrator_script) or phase_name
+                ),
             ),
         ))
     _unattended.report_partial_results(
@@ -3186,6 +3276,9 @@ async def run_review_orchestration(
         grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
         stamp_stable_ids(grouped)
         grouped_path = os.path.join(phase_dir, "grouped.json")
+        # D7: the previous run's verdicts belong to the grouping this write
+        # replaces; retired in the same step so no later reaggregate finds them.
+        retire_stale_validation(phase_dir, reason="grouped.json rewritten by a re-run")
         with open(grouped_path, 'w', encoding='utf-8') as f:
             json.dump(save_groups_payload(grouped), f, indent=2)
         print(f"Grouped suggestions saved to: {grouped_path}")
@@ -3328,3 +3421,20 @@ async def run_review_orchestration(
     state = get_or_create_state(Path(plan_path))
     state.mark_phase_completed(phase_name)
     state.save()
+
+    # §Fix2: the phase machine's own terminal value. status_file.py's module
+    # docstring names the sequence ``models_running`` →
+    # ``models_complete``/``grouping_complete`` → ``validation_pending`` →
+    # ``complete``, but nothing wrote the last link — the most recent `state`
+    # this run recorded was whichever intermediate step it last passed
+    # through (``grouping_complete``, or ``models_complete`` when there was
+    # nothing to group), even on a run that reaches here, past a written
+    # report and a completed phase. `run.state`/`progress.step` are the
+    # *process*/*display* views this same module docstring distinguishes from
+    # the phase machine; this is the third and last of the three. Nothing
+    # gates resume or ``--reaggregate`` on this field (both key off artifact
+    # existence and ``run.state`` — see ``reaggregate_from_existing_files`` and
+    # AGENTS.md's D7 notes), so recording it here only fixes what a reader
+    # (``status``, ``check_workflow_prerequisites``) reports for a finished run.
+    update_status(phase_dir, {"state": "complete"})
+    _detach.report_progress(phase_dir, step="complete")

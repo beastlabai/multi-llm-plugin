@@ -31,12 +31,15 @@ try:
         STATUS_TIMEOUT,
     )
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from .cli_common import durable_reaggregate_fields, reaggregate_command
+    from .cli_common import (
+        current_replay_flags, durable_reaggregate_fields, retry_command,
+    )
     from .subagent_prompts import build_validation_prompt
     from .subagent_tasks import (
         PromptBudget,
         TaskFileError,
         build_inputs,
+        file_content_hash,
         make_task,
         make_task_file,
         split_indices,
@@ -59,12 +62,15 @@ except ImportError:
         STATUS_TIMEOUT,
     )
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from utils.cli_common import durable_reaggregate_fields, reaggregate_command
+    from utils.cli_common import (
+        current_replay_flags, durable_reaggregate_fields, retry_command,
+    )
     from utils.subagent_prompts import build_validation_prompt
     from utils.subagent_tasks import (
         PromptBudget,
         TaskFileError,
         build_inputs,
+        file_content_hash,
         make_task,
         make_task_file,
         split_indices,
@@ -162,6 +168,8 @@ _CATEGORY_TO_ERROR_TYPE = {
     STATUS_SPAWN_FAILED: ERROR_TYPE_MODEL_FAILURE,
     CATEGORY_PERMISSION_DENIED: ERROR_TYPE_MODEL_FAILURE,
     CATEGORY_INVALID_MODEL: ERROR_TYPE_MODEL_FAILURE,
+    # A broken OS sandbox (D6) is a property of the machine, never of the turn.
+    "sandbox_unavailable": ERROR_TYPE_MODEL_FAILURE,
     STATUS_RUNNER_ERROR: ERROR_TYPE_MODEL_FAILURE,
     # A prompt that does not fit is terminal (§7.6(a)) and must never be
     # recorded recoverable: a revalidation pass would resend it unchanged.
@@ -394,7 +402,12 @@ async def validate_groups(
         group_index = item.get("group_index", -1)
         status = item.get("status", "needs-human-decision")
         reason = item.get("reason", "No reason provided")
+        # `.get(..., 0.5)`'s default only fires when the key is absent; an LLM
+        # that replies with an explicit `"confidence": null` would otherwise
+        # reach the clamp below as None and crash `float(None)`.
         confidence = item.get("confidence", 0.5)
+        if confidence is None:
+            confidence = 0.5
 
         # Normalize status
         if status not in valid_statuses:
@@ -451,10 +464,17 @@ def apply_validation_to_groups(
     """
     Apply validation results to groups by adding validation status.
 
-    Uses group_id (stable content hash) for matching when available, with
-    fallback to group_index for backward compatibility. This ensures validation
-    results remain correctly associated with groups even after reaggregation
-    changes the sort order.
+    Uses group_id (stable content hash) for matching when available. This
+    ensures validation results remain correctly associated with groups even
+    after reaggregation changes the sort order.
+
+    The ``group_index`` fallback exists for *hash-less* records only — the
+    pre-hash ``validation.json`` format, where the index was the identity. A
+    hashed record that matches no group is a verdict about a group that no
+    longer exists (the grouping changed underneath it, D7); handing it to
+    whichever group now sits at its index attributes another group's status,
+    reason and confidence to it, so such a group is left at the default
+    "No validation result" and the count of those groups is printed.
 
     Args:
         groups: Original groups (list of dicts or SuggestionGroup objects)
@@ -463,13 +483,17 @@ def apply_validation_to_groups(
     Returns:
         Groups with validation_status and validation_reason added
     """
-    # Build lookups - prefer group_id, fallback to group_index
+    # Build lookups - group_id for hashed records, group_index for the rest
     validation_by_id = {
         r.get("group_id"): r
         for r in validation_results
         if r.get("group_id")
     }
-    validation_by_index = {r["group_index"]: r for r in validation_results}
+    validation_by_index = {
+        r["group_index"]: r
+        for r in validation_results
+        if not r.get("group_id")
+    }
 
     default_validation = {
         "status": "needs-human-decision",
@@ -478,6 +502,7 @@ def apply_validation_to_groups(
     }
 
     updated_groups = []
+    unmatched = 0
     for i, group in enumerate(groups):
         # Handle both dict and SuggestionGroup objects
         if hasattr(group, 'to_dict'):
@@ -488,16 +513,22 @@ def apply_validation_to_groups(
         # Compute group_id for matching
         gid = generate_group_id(group_dict)
 
-        # Try group_id first, then fall back to index
+        # group_id first; the index only reaches records that carry no hash
         validation = (
             validation_by_id.get(gid) or
-            validation_by_index.get(i) or
-            default_validation
+            validation_by_index.get(i)
         )
+        if validation is None:
+            validation = default_validation
+            unmatched += 1
 
         group_dict["validation_status"] = validation.get("status", "needs-human-decision")
         group_dict["validation_reason"] = validation.get("reason", "")
-        group_dict["validation_confidence"] = validation.get("confidence", 0.0)
+        # `default_validation` above sets an explicit 0.0 for "no result at all"
+        # (a real, meaningful zero); omitting the `.get()` default here only
+        # changes the other case — a real record that omitted `confidence` —
+        # which now comes through as None instead of a manufactured 0.0.
+        group_dict["validation_confidence"] = validation.get("confidence")
         # Copy error_type and recoverable fields if present
         if "error_type" in validation:
             group_dict["validation_error_type"] = validation.get("error_type")
@@ -506,14 +537,94 @@ def apply_validation_to_groups(
 
         updated_groups.append(group_dict)
 
+    if unmatched:
+        print(
+            f"[validation] {unmatched} of {len(updated_groups)} groups have no "
+            f"validation result (left at needs-human-decision)"
+        )
+
     return updated_groups
+
+
+def stale_validation_reason(
+    validation_path: Path,
+    grouped_path: Path,
+) -> Optional[str]:
+    """Why a ``validation.json`` must not be trusted over the batch files, or ``None``.
+
+    A ``validation.json`` belongs to the grouping it was produced for. Since D7
+    it records that grouping as ``metadata.grouped_sha256`` — the same value
+    ``validation_tasks.json`` binds under ``inputs`` — and is honoured only when
+    it matches the ``grouped.json`` sitting beside it now. A file without the
+    key is legacy: its grouping is unknowable, so it is honoured only if no
+    ``validation_batch_*.json`` in the same dir is newer than it (mtime), because
+    a batch written after it is evidence of a validation round it did not come
+    from.
+
+    Returns:
+        ``None`` when the file may be used, else a one-line reason for the log.
+    """
+    try:
+        with open(validation_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        return f"could not read {validation_path.name}: {exc}"
+
+    metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
+    bound_hash = metadata.get("grouped_sha256")
+    if bound_hash:
+        current_hash = file_content_hash(str(grouped_path))
+        if bound_hash == current_hash:
+            return None
+        return (
+            f"{validation_path.name} belongs to grouping {bound_hash}, current "
+            f"{grouped_path.name} is {current_hash or 'missing'}"
+        )
+
+    # Legacy file: no binding to check, so fall back to what the phase dir says
+    # happened after it was written.
+    try:
+        validation_mtime = validation_path.stat().st_mtime
+    except OSError as exc:
+        return f"could not stat {validation_path.name}: {exc}"
+    newer = sorted(
+        batch.name
+        for batch in validation_path.parent.glob("validation_batch_*.json")
+        if batch.stat().st_mtime > validation_mtime
+    )
+    if newer:
+        return (
+            f"{validation_path.name} carries no grouped_sha256 and "
+            f"{len(newer)} batch file(s) are newer than it "
+            f"({', '.join(newer[:3])}{', ...' if len(newer) > 3 else ''})"
+        )
+    return None
+
+
+def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Optional[str]:
+    """Best-effort ``metadata.model`` for a caller that passed none.
+
+    ``merge_batched_validation_results`` tags every merged result with the
+    ``_source_model`` its own batch file's ``metadata.model`` reported (every
+    materialized validation batch carries one — the model that answered it).
+    A single value wins outright; two or more distinct values join as a
+    sorted, comma-separated list rather than silently picking one, since the
+    merge output is honestly mixed-provenance when batches ran on different
+    models. Returns ``None`` when no result carries the tag at all (a legacy
+    caller, or results that never went through the batched merge).
+    """
+    models = {r["_source_model"] for r in validation_results if r.get("_source_model")}
+    if not models:
+        return None
+    return ",".join(sorted(models))
 
 
 def save_validation_results(
     validation_results: List[Dict[str, Any]],
     output_path: Path,
-    model: str = "unknown",
-    groups: Optional[List[Dict[str, Any]]] = None
+    model: Optional[str] = None,
+    groups: Optional[List[Dict[str, Any]]] = None,
+    grouped_file: Optional[str] = None,
 ) -> None:
     """
     Save validation results to a JSON file with metadata.
@@ -521,13 +632,34 @@ def save_validation_results(
     When groups are provided, computes and stores group_id for each result
     to enable stable matching after reaggregation.
 
+    ``metadata.grouped_sha256`` binds the file to the ``grouped.json`` it was
+    produced for (D7) — the same ``file_content_hash`` value
+    ``validation_tasks.json`` records under ``inputs.grouped_sha256`` — so
+    ``reaggregate_from_existing_files`` can tell a file left behind by an
+    earlier grouping from one that belongs to the current one. Defaults to the
+    ``grouped.json`` beside ``output_path``; the key is omitted when that file
+    does not exist.
+
     Args:
         validation_results: List of validation results
         output_path: Path to save the JSON file
-        model: Model used for validation
+        model: Model used for validation. When omitted (``None``), derived
+            from the batch files via :func:`_derive_model_from_results`
+            (``_source_model``, stamped by
+            :func:`merge_batched_validation_results`) and falls back to
+            ``"unknown"`` only when no batch tagged a model at all — several
+            call sites merge then save without ever naming a model, which used
+            to write the literal string ``"unknown"`` even though every batch
+            file on disk carried its own ``metadata.model``.
         groups: Optional list of groups to compute group_ids from
+        grouped_file: The ``grouped.json`` this validation belongs to
     """
+    if not model:
+        model = _derive_model_from_results(validation_results) or "unknown"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if grouped_file is None:
+        grouped_file = str(output_path.parent / "grouped.json")
+    grouped_sha256 = file_content_hash(grouped_file)
 
     # Build a mapping from index to group_id if groups provided
     group_id_by_index = {}
@@ -547,7 +679,11 @@ def save_validation_results(
             "group_index": group_index,
             "status": v["status"],
             "reason": v.get("reason", ""),
-            "confidence": v.get("confidence", 0.0),
+            # Absent, not 0.0: a batch that omitted `confidence` (a subagent
+            # replied without one) is genuinely unknown, not a real zero. Only
+            # `v.get("confidence")` preserves an explicit 0.0 the subagent did
+            # report while letting a missing key come through as None.
+            "confidence": v.get("confidence"),
             "error_type": v.get("error_type", ERROR_TYPE_UNKNOWN),
             "recoverable": v.get("recoverable", False),
             "revalidated": v.get("revalidated", False),
@@ -566,6 +702,7 @@ def save_validation_results(
             "model": model,
             "timestamp": datetime.now().isoformat(),
             "schema_version": "2.1",
+            **({"grouped_sha256": grouped_sha256} if grouped_sha256 else {}),
         }
     }
 
@@ -964,15 +1101,17 @@ def build_validation_batch_records(
         group_ids: ``group_ids[i]`` is the stable id of ``groups[i]``.
 
     Returns:
-        One record per group in the batch, carrying the global ``index`` and the
-        ``group_hash`` the subagent must echo back.
+        One record per group in the batch, carrying the global index under
+        ``group_index`` — the same key the reply contract asks the subagent to
+        echo back, rather than a differently-named ``index`` the subagent has
+        to translate — and the ``group_hash`` the subagent must also echo.
     """
     records: List[Dict[str, Any]] = []
     for idx in group_indices:
         group = groups[idx]
         group_dict = group.to_dict() if hasattr(group, 'to_dict') else group
         records.append({
-            "index": idx,
+            "group_index": idx,
             # Both spellings carry the same value: the prompt tells the subagent
             # to copy `group_hash`, while `merge_batched_validation_results`
             # accepts either, so no reader can miss it.
@@ -1010,7 +1149,15 @@ def resolved_reaggregate_command(document: Dict[str, Any]) -> Optional[str]:
     mode = document.get("reaggregate_mode")
     plan = document.get("plan_file")
     if mode and plan:
-        return reaggregate_command(str(mode), str(plan))
+        # The live invocation of this mode wins over the document's stored
+        # `replay_flags` (D2's precedence rule); the stored list is the fallback
+        # for a reader in a later process, and is never sanitized.
+        return retry_command(
+            str(mode), str(plan), "--reaggregate",
+            flags=current_replay_flags(
+                document.get("replay_flags"), mode=str(mode)
+            ),
+        )
     # Written before the durable pair existed. Its stored command is only as
     # good as the skill dir it was written under — precisely the staleness this
     # key stopped persisting — but honouring it is never worse than the build
@@ -1279,6 +1426,10 @@ def merge_batched_validation_results(
     batches = batch_metadata.get("batches", [])
     batches_found = 0
     batches_missing = 0
+    # Counters behind the single end-of-merge summary line below, instead of
+    # one `[merge] Warning:` line printed per mismatched verdict.
+    hash_join_total = 0
+    hash_join_mismatched = 0
 
     for batch_info in batches:
         batch_index = batch_info["batch_index"]
@@ -1296,8 +1447,19 @@ def merge_batched_validation_results(
             # Handle both wrapped format and direct list
             if isinstance(batch_data, dict):
                 batch_results = batch_data.get("groups", [])
+                batch_model = batch_data.get("metadata", {}).get("model")
             else:
                 batch_results = batch_data
+                batch_model = None
+
+            # Tag every result with the model its own batch file reported, so
+            # `save_validation_results` can derive an overall model when its
+            # caller passes none (`_derive_model_from_results`), without this
+            # function's return type growing a second value that every one of
+            # its several cross-file callers would have to unpack.
+            if batch_model:
+                for _result in batch_results:
+                    _result.setdefault("_source_model", batch_model)
 
             batches_found += 1
 
@@ -1335,10 +1497,9 @@ def merge_batched_validation_results(
                 if result_hash in hash_to_original_index:
                     original_index = hash_to_original_index[result_hash]
                     reported_idx = result.get("group_index", result.get("index", -1))
+                    hash_join_total += 1
                     if reported_idx != original_index:
-                        print(f"[merge] Warning: Batch {batch_index}: hash {result_hash} "
-                              f"-> index {original_index}, LLM reported index "
-                              f"{reported_idx} (corrected via hash)")
+                        hash_join_mismatched += 1
                     result["group_index"] = original_index
                     result["group_id"] = result_hash
                     merged_results[original_index] = result
@@ -1424,6 +1585,15 @@ def merge_batched_validation_results(
             batches_missing += 1
 
     print(f"[merge] Merged {batches_found} batches, {batches_missing} missing")
+    # One summary line for the whole merge rather than one `[merge] Warning:`
+    # per verdict (a correct 16-batch run used to print 41 of them): the hash
+    # join is authoritative regardless, so a per-verdict echo mismatch is
+    # advisory noise, not an error to itemize. The codebase has no
+    # MULTI_LLM_DEBUG/verbose convention for validation.py to gate a per-line
+    # form behind, so the summary is what prints.
+    if hash_join_mismatched:
+        print(f"[merge] {hash_join_mismatched} of {hash_join_total} verdicts "
+              f"echoed a different group_index; all joined by hash")
 
     # Sort by group index
     merged_results.sort(key=lambda x: x.get("group_index", 0))

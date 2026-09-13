@@ -10,6 +10,7 @@
   "homepage": "https://github.com/beastlabai/multi-llm-plugin",
   "repository": "https://github.com/beastlabai/multi-llm-plugin",
   "license": "MIT",
+  "hooks": "./hooks/hooks.json",
   "keywords": [
     "multi-llm",
     "code-review",

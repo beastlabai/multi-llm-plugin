@@ -73,6 +73,7 @@
         "ask",
         "detach",
         "native_tool",
+        "session_runner_provider",
         "default_subagent_runner",
         "subagent_tiers",
         "runners",
@@ -345,6 +346,14 @@
             }
           }
         },
+        "session_runner_provider": {
+          "description": "The provider whose CLI can be pointed at the model the HOST SESSION is itself running on, or null where this host has no such rung. It is required rather than optional precisely because it affects dispatch: `resolve_subagent_runner` reads it together with $MULTI_LLM_HOST_SESSION_MODEL and, when both are present, resolves a runner at layer `session` — below every explicit driver.* layer and above `default_subagent_runner`. An omission would be a silent guess about which CLI may serve a session model, which is the class of defaulting this schema exists to remove; `null` states 'no session rung' out loud. The named provider must be a key of this entry's own runners map, for the same reason `default_subagent_runner`'s provider must be.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
         "default_subagent_runner": {
           "description": "A provider:model spec that must appear in this entry's own runners map.",
           "type": "string",
@@ -520,6 +529,7 @@
             "ask",
             "detach",
             "native_tool",
+            "session_runner_provider",
             "default_subagent_runner",
             "subagent_tiers",
             "runners",
@@ -570,6 +580,9 @@
               "$ref": "#/definitions/provenance_value"
             },
             "native_tool": {
+              "$ref": "#/definitions/provenance_value"
+            },
+            "session_runner_provider": {
               "$ref": "#/definitions/provenance_value"
             },
             "default_subagent_runner": {

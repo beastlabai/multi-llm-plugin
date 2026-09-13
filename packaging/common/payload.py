@@ -463,12 +463,23 @@ def stage(
     allowlist: Optional[Sequence[str]] = None,
     required: Sequence[str] = REQUIRED_INVENTORY,
     required_trees: Sequence[str] = REQUIRED_TREES,
+    required_extra: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """Copy the allowlisted payload into *destination*, then account for it.
 
     Returns the staged paths, relative to *destination*. Raises
     :class:`PayloadError` on a dirty tree, a symlink, an unexpected file or a
     missing required resource.
+
+    *required_extra* is merged additively with *required* — it never replaces
+    it. It exists because :data:`REQUIRED_INVENTORY` is a static, hand-typed
+    list and cannot see a resource a caller only discovers by reading data this
+    module deliberately never imports (see the module docstring: no skill
+    module import here). ``modes.py``'s ``target_module`` rows are exactly
+    that case — a dispatch table entry can name a module that ``git
+    ls-files`` never selected (untracked), and the static list has no way to
+    know the module exists at all. The caller derives that set and passes it
+    here; this function only merges and checks it.
 
     The write is **atomic against the destination**: staging happens in a temp
     directory on the same filesystem (see :func:`_staging_parent` for *which*
@@ -520,7 +531,8 @@ def stage(
             staged.append(relative)
 
         _assert_no_unexpected(scratch, staged)
-        _assert_inventory(scratch, staged, required, required_trees)
+        merged_required = tuple(dict.fromkeys((*required, *required_extra)))
+        _assert_inventory(scratch, staged, merged_required, required_trees)
         scan_tree(scratch)
 
         if destination.exists():

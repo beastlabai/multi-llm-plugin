@@ -237,6 +237,22 @@ MODES: Tuple[Mode, ...] = (
         instruction_file=None,
     ),
     Mode(
+        name="doctor",
+        positionals=(),
+        summary="Check every configured provider CLI on this machine: present, "
+                "version, auth, sandbox. No model calls; exit 0 or 3.",
+        # D6 step 5. The one mode allowed to spawn provider CLIs outside a
+        # phase — and only their model-free probes (`--version`, the declared
+        # `auth_check`, the sandbox self-test). No lock, no phase dir, no
+        # instruction file: like `status`, its flags are the whole interface.
+        # Not user-facing: it is what the Claude Code plugin's SessionStart
+        # hook runs (`hooks/hooks.json`, `--warn-only`) and what a user runs
+        # by hand after a refusal names it — not a workflow flag.
+        target_module="utils.doctor",
+        instruction_file=None,
+        user_facing=False,
+    ),
+    Mode(
         name="init",
         positionals=(),
         summary="Scaffold a per-project .multi-llm/providers.yaml override.",
@@ -341,6 +357,121 @@ TOOL_DESCRIPTION_LEDE = (
     "dispatcher command through bash, because the flags this host requires are "
     "appended here and a shell invocation reaches none of them."
 )
+
+#: The lede's sibling: one line that names the four exit codes and the decision
+#: exit 3 carries. A sibling rather than a clause folded into the lede, so the
+#: two strings with two jobs stay separately assertable (the lede is pinned by
+#: identity and by ``startswith``; this one by ``contains``). It is rendered
+#: into the tool description after the mode block, so a model meets it in the
+#: same glance as the modes. The four numbers are ``cli_common.EXIT_*``, held
+#: to this line by a test rather than by an import: this module imports nothing
+#: by design.
+TOOL_OUTCOMES_LINE = (
+    "Exit codes: 0 done · 1 error · 2 nothing to do · 3 needs a human: stop, "
+    "report, do not do the phase's work."
+)
+
+#: The one sentence every needs-human surface shares, and the one the incident
+#: turned on: an agent whose tool has just told it the run is blocked has no
+#: sentence anywhere telling it not to do the work by hand. Composed into
+#: :data:`NEEDS_HUMAN_RULE` (the file routes and the plugin's command body) and
+#: into :data:`NEEDS_HUMAN_MESSAGE` (the plugin's exit-3 result), so the two
+#: cannot say it differently.
+NEEDS_HUMAN_WORK_SENTENCE = (
+    "Do not perform the work this run was going to review, plan, or implement: "
+    "doing it yourself is never a substitute for a failed run."
+)
+
+#: The decision rule for exit 3, authored once. Every instruction surface a
+#: supported route loads renders it: both ``hosts/*/shim.md.tmpl`` and the
+#: plugin's ``hosts/opencode/plugin-command.md.tmpl`` through
+#: ``cli_common.NEEDS_HUMAN_RULE_TOKEN``, and Claude Code's ``SKILL.md`` — read
+#: verbatim by its host, so nothing substitutes a token there — as a literal
+#: held to this constant by ``test_needs_human_rule_has_one_owner``, the same
+#: shape :data:`DEFAULT_MODE` uses. It also owns the ``next`` clause, because
+#: ``next`` and the plugin's ``options`` are one object under two names: on
+#: ``0`` and ``2`` it runs verbatim, on ``3`` it is reported and waits for the
+#: user. Four hand-typed paraphrases of this rule are exactly how two hosts
+#: come to contradict each other on the behaviour an incident hinges on.
+NEEDS_HUMAN_RULE = (
+    "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
+    "report to the user what was being run, the last error line it printed, "
+    "and the options its output names (`next` included); do not run a "
+    "different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Run an option only "
+    "after the user has picked it."
+)
+
+#: The plugin's exit-3 ``message``, as a **template**: the JS selects a clause
+#: for each token and substitutes, and authors no wording of its own — not even
+#: a fallback. ``{phase}`` and ``{error}`` are literal tokens here (nothing in
+#: Python ``%``- or ``.format``-expands them); the clause alternatives below are
+#: what the plugin fills them with, chosen by what the child actually left:
+#:
+#: * ``phase_incomplete`` — the phase is named from the *launch* (the call's
+#:   validated mode word, through the table above) and the result line's
+#:   ``state`` is the needs-human state, so "did not complete" is true of it;
+#: * ``phase_known`` — the phase is named but the result line does not say it
+#:   failed to complete;
+#: * ``review_completed`` — ``review-code --fail-on-high``: the review finished,
+#:   found what it was told to stop on, and wants a decision. Never "did not
+#:   complete";
+#: * ``phase_unnamed`` — a result line is present but nothing names a phase;
+#: * ``phase_unknown`` — no result line at all (a child that died before it
+#:   emitted one, or a line that was not JSON), so nothing names the phase;
+#: * ``error_known`` — the last error line, quoted: the result's own ``error``
+#:   when it carries one, else the last non-blank line of the *redacted*
+#:   output, else of the redacted stderr;
+#: * ``error_unknown`` — the child left no line to quote; ``log`` and ``argv``
+#:   are what to report.
+#:
+#: The ``options`` sentence is kept word for word from the message it replaces:
+#: it is what tells the model where the redacted commands went.
+NEEDS_HUMAN_MESSAGE = {
+    "template": (
+        "Stop here: this run is blocked and needs a human. {phase} {error} "
+        "Report to the user what was being run (`argv`), that line, and the "
+        "`options`. The dispatcher's output is included as it was rendered, "
+        "except that every runnable command in it was replaced by a pointer and "
+        "spelled as a tool call in `options`, in the order it appeared, and its "
+        "result line is in `result` instead; do not paraphrase the output. Do "
+        "not run a different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
+        "an `options` entry only after the user has picked one."
+    ),
+    "phase_incomplete": "The `{phase}` phase did not complete.",
+    "phase_known": "The `{phase}` phase was running.",
+    "review_completed": (
+        "The `{phase}` review finished, found what it was told to stop on, and "
+        "needs your decision."
+    ),
+    "phase_unnamed": "Nothing in the result line names the phase that was running.",
+    "phase_unknown": (
+        "The dispatcher exited without a result line, so nothing here names the "
+        "phase that was running; `log` and `argv` say what ran."
+    ),
+    "error_known": "The last line it left is: {error}",
+    "error_unknown": (
+        "Its result line names no error, and what it printed is in `output` and "
+        "`stderr`; `log` and `argv` are what to report."
+    ),
+}
+
+#: The one ``options`` entry that is not a retry: a legal exit. Appended by the
+#: plugin after the scraped tool calls, as ``{human: <this sentence>}``, so an
+#: agent reading the options finds "ask the user" beside "run this again".
+NEEDS_HUMAN_OPTION = (
+    "stop here and report to the user; send back one of the options above only "
+    "after the user has picked one"
+)
+
+#: The one exit 3 that is not an unfinished run. ``review-code --fail-on-high``
+#: completes the review and *then* exits 3 to hold a standalone gate for a
+#: decision, and its result line carries the same needs-human state every other
+#: exit 3 does — so nothing in the payload distinguishes it, and the plugin
+#: reads the launch instead: this mode word, with this flag among the call's
+#: extra flags, gets the completed-review clause and never "did not complete".
+#: The flag is declared by ``code_review_orchestrator``'s parser; a test holds
+#: the two spellings together.
+REVIEW_GATE = {"mode": "review-code", "flag": "--fail-on-high"}
 
 
 # The `util` namespace is a mode word for routing purposes but is deliberately

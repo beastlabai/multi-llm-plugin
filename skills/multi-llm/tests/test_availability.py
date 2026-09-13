@@ -422,12 +422,15 @@ class TestIsAvailableKeepsItsBoolContract:
         assert callable(provider.describe_availability)
         signature = inspect.signature(LLMProvider.describe_availability)
         assert signature.return_annotation is AvailabilityReport
-        # Keyword-only evidence, both optional: an existing caller passes
-        # nothing and gets an answer built from declared data alone.
-        assert [p.kind for p in list(signature.parameters.values())[1:]] == [
-            inspect.Parameter.KEYWORD_ONLY,
-            inspect.Parameter.KEYWORD_ONLY,
+        # Keyword-only evidence, all optional: an existing caller passes
+        # nothing and gets an answer built from declared data alone. D3 step 2
+        # added `credentials_required` (declared adapter data, like the rest).
+        evidence = list(signature.parameters.values())[1:]
+        assert [p.name for p in evidence] == [
+            "auth", "version", "credentials_required",
         ]
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in evidence)
+        assert all(p.default is not inspect.Parameter.empty for p in evidence)
 
     @pytest.mark.parametrize(
         "relative",
@@ -708,3 +711,78 @@ class TestTheAnnotatingCallSurfaces:
         from utils import host_install as hi
 
         assert hi._runner_state("definitely-not-a-provider", {}) == ""
+
+
+# ---------------------------------------------------------------------------
+# D3 step 2 — `credentials_required` keeps the report and the preflight aligned
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialsRequiredLeg:
+    """A declared credential-free model suppresses `NEEDS_AUTH`; nothing else
+    about the mapping moves, and every credential-requiring model still refuses."""
+
+    @pytest.mark.parametrize("name", _registry_names())
+    def test_the_default_keeps_every_adapter_refusing(self, name):
+        provider = _PROVIDERS[name]
+        with patch("shutil.which", return_value=_RESOLVED):
+            report = provider.describe_availability(auth=False)
+        assert report.state is Availability.NEEDS_AUTH
+
+    @pytest.mark.parametrize("name", _registry_names())
+    def test_false_suppresses_only_the_needs_auth_leg(self, name):
+        provider = _PROVIDERS[name]
+        with patch("shutil.which", return_value=_RESOLVED):
+            suppressed = provider.describe_availability(
+                auth=False, credentials_required=False
+            )
+            clean = provider.describe_availability(
+                auth=True, credentials_required=False
+            )
+            unknown = provider.describe_availability(
+                auth=None, credentials_required=False
+            )
+        assert suppressed.state is Availability.READY
+        assert "declared to need no credential" in suppressed.detail
+        assert clean.state is Availability.READY
+        assert unknown.state is Availability.UNKNOWN
+
+    @pytest.mark.parametrize("name", _registry_names())
+    def test_binary_missing_and_version_legs_are_untouched(self, name):
+        provider = _PROVIDERS[name]
+        with patch("shutil.which", return_value=None):
+            report = provider.describe_availability(
+                auth=False, credentials_required=False
+            )
+        assert report.state is Availability.BINARY_MISSING
+        if (provider.min_version or "").strip():
+            with patch("shutil.which", return_value=_RESOLVED):
+                report = provider.describe_availability(
+                    auth=False, version="0.0.1", credentials_required=False
+                )
+            assert report.state is Availability.VERSION_TOO_LOW
+
+    def test_only_opencode_declares_a_credential_free_model(self):
+        declared = {
+            name: provider.credential_free_models
+            for name, provider in _PROVIDERS.items()
+            if provider.credential_free_models
+        }
+        assert declared == {"opencode": frozenset({"opencode/big-pickle"})}
+
+    def test_the_declaration_drives_the_report_through_the_model(self):
+        """`model_needs_credentials` → `credentials_required`, the way callers wire it."""
+        provider = _PROVIDERS["opencode"]
+        with patch("shutil.which", return_value=_RESOLVED):
+            free = provider.describe_availability(
+                auth=False,
+                credentials_required=provider.model_needs_credentials("opencode/big-pickle"),
+            )
+            gated = provider.describe_availability(
+                auth=False,
+                credentials_required=provider.model_needs_credentials(
+                    "openrouter/deepseek/deepseek-v4-flash-0731"
+                ),
+            )
+        assert free.state is Availability.READY
+        assert gated.state is Availability.NEEDS_AUTH

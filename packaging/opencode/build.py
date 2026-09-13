@@ -68,7 +68,8 @@ from common.payload import (  # noqa: F401  (re-exported for the Make targets)
     PayloadError, scan_tarball, scan_tree, tree_digest,
 )
 from utils import (  # noqa: E402
-    cli_common, detach, host_install, subagent_executor, unattended,
+    cli_common, detach, host_install, provider_registry, subagent_executor,
+    unattended,
 )
 
 #: The host this package is a distribution of. Not a new host id — the harness
@@ -138,7 +139,19 @@ PACKAGING_INPUTS: Tuple[str, ...] = (
 #: Bumped when the *shape* of ``cli-surface.json`` changes. The plugin refuses a
 #: version it does not know, so a payload/plugin mismatch is a named error rather
 #: than a ``TypeError`` inside a ``.map``.
-SURFACE_SCHEMA_VERSION = 1
+#:
+#: 2: ``needs_human_message``, ``needs_human_option`` and ``outcomes_line``
+#: joined the surface (the plugin's exit-3 message and its tool description's
+#: outcomes line are read from here, never authored in JS), every mode row
+#: carries its ``phase``, and ``dispatcher`` gained ``states`` and
+#: ``review_gate`` — the data the exit-3 message is selected from.
+#:
+#: 3: ``dispatcher`` gained ``session_model_env`` — the name of the variable the
+#: plugin exports the *session's own model* on, so the resolution ladder can
+#: prefer what the operator selected over the shipped credential-free floor. The
+#: name's owner is ``provider_registry.HOST_SESSION_MODEL_ENV``; the plugin reads
+#: it from here rather than spelling it, exactly like every flag and mode word.
+SURFACE_SCHEMA_VERSION = 3
 
 #: Opt-in that lets a staging run proceed from a dirty tree.
 #:
@@ -218,6 +231,10 @@ def _exposed_modes() -> List[Dict[str, Any]]:
             "positionals": list(mode.positionals),
             "supports_detach": mode.supports_detach,
             "summary": mode.summary,
+            # The phase word the exit-3 message names. From the *launch*, never
+            # from the payload: a poll's result line is `status`'s own and
+            # declares no phase, so the payload cannot say which phase died.
+            "phase": mode.phase,
         })
     return rows
 
@@ -302,6 +319,16 @@ def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
         # The single owner of "no mode flag means review-plan".
         "default_mode": mode_table.DEFAULT_MODE,
         "description_lede": mode_table.TOOL_DESCRIPTION_LEDE,
+        # The lede's sibling: the four exit codes and what exit 3 decides,
+        # pushed into the description after the mode block.
+        "outcomes_line": mode_table.TOOL_OUTCOMES_LINE,
+        # The exit-3 `message`, as a template plus the clauses its tokens are
+        # filled with. The plugin selects and substitutes; it authors nothing,
+        # not even a fallback — the same rule that keeps the uv preflight text
+        # in `hosts/uv-missing.txt`.
+        "needs_human_message": dict(mode_table.NEEDS_HUMAN_MESSAGE),
+        # The one `options` entry that is not a retry.
+        "needs_human_option": mode_table.NEEDS_HUMAN_OPTION,
         "modes": _exposed_modes(),
         "positional_kinds": {
             "plan": mode_table.POS_PLAN,
@@ -337,6 +364,23 @@ def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
                 "nothing_to_do": cli_common.EXIT_NOTHING_TO_DO,
                 "needs_human": cli_common.EXIT_NEEDS_HUMAN,
             },
+            # The `state` word the result line carries for each exit, keyed
+            # like `exit_codes`. The exit-3 message claims "did not complete"
+            # only when the result line's state is the needs-human one.
+            "states": {
+                "ok": cli_common._STATE_BY_EXIT[cli_common.EXIT_OK],
+                "error": cli_common._STATE_BY_EXIT[cli_common.EXIT_ERROR],
+                "nothing_to_do": cli_common._STATE_BY_EXIT[
+                    cli_common.EXIT_NOTHING_TO_DO
+                ],
+                "needs_human": cli_common._STATE_BY_EXIT[
+                    cli_common.EXIT_NEEDS_HUMAN
+                ],
+            },
+            # The one exit 3 that is a *completed* run: a review held for a
+            # decision. Read from the launch, because its result line carries
+            # the same state as every other exit 3.
+            "review_gate": dict(mode_table.REVIEW_GATE),
             # ``--wait`` is a store_true: the plugin passes the bare flag and
             # never a ``--timeout``, so the duration is the dispatcher's own
             # default with its own internal re-read. It is emphatically not
@@ -347,6 +391,15 @@ def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
             "instructions": ["util", "instructions"],
             "host_option": "--host",
             "run_id_option": "--run-id",
+            # The variable the plugin sets to the model the OpenCode session is
+            # itself running on, read back off the session's newest assistant
+            # message. Python owns the name (`provider_registry`), because
+            # `resolve_subagent_runner` is the only thing that reads it: the
+            # plugin's job is to *observe* the session model and the ladder's is
+            # to decide what that means. Without this the run dispatches the
+            # host's credential-free floor while the picker two inches above the
+            # prompt says something else.
+            "session_model_env": provider_registry.HOST_SESSION_MODEL_ENV,
             # A `next` carrying one of these is a *mechanical* continuation —
             # the same phase finishing itself off — so `execute` follows it
             # internally under its own cap rather than handing it back for a
@@ -432,10 +485,15 @@ def build(
     )
 
     # 4. The payload, by allowlist, with the sweep and the inventory assertion.
+    #    ``required_extra`` is the dispatch table's own required set — every
+    #    ``modes.py`` target_module, derived rather than hand-typed — so a mode
+    #    row naming a module the static REQUIRED_INVENTORY never anticipated
+    #    still fails the build if that module goes untracked.
     staged = payload.stage(
         checkout,
         out / "skills" / "multi-llm",
         allow_dirty=allow_dirty,
+        required_extra=target_module_paths(skill_base),
     )
 
     # 5. LICENSE and README — copied, never symlinked. A symlink inside an npm
@@ -510,6 +568,59 @@ def _not_shipped(relative: str) -> bool:
     return not (
         relative in SHIPPED_FILES or relative.startswith(SHIPPED_TREES)
     )
+
+
+# ---------------------------------------------------------------------------
+# Payload inventory derived from the dispatch table
+# ---------------------------------------------------------------------------
+
+def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
+    """Every ``modes.py`` ``target_module``, as a skill-relative file path.
+
+    ``modes.py``'s own docstring is explicit that nothing there imports an
+    orchestrator — ``target_module`` is a dotted path the dispatcher resolves
+    *lazily* — and that laziness is exactly why :data:`payload.REQUIRED_INVENTORY`,
+    a static hand-typed list, could not see ``utils/doctor.py`` go missing: the
+    dispatch table pointed at a module the allowlist (``git ls-files``) never
+    selected because it was untracked, and nothing failed until
+    ``multi_llm.py doctor`` ran from the staged tree and hit
+    ``ModuleNotFoundError``. This derives the same set the dispatcher resolves
+    at runtime, so a *build* fails on the gap rather than a user's first
+    invocation of the mode that has it.
+
+    Returned paths are sorted and de-duplicated (several modes share a
+    ``target_module``, e.g. ``install-host``/``uninstall-host`` both dispatch
+    to ``utils.host_install``).
+
+    *base* is where each dotted path is checked against the filesystem to tell
+    a plain module (``utils/doctor.py``) from a package (``x/__init__.py``);
+    it defaults to the real skill dir, the same default :func:`command_body`
+    uses. ``mode_table`` itself is always the top-level import — resolved once
+    against the real skill dir the way every module this build reads is (see
+    the module docstring) — so *base* only disambiguates the file *shape* for
+    a caller pointed at a fixture tree; it is not a way to derive the set from
+    a different ``modes.py``.
+    """
+    root = Path(base) if base else SKILL_DIR
+    found: Dict[str, str] = {}
+    for mode in mode_table.MODES:
+        dotted = mode.target_module
+        if not dotted or dotted in found:
+            continue
+        parts = dotted.split(".")
+        module_path = "/".join(parts) + ".py"
+        package_path = "/".join(parts) + "/__init__.py"
+        if (root / module_path).is_file():
+            found[dotted] = module_path
+        elif (root / package_path).is_file():
+            found[dotted] = package_path
+        else:
+            raise PayloadError(
+                f"modes.py names target_module {dotted!r}, but neither "
+                f"{module_path} nor {package_path} exists under {root}. Fix "
+                "the dotted path in modes.py, or add the file it should name."
+            )
+    return tuple(sorted(found.values()))
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +790,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.scan_tarball is not None:
         try:
-            scan_tarball(args.scan_tarball)
+            # Same derived requirement `build()` holds the staging tree to
+            # (see `target_module_paths`), re-checked here because npm applies
+            # its own ignore rules *after* staging — a tarball can go short
+            # for a reason the staged tree never saw. See `scan_tarball`'s own
+            # docstring for why the inventory assertions belong at both ends.
+            scan_tarball(
+                args.scan_tarball,
+                required=tuple(payload.REQUIRED_INVENTORY)
+                + target_module_paths(),
+            )
         except PayloadError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1

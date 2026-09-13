@@ -73,10 +73,15 @@ READERS = {
     "references/uv-check.md": "ls",
     "legacy/references/uv-check.md": "ls",
     "hosts/uv-missing.txt": "bracket",
+    # The Claude Code plugin's SessionStart hook (D6 step 5) resolves uv the
+    # same way before running `doctor --warn-only`; it lives at the repo root
+    # beside `.claude-plugin/`, so it is the one reader outside the skill tree.
+    "hooks/doctor.sh": "ls",
 }
 
 #: Where each reader lives, relative to the repo root.
 _ROOTS = {name: SKILL_ROOT for name in READERS}
+_ROOTS["hooks/doctor.sh"] = REPO_ROOT
 
 
 class TestTheListItself:
@@ -211,8 +216,10 @@ class TestNoUnlistedReader:
             patterns += ["-e", stem]
         try:
             listing = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "grep", "-l", "-F", *patterns, "--",
-                 "skills/multi-llm", "packaging"],
+                # `--untracked`: a reader is caught on the working tree that
+                # adds it, before it is staged, and ignored files stay out.
+                ["git", "-C", str(REPO_ROOT), "grep", "-l", "-F", "--untracked",
+                 *patterns, "--", "skills/multi-llm", "packaging", "hooks"],
                 capture_output=True, text=True, timeout=120,
             )
         except FileNotFoundError:  # pragma: no cover - environment guard

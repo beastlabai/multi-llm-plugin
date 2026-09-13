@@ -43,6 +43,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -921,13 +925,13 @@ class TestTheWorkerNotTheLauncher:
         """Completion, not creation: a phase dir exists before the work in it.
 
         The record that matters is `state.json`'s `phases_completed`, **not**
-        `{phase}/.status.json`'s in-phase `state`. Measured on both executor
-        hosts: a review-plan row that ran to a terminal `run.state: done` with
-        `validation.json` and the report on disk, and `state.json` recording the
-        phase completed, still leaves `.status.json` reading
-        `state: grouping_complete` — the in-phase checkpoint is the last
-        checkpoint the fan-out wrote, not a completion flag. Asserting on it
-        would fail a passing row.
+        `{phase}/.status.json`'s in-phase `state`. Until 2026-09-11 a review-plan
+        row that ran to a terminal `run.state: done` with `validation.json` and
+        the report on disk still left `.status.json` reading
+        `state: grouping_complete` (the last checkpoint the fan-out wrote); the
+        orchestrators now write `state: complete` at the end, but the workflow
+        record stays the assertion target so a row captured before that change
+        still grades.
         """
         result, matrix_row, _entry = workflow
         completed = (result.workflow_state().get("phases_completed") or {})
@@ -1166,14 +1170,29 @@ class TestTheNegativeAuthRowsRefuse:
     before the first stub call, so the row must fail within seconds with zero stub
     requests rather than on its wall-clock bound.
 
-    opencode's does not, and that is the one measured result that contradicted the
-    plan: a logged-out `opencode auth list` exits 0 printing "0 credentials", which
-    matches none of the adapter's `auth_error_patterns`, so `classify_auth_probe`
-    returns "authenticated" and the gate simply opens. `host_matrix.yaml` records
-    that row as `exit: unknown, provenance: unmeasured`, and an unmeasured
-    expectation is **recorded here, never asserted into a pass** — which is the
-    whole reason both rows are scheduled: a green codex negative proves nothing
-    about opencode.
+    opencode's did not when this row was first measured: a logged-out `opencode
+    auth list` exits 0 printing "0 credentials", which matched none of the
+    adapter's `auth_error_patterns`, so `classify_auth_probe` returned
+    "authenticated" and the gate simply opened. Two things have moved since and
+    neither has been re-recorded on this lane, which is why `host_matrix.yaml`
+    still records the row as `exit: unknown, provenance: unmeasured` and why an
+    unmeasured expectation is **recorded here, never asserted into a pass**:
+
+    * `OpenCodeProvider.classify_auth_probe` now reads the count line
+      (`_EMPTY_CREDENTIALS`): "0 credentials" with no Environment section is
+      `False`, so the preflight is expected to refuse this row
+      `not_authenticated` the way codex's does.
+    * D3 step 2 exempts models the adapter declares credential-free
+      (`credential_free_models`, today exactly `opencode/big-pickle`) from that
+      refusal. This row's runner is `opencode:stub/stub-model` — a
+      credential-*requiring* id by construction — so the exemption cannot turn
+      the row into a tautology; `TestTheCredentialFreeDefaultPassesPreflight`
+      below is the positive half, on the shipped default itself.
+
+    When a re-recorded run promotes this row, `exit`, `provenance`, this
+    docstring and the `test_the_refusal_was_named_and_fast` skip message move in
+    the same edit. Both rows stay scheduled: a green codex negative proves
+    nothing about opencode.
     """
 
     pytestmark = pytest.mark.live
@@ -1456,3 +1475,167 @@ def _exported(result, artifact: str):
         return None
     tail = artifact.split(marker, 1)[1]
     return result.out_dir / "artifacts" / tail
+
+
+# --------------------------------------------------------------------------- #
+# D3 step 6 — the standing drift check: the `opencode/*` ids this repo ships
+# against Zen's live catalog. Recurs on every opencode release.
+# --------------------------------------------------------------------------- #
+
+_SKILL_DIR = Path(__file__).resolve().parent.parent
+
+
+def _shipped_opencode_ids() -> dict:
+    """Every `opencode/*` id the shipped config and host data name, by source."""
+    shipped: dict = {}
+    providers = yaml.safe_load(
+        (_SKILL_DIR / "providers.yaml").read_text(encoding="utf-8")
+    )
+    for model in (providers.get("providers", {}).get("opencode", {}).get("models") or []):
+        if isinstance(model, str) and model.startswith("opencode/"):
+            shipped.setdefault(model, set()).add("providers.yaml")
+    caps = yaml.safe_load(
+        (_SKILL_DIR / "hosts" / "capabilities.yaml").read_text(encoding="utf-8")
+    )
+    entry = (caps.get("hosts") or caps).get("opencode") or {}
+    spec = str(entry.get("default_subagent_runner") or "")
+    provider, _, model = spec.partition(":")
+    if provider == "opencode" and model.startswith("opencode/"):
+        shipped.setdefault(model, set()).add("hosts/capabilities.yaml")
+    return shipped
+
+
+def _live_opencode_listing():
+    """`opencode models` on this lane's CLI, or a named skip when it cannot answer.
+
+    An absent CLI or an unreachable catalog is a skip, never a failure — the
+    same `known=None` rule the preflight's catalog leg pins: "not in an empty
+    list" is not a fact.
+    """
+    binary = shutil.which("opencode")
+    if not binary:
+        pytest.skip("opencode is not installed on this lane")
+    try:
+        completed = subprocess.run(
+            [binary, "models"], capture_output=True, text=True, timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"`opencode models` could not run: {exc}")
+    from utils.providers.opencode import _parse_model_listing
+
+    listing = _parse_model_listing(completed.stdout or "")
+    if completed.returncode != 0 or listing is None:
+        pytest.skip(
+            f"`opencode models` exited {completed.returncode} without a readable "
+            f"listing (catalog unreachable?): {(completed.stderr or '')[:200]!r}"
+        )
+    return listing
+
+
+class TestTheShippedOpencodeIdsAreStillListed:
+    """Zen's catalog is server-side: `opencode/sonnet`,
+    `opencode/deepseek-v4-flash-free` and `opencode/hy3-free` all vanished between
+    releases while the config still named them, and the host default was one of
+    them. A hermetic CI run cannot see the catalog and must not try, so the diff
+    lives on the lane that already runs real CLIs and is meant to run on a
+    schedule. A delta fails LOUDLY, naming the id and the file that ships it —
+    the runtime answer (`invalid_model_catalog` at preflight, D4 at dispatch) is
+    what a user hits; this is what notices before a user does.
+    """
+
+    pytestmark = pytest.mark.live
+
+    def test_every_shipped_opencode_id_is_in_the_live_catalog(self):
+        shipped = _shipped_opencode_ids()
+        assert shipped, "no opencode/* id is shipped at all — the check is vacuous"
+        listing = _live_opencode_listing()
+        missing = {
+            model: sorted(sources)
+            for model, sources in shipped.items() if model not in listing
+        }
+        assert not missing, (
+            f"shipped opencode/* id(s) missing from `opencode models` on "
+            f"opencode {_opencode_version()}: {missing}. Re-run the dated "
+            f"logged-out probe in hosts/capabilities.yaml (the bump ritual), "
+            f"replace or drop each id, and re-render the generated docs."
+        )
+
+
+def _opencode_version() -> str:
+    binary = shutil.which("opencode")
+    if not binary:
+        return "unknown"
+    try:
+        return (subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+        ).stdout or "").strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+class TestTheCredentialFreeDefaultPassesPreflight:
+    """The positive half of D3 step 2, on a clean environment.
+
+    Every existing opencode row on this lane is credentialed or negative, and
+    neither shape can show a credential-free default *completing*. `status`
+    structurally cannot see it either — it spawns no probe. So this drives the
+    executor's own `preflight_runner` on the shipped host default from a
+    zero-credential HOME/XDG pair with every provider `*_API_KEY` unset, in a
+    child interpreter (the caches are per process and the redirect is the
+    environment), and requires it to COMPLETE rather than exit 3: the auth leg
+    must read `not-required` and the catalog leg `ok`. The same child then
+    preflights a credential-requiring id on the same CLI and must be refused
+    `not_authenticated` — the exemption is narrow or it is a hole.
+    """
+
+    pytestmark = pytest.mark.live
+
+    _CHILD = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from utils import subagent_executor as executor
+from utils import host_capabilities as caps
+spec = caps.entry("opencode")["default_subagent_runner"]
+out = {"spec": spec}
+try:
+    out["info"] = executor.preflight_runner(spec, key="driver.subagent_runner (host capabilities)")
+except executor.RunnerRejected as exc:
+    out["refused"] = {"reason_code": exc.reason_code, "message": str(exc)}
+try:
+    executor.preflight_runner("opencode:openrouter/deepseek/deepseek-v4-flash-0731")
+    out["gated"] = "dispatched"
+except executor.RunnerRejected as exc:
+    out["gated"] = exc.reason_code
+print(json.dumps(out))
+"""
+
+    def test_the_shipped_default_completes_preflight_with_zero_credentials(
+        self, tmp_path
+    ):
+        if not shutil.which("opencode"):
+            pytest.skip("opencode is not installed on this lane")
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.endswith("_API_KEY") and k != "MULTI_LLM_PROVIDERS_CONFIG"
+        }
+        for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+            target = tmp_path / name.lower()
+            target.mkdir()
+            env[name] = str(target)
+        # XDG_CACHE_HOME is deliberately NOT redirected (models.json lives there).
+        completed = subprocess.run(
+            [sys.executable, "-c", self._CHILD, str(_SKILL_DIR)],
+            capture_output=True, text=True, timeout=300, env=env, cwd=str(tmp_path),
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        assert "refused" not in result, (
+            f"the shipped default {result['spec']!r} was refused on a "
+            f"zero-credential install: {result['refused']}"
+        )
+        info = result["info"]
+        assert info["auth"] == "not-required", info
+        assert info["model_catalog"] == "ok", info
+        assert result["gated"] == "not_authenticated", result
