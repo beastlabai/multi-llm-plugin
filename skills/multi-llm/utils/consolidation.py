@@ -47,10 +47,12 @@ except ImportError:
     )
 
 try:
+    from . import cli_common
     from .prompt_loader import load_prompt
     from .subagent_prompts import build_consolidation_prompt
     from .subagent_tasks import PromptBudget, build_inputs, make_task, make_task_file
 except ImportError:
+    from utils import cli_common
     from utils.prompt_loader import load_prompt
     from utils.subagent_prompts import build_consolidation_prompt
     from utils.subagent_tasks import (
@@ -487,8 +489,16 @@ def prepare_consolidation_tasks(
                 "phase_dir": "...",
                 "plan_file": "...",
                 "grouped_file": "grouped.json",
-                "reaggregate_command": "--reaggregate-consolidation"
+                "reaggregate_command": "--reaggregate-consolidation",
+                "replay_flags": ["--quick"]
             }
+
+    ``reaggregate_command`` is the bare verb, not a command; the reader
+    (``review_plan_orchestrator.consolidate_mode``) composes the runnable
+    string through ``cli_common.retry_command`` from mode ``review-plan``,
+    this document's ``plan_file``, that verb and ``replay_flags`` — the
+    writing invocation's own selection flags (D2), so the merge is retried
+    under the panel the caller asked for.
     """
     phase_path = Path(phase_dir)
 
@@ -588,6 +598,7 @@ def prepare_consolidation_tasks(
             "plan_file": plan_file,
             "grouped_file": "grouped.json",
             "reaggregate_command": "--reaggregate-consolidation",
+            "replay_flags": cli_common.current_replay_flags(mode="review-plan"),
         },
     )
 

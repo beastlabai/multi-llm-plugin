@@ -193,7 +193,7 @@ def _install_crashing_launcher(bin_dir: Path, name: str, code: int = 17) -> Path
         "argv = sys.argv[1:]\n"
         "env = dict(os.environ, MOCK_LLM_PROVIDER=%r)\n"
         "rc = subprocess.run([sys.executable, %r] + argv, env=env).returncode\n"
-        "probe = any(a in ('--version', '-v', 'login', 'status') for a in argv)\n"
+        "probe = any(a in ('--version', '-v', 'login', 'status', 'sandbox') for a in argv)\n"
         "sys.exit(rc if probe or rc else %d)\n"
         % ("claude-code" if name == "claude" else name, str(MOCK_LLM), code),
         encoding="utf-8",

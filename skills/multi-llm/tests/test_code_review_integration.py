@@ -44,7 +44,13 @@ class TestCodeReviewIssueGrouping:
         assert len(result) >= 1
 
     def test_different_file_issues_not_merged(self):
-        """Test that issues in different files stay separate."""
+        """Issues in different files stay separate.
+
+        A code-review finding is anchored to a file and its fix lands in one,
+        so two findings naming different files are two fixes — word-identical
+        or not. The score halves when the file anchors disagree, which is what
+        keeps an identical-sounding finding in ``a.py`` and ``b.py`` apart.
+        """
         issues = [
             {
                 "title": "Missing null check",
@@ -64,9 +70,59 @@ class TestCodeReviewIssueGrouping:
             }
         ]
         result = group_similar_suggestions(issues)
-        # Should stay separate due to different files
-        # Note: current grouping is text-based, so this tests current behavior
-        assert len(result) >= 1
+
+        assert len(result) == 2
+
+    def test_same_file_issues_still_merge(self):
+        """The file rule only ever separates — same file, same finding, one group."""
+        issues = [
+            {
+                "title": "Missing null check on the session lookup",
+                "desc": "get_session dereferences the row without checking for None",
+                "importance": "high",
+                "file": "src/a.py:40-52",
+                "type": "bug",
+                "source_model": "gpt-4"
+            },
+            {
+                "title": "Session lookup missing a null check",
+                "desc": "The session row is dereferenced with no None check in get_session",
+                "importance": "high",
+                "file": "a.py",
+                "type": "bug",
+                "source_model": "claude"
+            }
+        ]
+        result = group_similar_suggestions(issues)
+
+        # The anchors differ only in path spelling and line range, so they
+        # reduce to the same file and the pair is free to merge.
+        assert len(result) == 1
+        assert len(result[0].suggestions) == 2
+
+    def test_same_basename_in_different_directories_stays_apart(self):
+        """A suffix match must land on a path boundary, or a monorepo merges itself."""
+        issues = [
+            {
+                "title": "Missing null check on the session lookup",
+                "desc": "get_session dereferences the row without checking for None",
+                "importance": "high",
+                "file": "services/a/utils.py",
+                "type": "bug",
+                "source_model": "gpt-4"
+            },
+            {
+                "title": "Missing null check on the session lookup",
+                "desc": "get_session dereferences the row without checking for None",
+                "importance": "high",
+                "file": "services/b/utils.py",
+                "type": "bug",
+                "source_model": "claude"
+            }
+        ]
+        result = group_similar_suggestions(issues)
+
+        assert len(result) == 2
 
 
 class TestCodeReviewValidation:

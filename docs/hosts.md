@@ -99,7 +99,7 @@ Needs opencode 1.18.18 or newer. Upgrading is bumping the pin and restarting: th
 Three differences worth knowing on these hosts:
 
 - **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. On the `install-host` file route, `--interactive` opts back into a rendered gate. The package route on `opencode` refuses `--interactive` and `-i` instead — it spawns the dispatcher with nothing on its stdin, so the model picker they force could not prompt — and asks you to choose non-interactively: `--models "provider:model,…"` or `--quick`, or `defaults.models` in `providers.yaml`.
-- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on `codex` and `opencode:opencode/sonnet` on `opencode` — not a Claude subagent.
+- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on `codex` and `opencode:opencode/big-pickle` on `opencode` — not a Claude subagent.
 - **Headless `opencode` needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
 
 ## Capability matrix
@@ -110,7 +110,7 @@ Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data `ins
 |---|---|---|---|---|---|---|---|---|
 | `claude-code` | no (ships with the plugin) | `markdown+frontmatter` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | `none` |
 | `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | `new-session` |
-| `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/sonnet` | `new-session` |
+| `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/big-pickle` | `new-session` |
 
 ## Where the shim goes
 
@@ -134,6 +134,36 @@ uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" inst
 Repair is always re-render, never in-place patching, and a re-install with nothing changed is byte-identical and does nothing. A shim you edited by hand is **never** overwritten silently: the install stops and names the file, and `--force` keeps your version as `<shim>.local.bak`. The inverse is `uninstall-host <host> [--global|--project|--all] [--dry-run]`, which removes only files carrying our `multi_llm_shim` block — identified by that block, never by filename.
 
 <!-- END GENERATED: host-install -->
+
+## Linux sandboxed CLIs
+
+Two provider CLIs put an OS sandbox between the model and the filesystem, and both use bubblewrap: `codex` (`--sandbox workspace-write`) and `muse` (its shell sandbox, which multi-llm now turns off with `--disable-sandbox`). On a stock Ubuntu 24.04 (`kernel.apparmor_restrict_unprivileged_userns = 1`, AppArmor 4.0) bubblewrap cannot create the user namespace it needs, so every sandboxed write dies before the model is reached — this is a property of the **machine**, not of any provider, and it is the same on every host that runs the CLI. Measured from a plain shell:
+
+```
+$ bwrap --ro-bind / / --dev /dev --unshare-net -- /bin/true
+bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+$ bwrap --ro-bind / / --dev /dev -- /bin/true
+bwrap: setting up uid map: Permission denied
+$ unshare -rn /bin/true
+unshare: write failed /proc/self/uid_map: Operation not permitted
+```
+
+`multi_llm.py doctor` detects it (exit 3, naming the `bwrap:` line) and the executor refuses an edit-capable `codex` dispatch before it starts (`sandbox_unavailable`, rung 1). The fix is one AppArmor profile of the shape Ubuntu already ships for chrome/Discord/1password, installed with sudo — the plugin prints it and never applies it:
+
+```
+# /etc/apparmor.d/bwrap
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/bwrap>
+}
+```
+
+then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. That grants the right to `/usr/bin/bwrap` alone; `sysctl kernel.apparmor_restrict_unprivileged_userns=0` also works but loosens every binary on the machine and is not recommended. Reviews are unaffected either way — the fan-out asks codex for its array on stdout rather than for a sandboxed file write. `grok`'s workspace-trust gate (`grok inspect` → `Project trusted: no`, dispatched with `--always-approve` and no trust flag) is an open question: whether it blocks a headless write is unmeasured, and `doctor` prints `trust: untested` for it until it is.
 
 ---
 

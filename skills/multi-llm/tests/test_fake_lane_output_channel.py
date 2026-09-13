@@ -53,7 +53,7 @@ def mock_path(tmp_path, monkeypatch):
     """Put the fake binaries for both identities first on PATH."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for launcher in ("cursor-agent", "codex"):
+    for launcher in ("cursor-agent", "claude"):
         (bin_dir / launcher).symlink_to(MOCK_LLM)
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
@@ -76,8 +76,10 @@ def _invoke(model_spec, out_dir, template=TEMPLATE):
 class TestTheFileChannelIsReallyUsed:
     """A file-capable adapter's result comes from the FILE, not the fallback."""
 
-    def test_codex_writes_the_file_and_is_served_from_it(self, mock_path, tmp_path):
-        result = _invoke("codex:gpt-5.5", tmp_path / "out")
+    def test_claude_code_writes_the_file_and_is_served_from_it(
+        self, mock_path, tmp_path
+    ):
+        result = _invoke("claude-code:sonnet", tmp_path / "out")
 
         assert result["success"] is True, result.get("error")
         assert result["source"] == "file", (
@@ -90,7 +92,7 @@ class TestTheFileChannelIsReallyUsed:
     def test_the_file_the_prompt_named_is_the_file_that_was_read(
         self, mock_path, tmp_path
     ):
-        result = _invoke("codex:gpt-5.5", tmp_path / "out")
+        result = _invoke("claude-code:sonnet", tmp_path / "out")
 
         written = Path(result["output_file"])
         assert written.parent == tmp_path / "out" / "channel"
@@ -120,10 +122,10 @@ class TestAReadOnlyAdapterIsServedFromStdout:
     ):
         """The whole point, in one assertion: the declaration changed the run."""
         cursor = _invoke("cursor-agent:auto", tmp_path / "cursor")
-        codex = _invoke("codex:gpt-5.5", tmp_path / "codex")
+        claude = _invoke("claude-code:sonnet", tmp_path / "claude")
 
-        assert cursor["success"] and codex["success"]
-        assert {cursor["source"], codex["source"]} == {"stdout_fallback", "file"}
+        assert cursor["success"] and claude["success"]
+        assert {cursor["source"], claude["source"]} == {"stdout_fallback", "file"}
 
 
 class TestTheRegressionItselfIsCovered:
@@ -157,6 +159,17 @@ class TestTheRegressionItselfIsCovered:
         assert STDOUT_OUTPUT_LOCATION.splitlines()[0].startswith("CRITICAL: Return")
 
 
+#: Adapters that declare `supports_file_output = False` for a reason that is
+#: NOT a read-only mode, and whose fake identity therefore keeps writing when a
+#: prompt hands it the file block. codex (D6, 2026-09-11): its CLI writes
+#: wherever bubblewrap can start; the declaration moves the review off a sandbox
+#: that a stock Ubuntu 24.04 cannot start, and a mock that refused the write
+#: would model a CLI that does not exist on a working machine. What guards the
+#: review is the prompt — `test_llm_client.TestOutputLocationBlock` pins that
+#: codex is asked for stdout — not a refusal sentence here.
+DECLARED_FALSE_BUT_WRITES_WHEN_ASKED = frozenset({"codex"})
+
+
 class TestTheMockRosterTracksTheDeclaration:
     """`mock_llm.READ_ONLY_IDENTITIES` cannot drift from the adapters."""
 
@@ -186,4 +199,35 @@ class TestTheMockRosterTracksTheDeclaration:
         with_identities = TestDeclaredOutputChannel.CANNOT_WRITE_FILES & set(
             SkillRunner.PROVIDERS
         )
-        assert with_identities == mock_llm.READ_ONLY_IDENTITIES
+        assert (
+            with_identities - DECLARED_FALSE_BUT_WRITES_WHEN_ASKED
+            == mock_llm.READ_ONLY_IDENTITIES
+        )
+
+    def test_the_exception_is_a_declared_false_adapter_with_an_identity(self):
+        """The exception cannot outlive what it excuses: every member must be
+        on the declared roster, have a fake identity, and NOT refuse there."""
+        from tests.harness.skill_runner import SkillRunner
+        from tests.test_providers import TestDeclaredOutputChannel
+
+        sys.path.insert(0, str(MOCK_LLM.parent))
+        import mock_llm
+
+        assert DECLARED_FALSE_BUT_WRITES_WHEN_ASKED <= (
+            TestDeclaredOutputChannel.CANNOT_WRITE_FILES
+        )
+        assert DECLARED_FALSE_BUT_WRITES_WHEN_ASKED <= set(SkillRunner.PROVIDERS)
+        assert not (DECLARED_FALSE_BUT_WRITES_WHEN_ASKED & mock_llm.READ_ONLY_IDENTITIES)
+
+    def test_codex_is_asked_for_stdout_and_still_succeeds(self, mock_path, tmp_path):
+        """D6, end to end on the fake lane: the shipped prompt asks codex for
+        stdout, the mock writes nothing, and the slot is served from the
+        fallback — the same per-model result either way."""
+        bin_dir = mock_path
+        (bin_dir / "codex").symlink_to(MOCK_LLM)
+
+        result = _invoke("codex:gpt-5.5", tmp_path / "out")
+
+        assert result["success"] is True, result.get("error")
+        assert result["source"] == "stdout_fallback"
+        assert not Path(result["output_file"]).exists()

@@ -90,10 +90,13 @@ Every mode is this single command, with `--host claude-code` baked in:
 uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host claude-code [flags…]
 ```
 
-Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete,
-`3` needs a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read
-`state`, `artifacts` and `next` from it rather than mining the transcript, and run
-`next` verbatim when it is not `null`.
+Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete, `3` needs
+a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read `state`, `artifacts`
+and `next` from it rather than mining the transcript. Run `next` verbatim when it is not
+`null` on `0` and `2`. On `3` stop: report to the user what was being run, the last error
+line it printed, and the options its output names (`next` included); do not run a different
+mode. Do not perform the work this run was going to review, plan, or implement: doing it
+yourself is never a substitute for a failed run. Run an option only after the user has picked it.
 
 ## 7. Examples
 

@@ -202,6 +202,23 @@ class CodexProvider(LLMProvider):
     # rather than anything this repo enforces afterwards.
     agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
     supports_file_edits = True
+    # D6 — the review fan-out asks codex for the array on stdout, never for a
+    # file. `codex exec` writes through its own bubblewrap sandbox (`--sandbox
+    # workspace-write`), and on a stock Ubuntu 24.04 with
+    # `kernel.apparmor_restrict_unprivileged_userns=1` bwrap cannot start at
+    # all (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`).
+    # Measured twice on `codex:gpt-6-astra:xhigh`, 2026-09-10: seven minutes of
+    # review work each time, three `Failed to write file` attempts through the
+    # file tool, and a final message carrying no JSON — with `--ephemeral`
+    # keeping no rollout to salvage it from. The review only ever needed the
+    # array as the final `agent_message`, which `parse_output` already returns
+    # and `invoke_with_file_output` already reads (`source: stdout_fallback`);
+    # `save_model_result` writes the same per-model file from it either way.
+    # `supports_file_edits` stays True — the agent-write profile really edits,
+    # and D6 step 3's sandbox probe is what gates it — and
+    # `structured_output_transport` stays "file": that is the `--output-schema`
+    # sidecar the CLI reads, not a file the model writes.
+    supports_file_output = False
     supports_workspace_reads = True
     usage_support = USAGE_FULL
     # §4.2.2: this adapter really emits `--output-schema` when handed a
@@ -219,6 +236,11 @@ class CodexProvider(LLMProvider):
     auth_check = ("codex", "login", "status")
     login_cmd = "codex login"
     version_cmd = ("codex", "--version")
+    # D6 — `codex exec --sandbox workspace-write` writes through bubblewrap, and
+    # bubblewrap needs a user namespace a stock Ubuntu 24.04 denies it. Read by
+    # `multi_llm.py doctor` to pick the bwrap self-test; the dispatch-time gate
+    # is `sandbox_probe_command` below, which asks codex's own runner instead.
+    sandbox_mechanism = "bubblewrap"
     # M14/§5.4 — the floor names the FEATURE, not a bare number: 0.144.0 is the
     # oldest build measured to emit the `item.completed`/`agent_message` JSONL
     # shape `parse_output` reads AND to accept the three flags below at the same
@@ -337,6 +359,34 @@ class CodexProvider(LLMProvider):
                 schema=schema.name,
             )
         return [OUTPUT_SCHEMA_FLAG, schema.path]
+
+    def sandbox_probe_command(self, profile: str) -> Optional[List[str]]:
+        """codex's own runner, asked to write one byte where a dispatch would (D6).
+
+        ``codex sandbox -c 'sandbox_mode="<policy>"' -- <cmd>`` runs ``<cmd>``
+        under exactly the bubblewrap policy ``codex exec --sandbox <policy>``
+        would use, with no model and no prompt — ~30 ms measured, and on a
+        stock Ubuntu 24.04 it dies on ``bwrap: loopback: Failed RTM_NEWADDR:
+        Operation not permitted`` before the shell starts. Only the write
+        profile is probed: ``agent-readonly`` is never asked to write, and the
+        review fan-out stopped needing the sandbox when
+        ``supports_file_output`` went ``False``. The policy comes from
+        ``_SANDBOX_BY_PROFILE`` so the probe cannot answer for a policy the
+        dispatch does not use (M5). The byte lands under ``.multi-llm/tmp`` of
+        the current directory — the executor runs this with ``cwd`` at the
+        repo root — and the shell leaves nothing behind it created.
+        """
+        if profile != PROFILE_AGENT_WRITE:
+            return None
+        script = (
+            'd=.multi-llm/tmp; f="$d/sandbox-probe-$$"; '
+            'mkdir -p "$d" && : > "$f" && rm -f "$f"; rc=$?; '
+            'rmdir "$d" .multi-llm 2>/dev/null; exit $rc'
+        )
+        return [
+            "codex", "sandbox", "-c", f'sandbox_mode="{_sandbox_for(profile)}"',
+            "--", "sh", "-c", script,
+        ]
 
     def build_command(
         self,

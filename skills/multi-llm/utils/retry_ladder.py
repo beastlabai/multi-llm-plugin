@@ -58,6 +58,21 @@ STATUS_SCHEMA_INVALID = "schema_invalid"
 STATUS_REJECTED = "rejected"
 STATUS_SPAWN_FAILED = "spawn_failed"
 STATUS_AUTH_FAILED = "auth_failed"
+#: The runner rejected the model id itself (D4). Deliberately the same string
+#: as the classifier's ``CATEGORY_INVALID_MODEL`` — an alias for a word already
+#: in the vocabulary, not a second spelling — so the category reaches
+#: :meth:`RetryLadder.record` under its own name on both lanes. A rejected id is
+#: a property of the *spec*, not of the turn: the fix is a config edit, never a
+#: retry, and every sibling resolving the same spec fails identically.
+STATUS_INVALID_MODEL = "invalid_model"
+#: The runner's own OS sandbox could not start (D6) — bubblewrap on a stock
+#: Ubuntu 24.04, where ``kernel.apparmor_restrict_unprivileged_userns=1``
+#: denies it the user namespace it needs. The same string as the classifier's
+#: ``CATEGORY_SANDBOX_UNAVAILABLE`` on D4's reasoning: a property of the
+#: *machine*, not of the turn, so every sibling on that runner fails
+#: identically and the fix (an AppArmor profile, ``multi_llm.py doctor`` prints
+#: it) is never a retry.
+STATUS_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 #: Not a dispatch outcome: a task with no result file at all (an orphan from a
 #: run killed mid-batch). Defined by artifacts, never by memory (D3i).
 STATUS_INCOMPLETE = "incomplete"
@@ -89,6 +104,8 @@ STATUS_SALVAGE_UNRECOVERABLE = "salvage_unrecoverable"
 RUNG_BY_STATUS = {
     STATUS_SPAWN_FAILED: 1,
     STATUS_AUTH_FAILED: 1,
+    STATUS_INVALID_MODEL: 1,
+    STATUS_SANDBOX_UNAVAILABLE: 1,
     STATUS_TIMEOUT: 2,
     STATUS_RATE_LIMITED: 3,
     STATUS_RUNNER_ERROR: 4,
@@ -106,7 +123,15 @@ BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
 
 #: Rungs that fail the whole batch immediately: every sibling would fail
 #: identically, so continuing would only burn the retry budget N times.
-FATAL_STATUSES = frozenset({STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED})
+#: ``invalid_model`` qualifies because the failure is a property of the spec
+#: (D4): a sibling on the *same* spec cannot do anything but fail again, and a
+#: sibling on a different spec is settled by the dispatch gate, not predicted.
+#: ``sandbox_unavailable`` qualifies because the failure is a property of the
+#: machine (D6): bubblewrap cannot start for any sibling either.
+FATAL_STATUSES = frozenset({
+    STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED, STATUS_INVALID_MODEL,
+    STATUS_SANDBOX_UNAVAILABLE,
+})
 
 #: The smallest slice of the per-slot budget worth *starting* an attempt with
 #: (D3i). The timeout is the slot's total wall-clock budget, so a retry gets what

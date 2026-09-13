@@ -2,6 +2,7 @@
 import atexit
 import contextlib
 import contextvars
+import difflib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -20,6 +21,7 @@ from .base import (
     REASONING_LADDER,
     USAGE_FULL,
     LLMProvider,
+    ModelVerdict,
     ReasoningLadder,
     StructuredSchema,
     split_reasoning_effort,
@@ -291,6 +293,73 @@ def sweep_config_home() -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+#: One bare ``provider/model`` slug, the whole line: no whitespace, at least
+#: one ``/``, nothing that could be a log field or a decoration.
+_MODEL_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[^\s]+$")
+
+#: A ``--print-logs`` line, which is what a listing must NOT open with.
+_LOG_LINE = re.compile(r"^\s*(?:timestamp|level|service)=", re.IGNORECASE)
+
+
+def _list_models(
+    argv: List[str], env: Dict[str, str]
+) -> Optional["subprocess.CompletedProcess"]:
+    """Run the listing subcommand with the executor's own probe pins (D3 step 4).
+
+    Mirrors ``subagent_executor._run_probe`` exactly — ``timeout=30``,
+    ``stdin=DEVNULL``, captured text streams, ``None`` on any ``OSError`` /
+    ``SubprocessError`` — because that ceiling is the one that matters: a
+    ``subprocess.TimeoutExpired`` **is** a ``SubprocessError``, so a listing
+    that hangs is killed at 30 s and read as *unknown*, which blocks nothing.
+    It takes ``env`` because the listing must be read under the dispatch's own
+    hermetic delta, which the executor's probe has no channel for.
+    """
+    launcher: List[str] = [argv[0]]
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from ..llm_client import _resolve_executable
+    except ImportError:  # pragma: no cover - direct-script import shim
+        try:
+            from utils.llm_client import _resolve_executable  # type: ignore
+        except ImportError:
+            _resolve_executable = None  # type: ignore[assignment]
+    if _resolve_executable is not None:
+        try:
+            launcher, _ = _resolve_executable(argv[0])
+            launcher = list(launcher)
+        except Exception:  # noqa: BLE001 - fall back to the bare name
+            launcher = [argv[0]]
+    try:
+        return subprocess.run(
+            [*launcher, *argv[1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _parse_model_listing(text: str) -> Optional[FrozenSet[str]]:
+    """The slugs of one ``opencode models`` stdout, or ``None`` if it is not one.
+
+    ``None`` — "this is not a listing" — for an empty stream, a stream that
+    opens with a log line, or one whose non-blank lines are mostly not
+    ``provider/model`` shaped. A parsed listing is never empty by construction.
+    """
+    lines = [line.strip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines or _LOG_LINE.match(lines[0]):
+        return None
+    slugs = [line for line in lines if _MODEL_SLUG.match(line)]
+    if not slugs or len(slugs) * 2 < len(lines):
+        return None
+    return frozenset(slugs)
+
+
 def _read_help_tokens(binary: str) -> frozenset:
     """The long options ``opencode run --help`` documents (§5.4.1's flag gate).
 
@@ -452,8 +521,30 @@ class OpenCodeProvider(LLMProvider):
     # the once-per-run auth preflight needs (D3c).
     auth_check = ("opencode", "auth", "list")
     login_cmd = "opencode auth login"
+    #: D3 step 2 — the model tokens opencode serves with NO credential present,
+    #: declared rather than sniffed and measured before being written down.
+    #: `opencode/big-pickle`: probed 2026-09-11 on opencode 1.18.30 from a
+    #: scratch HOME/XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME pair whose
+    #: `opencode auth list` printed `└  0 credentials`, with OPENAI_API_KEY,
+    #: GEMINI_API_KEY, ANTHROPIC_API_KEY and OPENROUTER_API_KEY unset:
+    #: `opencode run --model opencode/big-pickle --print-logs --log-level ERROR
+    #: "Reply with the single word OK."` exited 0 with stdout `OK` in a few
+    #: seconds. `openrouter/*`, `openai/*` and `google/*` stay OUT: each needs a
+    #: stored or environment credential and the auth leg must keep refusing
+    #: them. Zen's catalog is server-side and `opencode/sonnet` vanished from
+    #: it once already, so re-probe this on each opencode bump and drop the
+    #: entry the day the probe stops answering (see hosts/capabilities.yaml).
+    credential_free_models = frozenset({"opencode/big-pickle"})
     version_cmd = ("opencode", "--version")
     min_version = "1.17.15"
+    # NOT the newest release the parser has been graded on — the release the
+    # DECLARED fixtures were captured from, and a floor `engines.opencode` is
+    # asserted against (test_opencode_package.py). D3 (2026-09-11) added a real
+    # 1.18.30 capture beside them, `tests/fixtures/opencode/run_review.1.18.30.jsonl`,
+    # and grades the parser on both pins rather than moving this one: moving it
+    # is a support-window decision with its own checklist (recaptured fixtures,
+    # this constant, `engines.opencode`, the packaging README, the container
+    # pin and lockfile, cli-versions.lock, host_matrix.yaml, re-recorded rows).
     verified_version = "1.18.12"
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
@@ -529,6 +620,96 @@ class OpenCodeProvider(LLMProvider):
             f"opencode {STRUCTURAL_MODEL_VERSION}) — pass e.g. 'opencode/{token}' "
             f"or the provider that serves it."
         )
+
+    # ── D3 step 4 — the CLI's own catalog ─────────────────────────────────
+
+    #: The listing subcommand: one bare ``provider/model`` per stdout line and
+    #: nothing else (measured on 1.18.30 — no header, no decoration).
+    models_cmd = ("opencode", "models")
+
+    def describe_unlisted_model(
+        self,
+        model: str,
+        *,
+        anchor: Optional[str] = None,
+        profile: str = PROFILE_AGENT_READONLY,
+    ) -> ModelVerdict:
+        """Is ``model`` in ``opencode models``' live listing? (D3 step 4)
+
+        **Read in the dispatch's own configuration, or the verdict is wrong.**
+        The listing is taken inside the same :meth:`hermetic_dispatch` context
+        the dispatch it vets will enter — same ``XDG_CONFIG_HOME`` redirect, same
+        ``OPENCODE_CONFIG_CONTENT`` rebuilt from multi-llm's own
+        ``config_providers`` — so a provider defined only in the user's own
+        ``opencode.json`` is absent here exactly as it would be at dispatch. When
+        :func:`hermetic_enabled` is false for ``profile`` the probe runs plain,
+        matching dispatch again. ``XDG_CACHE_HOME`` is never redirected (it holds
+        ``opencode/models.json``), so this reads the same catalog cache a
+        dispatch would rather than paying a cold fetch.
+
+        *Normalization*: the ``:effort`` suffix is split off with the same
+        :func:`split_reasoning_effort` call :meth:`build_command` makes before it
+        emits ``--variant``, so the token compared is the token dispatched. Then
+        whole lines, exact, case-sensitive.
+
+        *Unknown means unknown.* A probe that could not run, a non-zero exit,
+        zero parsed slugs, or output that is not a listing at all (a stream whose
+        lines are mostly not ``provider/model`` shaped, or that opens with a
+        ``timestamp=… level=…`` log line) is ``known=None`` — never ``False``.
+        "Not in an empty list" is not a fact. ``known=False`` is reserved for a
+        listing that parsed cleanly and does not contain the token, and it
+        carries a diagnostic composed *here* from that listing — the ids sharing
+        the token's ``provider/`` prefix, nearest first, capped at three, plus
+        how many ids that prefix lists. ``opencode models`` prints no "Did you
+        mean" line; quoting the CLI's own is D4's job on the dispatch path.
+        """
+        base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
+        token = base_model.strip()
+        if "/" not in token:
+            # Structural — `describe_unresolvable_model` refuses it first.
+            return ModelVerdict(known=None)
+        try:
+            with self.hermetic_dispatch(profile, token, anchor=anchor) as refusal:
+                if refusal:
+                    # The slot itself is refused before spawn; a listing taken
+                    # here would describe a configuration no dispatch will use.
+                    return ModelVerdict(known=None)
+                env = dict(os.environ)
+                for name in self.get_remove_env() or ():
+                    env.pop(name, None)
+                env.update(self.get_env(token) or {})
+                completed = _list_models(list(self.models_cmd), env)
+        except Exception:  # noqa: BLE001 - a catalog read may never end a preflight
+            return ModelVerdict(known=None)
+        if completed is None or completed.returncode != 0:
+            return ModelVerdict(known=None)
+        listing = _parse_model_listing(completed.stdout or "")
+        if listing is None:
+            return ModelVerdict(known=None)
+        if token in listing:
+            return ModelVerdict(known=True)
+
+        prefix = token.split("/", 1)[0]
+        siblings = [slug for slug in listing if slug.startswith(prefix + "/")]
+        nearest = tuple(
+            difflib.get_close_matches(token, siblings, n=3, cutoff=0.0)
+        )
+        if siblings:
+            hint = (
+                f"; nearest: {', '.join(nearest)}" if nearest else ""
+            )
+            detail = (
+                f"`opencode models` lists {len(siblings)} id(s) under "
+                f"'{prefix}/' and {token!r} is not one of them{hint}."
+            )
+        else:
+            detail = (
+                f"`opencode models` lists no ids under '{prefix}/' "
+                f"({len(listing)} ids listed in all) — this opencode has no "
+                f"provider {prefix!r} configured, or none it can authenticate "
+                f"to — so {token!r} cannot resolve."
+            )
+        return ModelVerdict(known=False, detail=detail, suggestions=nearest)
 
     # ── M4 — hermetic dispatch ────────────────────────────────────────────
 
@@ -864,6 +1045,21 @@ class OpenCodeProvider(LLMProvider):
         so without this the caller sees only "exited with code 1". Verified
         against a live auth failure, which produced a 304-byte error event on
         stdout and zero bytes on stderr.
+
+        **stdout is the declared channel; stderr is enrichment (D5).** Since
+        1.18.x the stdout event can be a wrapper with an ``err_…`` ref and no
+        cause — ``UnknownError: Unexpected server error. Check server logs for
+        details.`` — while the underlying exception goes to stderr under the
+        ``--print-logs --log-level ERROR`` we pass, as a
+        ``level=ERROR … error="<text>"`` line. When the stdout message has that
+        wrapper shape, the first such stderr value is appended in parentheses,
+        so the composed text extends the stdout-only one rather than replacing
+        it (``tests/fixtures/opencode/invalid-model.*``). A stderr-only capture
+        recovers nothing: the composition is gated on the wrapper being present.
+
+        Diagnostics only, never classification: no marker table is consulted
+        here and nothing in the composed string invites a caller to branch on
+        it — ``classify_failure`` reads the same bytes for its own verdict.
         """
         messages: List[str] = []
         for event in self._iter_events(stdout):
@@ -878,7 +1074,35 @@ class OpenCodeProvider(LLMProvider):
             parts = [p for p in (name, detail) if isinstance(p, str) and p]
             if parts:
                 messages.append(": ".join(parts))
-        return "; ".join(messages) if messages else None
+        if not messages:
+            return None
+        if any(self._SERVER_ERROR_WRAPPER in m for m in messages):
+            cause = self._stderr_error_value(stderr)
+            if cause:
+                messages = [
+                    f"{m} ({cause})" if self._SERVER_ERROR_WRAPPER in m else m
+                    for m in messages
+                ]
+        return "; ".join(messages)
+
+    #: The stdout wrapper whose cause lives on stderr (opencode ≥ 1.18.x).
+    _SERVER_ERROR_WRAPPER = "UnknownError: Unexpected server error"
+
+    #: One ``error="…"`` value on a log line. Anchored on a literal and free of
+    #: nested quantifiers, so a 40 KB single-character line costs one linear
+    #: scan and no backtracking (``test_every_override_survives_garbage_…``).
+    _STDERR_ERROR_VALUE = re.compile(r'(?:^|\s)error="([^"\n]*)"')
+
+    @classmethod
+    def _stderr_error_value(cls, stderr: str) -> Optional[str]:
+        """The first ``error="…"`` value on a ``level=ERROR`` stderr line."""
+        for line in (stderr or "").splitlines():
+            if "level=ERROR" not in line:
+                continue
+            match = cls._STDERR_ERROR_VALUE.search(line)
+            if match and match.group(1).strip():
+                return match.group(1).strip()
+        return None
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse NDJSON event stream output from OpenCode.

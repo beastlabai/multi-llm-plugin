@@ -61,6 +61,15 @@ For each of the 2 suggestion groups above, decide:
 Compare each group against the context above to verify it. Judge only the
 groups listed above; ignore anything else.
 
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering; do not rely on the
+context above alone when the code itself is one read away. Reserve
+"needs-human-decision" for genuine judgment calls (a product or design
+trade-off), never for a claim you could have checked but did not look at. If
+you cannot read the repository, judge from the records and the context above
+alone.
+
 ## Reply
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
@@ -75,9 +84,10 @@ explanation. Do not write any file; whoever invoked you persists your reply.
 
 Rules:
 1. Output EXACTLY one result per requested group — no more, no fewer.
-2. Copy each group's `group_hash` value verbatim into its result. The
-   `group_index` you echo is advisory; the hash is what the results are joined
-   on, so a wrong hash discards the result.
+2. Each group above carries its own `group_index` — echo that group's
+   `group_index` value back into its result, and copy its `group_hash` value
+   verbatim too. The `group_index` you echo is advisory; the hash is what the
+   results are joined on, so a wrong hash discards the result.
 3. Confidence is a number between 0.0 and 1.0.
 4. Be conservative: when you cannot decide from the context given, answer
    "needs-human-decision" rather than guessing.

@@ -282,6 +282,97 @@ class TestSaveValidationResults:
             assert group["recoverable"] is True
             assert group["revalidated"] is False
 
+    def test_absent_confidence_is_saved_as_null_not_zero(self):
+        """A verdict that omits `confidence` entirely is stored as None.
+
+        A batch reply that omits `confidence` for an otherwise valid verdict
+        used to be saved as 0.0, indistinguishable from a real zero-confidence
+        answer. It must round-trip as null/None instead.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "No confidence field"},
+                {"group_index": 1, "status": "valid", "reason": "Has one", "confidence": 0.0},
+            ]
+            save_validation_results(validation_results, output_path, model="test-model")
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Omitted entirely -> null, never a manufactured 0.0.
+            assert data["groups"][0]["confidence"] is None
+            # An explicit, real 0.0 is preserved as-is, not conflated with the
+            # absent case.
+            assert data["groups"][1]["confidence"] == 0.0
+
+    def test_model_is_derived_from_batch_provenance_when_omitted(self):
+        """`metadata.model` is derived from the batches' own tagged model,
+        never left as the literal string "unknown" when that data exists.
+
+        `merge_batched_validation_results` stamps each merged result with
+        `_source_model` from its batch file's `metadata.model`; a caller that
+        saves without naming a model (several production call sites do)
+        should get that value back instead of "unknown".
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "A", "_source_model": "big-pickle"},
+                {"group_index": 1, "status": "valid", "reason": "B", "_source_model": "big-pickle"},
+            ]
+            save_validation_results(validation_results, output_path)
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            assert data["metadata"]["model"] == "big-pickle"
+
+    def test_model_derivation_joins_distinct_batch_models_sorted(self):
+        """Mixed-provenance batches join as a sorted, comma-separated list
+        rather than silently picking one model's name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "A", "_source_model": "opencode/big-pickle"},
+                {"group_index": 1, "status": "valid", "reason": "B", "_source_model": "big-pickle"},
+            ]
+            save_validation_results(validation_results, output_path)
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            assert data["metadata"]["model"] == "big-pickle,opencode/big-pickle"
+
+    def test_model_falls_back_to_unknown_with_no_provenance_at_all(self):
+        """No `_source_model` anywhere and no explicit model -> "unknown", the
+        pre-existing behavior for genuinely unknown provenance."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "A"},
+            ]
+            save_validation_results(validation_results, output_path)
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            assert data["metadata"]["model"] == "unknown"
+
+    def test_explicit_model_always_wins_over_derivation(self):
+        """An explicitly passed model is never overridden by batch provenance."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "validation.json"
+            validation_results = [
+                {"group_index": 0, "status": "valid", "reason": "A", "_source_model": "big-pickle"},
+            ]
+            save_validation_results(validation_results, output_path, model="claude-code:sonnet")
+
+            with open(output_path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+
+            assert data["metadata"]["model"] == "claude-code:sonnet"
+
 
 class TestLoadValidationResults:
     """Tests for load_validation_results function."""

@@ -356,6 +356,7 @@ clis:
       # Unprobed, it would be the single unasserted link in every muse row.
       - "--base-url"
       - "--disable-approval"
+      - "--disable-sandbox"
       - "--json"
       - "--model"
 

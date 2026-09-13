@@ -455,21 +455,34 @@ def _save_log(
     returncode: int,
     success: bool,
     error: Optional[str] = None,
-    duration_seconds: Optional[float] = None
+    duration_seconds: Optional[float] = None,
+    result_source: Optional[str] = None,
+    stdout_parse_error: Optional[str] = None,
 ) -> bool:
     """
     Save agent output to a log file for debugging.
 
     Args:
         log_file: Path to save the log
-        model: Model identifier
+        model: Model identifier, ``"<provider>:<model>"`` where available —
+            the header names the provider half, so a bare model string (no
+            ``:``) still renders, just without a provider name to show.
         prompt: The prompt sent to the agent
         stdout: Standard output from the process
         stderr: Standard error from the process
         returncode: Process return code
-        success: Whether the invocation was successful
+        success: Whether the invocation was successful — the FINAL outcome,
+            not necessarily the stdout extractor's verdict (see
+            ``stdout_parse_error``/``result_source``).
         error: Error message if failed
         duration_seconds: How long the agent ran
+        result_source: Where the caller's data ultimately came from —
+            ``"file"``, ``"file_extracted"``, ``"stdout_fallback"``, or
+            ``None`` when the caller has no secondary channel to name.
+        stdout_parse_error: Set when the stdout extractor itself failed, even
+            if a secondary channel (the file) went on to salvage the run —
+            the two fields are independent because a failed stdout parse and
+            an overall success are not a contradiction.
 
     Returns:
         True if log was saved successfully, False otherwise
@@ -491,9 +504,16 @@ def _save_log(
         stderr = _bound_stream(_redact(stderr or ""))
         error = _redact(error) if error else error
 
+        # Provider-neutral (§Fix1): every adapter shares this sink, so the
+        # header names the provider the model spec actually carries rather
+        # than a fixed "CURSOR-AGENT" left over from the original single-CLI
+        # implementation. A bare model string (no ``provider:model`` split)
+        # falls back to naming itself.
+        provider_label = (model or "").split(":", 1)[0].strip().upper() or "PROVIDER"
+
         lines = [
             "=" * 80,
-            "CURSOR-AGENT LOG",
+            f"{provider_label} LOG",
             "=" * 80,
             f"Timestamp: {datetime.now().isoformat()}",
             f"Model: {model or 'default'}",
@@ -503,6 +523,12 @@ def _save_log(
 
         if duration_seconds is not None:
             lines.append(f"Duration: {duration_seconds:.1f}s")
+
+        if result_source:
+            lines.append(f"Result source: {result_source}")
+
+        if stdout_parse_error:
+            lines.append(f"Stdout parse: failed ({stdout_parse_error})")
 
         if error:
             lines.append(f"Error: {error}")
@@ -590,6 +616,7 @@ def invoke_with_provider(
     prompt_transport: Optional[str] = None,
     anchor: Optional[Union[str, Path]] = None,
     schema_phase: Optional[str] = None,
+    _defer_parse_failure_log: bool = False,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -650,6 +677,16 @@ def invoke_with_provider(
             ``--json-schema``. **Re-read date:** 2027-02-20. Until one of those
             fires, wiring a production caller here is a regression, not
             progress. See ``plans/harness-residual-work.md`` §3, W1.
+        _defer_parse_failure_log: Internal (§Fix1). When ``log_file`` is set
+            and the exit-0 stdout extractor fails, writing the log here would
+            freeze ``Success: False`` on a run that :func:`invoke_with_file_output`
+            goes on to resolve successfully through the file channel. Set by
+            that caller only: skips the immediate ``_save_log`` write for
+            exactly that case and hands the raw capture back on
+            ``details["_deferred_log"]`` instead, so the one log entry gets
+            written once the final outcome — file, stdout fallback, or both
+            failed — is known. Every other outcome (a clean parse, or a hard
+            failure) still logs immediately, unaffected by this flag.
 
     Returns:
         Dict with 'success' key and either:
@@ -1061,19 +1098,30 @@ def invoke_with_provider(
         if not parsed.get("success", False):
             _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
 
-        # Save log if requested
+        # Save log if requested. §Fix1: a deferring caller (invoke_with_file_output)
+        # gets the raw capture on `details` instead of an immediate write when the
+        # stdout extractor just failed — it may still salvage this run through the
+        # file channel, and only it knows the outcome that write should describe.
         if log_file:
-            _save_log(
-                log_file=log_file,
-                model=f"{provider_name}:{model}",
-                prompt=prompt,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                returncode=result.returncode,
-                success=parsed.get("success", False),
-                error=parsed.get("error"),
-                duration_seconds=duration
-            )
+            if _defer_parse_failure_log and not parsed.get("success", False):
+                parsed.setdefault("details", {})["_deferred_log"] = {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                    "duration_seconds": duration,
+                }
+            else:
+                _save_log(
+                    log_file=log_file,
+                    model=f"{provider_name}:{model}",
+                    prompt=prompt,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    returncode=result.returncode,
+                    success=parsed.get("success", False),
+                    error=parsed.get("error"),
+                    duration_seconds=duration
+                )
 
         return parsed
 
@@ -1275,6 +1323,53 @@ def render_output_location(
     return FILE_OUTPUT_LOCATION.format(path=output_json_path)
 
 
+def _finalize_file_output_log(
+    log_file: Optional[Union[str, Path]],
+    deferred_log: Optional[Dict[str, Any]],
+    result: Dict[str, Any],
+    model_spec: str,
+    prompt: str,
+    *,
+    success: bool,
+    error: Optional[str],
+    result_source: Optional[str],
+) -> None:
+    """Write the one log entry :func:`invoke_with_file_output` owes (§Fix1).
+
+    A no-op when no log was requested, or when nothing was deferred — either
+    the stdout extractor already succeeded (``invoke_with_provider``'s own
+    immediate write already says ``Success: True``, correctly) or the run
+    hard-failed before this function got far enough to reconsider it. Only
+    the exit-0-but-unparseable case defers, so this is the single place that
+    settles what that case's log ultimately says: the FINAL outcome — after
+    the file channel and the stdout fallback both had their turn — never the
+    stdout extractor's own opinion of a run it did not get the last word on.
+    """
+    if not log_file or deferred_log is None:
+        return
+    details = result.get("details", {})
+    provider = details.get("provider")
+    model = details.get("model")
+    resolved_model = f"{provider}:{model}" if provider or model else model_spec
+    # The stdout extractor's own verdict travels alongside the final one
+    # rather than being overwritten by it — "Success: True" by itself would
+    # hide that the file channel is what actually salvaged this run.
+    stdout_parse_error = result.get("error") if not result.get("success") else None
+    _save_log(
+        log_file=log_file,
+        model=resolved_model,
+        prompt=prompt,
+        stdout=deferred_log.get("stdout", ""),
+        stderr=deferred_log.get("stderr", ""),
+        returncode=deferred_log.get("returncode", -1),
+        success=success,
+        error=error,
+        duration_seconds=deferred_log.get("duration_seconds"),
+        result_source=result_source,
+        stdout_parse_error=stdout_parse_error,
+    )
+
+
 def invoke_with_file_output(
     prompt_template: str,
     model_spec: str,
@@ -1360,9 +1455,13 @@ def invoke_with_file_output(
             "data": None,
         }
 
-    # Invoke provider
+    # Invoke provider. §Fix1: defer the log write for an exit-0 stdout parse
+    # failure — this function may still salvage the run through the file
+    # channel below, and the immediate write inside invoke_with_provider
+    # cannot know that yet.
     result = invoke_with_provider(prompt, model_spec, timeout, log_file, cwd=cwd,
-                                  anchor=anchor)
+                                  anchor=anchor, _defer_parse_failure_log=True)
+    deferred_log = result.get("details", {}).pop("_deferred_log", None)
 
     # Check for hard failures that mean the command didn't run properly
     # (as opposed to parse errors which may still have written to file)
@@ -1376,6 +1475,9 @@ def invoke_with_file_output(
     )
 
     if not result.get("success") and is_hard_failure:
+        # `deferred_log` is always None here — a hard failure never reaches
+        # the exit-0 branch that sets it — so invoke_with_provider's own
+        # immediate write (or lack of one) already stands as final.
         return {
             **result,
             "output_file": str(output_json_path),
@@ -1385,6 +1487,11 @@ def invoke_with_file_output(
     file_result = read_json_from_file(output_json_path, prefer_arrays=prefer_arrays)
 
     if file_result.get("success"):
+        _finalize_file_output_log(
+            log_file, deferred_log, result, model_spec, prompt,
+            success=True, error=None,
+            result_source=file_result.get("source", "file"),
+        )
         return {
             "success": True,
             "data": file_result["data"],
@@ -1396,6 +1503,10 @@ def invoke_with_file_output(
     # Fall back to stdout parsing (the data parsed by the provider)
     stdout_data = result.get("data")
     if _is_valid_parsed_data(stdout_data):
+        _finalize_file_output_log(
+            log_file, deferred_log, result, model_spec, prompt,
+            success=True, error=None, result_source="stdout_fallback",
+        )
         return {
             "success": True,
             "data": stdout_data,
@@ -1406,6 +1517,11 @@ def invoke_with_file_output(
         }
 
     # Both failed
+    _finalize_file_output_log(
+        log_file, deferred_log, result, model_spec, prompt,
+        success=False, error="JSON parsing failed from both file and stdout",
+        result_source=None,
+    )
     return {
         "success": False,
         "error": "JSON parsing failed from both file and stdout",

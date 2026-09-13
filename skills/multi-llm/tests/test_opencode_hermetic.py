@@ -897,3 +897,225 @@ class TestHermeticScopeAndHatch:
                 f"{name} declares a hermetic dispatch context; opencode's config "
                 f"layering is what this contains, and it is not a general concern"
             )
+
+
+# --------------------------------------------------------------------------- #
+# D3 step 4 — `describe_unlisted_model` reads the listing in the dispatch's own
+# configuration, and an unreadable listing is unknown, never a refusal
+# --------------------------------------------------------------------------- #
+
+_LISTING = (
+    "opencode/big-pickle\n"
+    "opencode/ling-3.0-flash-fin-free\n"
+    "opencode/mimo-v2.5-free\n"
+    "opencode/muse-spark-1.2-contributor-free\n"
+    "opencode/muse-spark-1.3-contributor-free\n"
+    "opencode/nemotron-3-ultra-free\n"
+    "opencode/nemotron-3.5-lightning-free\n"
+    "openai/gpt-5.5\n"
+    "google/gemini-3.1-pro-preview\n"
+)
+
+
+def _listing(monkeypatch, stdout=_LISTING, *, returncode=0, seen=None):
+    """Pin `_list_models` to one stdout, recording the env each call was given."""
+    calls = seen if seen is not None else []
+
+    def _fake(argv, env):
+        calls.append((list(argv), dict(env)))
+        if stdout is None:
+            return None
+        return subprocess.CompletedProcess(
+            args=list(argv), returncode=returncode, stdout=stdout, stderr=""
+        )
+
+    monkeypatch.setattr(oc, "_list_models", _fake)
+    return calls
+
+
+@pytest.mark.model_catalog
+class TestDescribeUnlistedModel:
+    def test_a_listed_token_is_known(self, provider, user_xdg, monkeypatch):
+        _listing(monkeypatch)
+        verdict = provider.describe_unlisted_model("opencode/big-pickle")
+        assert verdict.known is True
+        assert verdict.detail == "" and verdict.suggestions == ()
+
+    def test_the_effort_suffix_is_split_off_before_comparing(
+        self, provider, user_xdg, monkeypatch
+    ):
+        """The token compared is the token dispatched (`--variant` split)."""
+        _listing(monkeypatch)
+        assert provider.describe_unlisted_model("openai/gpt-5.5:high").known is True
+        # A suffix that is NOT an accepted effort stays part of the token.
+        assert provider.describe_unlisted_model("openai/gpt-5.5:nope").known is False
+
+    def test_comparison_is_whole_line_exact_and_case_sensitive(
+        self, provider, user_xdg, monkeypatch
+    ):
+        _listing(monkeypatch)
+        assert provider.describe_unlisted_model("opencode/Big-Pickle").known is False
+        assert provider.describe_unlisted_model("opencode/big").known is False
+        assert provider.describe_unlisted_model("opencode/big-pickle-free").known is False
+
+    def test_an_unlisted_token_composes_its_own_diagnostic(
+        self, provider, user_xdg, monkeypatch
+    ):
+        _listing(monkeypatch)
+        verdict = provider.describe_unlisted_model("opencode/sonnet")
+        assert verdict.known is False
+        assert len(verdict.suggestions) <= 3
+        assert all(s.startswith("opencode/") for s in verdict.suggestions)
+        assert "lists 7 id(s) under 'opencode/'" in verdict.detail
+        assert "'opencode/sonnet' is not one of them" in verdict.detail
+        for suggestion in verdict.suggestions:
+            assert suggestion in verdict.detail
+        # Composed here from the listing, never quoted from a run-time line.
+        assert "Did you mean" not in verdict.detail
+
+    def test_suggestions_are_nearest_first_and_capped_at_three(
+        self, provider, user_xdg, monkeypatch
+    ):
+        _listing(monkeypatch)
+        verdict = provider.describe_unlisted_model("opencode/nemotron-3-ultra")
+        assert verdict.suggestions[0] == "opencode/nemotron-3-ultra-free"
+        assert len(verdict.suggestions) == 3
+
+    def test_an_unknown_prefix_says_so_with_the_total(
+        self, provider, user_xdg, monkeypatch
+    ):
+        _listing(monkeypatch)
+        verdict = provider.describe_unlisted_model("nosuch/model")
+        assert verdict.known is False
+        assert verdict.suggestions == ()
+        assert "lists no ids under 'nosuch/'" in verdict.detail
+        assert "9 ids listed in all" in verdict.detail
+
+    @pytest.mark.parametrize(
+        "stdout,returncode",
+        [
+            (None, 0),                                   # probe could not run
+            ("", 0),                                     # empty listing
+            (_LISTING, 1),                               # non-zero exit
+            ("timestamp=1 level=ERROR boom\n" + _LISTING, 0),  # opens with a log line
+            ("not a listing at all\nnor this\nopencode/big-pickle\n", 0),  # mostly prose
+            ("Available models:\n\n  - big-pickle\n", 0),  # decorated, no slugs
+        ],
+    )
+    def test_unreadable_listings_are_unknown_never_false(
+        self, provider, user_xdg, monkeypatch, stdout, returncode
+    ):
+        _listing(monkeypatch, stdout, returncode=returncode)
+        verdict = provider.describe_unlisted_model("opencode/sonnet")
+        assert verdict.known is None
+        assert verdict.detail == "" and verdict.suggestions == ()
+
+    def test_a_bare_token_is_left_to_the_structural_refusal(
+        self, provider, user_xdg, monkeypatch
+    ):
+        seen = _listing(monkeypatch)
+        assert provider.describe_unlisted_model("sonnet").known is None
+        assert seen == []
+
+    def test_a_raising_probe_is_unknown(self, provider, user_xdg, monkeypatch):
+        def _boom(argv, env):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(oc, "_list_models", _boom)
+        assert provider.describe_unlisted_model("opencode/sonnet").known is None
+
+    def test_the_listing_is_read_under_the_hermetic_redirect(
+        self, provider, user_xdg, monkeypatch
+    ):
+        """Same context as the dispatch it vets: XDG_CONFIG_HOME redirected,
+        the config carriers stripped, the user's own config home not consulted."""
+        _pure_help(monkeypatch)
+        monkeypatch.setenv("OPENCODE_CONFIG", "/etc/nope/opencode.json")
+        seen = _listing(monkeypatch)
+        provider.describe_unlisted_model(
+            "opencode/big-pickle", profile=PROFILE_AGENT_READONLY
+        )
+        assert len(seen) == 1
+        argv, env = seen[0]
+        assert argv == ["opencode", "models"]
+        assert env["XDG_CONFIG_HOME"] != str(user_xdg)
+        assert env["XDG_CONFIG_HOME"].startswith(
+            str(Path(oc.tempfile.gettempdir()))
+        ) or oc.HERMETIC_DIR_PREFIX in env["XDG_CONFIG_HOME"]
+        assert "OPENCODE_CONFIG" not in env
+        for name in PASSTHROUGH_XDG:
+            assert env[name] == os.environ[name], f"{name} must pass through"
+        # The slot is released again: nothing stays claimed after the read.
+        assert oc._ACTIVE.get() is None
+
+    def test_the_listing_carries_the_rebuilt_config_content(
+        self, provider, user_xdg, monkeypatch, tmp_path
+    ):
+        _pure_help(monkeypatch)
+        _use_config(
+            tmp_path, monkeypatch,
+            "providers:\n  opencode:\n    config_providers:\n"
+            "      my-gateway:\n        options: {baseURL: https://gw.invalid/v1}\n"
+            "        models: {my-model: {}}\n",
+        )
+        seen = _listing(monkeypatch, _LISTING + "my-gateway/my-model\n")
+        verdict = provider.describe_unlisted_model("my-gateway/my-model")
+        assert verdict.known is True
+        _argv, env = seen[0]
+        assert "my-gateway" in env["OPENCODE_CONFIG_CONTENT"]
+
+    def test_a_provider_only_in_the_users_config_is_unknown_not_listed(
+        self, provider, user_xdg, monkeypatch
+    ):
+        """The slot is refused before spawn; a listing here would describe a
+        configuration no dispatch will use, so nothing is read."""
+        _pure_help(monkeypatch)
+        seen = _listing(monkeypatch)
+        verdict = provider.describe_unlisted_model("only-in-user-config/private-model")
+        assert verdict.known is None
+        assert seen == []
+
+    def test_a_plain_read_when_hermetic_is_off(
+        self, provider, user_xdg, monkeypatch, tmp_path
+    ):
+        _use_config(tmp_path, monkeypatch, "providers:\n  opencode:\n    hermetic: off\n")
+        seen = _listing(monkeypatch)
+        provider.describe_unlisted_model("opencode/big-pickle")
+        _argv, env = seen[0]
+        assert env["XDG_CONFIG_HOME"] == str(user_xdg)
+
+    def test_a_write_profile_reads_plain_like_its_dispatch(
+        self, provider, user_xdg, monkeypatch
+    ):
+        seen = _listing(monkeypatch)
+        provider.describe_unlisted_model(
+            "opencode/big-pickle", profile=PROFILE_AGENT_WRITE
+        )
+        _argv, env = seen[0]
+        assert env["XDG_CONFIG_HOME"] == str(user_xdg)
+
+
+class TestTheListingProbePins:
+    """`_list_models` mirrors the executor's probe pins, so a hanging catalog
+    read is killed at 30 s and read as unknown."""
+
+    def test_the_probe_is_bounded_and_never_raises(self, monkeypatch):
+        calls = []
+
+        def _run(argv, **kwargs):
+            calls.append(kwargs)
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        monkeypatch.setattr(oc.subprocess, "run", _run)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        assert oc._list_models(["opencode", "models"], dict(os.environ)) is None
+        assert calls and calls[0]["timeout"] == 30
+        assert calls[0]["stdin"] is subprocess.DEVNULL
+
+    def test_the_parser_shape_rules(self):
+        assert oc._parse_model_listing("") is None
+        assert oc._parse_model_listing("opencode/a\n") == frozenset({"opencode/a"})
+        assert oc._parse_model_listing("level=ERROR x\nopencode/a\n") is None
+        assert oc._parse_model_listing("a b\nc d\nopencode/a\n") is None
+        # Whitespace is stripped; blank lines are ignored.
+        assert oc._parse_model_listing("  opencode/a  \n\n") == frozenset({"opencode/a"})

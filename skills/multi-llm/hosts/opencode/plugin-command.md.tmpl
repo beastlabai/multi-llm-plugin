@@ -9,3 +9,6 @@ properties exactly as that tool's own argument descriptions specify. The tool is
 the only supported entry point on this host: it appends the flags this host
 requires, refuses the ones it owns, and supervises the run to a terminal result.
 Do not reach the dispatcher any other way.
+
+Read the result's `exit` and `next` the way the dispatcher's own contract reads
+them. {NEEDS_HUMAN_RULE}

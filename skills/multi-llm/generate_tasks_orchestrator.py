@@ -62,6 +62,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent))
 
 from check_workflow_prerequisites import ensure_prerequisites
+from utils import cli_common
 from utils.cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -630,14 +631,20 @@ def run_generate_tasks(
         document=document,
         plan_path=str(plan_path),
         label="task generation",
-        retry_command=dispatcher_command(MODE_NAME, plan_path, "--yes"),
+        retry_command=cli_common.retry_command(
+            MODE_NAME, plan_path, "--yes",
+            flags=cli_common.current_replay_flags(mode=MODE_NAME),
+        ),
     ):
         # D3b: same process, straight on to the consumer.
         return consume_document(plan_path, result_path)
 
     # Native-subagent host: run `task.prompt`, write the reply to the task's
     # output_path, then hand back exactly one follow-up command (D1c).
-    follow_up = dispatcher_command(MODE_NAME, plan_path, "--reaggregate")
+    follow_up = cli_common.retry_command(
+        MODE_NAME, plan_path, "--reaggregate",
+        flags=cli_common.current_replay_flags(mode=MODE_NAME),
+    )
     print(f"\nRun the prompt in {task_file}, write the reply to {result_path},")
     print("then continue with:")
     print(f"  {follow_up}")
@@ -650,6 +657,9 @@ def run_generate_tasks(
             "task_file": task_file,
             "reaggregate_mode": MODE_NAME,
             "plan_file": str(plan_path),
+            # The durable triple's third element (D2): the flag list, never a
+            # resolved command.
+            "replay_flags": cli_common.current_replay_flags(mode=MODE_NAME),
         },
     )
     return EXIT_OK

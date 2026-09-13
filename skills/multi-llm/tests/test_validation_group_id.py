@@ -391,6 +391,29 @@ class TestBatchPreparationWithGroupId:
             for i, group_idx in enumerate(batch["group_indices"]):
                 assert batch["group_ids"][i] == expected_gids[group_idx]
 
+    def test_batch_prompt_names_the_global_index_group_index_not_index(self, temp_dir):
+        """The request record's index field is `group_index`, matching the key
+        the reply contract asks the subagent to echo back.
+
+        Before this fix the prompt listed each group under a bare `"index"`
+        while the reply schema asked for `"group_index"` — a name mismatch a
+        run showed models resolving by falling back to a batch-local ordinal
+        (0, 1, 2, ...) instead of the global index they were actually shown.
+        """
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(2)]
+        result = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+        )
+        prompt = result["batches"][0]["prompt"]
+        assert '"group_index": 0' in prompt
+        assert '"group_index": 1' in prompt
+        # The request no longer names the group's position under the bare
+        # `"index"` key the reply never asked for.
+        assert '"index":' not in prompt
+
 
 # ============================================================================
 # Tests for merge_batched_validation_results() with group_id
@@ -435,6 +458,108 @@ class TestMergeBatchedWithGroupId:
         for i, result in enumerate(merged):
             assert "group_id" in result
             assert result["group_id"] == expected_gids[i]
+
+    def test_merge_tags_each_result_with_its_batch_source_model(self, temp_dir):
+        """Merged results carry `_source_model` from their batch file's own
+        `metadata.model`, which is what lets `save_validation_results` derive
+        an overall model when its caller passes none."""
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(4)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+            max_per_batch=4,
+        )
+        batch = batch_metadata["batches"][0]
+        batch_results = {
+            "groups": [
+                {"group_index": i, "status": "valid", "reason": "OK", "confidence": 0.9}
+                for i in range(4)
+            ],
+            "metadata": {"model": "big-pickle", "schema_version": "2.1"},
+        }
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
+            json.dump(batch_results, f)
+
+        merged = merge_batched_validation_results(
+            output_dir=temp_dir, batch_metadata=batch_metadata, total_groups=len(groups)
+        )
+        for result in merged:
+            assert result["_source_model"] == "big-pickle"
+
+    def test_merge_prints_one_summary_line_for_mismatched_group_index_echoes(
+        self, temp_dir, capsys
+    ):
+        """A batch where every verdict echoes the wrong `group_index` (but the
+        right `group_hash`) is joined correctly by hash and reported as ONE
+        summary line, never one `[merge] Warning:` line per verdict.
+
+        A correct 16-batch run used to print 41 per-verdict warning lines for
+        exactly this — noise for a run whose join was never in doubt, since
+        the hash is authoritative regardless of what index was echoed.
+        """
+        # 8 groups over max_per_batch=4 makes a second batch whose global
+        # indices are [4, 5, 6, 7] — a batch-local ordinal (0..3) then
+        # genuinely differs from every one of its global indices.
+        groups = [make_group("MEDIUM", f"Group {i}") for i in range(8)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups,
+            context="Test context",
+            output_dir=temp_dir,
+            plan_file="/path/to/plan.md",
+            max_per_batch=4,
+        )
+        batch = batch_metadata["batches"][1]
+        assert batch["group_indices"] == [4, 5, 6, 7]
+        # Every verdict echoes a batch-local ordinal (0..3) instead of the
+        # global group_index it was shown; the hash is still correct.
+        batch_results = {
+            "groups": [
+                {
+                    "group_index": local_idx,
+                    "group_hash": batch["group_ids"][local_idx],
+                    "status": "valid",
+                    "reason": "OK",
+                    "confidence": 0.9,
+                }
+                for local_idx in range(4)
+            ],
+            "metadata": {"model": "test", "schema_version": "2.1"},
+        }
+        with open(batch["output_path"], 'w', encoding="utf-8") as f:
+            json.dump(batch_results, f)
+        # The other batch is left unfilled; give it a matching (non-mismatch)
+        # reply so the merge has nothing else to warn about.
+        other = batch_metadata["batches"][0]
+        with open(other["output_path"], 'w', encoding="utf-8") as f:
+            json.dump({
+                "groups": [
+                    {
+                        "group_index": gidx,
+                        "group_hash": other["group_ids"][local_idx],
+                        "status": "valid",
+                        "reason": "OK",
+                        "confidence": 0.9,
+                    }
+                    for local_idx, gidx in enumerate(other["group_indices"])
+                ],
+                "metadata": {"model": "test", "schema_version": "2.1"},
+            }, f)
+
+        capsys.readouterr()
+        merged = merge_batched_validation_results(
+            output_dir=temp_dir, batch_metadata=batch_metadata, total_groups=len(groups)
+        )
+        out = capsys.readouterr().out
+
+        # Still joined correctly by hash regardless of the mismatched echo.
+        for i, result in enumerate(merged):
+            assert result["group_index"] == i
+            assert result["status"] == "valid"
+
+        assert out.count("[merge] Warning: Batch") == 0
+        assert "4 of 8 verdicts echoed a different group_index; all joined by hash" in out
 
 
 # ============================================================================
@@ -540,16 +665,16 @@ class TestValidationGroupIdIntegration:
         assert result[1]["validation_reason"] == "Real security issue"
         assert result[1]["validation_confidence"] == 0.95
 
-    def test_new_group_gets_index_fallback_when_at_existing_index(self, temp_dir):
-        """When a new group is added at an existing index, it uses index fallback.
+    def test_new_group_at_an_existing_index_never_inherits_a_hashed_verdict(
+        self, temp_dir, capsys
+    ):
+        """A hashed record that matches nothing is not handed to the group at its index.
 
-        This test documents the current behavior: the index fallback is always
-        checked when group_id doesn't match, regardless of whether validation
-        results have group_ids.
-
-        In practice, this means new groups at existing indices will inherit
-        the validation from whatever was at that index before. This is a
-        known limitation that may be addressed in future versions.
+        Before D7 the index fallback was checked for every record, so a new
+        group sitting at an old record's index inherited that record's status,
+        reason and confidence — another group's verdict. The fallback is now for
+        hash-less (pre-hash format) records only; a hashed miss leaves the group
+        at the default and is counted on stdout.
         """
         # Create initial groups
         security_group = {
@@ -582,11 +707,17 @@ class TestValidationGroupIdIntegration:
         # Apply validation to just the new group at index 0
         result = apply_validation_to_groups([new_group], validation_results)
 
-        # Current behavior: new group at index 0 falls back to index matching
-        # and inherits the validation from the security group that was at index 0
-        # (because its group_id doesn't match, but there's a validation at index 0)
-        assert result[0]["validation_status"] == "valid"
-        assert result[0]["validation_reason"] == "Security issue"
+        # The security verdict is hashed to a group that is not here; the new
+        # group at its index gets the default, not the security group's verdict.
+        assert result[0]["validation_status"] == "needs-human-decision"
+        assert result[0]["validation_reason"] == "No validation result"
+        assert result[0]["validation_confidence"] == 0.0
+        assert "1 of 1 groups have no validation result" in capsys.readouterr().out
+
+        # A hash-less record is the pre-hash format, where the index *is* the
+        # identity — that fallback is kept.
+        legacy = [{"group_index": 0, "status": "valid", "reason": "Legacy", "confidence": 0.5}]
+        assert apply_validation_to_groups([new_group], legacy)[0]["validation_status"] == "valid"
 
     def test_batch_validation_with_reaggregation(self, temp_dir):
         """Test batched validation workflow handles reaggregation correctly.

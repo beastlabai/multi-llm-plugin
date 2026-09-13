@@ -822,3 +822,59 @@ class TestLaneANetworkRetryReadsTheSharedClassifier:
             "Failed to parse JSON. The reviewer noted that the database "
             "connection pool in db.py is never closed on the error path."
         ) == 1
+
+
+# ---------------------------------------------------------------------------
+# D6 — the classifier has a word for a sandbox that cannot start
+# ---------------------------------------------------------------------------
+
+class TestSandboxMarkers:
+    """`bwrap:` lines are the machine's fault, fatal, and never `permission_denied`."""
+
+    BWRAP_LINES = [
+        "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+        "bwrap: setting up uid map: Permission denied",
+        "error: bubblewrap failed to start the sandbox",
+    ]
+
+    @pytest.mark.parametrize("stream", BWRAP_LINES)
+    def test_every_measured_line_is_the_sandbox_category(self, stream):
+        from utils.providers import base as pbase
+
+        assert pbase.classify_streams("", stream, exit_code=1) == (
+            pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        )
+        # Wherever the line sits — this haystack is `stdout\nstderr`.
+        assert pbase.classify_streams("event: started\n", stream + "\n", exit_code=1) == (
+            pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        )
+
+    def test_the_category_is_the_ladder_status_at_rung_1(self):
+        from utils import review_orchestrator_base as rob
+        from utils.providers import base as pbase
+        from utils.retry_ladder import (
+            FATAL_STATUSES, RUNG_BY_STATUS, STATUS_SANDBOX_UNAVAILABLE,
+        )
+
+        category = pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        assert category == STATUS_SANDBOX_UNAVAILABLE
+        assert rob._LADDER_STATUS_BY_CATEGORY.get(category, category) in FATAL_STATUSES
+        assert RUNG_BY_STATUS[STATUS_SANDBOX_UNAVAILABLE] == 1
+        assert category not in pbase.RETRYABLE_FAILURE_CATEGORIES
+
+    def test_the_reason_line_names_doctor(self):
+        from utils.review_orchestrator_base import _format_failure_details
+
+        reason = _format_failure_details(1, "", self.BWRAP_LINES[0])
+        assert "sandbox" in reason
+        assert "multi_llm.py doctor" in reason
+        assert "Permission denied" not in reason.split("\n")[0]
+
+    def test_a_bwrap_word_inside_prose_is_not_a_sandbox_failure(self):
+        """`^bwrap: ` is anchored to a line start; a review quoting the word
+        `bwrap` mid-sentence stays whatever the rest of the stream says."""
+        from utils.providers import base as pbase
+
+        assert pbase.classify_streams(
+            "", "the plan mentions bwrap: as a sandbox option", exit_code=1
+        ) is None

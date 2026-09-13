@@ -42,6 +42,7 @@ exit code was ever observed" is a defined value and never a fabricated ``0``.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import shutil
 import sys
@@ -61,6 +62,7 @@ from .cli_common import (
     modes_table,
     record_artifact,
     record_next,
+    replay_flags,
     skill_dir,
 )
 from .status_file import (
@@ -102,6 +104,17 @@ LOCK_NAME = ".lock"
 #: hard-exit when it discovers its record was closed out from under it — an
 #: in-process test or a hand-run ``--internal-worker`` does neither.
 WORKER_ENV = "MULTI_LLM_DETACHED_WORKER"
+
+#: The launcher's replay flags (``cli_common.replay_flags`` over the
+#: pre-``build_worker_argv`` argv), shipped to the worker as a JSON list (D2).
+#: Computed in :func:`launch` rather than by the worker because the worker's own
+#: argv carries the appended ``--yes``/``--exec-subagents`` indistinguishable
+#: from typed ones; :func:`begin_worker_run` decodes it, pops it so no provider
+#: subprocess inherits it, and :class:`RunHandle` writes it into the run record
+#: once. Not a new ``--internal-*`` flag: that would land in the worker's own
+#: recorded argv and need a drop-set entry whose only job is undoing the
+#: transport. Absent or malformed decodes to ``[]``.
+REPLAY_FLAGS_ENV = "MULTI_LLM_REPLAY_FLAGS"
 
 #: Env overrides, all read at call time so a test can set them per-case.
 HEARTBEAT_INTERVAL_ENV = "MULTI_LLM_HEARTBEAT_INTERVAL_S"
@@ -359,7 +372,11 @@ def build_child_command(
     ]
 
 
-def child_env(*, base: Optional[Path] = None) -> Dict[str, str]:
+def child_env(
+    *,
+    base: Optional[Path] = None,
+    replay_flags: Optional[Sequence[str]] = None,
+) -> Dict[str, str]:
     """The invoker's environment, pinned for a process that outlives its shell."""
     base = Path(base) if base is not None else skill_dir()
     env = dict(os.environ)
@@ -367,6 +384,7 @@ def child_env(*, base: Optional[Path] = None) -> Dict[str, str]:
         env.pop(name, None)
     env["MULTI_LLM_SKILL_DIR"] = str(base)
     env[WORKER_ENV] = "1"
+    env[REPLAY_FLAGS_ENV] = json.dumps([str(t) for t in (replay_flags or [])])
     # Propagate the *binary*, not only the flags: the worker outlives the shell
     # that launched it and may not share its PATH, so re-probing could resolve a
     # different uv — or none — than the preflight approved. ``UV_ENV`` is common
@@ -562,6 +580,9 @@ def classify_run(
         "progress": status.get("progress") or {},
         "run": dict(run),
         "run_state": run.get("state") if isinstance(run, dict) else None,
+        # D4's refusal close-out: `{"state": "runner_rejected", "reason_code"}`
+        # at the checkpoint's top level, which `_resume_command` ranks from.
+        "reason_code": status.get("reason_code"),
         "reaggregate_command": resolved_reaggregate_command(status),
         "lock_held": not process_control.lock_is_free(lock_path(phase_dir)),
     }
@@ -784,9 +805,30 @@ def resolved_reaggregate_command(status: Dict[str, Any]) -> Optional[str]:
     plan = status.get("plan_file")
     if not mode or not plan:
         return None
-    from .cli_common import reaggregate_command
+    from .cli_common import current_replay_flags, retry_command
 
-    return reaggregate_command(str(mode), str(plan))
+    # The document's third element is the fallback; a live invocation of the
+    # same mode wins (`cli_common.current_replay_flags`). `status`'s own argv
+    # is a different mode and never wins here. Unshaped by design: this reader
+    # did not witness the failure, so it names a legal resume command and
+    # ranks nothing.
+    return retry_command(
+        str(mode), str(plan), "--reaggregate",
+        flags=current_replay_flags(status.get("replay_flags"), mode=str(mode)),
+    )
+
+
+def decode_replay_flags(raw: Optional[str]) -> List[str]:
+    """``REPLAY_FLAGS_ENV``'s value as a list; absent or malformed is ``[]``."""
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [str(token) for token in decoded]
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +855,7 @@ class RunHandle:
         plan_file: str,
         host: Optional[str] = None,
         detached: bool = True,
+        replay_flags: Optional[Sequence[str]] = None,
     ):
         self.phase_dir = str(phase_dir)
         self.run_id = run_id
@@ -820,6 +863,10 @@ class RunHandle:
         self.plan_file = str(plan_file)
         self.host = host
         self.detached = detached
+        # The launcher's list, never recomputed from this process's argv.
+        self.replay_flags: Optional[List[str]] = (
+            [str(t) for t in replay_flags] if replay_flags is not None else None
+        )
         self.log_path = log_path(self.phase_dir)
         self.cwd = os.getcwd()
         self.project_root = run_registry.resolve_project_root(self.plan_file)
@@ -863,6 +910,9 @@ class RunHandle:
             "error": None,
             "resolutions": [],
         }
+        if self.replay_flags is not None:
+            # Not process state: written once here, never by update_run.
+            record["replay_flags"] = list(self.replay_flags)
         status_file.claim_run(self.phase_dir, record)
         run_registry.write_entry(
             self.project_root,
@@ -1385,7 +1435,10 @@ def launch(
     rotate_log(phase_dir, previous)
     argv = _snapshot_question_file(argv, phase_dir)
     command = build_child_command(mode, argv, run_id=run_id, uv=uv)
-    env = child_env()
+    # The launcher's list, from the argv *before* build_worker_argv appends a
+    # thing: the only process that can still tell a typed --yes from an implied
+    # one is this one (D2 step 2, the *Later* bullet).
+    env = child_env(replay_flags=replay_flags(mode, argv))
     log = log_path(phase_dir)
     try:
         worker_pid = process_control.spawn_detached(
@@ -1575,6 +1628,10 @@ def begin_worker_run(
     """Start this process's ownership of a phase dir as the detached worker."""
     run_id = getattr(args, "internal_run_id", None) or str(uuid.uuid4())
     detached = os.environ.get(WORKER_ENV) == "1"
+    # Popped, not read: the list must reach neither the provider subprocesses
+    # this worker spawns nor any argv-echo of them (a short `ask` question
+    # would otherwise ride along in every child's environment).
+    replay = decode_replay_flags(os.environ.pop(REPLAY_FLAGS_ENV, None))
     if detached:
         # POSIX: the invoker handed us /dev/null; we own the log. Windows: the
         # launcher already handed the log handle in. Either way both
@@ -1588,6 +1645,7 @@ def begin_worker_run(
         plan_file=plan_file,
         host=getattr(args, "host", None),
         detached=detached,
+        replay_flags=replay,
     )
     handle.start()
     return handle

@@ -90,6 +90,16 @@ ENV_PERMISSIVE_VAR = "MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE"
 # §2.2's one-run debugging hatch for the credential-helper policy. Highest
 # precedence, above both config layers.
 ENV_GIT_CREDENTIAL_HELPER_VAR = "MULTI_LLM_GIT_CREDENTIAL_HELPER"
+#: The model the *host session* is currently running on, as the host's own
+#: `provider/model` addressing, exported by a host shim or plugin that can read
+#: it. THIS MODULE IS THE OWNER OF THE NAME — the opencode plugin reads it out of
+#: the generated `cli-surface.json` rather than spelling it in JavaScript — and
+#: the value is a *fact about the session*, never a config layer: it is consulted
+#: below any operator opinion (see :func:`resolve_subagent_runner`) and only on a
+#: host whose capability entry declares a `session_runner_provider` that can run
+#: it. Unset, empty or whitespace-only means "the host did not say", which is the
+#: pre-existing behaviour exactly.
+HOST_SESSION_MODEL_ENV = "MULTI_LLM_HOST_SESSION_MODEL"
 
 # Stable, greppable prefix for every non-fatal config warning emitted here. Tests
 # capsys-assert on this exact prefix; do not vary it per call site. Fail-fast
@@ -1035,6 +1045,11 @@ def get_driver_provenance(
 #: they must never outrank the running host's own declared default: a fully
 #: populated base would otherwise shadow every host entry and put `claude` back on
 #: the hard-prerequisite list for a zero-config Codex or OpenCode install.
+#:
+#: :data:`SESSION_LAYER` is deliberately **not** here either, for the mirror
+#: reason: the session's own model is something the operator selected rather than
+#: something they configured, so it must lose to a real ``driver.*`` value and win
+#: against a shipped floor.
 EXPLICIT_DRIVER_LAYERS: Tuple[str, ...] = ("env", "project")
 
 
@@ -1053,6 +1068,27 @@ def _host_capabilities():
         except ImportError:
             return None
     return host_capabilities
+
+
+def _host_entry(host_id: Optional[str] = None) -> Optional[dict]:
+    """The running host's capability entry, or ``None`` whenever it cannot answer.
+
+    Never fatal and never a guess: an unreadable document, a partial install or
+    an unknown id all degrade to ``None`` so the ladder falls through to the next
+    rung rather than failing a dispatch on capability data.
+    """
+    caps = _host_capabilities()
+    if caps is None:
+        return None
+    try:
+        if not host_id:
+            # The shim bakes `--host <id>` into the command line; there is no
+            # in-process channel carrying it down to config resolution, so the
+            # declaration is read back off argv exactly as the dispatcher reads it.
+            host_id = caps.resolve_host_id(sys.argv[1:])
+        return caps.entry(host_id)
+    except Exception:  # pragma: no cover - unknown host / unreadable data
+        return None
 
 
 def host_default_runner(
@@ -1076,17 +1112,8 @@ def host_default_runner(
     whenever the data cannot answer, so a partial install degrades to base instead
     of failing a dispatch.
     """
-    caps = _host_capabilities()
-    if caps is None:
-        return None
-    try:
-        if not host_id:
-            # The shim bakes `--host <id>` into the command line; there is no
-            # in-process channel carrying it down to config resolution, so the
-            # declaration is read back off argv exactly as the dispatcher reads it.
-            host_id = caps.resolve_host_id(sys.argv[1:])
-        entry = caps.entry(host_id)
-    except Exception:  # pragma: no cover - unknown host / unreadable data
+    entry = _host_entry(host_id)
+    if entry is None:
         return None
 
     spec = entry.get("default_subagent_runner")
@@ -1127,31 +1154,111 @@ def host_default_runner(
 #: contains is the support question this reporting exists to end.
 HOST_DEFAULT_LAYER = "host capabilities"
 
+#: The layer name reported for the model the **host session** is itself running
+#: on (D3o). It is not a config layer and deliberately does not read like one:
+#: nobody wrote it into a file, and the repair for a wrong value is the session's
+#: own model picker, not ``providers.yaml``. It sits *below* every explicit
+#: operator opinion and *above* the host's shipped floor, because "use what I
+#: selected" is a weaker claim than "use what I configured" and a much stronger
+#: one than "use whatever ships".
+SESSION_LAYER = "session"
+
+
+def session_runner(host_id: Optional[str] = None) -> Optional[str]:
+    """The session's own model as a runner spec, when the host can run it.
+
+    Two facts have to line up, and either one missing means no session rung:
+
+    * the host exported :data:`HOST_SESSION_MODEL_ENV` — the model the session is
+      *currently* using, in the host's own ``provider/model`` addressing (the
+      OpenCode plugin reads it back off the session's newest assistant message and
+      sets it on the environment the launcher and every poll run with);
+    * the running host's capability entry declares ``session_runner_provider``,
+      i.e. names the CLI of its own that can be pointed at that same model. A host
+      that declares ``null`` has no such CLI (or no way to read the value), and
+      omitting the rung is the conservative answer.
+
+    Why this rung exists at all: without it a ``--review-plan --quick`` run
+    launched from a session whose selected model was
+    ``opencode/nemotron-3-ultra-free`` validated all sixteen of its batches on
+    ``opencode/big-pickle`` — the credential-free *floor* — because no layer above
+    that floor had an opinion. Nothing was wrong with the floor; it simply is not
+    what the operator picked in the picker two inches above the prompt.
+
+    Like :func:`host_default_runner` this is gated on the runner's CLI being
+    detected (D3c) and returns ``None`` whenever the data cannot answer, so a
+    partial install degrades to the next rung instead of failing a dispatch. It
+    spawns nothing: ``is_available()`` is a ``shutil.which``.
+    """
+    value = (os.environ.get(HOST_SESSION_MODEL_ENV) or "").strip()
+    if not value:
+        return None
+    entry = _host_entry(host_id)
+    if entry is None:
+        return None
+    provider_name = entry.get("session_runner_provider")
+    if not isinstance(provider_name, str) or not provider_name.strip():
+        return None
+    provider_name = provider_name.strip()
+    provider = get_provider(provider_name)
+    if provider is None:
+        return None
+    # The same bool consumer host_default_runner keeps (M10 §5.1): an undetected
+    # CLI falls through to the next rung rather than resolving to a spec whose
+    # only possible outcome is a refusal.
+    try:
+        if not provider.is_available():
+            return None
+    except Exception:  # pragma: no cover - a detection probe never blocks
+        return None
+    return f"{provider_name}:{value}"
+
 
 def resolve_subagent_runner(
     tier: str = "full",
     anchor: Optional[Union[str, Path]] = None,
     host_id: Optional[str] = None,
+    skip_session: bool = False,
 ) -> Tuple[str, str]:
     """The resolved runner spec **and the layer that supplied it** (D2e/D3/D3o).
 
     The one implementation of D3o's ladder, so the value a dispatch uses and the
     value ``status`` / ``install-host --check`` report can never be resolved two
     different ways. Per key, highest precedence first: the value an **explicit**
-    override layer supplied (``env`` then ``project``) → the running host's
-    ``default_subagent_runner`` from ``hosts/capabilities.yaml``, when its CLI is
-    detected (:func:`host_default_runner`) → the merged (``base``/``default``)
-    value.
+    override layer supplied (``env`` then ``project``) → the model the host
+    session is itself running on (:func:`session_runner`, layer
+    :data:`SESSION_LAYER`) → the running host's ``default_subagent_runner`` from
+    ``hosts/capabilities.yaml``, when its CLI is detected
+    (:func:`host_default_runner`) → the merged (``base``/``default``) value.
+
+    The session rung is **implicit** and deliberately absent from
+    :data:`EXPLICIT_DRIVER_LAYERS`: it is what the operator selected, not what
+    they configured, so it yields to any ``driver.*`` value a config layer really
+    carries while still outranking a shipped floor nobody chose. It is also the
+    one rung that is allowed to *fall through at preflight* rather than refuse —
+    see ``subagent_executor.run_tasks``, which re-resolves with
+    ``skip_session=True`` and prints what it fell back to. Every other rung keeps
+    refusing, because an explicit opinion that cannot be served is a config error
+    and silently substituting something else is how "I set it and nothing
+    changed" starts.
 
     ``cheap`` reads ``driver.subagent_runner_cheap`` — and the host's own
     ``subagent_tiers.cheap`` when the host default is what answers — falling back
-    to ``driver.subagent_runner`` last, as before. Tracking *where* a value came
-    from is what keeps base's ``claude-code:sonnet`` from silently outranking a
-    Codex or OpenCode host's own runner while still letting any user-set value win.
+    to ``driver.subagent_runner`` last, as before. The session model has no tier
+    split: it is a single thing the operator selected, so a ``cheap`` task takes
+    it too unless ``driver.subagent_runner_cheap`` was explicitly set, which wins
+    on the rung above. Tracking *where* a value came from is what keeps base's
+    ``claude-code:sonnet`` from silently outranking a Codex or OpenCode host's own
+    runner while still letting any user-set value win.
+
+    Args:
+        skip_session: skip the session rung entirely. The fallback path passes it
+            after the session model failed preflight, so the re-resolution cannot
+            return the spec that was just refused.
 
     Returns:
         ``(spec, layer)``, where ``layer`` is one of ``env``, ``project``,
-        :data:`HOST_DEFAULT_LAYER`, ``base`` or ``default``.
+        :data:`SESSION_LAYER`, :data:`HOST_DEFAULT_LAYER`, ``base`` or ``default``.
     """
     driver = get_driver_config(anchor=anchor)
     key = "subagent_runner_cheap" if tier == "cheap" else "subagent_runner"
@@ -1163,6 +1270,11 @@ def resolve_subagent_runner(
         and layer in EXPLICIT_DRIVER_LAYERS
     ):
         return configured.strip(), layer
+
+    if not skip_session:
+        session_spec = session_runner(host_id=host_id)
+        if session_spec:
+            return session_spec, SESSION_LAYER
 
     host_spec = host_default_runner(tier, host_id=host_id)
     if host_spec:
@@ -1184,13 +1296,16 @@ def get_subagent_runner(
     tier: str = "full",
     anchor: Optional[Union[str, Path]] = None,
     host_id: Optional[str] = None,
+    skip_session: bool = False,
 ) -> str:
     """The resolved runner spec for a capability tier (D2e/D3/D3o).
 
     The dispatch-side spelling of :func:`resolve_subagent_runner`, which owns the
     ladder and also names the layer that answered.
     """
-    return resolve_subagent_runner(tier, anchor=anchor, host_id=host_id)[0]
+    return resolve_subagent_runner(
+        tier, anchor=anchor, host_id=host_id, skip_session=skip_session
+    )[0]
 
 
 def get_max_concurrent_subagents(anchor: Optional[Union[str, Path]] = None) -> int:

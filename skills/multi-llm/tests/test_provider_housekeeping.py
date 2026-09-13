@@ -434,17 +434,34 @@ STOPS_FILE_WRITES = {
         "meta.json. The one writable path is a per-slot temp home this adapter "
         "mints and deletes, never the review's output directory."
     ),
+    ("codex", "--sandbox workspace-write"): (
+        "Not a read-only mode, and until D6 (2026-09-11) this atom sat in "
+        "REVIEWED_STILL_WRITES with `(source: file)` measured in "
+        "plans/harness-expansion/code-review/orchestrator-run.log. It moved "
+        "because the write goes through bubblewrap, and on a stock Ubuntu 24.04 "
+        "(kernel.apparmor_restrict_unprivileged_userns=1) bwrap cannot start: "
+        "`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. "
+        "Measured twice on codex:gpt-6-astra:xhigh, 2026-09-10 — seven minutes "
+        "of review work each time, three `Failed to write file` attempts, and a "
+        "final message with no JSON in it, which `--ephemeral` left nothing to "
+        "salvage from. A review channel that depends on the machine's sandbox "
+        "is not one the fan-out can bet a slot on; the array on stdout is what "
+        "`parse_output` reads anyway. `supports_file_edits` stays True — the "
+        "agent-write profile really edits, and D6 step 3 gates it with a probe."
+    ),
 }
 
 #: Atoms that LOOK restrictive and were checked to be compatible with the write.
 #: A row here is a claim someone verified, not a flag someone waved through.
 REVIEWED_STILL_WRITES = {
-    ("codex", "--sandbox workspace-write"): (
-        "Writable inside the workspace root, and the review output path is "
-        "derived from the plan's own directory inside that repo — measured "
-        "`(source: file)` in plans/harness-expansion/code-review/"
-        "orchestrator-run.log. An explicit --out-dir outside the repo, or a plan "
-        "in no git repo, would land outside it; the stdout fallback covers both."
+    ("muse", "--disable-sandbox"): (
+        "The word is `sandbox` but the flag REMOVES one. D6 (2026-09-11) turns "
+        "muse's shell sandbox off: it is bubblewrap with --unshare-net, and on a "
+        "stock Ubuntu 24.04 (kernel.apparmor_restrict_unprivileged_userns=1) "
+        "bwrap cannot start, so every sandboxed write died on `bwrap: loopback: "
+        "Failed RTM_NEWADDR` exactly as codex's did. Verified against `muse exec "
+        "--help` 1.1.1: 'Disable shell filesystem/network sandboxing for this "
+        "run'. Deliberately not `--yolo`, which also grants workspace trust."
     ),
 }
 

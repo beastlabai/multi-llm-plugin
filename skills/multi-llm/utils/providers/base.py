@@ -1462,6 +1462,12 @@ CATEGORY_CONNECTION_ERROR = "connection_error"
 CATEGORY_SERVER_ERROR = "server_error"
 CATEGORY_INVALID_MODEL = "invalid_model"
 CATEGORY_PERMISSION_DENIED = "permission_denied"
+#: The runner's *own* OS sandbox could not start (D6). Deliberately the same
+#: string as ``retry_ladder.STATUS_SANDBOX_UNAVAILABLE`` — like
+#: ``CATEGORY_INVALID_MODEL``, an alias for a word already in the vocabulary —
+#: so it reaches the ladder under its own name, at rung 1: a property of the
+#: machine, not of the turn, and every sibling on that runner fails identically.
+CATEGORY_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 
 #: §7.2's retryable-code allowlist, shared across both harnesses. Auth is
 #: deliberately absent (no retry fixes a logged-out CLI) and so is
@@ -1501,7 +1507,48 @@ def _matches_marker(markers: Collection["Pattern[str]"], haystack: str) -> bool:
 #: The markers are deliberately specific phrases rather than the bare
 #: ``'not found'`` Lane A used: that one called **every** provider's failure
 #: "cursor-agent command not found", and it swallowed "model not found" too.
+#: bubblewrap's own words when it cannot start (D6). Measured on a stock Ubuntu
+#: 24.04 (``kernel.apparmor_restrict_unprivileged_userns=1``, no AppArmor
+#: profile granting ``/usr/bin/bwrap`` the ``userns`` right):
+#: ``bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`` under
+#: ``--unshare-net``, ``bwrap: setting up uid map: Permission denied`` without.
+#: codex and muse both sandbox through bubblewrap, so both die on these lines
+#: before any model is reached. The table is consulted **first** of the launch
+#: tuple, because the same lines also say "permission denied" / "operation not
+#: permitted" and would otherwise land on ``permission_denied`` — a per-task
+#: verdict, where this one is fatal to the batch and names a machine repair
+#: (``multi_llm.py doctor``). The haystack is lowercased before matching and is
+#: ``stdout\nstderr``, so the anchor is multiline and the words are lowercase.
+SANDBOX_MARKERS = _markers(
+    r"(?m)^bwrap: ",
+    r"bubblewrap",
+    r"failed rtm_newaddr",
+    r"setting up uid map: permission denied",
+)
+
+#: A non-zero exit from a ``sandbox_probe_command`` that says nothing about the
+#: sandbox: the CLI did not understand the probe. Measured on codex — a build
+#: without the ``sandbox`` subcommand reads the argv as an interactive prompt
+#: and dies on ``Error: stdin is not a terminal``; clap's own refusals are the
+#: ``unrecognized subcommand`` / ``unexpected argument`` lines. The preflight
+#: records these ``unknown`` and dispatches, exactly like a probe that timed
+#: out: refusing a runner because it is *older* than the probe would turn a
+#: diagnostic into a version gate the adapter never declared.
+SANDBOX_PROBE_INCONCLUSIVE_MARKERS = _markers(
+    r"unrecognized subcommand",
+    r"unknown subcommand",
+    r"unexpected argument",
+    r"stdin is not a terminal",
+)
+
+
+def sandbox_probe_inconclusive(text: str) -> bool:
+    """Whether a failed sandbox probe's output says the CLI did not run it."""
+    return _matches_marker(SANDBOX_PROBE_INCONCLUSIVE_MARKERS, (text or "").lower())
+
+
 LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
+    (CATEGORY_SANDBOX_UNAVAILABLE, SANDBOX_MARKERS),
     (STATUS_SPAWN_FAILED, _markers(
         r"command not found",
         r"executable file not found",
@@ -1899,6 +1946,29 @@ class VersionVerdict:
         return self.state in (VERSION_TOO_LOW, VERSION_TOO_NEW)
 
 
+@dataclass(frozen=True)
+class ModelVerdict:
+    """Whether one model token is in the CLI's *own* live catalog (D3 step 4).
+
+    The typed answer :meth:`LLMProvider.describe_unlisted_model` returns, in the
+    :class:`VersionVerdict` mould. ``known`` is a tri-state on purpose: ``True``
+    means the listing parsed cleanly and contains the token, ``False`` means the
+    listing parsed cleanly and does **not**, and ``None`` means the CLI could not
+    answer — no listing subcommand, a probe that failed to run, a non-zero exit,
+    an empty or malformed listing. Unknown means unknown: a ``None`` refuses
+    nothing, and D4's dispatch-time classifier is the backstop for a real miss.
+
+    :attr:`detail` is composed from the listing that was just read — never quoted
+    from a run-time "Did you mean" line, which no listing subcommand prints —
+    and :attr:`suggestions` carries the same nearest ids structurally, so a
+    caller renders them without re-parsing prose.
+    """
+
+    known: Optional[bool] = None
+    detail: str = ""
+    suggestions: Tuple[str, ...] = ()
+
+
 def version_verdict(
     provider: Any,
     version: Optional[str],
@@ -2245,6 +2315,85 @@ class LLMProvider(ABC):
     #: exit-3 refusal. Mirrors ``runners[*].login_cmd`` in ``hosts/capabilities.yaml``,
     #: which is the same fact from the host's side.
     login_cmd: str = ""
+
+    #: The OS-level sandbox this CLI puts between the model and the filesystem
+    #: in the mode the adapter runs it (D6): ``"bubblewrap"`` for codex and
+    #: muse, empty for every adapter that writes as an ordinary process under
+    #: flags fixed at build time. Read by ``multi_llm.py doctor`` only — it is
+    #: what selects the 2 ms ``bwrap --unshare-net`` self-test for a CLI whose
+    #: own runner offers no model-free probe. Never a dispatch decision.
+    sandbox_mechanism: str = ""
+
+    #: The adapter flag that turns :attr:`sandbox_mechanism` **off** on every
+    #: dispatch (muse's ``--disable-sandbox``, D6 step 2), so a broken sandbox
+    #: is reported by ``doctor`` as bypassed rather than as a failure. Empty
+    #: means the mechanism is live.
+    sandbox_disabled_by: str = ""
+
+    #: An open question about whether this CLI's workspace-trust gate blocks a
+    #: headless write, recorded as data rather than guessed (D6 step 6). Empty
+    #: for every adapter except one whose gate is unmeasured; ``doctor`` prints
+    #: it verbatim as ``trust: <value>``.
+    trust_status: str = ""
+
+    def sandbox_probe_command(self, profile: str) -> Optional[List[str]]:
+        """A model-free argv that exercises this CLI's own sandbox (D6 step 3).
+
+        ``None`` — the default, and the answer for every adapter without an OS
+        sandbox or with one turned off — means "nothing to probe". An adapter
+        that returns an argv promises it writes one byte under
+        ``.multi-llm/tmp`` of the current directory through the *same* sandbox a
+        ``profile`` dispatch would use, deletes it, and exits 0 on success;
+        anything non-zero is read as the sandbox refusing. The executor's
+        preflight runs it once per host/spec/profile with a 10 s timeout before
+        the first edit-capable dispatch, and ``doctor`` runs the same command.
+        A read-only profile is never asked to write, so adapters answer ``None``
+        for it.
+        """
+        return None
+
+    #: Model tokens this CLI serves with **no credential of any kind present**
+    #: (D3 step 2) — declared, never sniffed, and measured before it is written
+    #: down. "Needs a credential" is a property of the *model* on a CLI that
+    #: fronts several vendors (opencode's own ``opencode/*`` ids answer from a
+    #: logged-out install; its ``openrouter/*`` ids do not), so the auth leg of
+    #: the preflight asks :meth:`model_needs_credentials` per spec rather than
+    #: treating one ``auth_check`` verdict as a fact about every model. Empty —
+    #: the default for every adapter — means every model needs one, which is
+    #: exactly today's behaviour: declaring nothing widens no gate. This is
+    #: **not** ``hosts/capabilities.yaml``'s ``runners.*.needs_auth``, which is
+    #: a host statement about a bundled runner and is read by nothing here.
+    credential_free_models: FrozenSet[str] = frozenset()
+
+    def model_needs_credentials(self, model: str) -> bool:
+        """Whether dispatching ``model`` needs a stored or environment credential.
+
+        ``model`` is normalized the way the dispatch normalizes it — the
+        ``:effort`` suffix split off with :func:`split_reasoning_effort` against
+        this adapter's accepted ladder — so one token spelling governs the auth
+        leg and the catalog leg alike. ``True`` for every model an adapter has
+        not explicitly declared credential-free.
+        """
+        base_model, _effort = split_reasoning_effort(
+            str(model or ""), self._accepted_efforts()
+        )
+        return base_model.strip() not in self.credential_free_models
+
+    def _accepted_efforts(self) -> Collection[str]:
+        """This adapter's accepted ``:effort`` names — its module's ``EFFORT_LADDER``.
+
+        Every registered adapter declares one at module scope and derives its
+        ``REASONING_EFFORTS`` from it (``tests/test_reasoning_effort_ladder.py``
+        grades that over the registry), so the base reads the same declaration
+        instead of asking each adapter to repeat it. A test double without a
+        ladder gets an empty set, which splits nothing.
+        """
+        module = sys.modules.get(type(self).__module__)
+        ladder = getattr(module, "EFFORT_LADDER", None)
+        try:
+            return frozenset(ladder.accepted) if ladder is not None else frozenset()
+        except Exception:  # noqa: BLE001 - a malformed ladder splits nothing
+            return frozenset()
 
     #: M13 (§5.2) — an optional **metadata** readout: the cheap, non-generating
     #: argv that reports what a *status* surface prints beside the auth verdict
@@ -2846,6 +2995,30 @@ class LLMProvider(ABC):
         """
         pass
 
+    def describe_unlisted_model(
+        self, model: str, *, anchor: Optional[str] = None
+    ) -> ModelVerdict:
+        """Is ``model`` in this CLI's own live catalog? (D3 step 4)
+
+        The preflight's *catalog* leg — distinct from
+        ``describe_unresolvable_model`` (structural, catalog-free) and from the
+        advisory ``is_model_valid`` warning about *our* configured list. This is
+        the one leg that may spawn the CLI, and only an adapter with a listing
+        subcommand overrides it (opencode's ``opencode models``). Every adapter
+        answers; this default answers **unknown** — ``ModelVerdict(known=None)``
+        — which refuses nothing, warns nothing, and leaves D4's dispatch-time
+        classifier to catch a real miss one attempt later in the provider's own
+        words. Declared here, typed, the way :meth:`describe_failure` is, so the
+        executor calls it directly rather than ``getattr``-ing a name that
+        exists on one adapter.
+
+        ``anchor`` is the run anchor a dispatch resolves config against, so an
+        override reading the listing under its dispatch context (a hermetic
+        config-home redirect, say) sees the same effective configuration the
+        dispatch it vets will.
+        """
+        return ModelVerdict(known=None, detail="", suggestions=())
+
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """Extract a human-readable reason from a failed invocation.
 
@@ -2999,6 +3172,7 @@ class LLMProvider(ABC):
         *,
         auth: Optional[bool] = None,
         version: Optional[str] = None,
+        credentials_required: bool = True,
     ) -> AvailabilityReport:
         """Why this runner is or is not usable, as a typed state (§5.1).
 
@@ -3043,6 +3217,14 @@ class LLMProvider(ABC):
                 sentence (:func:`_version_token`), so trailing build noise is
                 tolerated and nothing else from this string can reach a stored
                 ``detail``.
+            credentials_required: what :meth:`model_needs_credentials` answers
+                for the model this report is about (D3 step 2). ``False``
+                suppresses the ``NEEDS_AUTH`` leg — the preflight skips its
+                refusal for a declared credential-free model, and a status that
+                reported ``NEEDS_AUTH`` about a runner that dispatches fine
+                would be the same drift facing the other way. It is declared
+                adapter data like everything else read here; nothing is
+                spawned. Defaults to ``True``, today's behaviour.
 
         Returns:
             An :class:`AvailabilityReport`. Its ``detail`` is built only from
@@ -3084,6 +3266,16 @@ class LLMProvider(ABC):
                 f"upgrade {name} to >= {minimum}.",
             )
 
+        if auth is False and not credentials_required:
+            # The probe's verdict is real and still recorded by the preflight;
+            # what it may not do is refuse a model the adapter declares serves
+            # with no credential present. Mirror that here so the report and
+            # the refusal a run would hit cannot name different problems.
+            return AvailabilityReport(
+                Availability.READY,
+                f"{name} is installed; its auth probe recognised a login notice, "
+                f"but this model is declared to need no credential.",
+            )
         if auth is False:
             login = (self.login_cmd or "").strip()
             fix = f" Fix: run `{login}`." if login else ""

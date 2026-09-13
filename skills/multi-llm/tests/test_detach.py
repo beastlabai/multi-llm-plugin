@@ -884,6 +884,45 @@ class TestStatusSurface:
         assert str(cli_common.skill_dir()) in out
         assert "{SKILL_DIR}" not in out
 
+    def test_complete_phase_state_renders_as_finished(self, tmp_path, capsys):
+        """§Fix2: a run whose phase machine reached ``complete`` renders as
+        finished on all three of ``status``'s state lines — not stuck showing
+        whichever intermediate step (``grouping_complete``, ``models_complete``,
+        ``validation_pending``) the run's last write happened to leave behind,
+        and without the "not yet marked completed" note a still-pending
+        workflow phase would print alongside a done run.
+        """
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        # `claim_run` drops any predecessor `run`/`progress` wholesale, so it
+        # has to land BEFORE the phase-level writes below — exactly the order
+        # a real run takes (the detach boundary's claim, then the phase's own
+        # `write_status`/`update_status` calls), not before it.
+        status_file.claim_run(str(phase), {
+            "run_id": "run-done-0002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+        })
+        status_file.update_status(str(phase), {
+            "progress": {"step": "complete", "models_total": 3, "models_done": 3},
+        })
+        state = StateManager(plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "run.state:      done" in out
+        assert "phase state:    complete" in out
+        assert "progress:       complete, models 3/3" in out
+        assert "workflow phase: completed" in out
+        assert "not yet marked completed" not in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):
@@ -1554,3 +1593,119 @@ def _banner_field(text: str, name: str) -> str:
         if stripped.startswith(f"{name}:"):
             return stripped.split(":", 1)[1].strip()
     raise AssertionError(f"no {name} in the detach banner:\n{text}")
+
+
+# ===========================================================================
+# D2 — the detached route carries the launcher's flags
+# ===========================================================================
+
+class TestReplayFlagsAcrossTheDetachBoundary:
+    """Three assertions, one level each: the launcher ships its list on the
+    child's environment, the worker pops it before the phase body runs and
+    writes it into the record, and ``status`` splices it back into every
+    command it prints — the inlined log tail included."""
+
+    def test_launcher_ships_replay_flags_on_the_child_env(self, tmp_path,
+                                                          monkeypatch, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setenv(detach.UV_ENV, str(_fake_uv(tmp_path)))
+        seen = {}
+
+        def fake_spawn(command, *, cwd, env, log_path):
+            seen["command"] = list(command)
+            seen["env"] = dict(env)
+            run_id = command[command.index("--internal-run-id") + 1]
+            status_file.claim_run(str(phase), {
+                "run_id": run_id, "state": "running", "pid": os.getpid(),
+                "heartbeat_at": status_file.now_iso(),
+            })
+            return os.getpid()
+
+        monkeypatch.setattr(process_control, "spawn_detached", fake_spawn)
+        argv = ["--plan-file", str(plan), "--quick", "--detach", "--yes",
+                "--exec-subagents"]
+        code = detach.launch(
+            mode="review-plan", argv=argv, phase_dir=str(phase),
+            plan_file=str(plan), phase="review-plan",
+            args=argparse.Namespace(force=False, if_not_running=False),
+        )
+        capsys.readouterr()
+        assert code == 0
+        shipped = json.loads(seen["env"][detach.REPLAY_FLAGS_ENV])
+        # The launcher's list: the selector and the caller's --detach, never
+        # the implied pair nor the re-entry flags the child command carries.
+        assert shipped == ["--quick", "--detach"]
+        assert "--internal-worker" in seen["command"]
+        assert "--yes" in seen["command"] and "--exec-subagents" in seen["command"]
+
+    def test_worker_pops_the_env_and_records_the_launchers_list(self, tmp_path,
+                                                                monkeypatch):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setenv(
+            detach.REPLAY_FLAGS_ENV, json.dumps(["--quick", "--detach"])
+        )
+        monkeypatch.delenv(detach.WORKER_ENV, raising=False)
+        args = argparse.Namespace(
+            internal_worker=True, internal_run_id="run-replay-0001",
+            host="opencode",
+        )
+        handle = detach.begin_worker_run(
+            phase_dir=str(phase), mode="review-plan", plan_file=str(plan),
+            args=args,
+        )
+        try:
+            # Absent by the time the phase body runs: no provider child inherits it.
+            assert detach.REPLAY_FLAGS_ENV not in os.environ
+            record = status_file.read_run(str(phase))
+            assert record["replay_flags"] == ["--quick", "--detach"]
+            for token in ("--internal-worker", "--internal-run-id", "--yes",
+                          "--exec-subagents"):
+                assert token not in record["replay_flags"]
+        finally:
+            handle.finish(0)
+
+    def test_a_malformed_env_value_records_an_empty_list(self, tmp_path, monkeypatch):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setenv(detach.REPLAY_FLAGS_ENV, "{not json")
+        monkeypatch.delenv(detach.WORKER_ENV, raising=False)
+        handle = detach.begin_worker_run(
+            phase_dir=str(phase), mode="review-plan", plan_file=str(plan),
+            args=argparse.Namespace(internal_worker=True, internal_run_id="r2"),
+        )
+        try:
+            assert status_file.read_run(str(phase))["replay_flags"] == []
+        finally:
+            handle.finish(0)
+
+    def test_status_after_the_worker_died_carries_quick_everywhere(self, tmp_path,
+                                                                   capsys):
+        """The printed-text carrier: the whole of ``status``'s stdout — the
+        inlined log tail included — has no flag-less ``--reaggregate``."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        worker_line = cli_common.retry_command(
+            "review-plan", str(plan), "--reaggregate", flags=["--quick"]
+        )
+        Path(detach.log_path(str(phase))).write_text(
+            "ERROR: 1 of 1 validation task(s) did not produce a usable result\n"
+            "Re-invoke to retry only the failures (validation-batch-0):\n"
+            f"  {worker_line}\n",
+            encoding="utf-8",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-quick-00001", "state": "failed", "exit_code": 3,
+            "error": "BatchFailed", "log_path": detach.log_path(str(phase)),
+            "detached": True, "mode": "review-plan",
+            "replay_flags": ["--quick", "--detach"],
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 3
+        out = capsys.readouterr().out
+        assert "resume with:" in out
+        assert "--quick --detach --reaggregate" in out
+        carriers = [line for line in out.splitlines() if "--reaggregate" in line]
+        assert carriers
+        assert all("--quick" in line for line in carriers), out
+        assert "--force" not in out

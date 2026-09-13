@@ -757,13 +757,13 @@ def _complete_validation_batches(phase_dir, status="valid"):
 def _unrelated_issues(names):
     """Issues no two of which `group_similar_suggestions` will ever merge.
 
-    `compute_similarity` (`utils/suggestion_processor.py`) scores shared *words*
-    in the title and the desc plus a flat 0.2 for a matching `type`, against a
-    0.4 threshold — so `_issues`' shared "Description for ..." boilerplate and
-    single `type` collapse an arbitrary list into one group, which is fine for
-    the identity questions above and useless here. These share no word and no
-    type, so the group count is the name count, and the batch count that follows
-    from it (`max_per_batch=4`) is something a test can rely on.
+    `compute_similarity` (`utils/suggestion_processor.py`) scores shared
+    *content tokens* — normalized, rarity-weighted, title above body — so
+    `_issues`' shared "Description for ..." boilerplate can pull an arbitrary
+    list together, which is fine for the identity questions above and useless
+    here. These share no content token at all, so the group count is the name
+    count, and the batch count that follows from it (`max_per_batch=4`) is
+    something a test can rely on.
     """
     return [
         {
@@ -1357,3 +1357,347 @@ class TestTwoSpecsSharingOneFilenameStemNeverReachTheFanOut:
         """
         with pytest.raises(AssertionError, match="dispatched despite"):
             _run_cro_fanout_resolving_models(tmp_path, list(_REAL_SPECS))
+
+
+# ---------------------------------------------------------------------------
+# A stale validation.json never outranks the batch files that superseded it (D7)
+# ---------------------------------------------------------------------------
+#
+# The resume of a real review re-grouped 48 groups into 61, wrote a fresh
+# `validation_tasks.json`, and left the first run's `validation.json` where it
+# was. With all 21 batch files complete, `--reaggregate` trusted that file first
+# ("Found existing validation.json, using it"), and the 13 groups it had never
+# seen each took whatever record sat at their *index* — another group's verdict.
+# 52 / 3 / 6 on screen, 56 / 4 / 1 on disk, exit 0.
+#
+# Three rules close it, each pinned below against the base reaggregator over a
+# real phase dir: a `validation.json` records the grouping it belongs to
+# (`metadata.grouped_sha256`) and is honoured only when that is the grouping on
+# disk; a re-group retires the file it orphans (renamed, never deleted); and the
+# index fallback in `apply_validation_to_groups` is for hash-less records only.
+
+
+def _distinct_suggestions(names):
+    """Review-plan suggestions no two of which grouping will merge.
+
+    Same construction as `_unrelated_issues` — no shared word, a distinct
+    `type` each — so the group count is the name count and a second model's
+    findings *add* groups rather than joining existing ones.
+    """
+    return [
+        {
+            "title": name,
+            "desc": f"{name}{name} {name}{name}",
+            "importance": "MEDIUM",
+            "reference": f"Step {name}",
+            "type": f"kind-{name.lower()}",
+        }
+        for name in names
+    ]
+
+
+def _validated_round(plan, out_dir, phase_dir, status):
+    """Take a phase dir from per-model results to a merged `validation.json`.
+
+    The first reaggregate groups and materializes `validation_tasks.json` (the
+    marker handover); the batches are completed with *status*; the second
+    reaggregate merges them, which is the write that produces `validation.json`
+    — bound, since D7, to the `grouped.json` it was merged against.
+    """
+    _reaggregate(plan, out_dir, phase_dir)
+    assert (phase_dir / "validation_tasks.json").exists()
+    _complete_validation_batches(phase_dir, status=status)
+    _reaggregate(plan, out_dir, phase_dir)
+    return json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+
+
+def _grouped_hash(phase_dir):
+    return subagent_tasks_mod.file_content_hash(str(phase_dir / "grouped.json"))
+
+
+def _groups_on_disk(phase_dir):
+    payload = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+    return payload["groups"] if isinstance(payload, dict) else payload
+
+
+def _stale_files(phase_dir):
+    return sorted(p.name for p in phase_dir.glob("validation.*.stale.json"))
+
+
+def _validation_summary(phase_dir):
+    report = (phase_dir / "report.md").read_text(encoding="utf-8")
+    line = next(ln for ln in report.splitlines() if ln.startswith("**Validation:**"))
+    return line
+
+
+def _regrouped_after_a_second_model(plan, out_dir, phase_dir, first_validation):
+    """Reproduce the dir the defective resume left behind.
+
+    The first grouping was validated (`first_validation`). Then a second model's
+    result lands and the phase is re-materialized: a fresh grouping, a fresh
+    `validation_tasks.json`, and fresh batches completed as *invalid* so a
+    verdict from the old file is distinguishable from one out of the batches.
+    Pre-D7 the resume left the first `validation.json` where it was — the same
+    bytes are put back after the regroup to reproduce exactly that dir.
+    """
+    stale_bytes = json.dumps(first_validation, indent=2).encode("utf-8")
+    for name in ("validation.json", "validation_tasks.json"):
+        (phase_dir / name).unlink()
+    for batch in phase_dir.glob("validation_batch_*.json"):
+        batch.unlink()
+    (phase_dir / "codex_gpt-6.json").write_text(
+        json.dumps(_distinct_suggestions(["Delta", "Echo"])), encoding="utf-8"
+    )
+
+    _reaggregate(plan, out_dir, phase_dir)
+    assert _grouped_hash(phase_dir) != first_validation["metadata"]["grouped_sha256"], (
+        "the fixture is meant to change the grouping"
+    )
+    _complete_validation_batches(phase_dir, status="invalid")
+    (phase_dir / "validation.json").write_bytes(stale_bytes)
+    return stale_bytes
+
+
+class TestAStaleValidationFileYieldsToTheBatches:
+    def test_a_hashed_file_from_an_older_grouping_is_retired_and_the_batches_merge(
+        self, tmp_path, capsys
+    ):
+        """The defect as reported: hashed `validation.json` from grouping A, fresh
+        batches for grouping B. The batches win, the reason is printed, and the
+        old file is renamed rather than read or overwritten."""
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo", "Charlie"])},
+            models_requested=["claude-code:sonnet", "codex:gpt-6"],
+        )
+        first = _validated_round(plan, out_dir, phase_dir, status="valid")
+        assert first["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        assert _validation_summary(phase_dir) == (
+            "**Validation:** 3 valid, 0 invalid, 0 needs human review"
+        )
+
+        stale_bytes = _regrouped_after_a_second_model(plan, out_dir, phase_dir, first)
+        capsys.readouterr()
+
+        _reaggregate(plan, out_dir, phase_dir)
+        out = capsys.readouterr().out
+
+        assert "Found existing validation.json" not in out
+        assert (
+            f"Not using validation.json: validation.json belongs to grouping "
+            f"{first['metadata']['grouped_sha256']}, current grouped.json is "
+            f"{_grouped_hash(phase_dir)}"
+        ) in out
+        assert "batch files found, merging" in out
+
+        # Renamed, never deleted, and byte-identical to what was left behind.
+        stale = _stale_files(phase_dir)
+        assert len(stale) == 1
+        assert (phase_dir / stale[0]).read_bytes() == stale_bytes
+        assert "[VALIDATION_RETIRED] " + stale[0] in out
+
+        # The merged file is bound to the grouping it was merged against, and
+        # every verdict came out of the batches — none out of the old file.
+        merged = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+        assert merged["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        assert [g["status"] for g in merged["groups"]] == ["invalid"] * 5
+        assert _validation_summary(phase_dir) == (
+            "**Validation:** 0 valid, 5 invalid, 0 needs human review"
+        )
+
+    def test_a_hashed_file_applied_to_a_regrouped_set_yields_exactly_the_unmatched_default(
+        self, tmp_path, capsys
+    ):
+        """`apply_validation_to_groups` over the same two groupings, in memory.
+
+        The new groups are put *first* so they sit at the indices the old
+        records carry — the arrangement the index fallback used to misattribute.
+        Every old group keeps its own verdict, every new group gets the default,
+        and the count of the latter is printed. Zero foreign verdicts.
+        """
+        from utils import validation as validation_mod
+
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo", "Charlie"])},
+            models_requested=["claude-code:sonnet", "codex:gpt-6"],
+        )
+        first = _validated_round(plan, out_dir, phase_dir, status="valid")
+        old_ids = {g["group_id"] for g in first["groups"]}
+        assert len(old_ids) == 3
+
+        _regrouped_after_a_second_model(plan, out_dir, phase_dir, first)
+        regrouped = _groups_on_disk(phase_dir)
+        assert len(regrouped) == 5
+        new_first = sorted(
+            regrouped,
+            key=lambda g: validation_mod.generate_group_id(g) in old_ids,
+        )
+        assert validation_mod.generate_group_id(new_first[0]) not in old_ids
+        assert validation_mod.generate_group_id(new_first[1]) not in old_ids
+
+        records = validation_mod.load_validation_results(phase_dir / "validation.json")
+        capsys.readouterr()
+        applied = validation_mod.apply_validation_to_groups(new_first, records)
+        out = capsys.readouterr().out
+
+        assert "[validation] 2 of 5 groups have no validation result" in out
+        for group in applied:
+            if validation_mod.generate_group_id(group) in old_ids:
+                assert group["validation_status"] == "valid"
+                assert group["validation_reason"].startswith("Confirmed against the diff")
+            else:
+                assert group["validation_status"] == "needs-human-decision"
+                assert group["validation_reason"] == "No validation result"
+                assert group["validation_confidence"] == 0.0
+        assert sum(g["validation_status"] == "valid" for g in applied) == 3
+
+
+class TestARegroupRetiresTheVerdictsItOrphans:
+    def test_the_base_regroup_renames_validation_json_in_the_same_step(
+        self, tmp_path, capsys
+    ):
+        """`reaggregate_from_existing_files`' own regroup branch — the one that
+        rewrites `grouped.json` — retires the file it orphans."""
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo", "Charlie"])},
+            models_requested=["claude-code:sonnet"],
+        )
+        first = _validated_round(plan, out_dir, phase_dir, status="valid")
+        stale_bytes = (phase_dir / "validation.json").read_bytes()
+        # No task file, `--skip-validation`: nothing binds the grouping, so this
+        # reaggregate regroups and rewrites `grouped.json`.
+        (phase_dir / "validation_tasks.json").unlink()
+        capsys.readouterr()
+
+        asyncio.run(
+            rob.reaggregate_from_existing_files(
+                prefix="plan",
+                out_dir=str(out_dir),
+                phase_dir=str(phase_dir),
+                phase_name="review-plan",
+                plan_path=str(plan),
+                args=_args(skip_validation=True),
+                orchestrator_script="review_plan_orchestrator.py",
+            )
+        )
+        out = capsys.readouterr().out
+
+        assert "Grouped suggestions saved to" in out
+        assert not (phase_dir / "validation.json").exists()
+        stale = _stale_files(phase_dir)
+        assert len(stale) == 1
+        assert (phase_dir / stale[0]).read_bytes() == stale_bytes
+        assert f"[VALIDATION_RETIRED] {stale[0]} (grouped.json rewritten by reaggregate)" in out
+        assert first["groups"]  # the retired verdicts are still on disk, intact
+
+    def test_the_code_review_fanout_renames_validation_json_when_it_regroups(
+        self, tmp_path, capsys
+    ):
+        """The main path's write, driven end to end on `code_review_orchestrator`
+        (`review_orchestrator_base`'s fan-out calls the same helper at the same
+        step). A `validation.json` from a previous run is in the phase dir when
+        the fan-out regroups; afterwards it is the `.stale.json` sibling."""
+        phase_dir = cro.get_phase_dir(tmp_path / "auth-feature.md", "code-review")
+        previous = {
+            "format_version": 2,
+            "groups": [{"group_index": 0, "group_id": "0123456789abcdef",
+                        "status": "valid", "reason": "From an earlier run",
+                        "confidence": 0.9}],
+            "metadata": {"model": "unknown", "schema_version": "2.1",
+                         "grouped_sha256": "feedfacecafebeef"},
+        }
+        stale_bytes = json.dumps(previous, indent=2).encode("utf-8")
+        (phase_dir / "validation.json").write_bytes(stale_bytes)
+
+        _run_cro_fanout(tmp_path, _two_model_findings())
+        out = capsys.readouterr().out
+
+        assert (phase_dir / "grouped.json").exists()
+        assert not (phase_dir / "validation.json").exists()
+        stale = _stale_files(phase_dir)
+        assert len(stale) == 1
+        assert (phase_dir / stale[0]).read_bytes() == stale_bytes
+        assert f"[VALIDATION_RETIRED] {stale[0]} (grouped.json rewritten by a re-run)" in out
+
+
+def _as_legacy_file(phase_dir, status):
+    """Strip `metadata.grouped_sha256` and set every verdict to *status*.
+
+    A pre-D7 `validation.json`: hashed records, no binding to any grouping.
+    """
+    path = phase_dir / "validation.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for group in data["groups"]:
+        group["status"] = status
+        group["reason"] = "From the legacy file"
+    del data["metadata"]["grouped_sha256"]
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return path
+
+
+def _set_mtime(path, seconds):
+    import os
+    os.utime(path, (seconds, seconds))
+
+
+class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
+    def _legacy_phase(self, tmp_path):
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo", "Charlie"])},
+            models_requested=["claude-code:sonnet"],
+        )
+        _validated_round(plan, out_dir, phase_dir, status="invalid")
+        legacy = _as_legacy_file(phase_dir, status="valid")
+        batches = sorted(phase_dir.glob("validation_batch_*.json"))
+        assert batches
+        base = 1_700_000_000
+        for batch in batches:
+            _set_mtime(batch, base)
+        _set_mtime(legacy, base + 60)
+        return plan, out_dir, phase_dir, batches
+
+    def test_honoured_when_it_postdates_every_batch(self, tmp_path, capsys):
+        plan, out_dir, phase_dir, _batches = self._legacy_phase(tmp_path)
+        capsys.readouterr()
+
+        _reaggregate(plan, out_dir, phase_dir)
+        out = capsys.readouterr().out
+
+        assert "Found existing validation.json, using it for report generation" in out
+        assert "Not using validation.json" not in out
+        assert _stale_files(phase_dir) == []
+        # Left as it was: still key-less, still the legacy verdicts.
+        data = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+        assert "grouped_sha256" not in data["metadata"]
+        assert _validation_summary(phase_dir) == (
+            "**Validation:** 3 valid, 0 invalid, 0 needs human review"
+        )
+
+    def test_not_honoured_when_a_batch_is_newer(self, tmp_path, capsys):
+        plan, out_dir, phase_dir, batches = self._legacy_phase(tmp_path)
+        newer = batches[0]
+        _set_mtime(newer, 1_700_000_000 + 120)
+        stale_bytes = (phase_dir / "validation.json").read_bytes()
+        capsys.readouterr()
+
+        _reaggregate(plan, out_dir, phase_dir)
+        out = capsys.readouterr().out
+
+        assert "Found existing validation.json" not in out
+        assert (
+            "Not using validation.json: validation.json carries no grouped_sha256 "
+            f"and 1 batch file(s) are newer than it ({newer.name})"
+        ) in out
+        stale = _stale_files(phase_dir)
+        assert len(stale) == 1
+        assert (phase_dir / stale[0]).read_bytes() == stale_bytes
+        # Merged from the batches, and bound from now on.
+        data = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+        assert data["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        assert [g["status"] for g in data["groups"]] == ["invalid"] * 3
+        assert _validation_summary(phase_dir) == (
+            "**Validation:** 0 valid, 3 invalid, 0 needs human review"
+        )

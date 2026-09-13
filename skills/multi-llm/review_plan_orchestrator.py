@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # via utils.review_orchestrator_base which handles validation orchestration.
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils import cli_common
 from utils.cli_common import build_parent_parser, dispatcher_prefix
 from utils.output_handler import sanitize_prefix, get_phase_dir
 from utils.prompt_loader import load_prompt
@@ -71,7 +72,6 @@ from utils.review_orchestrator_base import (
     validate_suggestion,
     extract_json_array,
     save_model_result as _base_save_model_result,
-    save_agent_log,
     aggregate_results as _base_aggregate_results,
     reaggregate_from_existing_files as _base_reaggregate,
     run_single_model as _base_run_single_model,
@@ -536,6 +536,19 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
     print(f"Sections with 2+ groups: {len([s for s in section_groups.values() if len(s) >= 2])}")
     print(f"Singleton sections: {len(tasks_metadata.get('singleton_sections', {}))}")
 
+    # The stored value is the bare verb, never a command (D2 row 8): compose
+    # the runnable string here, from this mode, the document's own plan_file,
+    # that verb and the document's replay_flags — a live invocation of this
+    # mode winning over the stored list.
+    reaggregate_cmd = cli_common.retry_command(
+        "review-plan",
+        tasks_metadata.get("plan_file") or plan_path,
+        tasks_metadata.get("reaggregate_command") or "--reaggregate-consolidation",
+        flags=cli_common.current_replay_flags(
+            tasks_metadata.get("replay_flags"), mode="review-plan"
+        ),
+    )
+
     # D3b: continue past the marker in-process when this run drives its own
     # subagents — consolidation's consumer is reaggregate_consolidation_mode, so
     # the phase closes here rather than owing a host a second turn.
@@ -547,14 +560,14 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
         document=tasks_metadata,
         plan_path=plan_path,
         label="consolidation",
-        retry_command=tasks_metadata.get("reaggregate_command"),
+        retry_command=reaggregate_cmd,
     ):
         prefix = derive_prefix(plan_path)
         reaggregate_consolidation_mode(phase_dir, plan_path, prefix, [])
         return
 
     print(f"\nAfter consolidation completes, run:")
-    print(f"  {tasks_metadata.get('reaggregate_command', '--reaggregate-consolidation')}")
+    print(f"  {reaggregate_cmd}")
 
 
 def consolidate_dry_run_mode(phase_dir: str, plan_path: str) -> None:

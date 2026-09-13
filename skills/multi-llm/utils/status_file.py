@@ -26,7 +26,12 @@ second file with a private shape:
   (``starting → running → {done, failed, aborted}``). ``pgid`` is the worker's
   process group, recorded at start because it cannot be re-derived once the
   worker dies — it is what the close-out signals to reap surviving provider
-  CLIs (``None`` on Windows, where a Job Object does that).
+  CLIs (``None`` on Windows, where a Job Object does that). Plus the optional
+  ``replay_flags`` list (D2): the *launcher's* selection flags
+  (``cli_common.replay_flags``), which ``status`` splices back into the
+  ``resume with:`` command so a ``--quick`` run is retried as one. It is
+  **not** process state — ``update_run``'s successor-state guard does not
+  apply to it, and ``claim_run`` writes it once at start and never again.
 * ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
   failed_task_ids, models_done, models_total}`` — reporting only; no external
   actor advances it.

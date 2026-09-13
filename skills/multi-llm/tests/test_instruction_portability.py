@@ -692,7 +692,7 @@ class TestServedCoreIsTokenFree:
     #: surfaces with no workflow to narrate. Pinned so the set cannot grow
     #: silently: a new mode landing here means a shim's read step now says
     #: nothing useful about it, which is a review decision, not a default.
-    DISPATCHER_DRIVEN = ["status", "install-host", "uninstall-host"]
+    DISPATCHER_DRIVEN = ["status", "doctor", "install-host", "uninstall-host"]
 
     def test_dispatcher_driven_set_is_exactly_the_pinned_one(self):
         actual = sorted(m.name for m in mode_table.MODES if not m.instruction_file)

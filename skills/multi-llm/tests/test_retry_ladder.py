@@ -25,10 +25,12 @@ from utils.retry_ladder import (  # noqa: E402
     MIN_ATTEMPT_BUDGET_S,
     RetryLadder,
     STATUS_AUTH_FAILED,
+    STATUS_INVALID_MODEL,
     STATUS_OK,
     STATUS_RATE_LIMITED,
     STATUS_REJECTED,
     STATUS_RUNNER_ERROR,
+    STATUS_SANDBOX_UNAVAILABLE,
     STATUS_SCHEMA_INVALID,
     STATUS_SPAWN_FAILED,
     STATUS_TIMEOUT,
@@ -356,9 +358,21 @@ class TestForever429FinishesInsideTheTimeout:
 
 
 class TestTerminalAndFatalStatuses:
-    """The rungs that are never retried, and the two that fail the batch."""
+    """The rungs that are never retried, and the three that fail the batch.
 
-    @pytest.mark.parametrize("status", [STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED])
+    ``invalid_model`` joined rung 1 with D4: a rejected model id is a property
+    of the spec, so retrying it — here or on any sibling resolving the same
+    spec — cannot do anything but fail again. ``sandbox_unavailable`` joined
+    with D6 on the same reasoning one level down: bubblewrap failing to start
+    is a property of the machine, and no sibling on that runner fares better.
+    """
+
+    @pytest.mark.parametrize(
+        "status", [
+            STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED, STATUS_INVALID_MODEL,
+            STATUS_SANDBOX_UNAVAILABLE,
+        ]
+    )
     def test_rung_1_is_fatal(self, status):
         ladder = _ladder(Clock())
         ladder.next_attempt()

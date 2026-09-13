@@ -558,6 +558,8 @@ class TestFailureLadder:
         assert executor.RUNG_BY_STATUS == {
             executor.STATUS_SPAWN_FAILED: 1,
             executor.STATUS_AUTH_FAILED: 1,
+            executor.STATUS_INVALID_MODEL: 1,
+            executor.STATUS_SANDBOX_UNAVAILABLE: 1,
             executor.STATUS_TIMEOUT: 2,
             executor.STATUS_RATE_LIMITED: 3,
             executor.STATUS_RUNNER_ERROR: 4,
@@ -2814,3 +2816,1322 @@ class TestProviderCapabilityDeclarations:
         for name, provider in registry._PROVIDERS.items():
             implements = type(provider).parse_usage is not LLMProvider.parse_usage
             assert implements == (provider.usage_support != "none"), name
+
+
+# ---------------------------------------------------------------------------
+# D4 — `invalid_model` is rung 1, fatal, refused at the probe, and repairable
+# ---------------------------------------------------------------------------
+
+_OPENCODE_FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+
+#: The two streams `opencode run --model opencode/sonnet` really wrote (opencode
+#: 1.18.x, `--print-logs --log-level ERROR`): a wrapper error event on stdout
+#: with an `err_…` ref and no cause, and the `ProviderModelNotFoundError` with
+#: its "Did you mean" list on stderr. Verbatim from the incident's
+#: `failed/validation-batch-0.attempt1.json`, which is what D5's fixture is.
+_INVALID_MODEL_STDOUT = (_OPENCODE_FIXTURES / "invalid-model.stdout.txt").read_text(
+    encoding="utf-8"
+)
+_INVALID_MODEL_STDERR = (_OPENCODE_FIXTURES / "invalid-model.stderr.txt").read_text(
+    encoding="utf-8"
+)
+_REJECTED_SPEC = "opencode:opencode/sonnet"
+
+#: The same wrapper on stdout, but a stderr whose `error=` is a genuine server
+#: fault — no `INVALID_MODEL_MARKERS` hit, so `_classify_failed_run` returns
+#: `None` and the adapter's composed text is what the exit-3 line prints.
+_SERVER_FAULT_STDERR = (
+    'timestamp=2026-09-10T15:12:34.751Z level=ERROR run=f2d52142 message=failed '
+    'ref=err_9e0ff23e error="Error: upstream returned HTTP 502 Bad Gateway" '
+    'cause="Error: upstream returned HTTP 502 Bad Gateway\n'
+    '    at <anonymous> (/$bunfs/root/chunk-2ybdzszf.js:439:94278)"\n'
+)
+
+
+def _install_opencode_capture(
+    bin_dir: Path, stdout: str, stderr: str, exit_code: int = 1
+) -> None:
+    """Replace the mock `opencode` with a CLI that replays one captured failure.
+
+    Version and auth probes answer like a logged-in 1.18.12; every other
+    invocation — the nested-exec probe and the dispatch alike — drains stdin,
+    writes the two captured streams and exits ``exit_code``. A shell script
+    rather than a mock knob, so the bytes the real ``OpencodeProvider`` parses
+    are exactly the bytes the incident recorded.
+    """
+    out = bin_dir / "opencode-capture.stdout"
+    err = bin_dir / "opencode-capture.stderr"
+    out.write_text(stdout, encoding="utf-8")
+    err.write_text(stderr, encoding="utf-8")
+    script = bin_dir / "opencode"
+    script.unlink()
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            case "$1" in
+              --version|-V) echo "opencode 1.18.12"; exit 0;;
+              auth) printf 'Credentials\\n  anthropic  oauth\\n'; exit 0;;
+            esac
+            cat >/dev/null
+            cat "{out}"
+            cat "{err}" >&2
+            exit {exit_code}
+            """
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+class TestInvalidModelIsFatal:
+    """D4: a rejected model id is a property of the spec, and the code says so.
+
+    Every row here uses the real ``OpencodeProvider`` over the incident's own
+    streams — its ``parse_output`` composes ``OpenCode reported an error: …``
+    from D5's rewritten ``describe_failure`` — so what is pinned is the
+    *interaction*: the classifier's verdict replaces the adapter's text on the
+    exit-3 line whole, never concatenated, never deduplicated.
+    """
+
+    class _Capture:
+        def __init__(self, stdout, stderr, exit_code=1):
+            self.stdout = stdout
+            self.stderr = stderr
+            self.exit_code = exit_code
+            self.duration = 0.0
+            self.timed_out = False
+            self.launch_error = None
+            self.argv = []
+
+    def _tasks(self, tmp_path, n):
+        return [_validation_batch(tmp_path, i, (f"{i:04x}000000000000",))
+                for i in range(n)]
+
+    # -- step 2: the classifier row ---------------------------------------
+
+    def test_the_real_capture_classifies_to_invalid_model(self, monkeypatch):
+        provider = registry.get_provider("opencode")
+        # D5 is diagnostics, never classification: the verdict must not route
+        # through `describe_failure`, so it is broken here and still reached.
+        monkeypatch.setattr(
+            type(provider), "describe_failure",
+            lambda self, stdout, stderr: (_ for _ in ()).throw(RuntimeError("no")),
+        )
+        verdict = executor._classify_failed_run(
+            provider, self._Capture(_INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR),
+            "opencode/sonnet",
+        )
+        assert verdict is not None
+        status, reason = verdict
+        assert status == executor.STATUS_INVALID_MODEL
+        assert status in executor.FATAL_STATUSES
+        assert executor.RUNG_BY_STATUS[status] == 1
+        assert reason.startswith(
+            "the runner rejected the model id 'opencode:opencode/sonnet' (the fix "
+            "is a config edit, never a retry). Stream tail: '"
+        )
+        assert "Did you mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?" in reason
+
+    # -- step 3: the probe row ----------------------------------------------
+
+    def test_the_probe_refuses_before_dispatch_where_a_leg_is_unresolved(
+        self, monkeypatch
+    ):
+        """Opportunistic by construction, and the test says so.
+
+        The branch is only reached when a `nested_exec` leg is still unresolved
+        and the verdict is not yet cached for this host/spec pair, so both are
+        arranged explicitly: the opencode host entry declares every leg
+        `unknown`, and `_NESTED_CACHE` is cleared. A host whose legs are all
+        `allowed` never reaches this branch.
+        """
+        from utils import host_capabilities as caps
+
+        legs = caps.nested_exec("opencode")
+        legs.pop("notes", None)
+        assert any(state != "allowed" for state in legs.values()), legs
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+        executor.reset_nested_exec_cache()
+        assert executor._NESTED_CACHE == {}
+        spawned = []
+
+        def fake_spawn(**kwargs):
+            spawned.append(kwargs)
+            return self._Capture(_INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR)
+
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor._detect_nested_exec(
+                "opencode", "opencode/sonnet",
+                key="driver.subagent_runner", spec=_REJECTED_SPEC,
+            )
+        rejected = excinfo.value
+        assert len(spawned) == 1
+        assert rejected.reason_code == "runner_invalid_model"
+        assert rejected.exit_code == 3
+        assert rejected.key == "driver.subagent_runner"
+        assert rejected.spec == _REJECTED_SPEC
+        assert "Model not found: opencode/sonnet" in rejected.message
+        assert "Did you mean" in rejected.message
+        assert "Did you mean" in rejected.detail
+        assert "(`opencode models`)" in rejected.message
+        assert "update the plugin's host default" in rejected.message
+        assert "Nothing was dispatched." in rejected.message
+        assert "runner_invalid_model" in executor._REASON_EXPLANATION
+        # A refusal is never cached: the next resolution asks again.
+        assert executor._NESTED_CACHE == {}
+
+    # -- steps 3 + 5 end to end: the refusal path ---------------------------
+
+    def test_a_refusal_is_printed_structured_and_never_from_a_stale_report(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """No task file, no report from this run, and the previous run's report
+        is not what the failure is described from."""
+        from utils import status_file
+        from utils.review_orchestrator_base import dispatch_subagent_tasks
+
+        runner_env.use(_REJECTED_SPEC)
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+        executor.reset_version_cache()
+        stale = tmp_path / executor.BATCH_REPORT_FILENAME
+        stale.write_text(json.dumps({
+            "tasks": [{
+                "task_id": "STALE-TASK-FROM-AN-EARLIER-RUN",
+                "runner": "codex:gpt-5.5", "status": "timeout",
+                "reason": "STALE REASON the current run must not quote",
+            }],
+        }), encoding="utf-8")
+        stale_bytes = stale.read_bytes()
+        task_file = _write_validation_task_file(
+            tmp_path, [_validation_batch(tmp_path)]
+        )
+        args = type(
+            "Args", (), {"exec_subagents": True, "yes": True, "host": "opencode"}
+        )()
+        retry = "uv run … multi_llm.py review-plan p.md --reaggregate"
+        with pytest.raises(SystemExit) as excinfo:
+            dispatch_subagent_tasks(
+                args, task_file=str(task_file), phase_dir=str(tmp_path),
+                phase="review-plan", label="validation", retry_command=retry,
+            )
+        assert excinfo.value.code == 3
+        err = capsys.readouterr().err
+
+        # The structured lines beside the message.
+        assert "Refused before dispatch: reason_code=runner_invalid_model" in err
+        # The key names the layer that supplied the spec (D3 step 3's `key=`
+        # repair): this test's runner comes from the env-pointed config.
+        assert f"Runner: driver.subagent_runner (env) = '{_REJECTED_SPEC}'" in err
+        assert "Runner said:" in err
+        assert "Did you mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?" in err
+        assert "Options" in err
+        assert "Repair first:" in err
+        assert f"re-invoke with `{retry}`" in err
+        assert "report this to the user" in err
+        assert "not a fallback" in err
+        # Nothing on this path reads the earlier run's report.
+        assert "STALE-TASK" not in err and "STALE REASON" not in err
+        assert stale.read_bytes() == stale_bytes
+        assert not (tmp_path / "validation_batch_0.json").exists()
+        assert not (tmp_path / executor.FAILED_CAPTURE_DIRNAME).exists()
+        # `.status.json` describes THIS run.
+        status = status_file.read_status(str(tmp_path))
+        assert status["state"] == "runner_rejected"
+        assert status["reason_code"] == "runner_invalid_model"
+        assert status["runner"] == _REJECTED_SPEC
+
+    # -- step 4: the dispatched path, and the D4/D5 precedence ---------------
+
+    def test_the_dispatched_line_is_the_verdict_not_the_adapter_text(
+        self, tmp_path, runner_env
+    ):
+        """The exit-3 per-task line, pinned as a string.
+
+        With the probe out of the way (the default host declares every leg
+        allowed, so none runs) the task dispatches, opencode's `parse_output`
+        composes D5's text, and `_classify_failed_run` then REBINDS the same
+        `error` local to step 2's verdict. The line therefore carries the
+        provider's "Did you mean" sentence exactly as many times as the raw
+        stderr does (no de-duplication) and none of the adapter's composition
+        (no concatenation): neither `OpenCode reported an error:` nor
+        `UnknownError:` may appear.
+        """
+        runner_env.use(_REJECTED_SPEC, subagent_retries=2)
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        report = executor.run_tasks(
+            self._tasks(tmp_path, 1), phase_dir=str(tmp_path), kind="validation",
+        )
+        assert not report.ok
+        (outcome,) = report.outcomes
+        assert outcome.status == executor.STATUS_INVALID_MODEL
+        assert outcome.rung == 1 and outcome.fatal
+        assert len(outcome.attempts) == 1  # rung 1: the two retries go unspent
+
+        (line,) = report.failure_summary()
+        prefix = (
+            f"  - validation-batch-0: invalid_model (rung 1, 1 attempt(s), runner "
+            f"{_REJECTED_SPEC}) the runner rejected the model id "
+            f"'{_REJECTED_SPEC}' (the fix is a config edit, never a retry). "
+            f"Stream tail: '"
+        )
+        assert line.startswith(prefix), line
+        needle = "Model not found: opencode/sonnet"
+        assert line.count(needle) == _INVALID_MODEL_STDERR.count(needle) >= 1
+        assert "OpenCode reported an error:" not in line
+        assert "UnknownError:" not in line
+        assert line == (
+            f"  - validation-batch-0: invalid_model (rung 1, 1 attempt(s), runner "
+            f"{_REJECTED_SPEC}) {outcome.reason}"
+        )
+        assert outcome.attempts[0].error == outcome.reason
+
+        capture = json.loads(
+            Path(outcome.attempts[0].capture_path).read_text(encoding="utf-8")
+        )
+        assert capture["status"] == executor.STATUS_INVALID_MODEL
+        assert capture["rung"] == 1
+        assert capture["error"] == outcome.reason
+        # Only the raw streams still hold the original bytes.
+        assert 'error="ProviderModelNotFoundError: Model not found' in capture["stderr_tail"]
+        assert "UnknownError" in capture["stdout_tail"]
+        assert report.counts() == {executor.STATUS_INVALID_MODEL: 1}
+
+    def test_a_genuine_server_fault_keeps_the_composed_adapter_text(
+        self, tmp_path, runner_env
+    ):
+        """The complement: the classifier returning `None` is the only condition
+        under which the adapter's (D5-composed) text is the printed reason."""
+        runner_env.use(_REJECTED_SPEC, subagent_retries=1)
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _SERVER_FAULT_STDERR
+        )
+        report = executor.run_tasks(
+            self._tasks(tmp_path, 1), phase_dir=str(tmp_path), kind="validation",
+        )
+        (outcome,) = report.outcomes
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert outcome.rung == 5 and not outcome.fatal
+        assert len(outcome.attempts) == 2  # rung 5 spends the one retry
+        (line,) = report.failure_summary()
+        assert line == (
+            f"  - validation-batch-0: unparseable_result (rung 5, 2 attempt(s), "
+            f"runner {_REJECTED_SPEC}) OpenCode reported an error: UnknownError: "
+            f"Unexpected server error. Check server logs for details. "
+            f"(Error: upstream returned HTTP 502 Bad Gateway)"
+        )
+        assert "Model not found" not in line
+        assert executor.STATUS_INVALID_MODEL not in report.counts()
+
+    # -- step 1: what "fails the whole batch" means ----------------------------
+
+    def test_serialized_batch_records_one_invalid_model_and_incomplete_siblings(
+        self, tmp_path, runner_env
+    ):
+        """Exactly one, and only because `max_concurrent_subagents=1` makes the
+        in-flight set one task wide — never three, never "one attempt total"."""
+        runner_env.use(_REJECTED_SPEC, max_concurrent_subagents=1)
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        report = executor.run_tasks(
+            self._tasks(tmp_path, 3), phase_dir=str(tmp_path), kind="validation",
+        )
+        by_id = {o.task_id: o for o in report.outcomes}
+        assert by_id["validation-batch-0"].status == executor.STATUS_INVALID_MODEL
+        assert len(by_id["validation-batch-0"].attempts) == 1
+        for task_id in ("validation-batch-1", "validation-batch-2"):
+            sibling = by_id[task_id]
+            assert sibling.status == executor.STATUS_INCOMPLETE
+            assert sibling.attempts == []
+            assert sibling.runner == _REJECTED_SPEC
+            assert sibling.reason == (
+                f"not dispatched: {_REJECTED_SPEC} failed on a rung that fails the "
+                f"whole batch; every task on that runner would fail identically"
+            )
+        assert report.counts() == {
+            executor.STATUS_INVALID_MODEL: 1, executor.STATUS_INCOMPLETE: 2,
+        }
+        assert not report.ok
+        assert list(tmp_path.glob("validation_batch_*.json")) == []
+
+    def test_concurrent_batch_is_bounded_by_the_ceiling_not_by_one(
+        self, tmp_path, runner_env
+    ):
+        """Invariants, not counts: the in-flight set is bounded by the effective
+        parallelism, and asserting a specific number would be a race."""
+        runner_env.use(_REJECTED_SPEC, max_concurrent_subagents=4)
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        report = executor.run_tasks(
+            self._tasks(tmp_path, 6), phase_dir=str(tmp_path), kind="validation",
+        )
+        ceiling = report.ceilings["effective"]
+        assert 1 <= ceiling <= 4
+        rejected = [o for o in report.outcomes
+                    if o.status == executor.STATUS_INVALID_MODEL]
+        others = [o for o in report.outcomes
+                  if o.status != executor.STATUS_INVALID_MODEL]
+        assert 1 <= len(rejected) <= ceiling
+        assert all(len(o.attempts) == 1 for o in rejected)
+        assert all(o.status == executor.STATUS_INCOMPLETE for o in others)
+        assert all(o.attempts == [] for o in others)
+        assert len(rejected) + len(others) == 6
+        assert executor.STATUS_OK not in report.counts()
+        assert not report.ok
+        assert list(tmp_path.glob("validation_batch_*.json")) == []
+        # The batch is a failed batch: reaggregation is refused with exit 3.
+        task_file = _write_validation_task_file(tmp_path, self._tasks(tmp_path, 6))
+        args = type("Args", (), {"exec_subagents": True, "yes": True})()
+        with pytest.raises(executor.BatchFailed) as excinfo:
+            executor.continue_past_marker(
+                args, task_file=str(task_file), phase_dir=str(tmp_path),
+                phase="review-plan",
+            )
+        assert excinfo.value.exit_code == 3
+
+    def test_mixed_runners_rejected_first_is_honest_about_the_healthy_sibling(
+        self, tmp_path, runner_env
+    ):
+        """The gate is batch-wide; the claim it prints is per-spec.
+
+        A sibling pinned by `model_hint` to a runner the mock serves happily is
+        still not dispatched — nothing further is dispatched, whatever spec —
+        but its reason may not claim it would have failed identically.
+        """
+        runner_env.use(_REJECTED_SPEC, max_concurrent_subagents=1)
+        runner_env.echo("validation")
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        tasks = self._tasks(tmp_path, 3)
+        tasks[0]["model_hint"] = _REJECTED_SPEC
+        tasks[1]["model_hint"] = _REJECTED_SPEC
+        tasks[2]["model_hint"] = "codex:gpt-5.5"
+        report = executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation",
+        )
+        by_id = {o.task_id: o for o in report.outcomes}
+        assert by_id["validation-batch-0"].status == executor.STATUS_INVALID_MODEL
+        assert by_id["validation-batch-1"].status == executor.STATUS_INCOMPLETE
+        assert "would fail identically" in by_id["validation-batch-1"].reason
+        healthy = by_id["validation-batch-2"]
+        assert healthy.status == executor.STATUS_INCOMPLETE
+        assert healthy.runner == "codex:gpt-5.5"
+        assert healthy.reason == (
+            f"not dispatched: the batch stopped after {_REJECTED_SPEC} failed "
+            f"fatally; this task's runner codex:gpt-5.5 was never tried"
+        )
+        assert "would fail identically" not in healthy.reason
+        assert not (tmp_path / "validation_batch_2.json").exists()
+
+    def test_mixed_runners_healthy_first_stays_ok(self, tmp_path, runner_env):
+        """The gate stops what comes after it and cancels nothing that ran."""
+        runner_env.use(_REJECTED_SPEC, max_concurrent_subagents=1)
+        runner_env.echo("validation")
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        tasks = self._tasks(tmp_path, 3)
+        tasks[0]["model_hint"] = "codex:gpt-5.5"
+        report = executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation",
+        )
+        by_id = {o.task_id: o for o in report.outcomes}
+        assert by_id["validation-batch-0"].status == executor.STATUS_OK
+        assert (tmp_path / "validation_batch_0.json").exists()
+        assert by_id["validation-batch-1"].status == executor.STATUS_INVALID_MODEL
+        assert by_id["validation-batch-2"].status == executor.STATUS_INCOMPLETE
+        assert not report.ok
+
+    # -- step 6: a config repair replaces the rejected runner --------------------
+
+    def test_recorded_runners_drop_every_pin_on_a_fatally_rejected_spec(
+        self, tmp_path
+    ):
+        """Keyed on the spec, not the row: the `incomplete` sibling that recorded
+        the rejected spec loses its pin too, or preflight re-refuses the batch on
+        that one surviving pin, repaired config and all."""
+        (tmp_path / executor.BATCH_REPORT_FILENAME).write_text(json.dumps({
+            "tasks": [
+                {"task_id": "a", "runner": "codex:gpt-5.5", "status": "ok"},
+                {"task_id": "b", "runner": _REJECTED_SPEC, "status": "invalid_model"},
+                {"task_id": "c", "runner": _REJECTED_SPEC, "status": "incomplete"},
+                {"task_id": "d", "runner": "claude-code:sonnet", "status": "auth_failed"},
+                {"task_id": "e", "runner": "claude-code:sonnet", "status": "ok"},
+                {"task_id": "f", "runner": "codex:gpt-5.5", "status": "timeout"},
+            ],
+        }), encoding="utf-8")
+        assert executor._recorded_runners(str(tmp_path)) == {
+            "a": "codex:gpt-5.5", "f": "codex:gpt-5.5",
+        }
+
+    def test_a_config_repair_replaces_the_rejected_runner_on_re_invocation(
+        self, tmp_path, runner_env
+    ):
+        """Fail a batch, edit `driver.subagent_runner`, re-invoke: the rejected
+        tasks — the `incomplete` sibling included — resolve the NEW spec, and the
+        task that succeeded is still skipped as complete."""
+        runner_env.use(_REJECTED_SPEC, max_concurrent_subagents=1)
+        runner_env.echo("validation")
+        _install_opencode_capture(
+            runner_env.bin_dir, _INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR
+        )
+        tasks = self._tasks(tmp_path, 3)
+        tasks[0]["model_hint"] = "codex:gpt-5.5"
+        first = executor.run_tasks(tasks, phase_dir=str(tmp_path), kind="validation")
+        by_id = {o.task_id: o for o in first.outcomes}
+        assert by_id["validation-batch-0"].status == executor.STATUS_OK
+        assert by_id["validation-batch-1"].status == executor.STATUS_INVALID_MODEL
+        assert by_id["validation-batch-2"].status == executor.STATUS_INCOMPLETE
+        assert by_id["validation-batch-2"].runner == _REJECTED_SPEC
+
+        # Only the healthy spec's row is still a pin.
+        assert executor._recorded_runners(str(tmp_path)) == {
+            "validation-batch-0": "codex:gpt-5.5",
+        }
+
+        # The repair: a runner the mock serves, distinct from everything run 1 used.
+        runner_env.use("claude-code:sonnet", max_concurrent_subagents=1)
+        executor.reset_version_cache()
+        second = executor.run_tasks(tasks, phase_dir=str(tmp_path), kind="validation")
+        by_id = {o.task_id: o for o in second.outcomes}
+        assert by_id["validation-batch-0"].skipped is True
+        assert by_id["validation-batch-0"].status == executor.STATUS_OK
+        for task_id in ("validation-batch-1", "validation-batch-2"):
+            assert by_id[task_id].runner == "claude-code:sonnet", task_id
+            assert by_id[task_id].status == executor.STATUS_OK, task_id
+            assert by_id[task_id].skipped is False
+        assert second.ok
+
+    # -- the gate split applies to every fatal rung ----------------------------
+
+    def test_an_auth_failure_gate_names_the_spec_too(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
+        monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
+            {"response": "Not logged in. Please log in."}
+        ))
+        report = executor.run_tasks(
+            self._tasks(tmp_path, 2), phase_dir=str(tmp_path), kind="validation",
+        )
+        by_id = {o.task_id: o for o in report.outcomes}
+        assert by_id["validation-batch-0"].status == executor.STATUS_AUTH_FAILED
+        assert by_id["validation-batch-1"].reason == (
+            "not dispatched: codex:gpt-5.5 failed on a rung that fails the whole "
+            "batch; every task on that runner would fail identically"
+        )
+
+
+# ---------------------------------------------------------------------------
+# D3 step 3 — the CLI's own catalog, verified at preflight and nowhere on the
+# resolution ladder
+# ---------------------------------------------------------------------------
+
+#: A well-formed opencode slug the (stubbed) `opencode models` listing lacks.
+_UNLISTED_SPEC = "opencode:opencode/vanished-id"
+_UNLISTED_MODEL = "opencode/vanished-id"
+_UNLISTED_DETAIL = (
+    "`opencode models` lists 7 id(s) under 'opencode/' and 'opencode/vanished-id' "
+    "is not one of them; nearest: opencode/big-pickle, opencode/mimo-v2.5-free, "
+    "opencode/nemotron-3-ultra-free."
+)
+
+
+def _stub_catalog(monkeypatch, known, *, detail="", seen=None):
+    """Pin `OpenCodeProvider.describe_unlisted_model` to one verdict, recording calls."""
+    from utils.providers import opencode as oc
+    from utils.providers.base import ModelVerdict
+
+    calls = seen if seen is not None else []
+
+    def _verdict(self, model, *, anchor=None, profile="agent-readonly"):
+        calls.append(model)
+        return ModelVerdict(
+            known=known, detail=detail if known is False else "",
+            suggestions=("opencode/big-pickle",) if known is False else (),
+        )
+
+    monkeypatch.setattr(oc.OpenCodeProvider, "describe_unlisted_model", _verdict)
+    return calls
+
+
+def _no_driver_layer(monkeypatch):
+    """Leave every explicit config layer silent about `driver.subagent_runner`."""
+    monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
+    registry._config = None
+    registry._config_key = None
+
+
+class TestModelCatalogPreflight:
+    """The catalog leg refuses at preflight, names its rung, and never blocks on
+    an answer it could not read."""
+
+    def test_a_listed_model_records_ok(self, tmp_path, runner_env, monkeypatch):
+        runner_env.use("opencode:opencode/big-pickle")
+        _stub_catalog(monkeypatch, True)
+        info = executor.preflight_runner("opencode:opencode/big-pickle")
+        assert info["model_catalog"] == "ok"
+        # The model token itself is untouched — `model` is the spec's model half.
+        assert info["model"] == "opencode/big-pickle"
+
+    def test_an_unlisted_model_is_refused_before_any_child(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use(_UNLISTED_SPEC)
+        runner_env.echo("validation")
+        _stub_catalog(monkeypatch, False, detail=_UNLISTED_DETAIL)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert excinfo.value.exit_code == 3
+        message = excinfo.value.message
+        assert _UNLISTED_SPEC in message
+        # The detail is the sentence composed from the listing, not a quoted
+        # "Did you mean" line (which `opencode models` never prints).
+        assert _UNLISTED_DETAIL in message
+        assert "Did you mean" not in message
+        # Distinct from D4's reactive code, so a log can tell the two apart.
+        assert "runner_invalid_model" not in message
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_the_reason_row_is_distinct_from_the_dispatch_time_one(self):
+        table = executor._REASON_EXPLANATION
+        assert "invalid_model_catalog" in table
+        assert "runner_invalid_model" in table
+        assert table["invalid_model_catalog"] != table["runner_invalid_model"]
+
+    def test_an_unreadable_listing_is_unknown_and_never_blocks(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """Unknown means unknown: the run proceeds exactly as with no probe."""
+        runner_env.use("opencode:opencode/big-pickle")
+        runner_env.echo("validation")
+        _stub_catalog(monkeypatch, None)
+        info = executor.preflight_runner("opencode:opencode/big-pickle")
+        assert info["model_catalog"] == "unknown"
+        report = executor.run_tasks([_validation_batch(tmp_path)],
+                                    phase_dir=str(tmp_path), kind="validation")
+        assert report.ok
+        assert "could not confirm" in capsys.readouterr().err
+
+    def test_adapters_without_a_catalog_answer_unknown_silently(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """The base's typed default: `known=None`, no warning, no spawn."""
+        runner_env.use("codex:gpt-5.5")
+        info = executor.preflight_runner("codex:gpt-5.5")
+        assert info["model_catalog"] == "unknown"
+        assert "could not confirm" not in capsys.readouterr().err
+
+    def test_the_leg_runs_after_auth_and_before_nested_exec(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use(_UNLISTED_SPEC)
+        seen = _stub_catalog(monkeypatch, False, detail=_UNLISTED_DETAIL)
+        # A logged-out CLI is refused first: the catalog is never asked.
+        monkeypatch.setenv("MOCK_LLM_LOGGED_OUT", "1")
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner(_UNLISTED_SPEC)
+        assert excinfo.value.reason_code == "not_authenticated"
+        assert seen == []
+        # With auth clean, the catalog refuses before nested-exec runs.
+        monkeypatch.delenv("MOCK_LLM_LOGGED_OUT")
+        executor.reset_version_cache()
+        nested = []
+        monkeypatch.setattr(
+            executor, "_detect_nested_exec",
+            lambda *a, **k: nested.append(a) or "unknown",
+        )
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner(_UNLISTED_SPEC)
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert seen == [_UNLISTED_MODEL]
+        assert nested == []
+
+    def test_the_verdict_is_cached_per_slot_and_cleared_with_the_rest(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("opencode:opencode/big-pickle")
+        seen = _stub_catalog(monkeypatch, True)
+        executor.preflight_runner("opencode:opencode/big-pickle")
+        executor.preflight_runner("opencode:opencode/big-pickle")
+        assert seen == ["opencode/big-pickle"]
+        # A different model is a different slot.
+        executor.preflight_runner("opencode:opencode/nemotron-3-ultra-free")
+        assert seen == ["opencode/big-pickle", "opencode/nemotron-3-ultra-free"]
+        assert len(executor._MODEL_CACHE) == 2
+        assert all("|" in key for key in executor._MODEL_CACHE)
+        executor.reset_version_cache()
+        assert executor._MODEL_CACHE == {}
+        executor.preflight_runner("opencode:opencode/big-pickle")
+        assert seen[-1] == "opencode/big-pickle"
+        executor.reset_model_cache()
+        assert executor._MODEL_CACHE == {}
+
+    def test_the_cache_key_separates_hermetic_from_plain(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("opencode:opencode/big-pickle")
+        seen = _stub_catalog(monkeypatch, True)
+        executor.preflight_runner(
+            "opencode:opencode/big-pickle", profile=executor.PROFILE_AGENT_READONLY
+        )
+        executor.preflight_runner(
+            "opencode:opencode/big-pickle", profile=executor.PROFILE_AGENT_WRITE
+        )
+        assert len(seen) == 2
+        keys = sorted(executor._MODEL_CACHE)
+        assert any("|hermetic|" in key for key in keys)
+        assert any("|plain|" in key for key in keys)
+
+    def test_a_model_hint_override_gets_the_same_gate(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        _stub_catalog(monkeypatch, False, detail=_UNLISTED_DETAIL)
+        task = _validation_batch(tmp_path)
+        task["model_hint"] = _UNLISTED_SPEC
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([task], phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert excinfo.value.key == "tasks[validation-batch-0].model_hint"
+        assert "tasks[validation-batch-0].model_hint" in excinfo.value.message
+
+    def test_a_recorded_runner_override_gets_the_same_gate(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        _stub_catalog(monkeypatch, False, detail=_UNLISTED_DETAIL)
+        (tmp_path / executor.BATCH_REPORT_FILENAME).write_text(json.dumps({
+            "tasks": [{"task_id": "validation-batch-0", "runner": _UNLISTED_SPEC,
+                       "status": "timeout"}],
+        }), encoding="utf-8")
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert excinfo.value.key == (
+            "tasks[validation-batch-0].runner (recorded from a previous attempt)"
+        )
+
+    @pytest.mark.config_override
+    @pytest.mark.parametrize("layer", ["env", "project", "host capabilities", "base"])
+    def test_every_rung_refuses_identically_naming_its_layer(
+        self, tmp_path, runner_env, monkeypatch, layer
+    ):
+        """One rule on every rung: refuse, never fall through, name the source."""
+        seen = _stub_catalog(monkeypatch, False, detail=_UNLISTED_DETAIL)
+        if layer == "env":
+            runner_env.use(_UNLISTED_SPEC)
+        else:
+            _no_driver_layer(monkeypatch)
+        if layer == "project":
+            project = tmp_path / "project-providers.yaml"
+            project.write_text(
+                f'driver:\n  subagent_runner: "{_UNLISTED_SPEC}"\n', encoding="utf-8"
+            )
+            monkeypatch.setattr(
+                registry, "_find_project_config", lambda anchor=None: project
+            )
+            registry._config = None
+            registry._config_key = None
+        elif layer == "host capabilities":
+            monkeypatch.setattr(
+                registry, "_find_project_config", lambda anchor=None: None
+            )
+            monkeypatch.setattr(
+                registry, "host_default_runner",
+                lambda tier="full", host_id=None: _UNLISTED_SPEC,
+            )
+        elif layer == "base":
+            monkeypatch.setattr(
+                registry, "_find_project_config", lambda anchor=None: None
+            )
+            monkeypatch.setattr(
+                registry, "host_default_runner",
+                lambda tier="full", host_id=None: None,
+            )
+            real_driver = registry.get_driver_config()
+            monkeypatch.setattr(
+                registry, "get_driver_config",
+                lambda anchor=None: {**real_driver, "subagent_runner": _UNLISTED_SPEC},
+            )
+            monkeypatch.setattr(
+                registry, "get_driver_provenance",
+                lambda key, anchor=None: "base",
+            )
+        spec, reported = registry.resolve_subagent_runner("full")
+        assert (spec, reported) == (_UNLISTED_SPEC, layer)
+
+        runner_env.echo("validation")
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert excinfo.value.spec == _UNLISTED_SPEC
+        assert excinfo.value.key == f"driver.subagent_runner ({layer})"
+        assert f"driver.subagent_runner ({layer})" in excinfo.value.message
+        # No fall-through: the one spec resolved is the one spec probed.
+        assert seen == [_UNLISTED_MODEL]
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_status_resolves_without_ever_reaching_a_probe(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """`render_runner_text` spawns nothing: the ladder is subprocess-free."""
+        from utils import run_status
+        from utils.providers import opencode as oc
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("status reached a probe")
+
+        monkeypatch.setattr(executor, "_run_probe", _boom)
+        monkeypatch.setattr(oc, "_list_models", _boom)
+        monkeypatch.setattr(subprocess, "run", _boom)
+        monkeypatch.setattr(subprocess, "Popen", _boom)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        started = time.monotonic()
+        lines = run_status.render_runner_text(plan, host_id="opencode")
+        assert time.monotonic() - started < 1.0
+        assert lines and lines[1].strip() == (
+            "opencode:opencode/big-pickle  (supplied by host capabilities)"
+        )
+
+
+class TestCredentialFreeModels:
+    """D3 step 2: a declared credential-free model passes the auth leg; a
+    credential-requiring one on the same CLI in the same process still refuses."""
+
+    #: The real `opencode auth list` envelope from a logged-out install.
+    _ZERO_CREDENTIALS = (
+        "┌  Credentials ~/data/opencode/auth.json\n"
+        "│\n"
+        "└  0 credentials\n"
+    )
+
+    def _probe(self, monkeypatch):
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "auth", "list"], returncode=0,
+            stdout=self._ZERO_CREDENTIALS, stderr="",
+        )
+        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+
+    def test_the_default_declares_the_measured_id_and_nothing_else(self):
+        provider = registry.get_provider("opencode")
+        assert provider.credential_free_models == frozenset({"opencode/big-pickle"})
+        assert not provider.model_needs_credentials("opencode/big-pickle")
+        assert not provider.model_needs_credentials("opencode/big-pickle:high")
+        assert provider.model_needs_credentials("openrouter/deepseek/deepseek-v4-flash-0731")
+        assert provider.model_needs_credentials("openai/gpt-5.5")
+        assert provider.model_needs_credentials("google/gemini-3.1-pro-preview")
+        # Every other adapter declares nothing, so every model needs one.
+        for name, other in registry._PROVIDERS.items():
+            if name != "opencode":
+                assert other.credential_free_models == frozenset(), name
+                assert other.model_needs_credentials("anything"), name
+
+    def test_zero_credentials_passes_the_free_model_and_refuses_the_other(
+        self, monkeypatch
+    ):
+        self._probe(monkeypatch)
+        executor.reset_auth_cache()
+        state = executor._detect_auth(
+            "opencode", "opencode/big-pickle",
+            key="driver.subagent_runner", spec="opencode:opencode/big-pickle",
+            profile="agent-readonly",
+        )
+        assert state == "not-required"
+        # Same process, same provider, a credential-requiring model: the cache
+        # key carries the needs-credentials bit, so this still refuses.
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor._detect_auth(
+                "opencode", "openrouter/deepseek/deepseek-v4-flash-0731",
+                key="driver.subagent_runner",
+                spec="opencode:openrouter/deepseek/deepseek-v4-flash-0731",
+                profile="agent-readonly",
+            )
+        assert excinfo.value.reason_code == "not_authenticated"
+        assert set(executor._AUTH_CACHE) == {"opencode|0"}
+
+    def test_the_verdict_is_still_recorded_not_assumed(self, monkeypatch):
+        """A clean probe on a credential-free model still reads `ok`."""
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "auth", "list"], returncode=0,
+            stdout="┌  Credentials\n│\n●  OpenRouter api\n│\n└  1 credentials\n",
+            stderr="",
+        )
+        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        executor.reset_auth_cache()
+        state = executor._detect_auth(
+            "opencode", "opencode/big-pickle",
+            key="driver.subagent_runner", spec="opencode:opencode/big-pickle",
+            profile="agent-readonly",
+        )
+        assert state == "ok"
+
+    def test_the_whole_preflight_completes_credential_free(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The Phase-2 verification, hermetic: a logged-out opencode, the shipped
+        default, and `preflight_runner` completes rather than exiting 3."""
+        runner_env.use("opencode:opencode/big-pickle")
+        monkeypatch.setenv("MOCK_LLM_LOGGED_OUT", "1")
+        _stub_catalog(monkeypatch, True)
+        provider = registry.get_provider("opencode")
+        # The mock's logged-out notice must really be one this adapter refuses.
+        with pytest.raises(executor.RunnerRejected):
+            executor.preflight_runner("opencode:openrouter/deepseek/deepseek-v4-flash-0731")
+        executor.reset_auth_cache()
+        info = executor.preflight_runner("opencode:opencode/big-pickle")
+        assert info["auth"] == "not-required"
+        assert info["model_catalog"] == "ok"
+        assert provider.describe_availability(
+            auth=False, credentials_required=False
+        ).state.value == "ready"
+
+
+# ---------------------------------------------------------------------------
+# D6 — `sandbox_unavailable` is rung 1, fatal, refused at the probe and at the
+# preflight's own model-free sandbox self-test
+# ---------------------------------------------------------------------------
+
+#: What real bubblewrap prints on a stock Ubuntu 24.04 with
+#: `kernel.apparmor_restrict_unprivileged_userns=1` and no profile granting
+#: `/usr/bin/bwrap` the `userns` right. Measured, verbatim; the same line the
+#: mock replays under `MOCK_LLM_SANDBOX_BROKEN=1`.
+_BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+
+
+class TestSandboxUnavailable:
+    """A sandbox that cannot start is a property of the machine, never retried."""
+
+    class _Capture:
+        def __init__(self, stdout, stderr, exit_code=1):
+            self.stdout = stdout
+            self.stderr = stderr
+            self.exit_code = exit_code
+            self.duration = 0.0
+            self.timed_out = False
+            self.launch_error = None
+            self.argv = []
+
+    @staticmethod
+    def _fake_command(script: str):
+        """A `sandbox_probe_command` that answers `script` for the write profile."""
+        def command(self, profile):
+            return ["sh", "-c", script] if profile == PROFILE_AGENT_WRITE else None
+        return command
+
+    @staticmethod
+    def _no_dispatch(monkeypatch):
+        def boom(**kwargs):
+            raise AssertionError("a child was dispatched past a refused preflight")
+        monkeypatch.setattr(executor, "_spawn", boom)
+
+    # -- step 4: the classifier row ---------------------------------------
+
+    def test_the_bwrap_line_classifies_to_sandbox_unavailable(self):
+        provider = registry.get_provider("codex")
+        verdict = executor._classify_failed_run(
+            provider, self._Capture("", _BWRAP_BROKEN_LINE + "\n"), "gpt-5.5"
+        )
+        assert verdict is not None
+        status, reason = verdict
+        assert status == executor.STATUS_SANDBOX_UNAVAILABLE
+        assert status in executor.FATAL_STATUSES
+        assert executor.RUNG_BY_STATUS[status] == 1
+        assert "multi_llm.py doctor" in reason
+        assert _BWRAP_BROKEN_LINE in reason
+
+    def test_the_uid_map_line_is_the_sandbox_not_a_permission_problem(self):
+        """The same words as `permission_denied`, consulted first on purpose."""
+        from utils.providers import base as pbase
+
+        stream = "bwrap: setting up uid map: Permission denied\n"
+        assert pbase.classify_streams("", stream, exit_code=1) == (
+            pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        )
+        assert pbase.CATEGORY_SANDBOX_UNAVAILABLE == executor.STATUS_SANDBOX_UNAVAILABLE
+
+    # -- step 4: the probe row --------------------------------------------
+
+    def test_the_probe_refuses_before_dispatch_where_a_leg_is_unresolved(
+        self, monkeypatch
+    ):
+        """Arranged like D4's probe test: an opencode host entry whose legs are
+        `unknown`, and a cleared `_NESTED_CACHE`, so the throwaway dispatch
+        really happens — and its `bwrap:` line refuses everything after it."""
+        from utils import host_capabilities as caps
+
+        legs = caps.nested_exec("opencode")
+        legs.pop("notes", None)
+        assert any(state != "allowed" for state in legs.values()), legs
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+        executor.reset_nested_exec_cache()
+        assert executor._NESTED_CACHE == {}
+        spawned = []
+
+        def fake_spawn(**kwargs):
+            spawned.append(kwargs)
+            return self._Capture("", _BWRAP_BROKEN_LINE + "\n")
+
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor._detect_nested_exec(
+                "codex", "gpt-5.5",
+                key="driver.subagent_runner", spec="codex:gpt-5.5",
+            )
+        rejected = excinfo.value
+        assert len(spawned) == 1  # the probe itself, and nothing after it
+        assert rejected.reason_code == "sandbox_unavailable"
+        assert rejected.exit_code == 3
+        assert rejected.spec == "codex:gpt-5.5"
+        assert _BWRAP_BROKEN_LINE in rejected.detail
+        assert "AppArmor user-namespace restriction" in rejected.message
+        assert "multi_llm.py doctor" in rejected.message
+        assert "Nothing was dispatched." in rejected.message
+        assert "sandbox_unavailable" in executor._REASON_EXPLANATION
+        assert executor._NESTED_CACHE == {}
+
+    # -- step 3: the preflight's own self-test ----------------------------
+
+    def test_codex_declares_the_probe_for_the_write_profile_only(self):
+        provider = registry.get_provider("codex")
+        argv = provider.sandbox_probe_command(PROFILE_AGENT_WRITE)
+        assert argv[:6] == [
+            "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", "sh",
+        ]
+        assert ".multi-llm/tmp" in argv[-1]
+        assert provider.sandbox_probe_command(PROFILE_AGENT_READONLY) is None
+        assert provider.sandbox_probe_command("generate") is None
+        # muse turned its sandbox off (step 2), so it has nothing to probe.
+        assert registry.get_provider("muse").sandbox_probe_command(PROFILE_AGENT_WRITE) is None
+
+    def test_a_failing_self_test_refuses_before_dispatch(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._fake_command(f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"),
+        )
+        self._no_dispatch(monkeypatch)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        rejected = excinfo.value
+        assert rejected.reason_code == "sandbox_unavailable"
+        assert rejected.exit_code == 3
+        assert _BWRAP_BROKEN_LINE in rejected.detail
+        assert "the runner's own sandbox cannot write under this repo" in rejected.message
+        assert "Nothing was dispatched." in rejected.message
+        # A refusal is never cached.
+        assert executor._SANDBOX_CACHE == {}
+
+    def test_a_passing_self_test_dispatches_and_is_probed_once(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command", self._fake_command("exit 0"),
+        )
+        runs = []
+        real = executor._run_sandbox_probe
+
+        def counting(argv, **kwargs):
+            runs.append(list(argv))
+            return real(argv, **kwargs)
+
+        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert info["sandbox"] == "ok"
+        assert len(runs) == 1
+        # Cached per host|spec|profile: the second preflight spawns nothing.
+        again = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert again["sandbox"] == "ok"
+        assert len(runs) == 1
+        assert any(key.endswith(f"|codex:gpt-5.5|{PROFILE_AGENT_WRITE}")
+                   for key in executor._SANDBOX_CACHE)
+        # A read-only profile is never asked to write, so it is never probed.
+        readonly = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        assert readonly["sandbox"] == "not-required"
+        assert len(runs) == 1
+
+    def test_a_self_test_that_times_out_dispatches_with_unknown(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command", self._fake_command("sleep 5"),
+        )
+        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        started = time.monotonic()
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert time.monotonic() - started < 4.0
+        assert info["sandbox"] == "unknown"
+        err = capsys.readouterr().err
+        assert "recording sandbox 'unknown'" in err
+        assert "Dispatching anyway" in err
+
+    def test_a_command_that_cannot_run_dispatches_with_unknown(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            lambda self, profile: ["definitely-not-a-binary-4b1c", "--x"],
+        )
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert info["sandbox"] == "unknown"
+
+    def test_the_real_codex_command_runs_through_the_mock_runner(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """End to end through the mock's `codex sandbox` emulation: the shell
+        script writes and deletes its byte under cwd and leaves nothing behind,
+        and `MOCK_LLM_SANDBOX_BROKEN=1` is the machine this was written on."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert info["sandbox"] == "ok"
+        assert not (tmp_path / ".multi-llm").exists()
+
+        executor.reset_version_cache()
+        monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
+        self._no_dispatch(monkeypatch)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert excinfo.value.reason_code == "sandbox_unavailable"
+        assert _BWRAP_BROKEN_LINE in excinfo.value.detail
+
+    def test_status_and_install_check_never_reach_the_probe(self):
+        """`provider_registry` stays subprocess-free (D3's rule): the probe
+        lives in this module and nowhere a sub-second command imports."""
+        import ast
+
+        source = (Path(executor.__file__).parent / "provider_registry.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        imported = {
+            alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        assert "subprocess" not in imported
+        assert "sandbox_probe_command" not in source
+
+    def test_a_cli_that_does_not_understand_the_probe_dispatches_with_unknown(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """A codex older than its `sandbox` subcommand reads the argv as an
+        interactive prompt and dies on `stdin is not a terminal`; that says
+        nothing about the sandbox, so it is `unknown`, never a refusal."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._fake_command("echo 'Error: stdin is not a terminal' >&2; exit 1"),
+        )
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert info["sandbox"] == "unknown"
+        assert "recording sandbox 'unknown'" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# The session rung is the one rung allowed to fall through
+# ---------------------------------------------------------------------------
+
+#: The credential-free floor `hosts/capabilities.yaml` declares for opencode —
+#: what a session model that cannot run falls back to.
+_FLOOR_SPEC = "opencode:opencode/big-pickle"
+
+
+def _stub_catalog_by_model(monkeypatch, unlisted, *, seen=None):
+    """Refuse exactly the models in *unlisted*; list every other one.
+
+    The blanket `_stub_catalog(…, False)` cannot express this row: the fallback
+    spec is an opencode id too, so a verdict that refuses everything would refuse
+    the rung we are trying to land on.
+    """
+    from utils.providers import opencode as oc
+    from utils.providers.base import ModelVerdict
+
+    calls = seen if seen is not None else []
+
+    def _verdict(self, model, *, anchor=None, profile="agent-readonly"):
+        calls.append(model)
+        if model in unlisted:
+            return ModelVerdict(known=False, detail=_UNLISTED_DETAIL,
+                                suggestions=("opencode/big-pickle",))
+        return ModelVerdict(known=True, detail="", suggestions=())
+
+    monkeypatch.setattr(oc.OpenCodeProvider, "describe_unlisted_model", _verdict)
+    return calls
+
+
+def _session_ladder(monkeypatch, session_spec=_UNLISTED_SPEC, floor=_FLOOR_SPEC):
+    """A ladder whose `session` rung answers and whose next rung is the floor."""
+    _no_driver_layer(monkeypatch)
+    monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+    monkeypatch.setattr(
+        registry, "session_runner", lambda host_id=None: session_spec
+    )
+    monkeypatch.setattr(
+        registry, "host_default_runner",
+        lambda tier="full", host_id=None: floor,
+    )
+
+
+class TestTheSessionRungFallsBackInsteadOfRefusing:
+    """A model nobody configured must not be able to fail a batch (D3o).
+
+    Every other rung refuses at preflight and that is right: an operator wrote
+    the value down, so a spec that cannot serve the phase is a config error and
+    substituting something else silently is how "I set it and nothing changed"
+    begins. The `session` rung is not a written-down value — it is whatever model
+    the host session happens to be on — so the same refusal would turn *switching
+    models mid-session* into a way to break a run that worked a minute earlier.
+    It falls through instead, loudly, to the rung underneath it.
+    """
+
+    def test_a_refused_session_model_falls_back_and_says_so(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        _session_ladder(monkeypatch)
+        seen = _stub_catalog_by_model(monkeypatch, {_UNLISTED_MODEL})
+        runner_env.echo("validation")
+
+        assert registry.resolve_subagent_runner("full") == (
+            _UNLISTED_SPEC, registry.SESSION_LAYER,
+        )
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation"
+        )
+        assert report.ok
+        # Both specs were really asked about, in that order: the session model
+        # first, then the rung it fell to.
+        assert seen == [_UNLISTED_MODEL, "opencode/big-pickle"]
+        out = capsys.readouterr().out
+        assert (
+            f"[exec-subagents] session model {_UNLISTED_SPEC} failed preflight "
+            f"(invalid_model_catalog); falling back to {_FLOOR_SPEC} "
+            f"({registry.HOST_DEFAULT_LAYER})"
+        ) in out
+        assert (tmp_path / "validation_batch_0.json").exists()
+
+    def test_the_batch_dispatches_on_the_rung_it_fell_to(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The substitution reaches the dispatch, not only the message."""
+        _session_ladder(monkeypatch)
+        _stub_catalog_by_model(monkeypatch, {_UNLISTED_MODEL})
+        runner_env.echo("validation")
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation"
+        )
+        assert [o.runner for o in report.outcomes] == [_FLOOR_SPEC]
+        assert set(report.runner_versions) == {_FLOOR_SPEC}
+
+    def test_the_fallback_is_recorded_in_the_batch_report(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Visible after the fact, not only in a line that scrolled past."""
+        _session_ladder(monkeypatch)
+        _stub_catalog_by_model(monkeypatch, {_UNLISTED_MODEL})
+        runner_env.echo("validation")
+        executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation"
+        )
+        document = json.loads(
+            (tmp_path / executor.BATCH_REPORT_FILENAME).read_text(encoding="utf-8")
+        )
+        assert document["runner_fallback"] == {
+            "from": _UNLISTED_SPEC,
+            "reason": "invalid_model_catalog",
+            "to": _FLOOR_SPEC,
+            "layer": registry.HOST_DEFAULT_LAYER,
+        }
+
+    def test_a_run_that_fell_back_on_nothing_records_nothing(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The key is absent, not null: an ordinary report is byte-unchanged."""
+        _session_ladder(monkeypatch, session_spec=_FLOOR_SPEC)
+        _stub_catalog_by_model(monkeypatch, set())
+        runner_env.echo("validation")
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation"
+        )
+        assert report.runner_fallback is None
+        assert "runner_fallback" not in report.to_dict()
+
+    def test_an_explicit_layer_keeps_refusing(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """Today's behaviour on every other rung, asserted against the new one."""
+        runner_env.use(_UNLISTED_SPEC)
+        runner_env.echo("validation")
+        _stub_catalog_by_model(monkeypatch, {_UNLISTED_MODEL})
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([_validation_batch(tmp_path)],
+                               phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.reason_code == "invalid_model_catalog"
+        assert "falling back" not in capsys.readouterr().out
+        assert not (tmp_path / "validation_batch_0.json").exists()
+
+    def test_any_refusal_reason_falls_back_not_just_the_catalog(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """The rung's rule is about *where the spec came from*, not about why.
+
+        A session model can fail preflight for reasons that have nothing to do
+        with a catalog — a provider with no adapter at all, a logged-out CLI, a
+        denied `nested_exec` leg. All of them mean the same thing here: the thing
+        the operator selected cannot serve this phase, so use the rung below it.
+        """
+        _session_ladder(monkeypatch, session_spec="no-such-provider:whatever")
+        _stub_catalog_by_model(monkeypatch, set())
+        runner_env.echo("validation")
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation"
+        )
+        assert report.ok
+        assert report.runner_fallback["reason"] == "unknown_provider"
+        assert "falling back to" in capsys.readouterr().out
+
+    def test_a_task_level_runner_is_not_a_session_runner(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """`model_hint` never reaches the ladder, so it never gets the fallback."""
+        _session_ladder(monkeypatch)
+        _stub_catalog_by_model(monkeypatch, {_UNLISTED_MODEL})
+        runner_env.echo("validation")
+        task = _validation_batch(tmp_path)
+        task["model_hint"] = _UNLISTED_SPEC
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.run_tasks([task], phase_dir=str(tmp_path), kind="validation")
+        assert excinfo.value.key == "tasks[validation-batch-0].model_hint"

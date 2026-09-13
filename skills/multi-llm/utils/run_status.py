@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import detach, status_file
+from . import cli_common, detach, status_file
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -302,7 +302,7 @@ def render_run_text(
             if tail:
                 lines.append("      last log lines:")
                 lines.append(tail)
-            lines.append(f"      resume with: {_resume_command(view, plan_path)}")
+            lines.extend(_resume_lines(view, plan_path))
     return lines
 
 
@@ -338,9 +338,94 @@ def _progress_text(progress: Dict[str, Any]) -> str:
     return ", ".join(parts) or "(none recorded)"
 
 
+#: The modes whose parser registers ``--reaggregate`` — the retry-only-the-
+#: failures verb a failed run resumes with (D2 step 4). Every other mode keeps
+#: ``--force``, the only resume verb it accepts. ``status`` cannot afford to
+#: import each orchestrator's parser to derive this, so it is the one list in
+#: this module that is typed rather than read.
+_REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code", "generate-tasks")
+
+
 def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
-    mode = view["run"].get("mode") or view.get("phase") or "review-plan"
-    return dispatcher_command(mode, str(plan_path), "--force")
+    """The ``resume with:`` command, with the run's own flags spliced back in.
+
+    Flags come from the run record's ``replay_flags`` (the launcher's list,
+    D2) through :func:`cli_common.current_replay_flags`, whose live-source rule
+    never lets ``status``'s own ``--view run`` argv win here (a different
+    mode). ``ask`` re-derives its question positional from the checkpoint's
+    ``question`` field — the one place it is stored — and falls back to the
+    questionless string when the key is missing.
+    """
+    run = view["run"]
+    mode = str(run.get("mode") or view.get("phase") or "review-plan")
+    flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=mode)
+    positionals = [str(plan_path)]
+    if mode == "ask" and view.get("question"):
+        positionals.append(str(view["question"]))
+    verb = "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
+    return cli_common.retry_command(mode, *positionals, verb, flags=flags)
+
+
+def _resume_shape(view: Dict[str, Any]) -> "tuple":
+    """``(shape, repair, redispatch, kept)`` from the document, in two reads.
+
+    1. the run record's close-out — D4's ``{"state": "runner_rejected",
+       "reason_code": …}``, written at the checkpoint's top level and mirrored
+       into the view — is the refusal's classification made durable and, after
+       a refusal, the only thing on disk ⇒ shape 1;
+    2. otherwise ``progress.subagents`` (``_mirror_status``), whose ``counts``
+       split by ``FATAL_STATUSES`` ⇒ shape 1 or 2. Its freshness is the
+       writer's property: ``claim_run`` drops the predecessor's ``run`` **and**
+       ``progress`` together, so a mirror beside a run record is that run's.
+    3. neither ⇒ shape 2, the transient default.
+
+    Never ``subagent_batch_report.json``: the report in the phase dir may be
+    the previous run's, and it is an arbitrarily large read on a command that
+    must stay sub-second.
+    """
+    run = view["run"]
+    reason_code = None
+    if run.get("state") == "runner_rejected" or view.get("state") == "runner_rejected":
+        reason_code = run.get("reason_code") or view.get("reason_code") or "runner_rejected"
+    mirror = (view.get("progress") or {}).get("subagents") or {}
+    counts = mirror.get("counts") if isinstance(mirror.get("counts"), dict) else {}
+    shape = cli_common.retry_shape(reason_code=reason_code, statuses=counts.keys())
+    repair = None
+    if shape == cli_common.SHAPE_REPAIR:
+        repair = cli_common.repair_sentence(
+            reason_code=reason_code, explanation=_reason_explanation(reason_code),
+            counts=counts,
+        )
+    redispatch = len(mirror.get("failed_task_ids") or []) or None
+    kept = mirror.get("ok") if isinstance(mirror.get("ok"), int) else None
+    return shape, repair, redispatch, kept
+
+
+def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
+    """``_REASON_EXPLANATION[reason_code]``, imported only on this failed path."""
+    if not reason_code:
+        return None
+    try:
+        from .subagent_executor import _REASON_EXPLANATION
+    except Exception:  # pragma: no cover - a broken install still prints the code
+        return None
+    return _REASON_EXPLANATION.get(reason_code)
+
+
+def _resume_lines(view: Dict[str, Any], plan_path: Path) -> List[str]:
+    """The shaped resume block: the repair first when there is one, then the
+    single ``resume with:`` command, then what it costs."""
+    shape, repair, redispatch, kept = _resume_shape(view)
+    lines: List[str] = []
+    if shape == cli_common.SHAPE_REPAIR:
+        lines.append(f"      repair first: {repair}")
+    lines.append(f"      resume with: {_resume_command(view, plan_path)}")
+    if redispatch:
+        cost = f"re-dispatches the {redispatch} failed task(s)"
+        if kept is not None:
+            cost += f" and keeps the {kept} valid result(s) already on disk"
+        lines.append(f"      ({cost}; --force is not needed and would re-run the reviewer panel)")
+    return lines
 
 
 def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:

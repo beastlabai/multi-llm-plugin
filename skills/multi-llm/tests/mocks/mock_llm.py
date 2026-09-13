@@ -115,6 +115,7 @@ import datetime
 import importlib.util
 import json
 import os
+import subprocess
 import re
 import sys
 import time
@@ -661,6 +662,12 @@ FILE_INSTRUCTION_RE = re.compile(
 #: three are `lane: provider` CLIs whose real binary is in the container image —
 #: so this set is cursor alone today. `test_fake_lane_output_channel.py` asserts
 #: exactly that intersection, in both directions.
+#: UPDATED 2026-09-11 (D6): `codex` declares False too and is deliberately NOT
+#: here. Its CLI writes wherever bubblewrap can start; the declaration moves the
+#: review off a sandbox that a stock Ubuntu 24.04 cannot start, so this identity
+#: keeps writing when a prompt asks it to — which is what the real binary does
+#: on a working machine. `test_fake_lane_output_channel.py` names that
+#: exception (`DECLARED_FALSE_BUT_WRITES_WHEN_ASKED`).
 #: UPDATED 2026-08-19: `gemini` joined, and it does NOT refuse in words.
 #: Measured (harness-expansion.md §14.7 gap 5): gemini-cli ships no `write_file`
 #: tool under this adapter's argv, so a write is answered
@@ -1411,6 +1418,38 @@ def print_auth_status(provider: str) -> int:
     return 0
 
 
+#: What real bubblewrap prints on a stock Ubuntu 24.04 with
+#: `kernel.apparmor_restrict_unprivileged_userns=1` and no profile granting
+#: /usr/bin/bwrap the `userns` right — measured, not paraphrased.
+BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+
+
+def run_codex_sandbox(argv: List[str]) -> int:
+    """Emulate `codex sandbox [-c key=value…] -- <cmd…>` (D6 step 3).
+
+    The real subcommand starts bubblewrap under the named policy and runs
+    ``<cmd>`` inside it. Here the command runs as an ordinary child in the
+    inherited cwd — a mock has no sandbox to offer — and its exit code is the
+    verdict, unless ``MOCK_LLM_SANDBOX_BROKEN=1`` replays the machine this was
+    written on: the bwrap line on stderr, exit 1, and the command never runs.
+    """
+    if os.environ.get("MOCK_LLM_SANDBOX_BROKEN") == "1":
+        print(BWRAP_BROKEN_LINE, file=sys.stderr)
+        return 1
+    if "--" not in argv:
+        print("error: codex sandbox needs `-- <command>`", file=sys.stderr)
+        return 2
+    command = argv[argv.index("--") + 1:]
+    if not command:
+        print("error: codex sandbox needs a command after `--`", file=sys.stderr)
+        return 2
+    try:
+        return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 def read_stdin_prompt() -> str:
     """Read the prompt from stdin (the executor's non-argv transport, D2d).
 
@@ -1746,6 +1785,13 @@ def main() -> int:
     # the call log.
     if is_auth_probe(sys.argv[1:]):
         return print_auth_status(provider)
+
+    # codex's model-free sandbox self-test (D6 step 3): `codex sandbox -c
+    # 'sandbox_mode="…"' -- <cmd>` runs <cmd> under the same bubblewrap policy
+    # a dispatch would use. Not a dispatch either — it must not land in the
+    # call log — so it is answered here, before the exec parser.
+    if provider == "codex" and sys.argv[1:2] == ["sandbox"]:
+        return run_codex_sandbox(sys.argv[2:])
 
     # Parse arguments based on provider
     args, prompt = parse_provider_args(provider)
