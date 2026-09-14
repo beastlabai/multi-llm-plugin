@@ -4317,3 +4317,202 @@ class TestTheSessionRungFallsBackInsteadOfRefusing:
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.run_tasks([task], phase_dir=str(tmp_path), kind="validation")
         assert excinfo.value.key == "tasks[validation-batch-0].model_hint"
+
+
+# ---------------------------------------------------------------------------
+# A reply that spells "none" by leaving the key out (2026-09-14)
+# ---------------------------------------------------------------------------
+
+def _generated_document(*, drop=()):
+    tasks = []
+    for index in (1, 2):
+        task = {
+            "id": f"T00{index}",
+            "title": f"Task {index}",
+            "description": "Edit index.html.",
+            "depends_on": [] if index == 1 else ["T001"],
+            "files_to_create": [],
+            "files_to_modify": ["index.html"],
+            "acceptance_criteria": ["it works in a named, checkable way"],
+            "estimated_complexity": "low",
+            "executor_role": "agent",
+        }
+        for key in drop:
+            task.pop(key, None)
+        tasks.append(task)
+    return {"schema_version": "1.0", "plan_preamble": "One file.", "tasks": tasks}
+
+
+class TestNormalizeResult:
+    """`opencode/nemotron-3-ultra-free` returned ten well-formed tasks for a
+    single-file plan with no `files_to_create` on any of them, and the whole
+    reply failed rung 6 — never retried — twice. Absent and empty mean the
+    same thing to every consumer, so the invoker supplies the key."""
+
+    def test_an_omitted_list_key_is_supplied_and_the_document_validates(self):
+        document = _generated_document(drop=("files_to_create",))
+        assert executor.validate_result("task_generation", document)
+        notes = executor.normalize_result("task_generation", document)
+        assert notes == ["'files_to_create' on 2 task(s)"]
+        assert all(t["files_to_create"] == [] for t in document["tasks"])
+        assert executor.validate_result("task_generation", document) == []
+
+    def test_every_list_key_is_covered_and_reported_once_each(self):
+        document = _generated_document(
+            drop=("files_to_create", "files_to_modify", "depends_on")
+        )
+        notes = executor.normalize_result("task_generation", document)
+        assert sorted(notes) == sorted([
+            "'depends_on' on 2 task(s)",
+            "'files_to_create' on 2 task(s)",
+            "'files_to_modify' on 2 task(s)",
+        ])
+        assert executor.validate_result("task_generation", document) == []
+
+    def test_a_present_key_of_the_wrong_type_is_left_for_the_schema(self):
+        document = _generated_document()
+        document["tasks"][0]["files_to_create"] = "index.html"
+        assert executor.normalize_result("task_generation", document) == []
+        assert document["tasks"][0]["files_to_create"] == "index.html"
+        assert executor.validate_result("task_generation", document)
+
+    def test_a_reply_already_in_shape_is_untouched_and_silent(self, capsys):
+        document = _generated_document()
+        before = json.dumps(document, sort_keys=True)
+        assert executor.normalize_result("task_generation", document) == []
+        assert json.dumps(document, sort_keys=True) == before
+        executor._report_normalized("task_generation", [])
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize("kind", ["validation", "consolidation", "salvage",
+                                      "human_decision_judge"])
+    def test_no_other_kind_is_completed(self, kind):
+        data = {"tasks": [{"id": "T001"}]}
+        assert executor.normalize_result(kind, data) == []
+        assert data == {"tasks": [{"id": "T001"}]}
+
+    def test_a_non_document_is_ignored(self):
+        for data in (None, [], "prose", {"tasks": "T001"}, {"tasks": [1, None]}):
+            assert executor.normalize_result("task_generation", data) == []
+
+    def test_the_parse_lane_completes_the_reply_before_validating(self, capsys):
+        """The executor's own lane: extraction → completion → validation, and
+        the completed document is what the caller persists."""
+        document = _generated_document(drop=("files_to_create",))
+        capture = executor._Capture(
+            stdout=json.dumps(document), stderr="", exit_code=0, duration=1.0,
+        )
+
+        class _Provider:
+            name = "stub"
+
+            def parse_output(self, stdout, stderr=""):
+                return {"success": True, "data": stdout}
+
+        status, error, data = executor._parse_and_validate(
+            _Provider(), capture, kind="task_generation", prefer_arrays=False,
+        )
+        assert (status, error) == (executor.STATUS_OK, "")
+        assert all(t["files_to_create"] == [] for t in data["tasks"])
+        out = capsys.readouterr().out
+        assert "[exec-subagents] task_generation: the reply omitted " \
+               "'files_to_create' on 2 task(s); supplied []" in out
+
+
+class TestSessionModelCatalogExemptionByModel:
+    """The rung exemption alone left two sites printing the warning the
+    session rung had just been excused from: the generate-tasks preflight
+    (`driver.subagent_runner`, no layer) and the re-invocation's recorded pin
+    (`tasks[<id>].runner (recorded from a previous attempt)`, no rung). The
+    exemption is keyed on the model too, so the session's model is never
+    reported as unconfigured whoever names it."""
+
+    def _session(self, monkeypatch, model):
+        from utils import provider_registry as registry
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, model)
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+
+    def test_a_recorded_pin_on_the_session_model_does_not_warn(
+        self, runner_env, monkeypatch, capsys
+    ):
+        runner_env.use("opencode:stub/stub-model")
+        self._session(monkeypatch, "stub/stub-model")
+        capsys.readouterr()
+        executor.preflight_runner(
+            "opencode:stub/stub-model",
+            key="tasks[task_generation].runner (recorded from a previous attempt)",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert "configured catalog" not in capsys.readouterr().err
+
+    def test_a_different_model_keeps_the_warning_while_a_session_is_set(
+        self, runner_env, monkeypatch, capsys
+    ):
+        runner_env.use("opencode:stub/stub-model")
+        self._session(monkeypatch, "stub/other-model")
+        capsys.readouterr()
+        executor.preflight_runner(
+            "opencode:stub/stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert "not in opencode's configured catalog" in capsys.readouterr().err
+
+    def test_no_session_model_leaves_the_warning_exactly_as_it_was(
+        self, runner_env, monkeypatch, capsys
+    ):
+        from utils import provider_registry as registry
+        runner_env.use("opencode:stub/stub-model")
+        monkeypatch.delenv(registry.HOST_SESSION_MODEL_ENV, raising=False)
+        capsys.readouterr()
+        executor.preflight_runner(
+            "opencode:stub/stub-model",
+            check_version=False, check_auth=False, check_nested=False,
+        )
+        assert "not in opencode's configured catalog" in capsys.readouterr().err
+
+
+class TestFailureCaptureRotation:
+    """Attempt numbering restarts at 1 per invocation, so a re-invoked phase
+    wrote its `attempt1.json` over the one it was retrying (measured
+    2026-09-14: two `generate-tasks` runs an hour apart left one capture)."""
+
+    def _write(self, phase_dir, error):
+        return executor._write_failure_capture(
+            phase_dir=str(phase_dir),
+            task={"task_id": "task_generation", "kind": "task_generation"},
+            attempt_index=1, argv=["opencode", "run"], prompt="p",
+            stdout="", stderr="", exit_code=0, duration=1.0,
+            status=executor.STATUS_SCHEMA_INVALID, error=error,
+        )
+
+    def test_the_earlier_capture_is_retired_under_its_own_timestamp(self, tmp_path):
+        first = Path(self._write(tmp_path, "first"))
+        assert first.name == "task_generation.attempt1.json"
+        os.utime(first, (1_600_000_000, 1_600_000_000))
+        second = Path(self._write(tmp_path, "second"))
+        assert second == first
+        assert json.loads(second.read_text())["error"] == "second"
+        retired = sorted((tmp_path / executor.FAILED_CAPTURE_DIRNAME).iterdir())
+        names = [p.name for p in retired]
+        assert names == [
+            "task_generation.attempt1.20200913T122640Z.json",
+            "task_generation.attempt1.json",
+        ]
+        assert json.loads(retired[0].read_text())["error"] == "first"
+
+    def test_two_retirements_in_the_same_second_both_survive(self, tmp_path):
+        first = Path(self._write(tmp_path, "first"))
+        os.utime(first, (1_600_000_000, 1_600_000_000))
+        self._write(tmp_path, "second")
+        os.utime(first, (1_600_000_000, 1_600_000_000))
+        self._write(tmp_path, "third")
+        names = sorted(p.name for p in (tmp_path / executor.FAILED_CAPTURE_DIRNAME).iterdir())
+        assert names == [
+            "task_generation.attempt1.20200913T122640Z-1.json",
+            "task_generation.attempt1.20200913T122640Z.json",
+            "task_generation.attempt1.json",
+        ]
+
+    def test_a_first_capture_is_written_as_before(self, tmp_path):
+        path = Path(self._write(tmp_path, "only"))
+        assert [p.name for p in path.parent.iterdir()] == ["task_generation.attempt1.json"]

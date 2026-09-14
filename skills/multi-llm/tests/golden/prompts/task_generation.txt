@@ -102,3 +102,5 @@ Rules:
    least one task has an empty `depends_on`.
 3. `executor_role` is "agent" for anything an agent can do and "human" only for
    the manual cases listed in the rules above.
+4. `depends_on`, `files_to_create` and `files_to_modify` are always present —
+   `[]` when a task has none. Never drop a key because its list is empty.

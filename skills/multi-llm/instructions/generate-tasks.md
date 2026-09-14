@@ -68,6 +68,11 @@ driving agent re-implements.
 }
 ```
 
+`depends_on`, `files_to_create` and `files_to_modify` are always present — `[]`
+when a task has none. A reply that leaves one of them out is completed with `[]`
+before validation (on either invoker); a key present with the wrong type, or any
+other missing field, is still `schema_invalid`.
+
 ### Plan Preamble
 
 The `plan_preamble` field provides essential context for subagents implementing tasks. Include:

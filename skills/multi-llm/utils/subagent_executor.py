@@ -61,6 +61,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         EXPLICIT_DRIVER_LAYERS,
         HOST_DEFAULT_LAYER,
         SESSION_LAYER,
+        session_runner,
         get_max_concurrent_subagents,
         get_provider,
         get_provider_max_concurrent,
@@ -134,6 +135,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         EXPLICIT_DRIVER_LAYERS,
         HOST_DEFAULT_LAYER,
         SESSION_LAYER,
+        session_runner,
         get_max_concurrent_subagents,
         get_provider,
         get_provider_max_concurrent,
@@ -198,6 +200,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
 __all__ = [
     "BATCH_REPORT_FILENAME",
     "FAILED_CAPTURE_DIRNAME",
+    "TASK_GENERATION_LIST_KEYS",
+    "normalize_result",
     "MAX_RESULT_BYTES",
     "MAX_CAPTURE_BYTES",
     "STATUS_OK",
@@ -1086,6 +1090,27 @@ def _resolve_task_source(
     return spec, f"{driver_key} ({layer})", layer
 
 
+def _is_session_model(
+    provider_name: str, model: str, *, anchor: Optional[str] = None
+) -> bool:
+    """Whether ``provider:model`` is the host session's own model, whoever named it.
+
+    The configured catalog is the operator's fan-out list; the session's model
+    is by definition one the host is already running, so "not configured" is
+    never news about it — on whichever rung, or under whichever recorded key,
+    it arrives. Answers ``False`` whenever the session rung cannot answer, so a
+    host with no session model keeps the warning exactly as it was.
+    """
+    try:
+        session = session_runner()
+        if not session:
+            return False
+        session_provider, session_model = parse_model_spec(session, anchor=anchor)
+    except Exception:  # noqa: BLE001 - an advisory exemption never ends a run
+        return False
+    return (session_provider, session_model) == (provider_name, model)
+
+
 def preflight_runner(
     spec: str,
     *,
@@ -1198,7 +1223,17 @@ def preflight_runner(
     # definition one the host is already running — warning that it is "not
     # configured" told an opencode user their selected model was suspect on
     # every run. The live catalog leg (`_detect_model`) still judges it.
-    if not catalogued and layer != SESSION_LAYER:
+    # The exemption is keyed on the *model* as well as on the rung: the same
+    # model reaches this function under other keys — the generate-tasks
+    # orchestrator's own preflight, and `tasks[<id>].runner (recorded from a
+    # previous attempt)` on a re-invocation — and each of those printed the
+    # warning the session rung had just been excused from (measured
+    # 2026-09-14, twice per `generate-tasks` retry).
+    if (
+        not catalogued
+        and layer != SESSION_LAYER
+        and not _is_session_model(provider_name, model, anchor=anchor)
+    ):
         print(
             f"multi-llm warning: {key} names model {model!r}, which is not in "
             f"{provider_name}'s configured catalog — dispatching anyway.",
@@ -2630,6 +2665,60 @@ def _salvage_gave_up(kind: str, data: Any) -> Optional[str]:
     return f"salvage recovered no result from the raw output: it returned {shape}"
 
 
+#: The list-valued keys of a generated task a runner may leave out when the
+#: list is empty. ``generated_tasks.schema.json`` requires all three, and a
+#: small model reads "no files to create" as "no ``files_to_create`` key" —
+#: measured 2026-09-14: ``opencode/nemotron-3-ultra-free`` returned ten
+#: well-formed tasks for a single-file plan, every one carrying
+#: ``files_to_modify`` and none carrying ``files_to_create``, and the whole
+#: reply failed rung 6 (never retried) on that one absent key, twice. An absent
+#: list and an empty list mean the same thing to every consumer
+#: (``task_decomposer.from_dict`` reads each with a ``[]`` default), so the
+#: invoker supplies the key. A key that is *present* with the wrong type is
+#: left alone for the schema to name.
+TASK_GENERATION_LIST_KEYS: Tuple[str, ...] = (
+    "depends_on", "files_to_create", "files_to_modify",
+)
+
+
+def normalize_result(kind: str, data: Any) -> List[str]:
+    """Supply what a reply left out that means the same thing absent as empty.
+
+    Mutates ``data`` in place and returns one note per key it supplied, shaped
+    ``'files_to_create' on 10 task(s)``; ``[]`` means the reply was already in
+    shape. Runs *before* :func:`validate_result` on both parse lanes and on the
+    native host's consume path, so the document written to disk is the
+    normalized one and :func:`task_is_complete` re-reads what was validated.
+
+    Only ``task_generation`` has such keys. Every other kind returns ``[]``
+    with ``data`` untouched: a validation verdict or a write-batch result
+    missing a field is a real disagreement, not a spelling of "none".
+    """
+    if kind != "task_generation":
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+        return []
+    supplied: Dict[str, int] = {}
+    for task in data["tasks"]:
+        if not isinstance(task, dict):
+            continue
+        for key in TASK_GENERATION_LIST_KEYS:
+            if key not in task:
+                task[key] = []
+                supplied[key] = supplied.get(key, 0) + 1
+    return [f"{key!r} on {count} task(s)" for key, count in supplied.items()]
+
+
+def _report_normalized(kind: str, notes: List[str]) -> None:
+    """One stdout line per reply the executor had to complete, or nothing."""
+    if notes:
+        print(
+            f"[exec-subagents] {kind}: the reply omitted {', '.join(notes)}; "
+            f"supplied [] before validating (absent and empty mean the same "
+            f"thing to every consumer of this document)."
+        )
+
+
 def validate_result(kind: str, data: Any) -> List[str]:
     """Validate an extracted result against its kind's result shape (D3f).
 
@@ -2774,6 +2863,38 @@ def _safe_task_filename(task_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "task") or "task"
 
 
+def _retire_capture(target: Path) -> None:
+    """Move an earlier invocation's capture aside rather than overwrite it.
+
+    Attempt numbering restarts at 1 on every invocation, and a re-invoked phase
+    re-dispatches the failed task under the same id — so without this the retry
+    destroyed the evidence of the attempt it was retrying (measured
+    2026-09-14: two ``generate-tasks`` runs an hour apart left one
+    ``task_generation.attempt1.json``, the second's). The stamp is the retired
+    file's own mtime in UTC, so the name says when that attempt ran; the batch
+    report that named the old path is rewritten by the same invocation.
+    Best-effort: a rename that fails leaves the overwrite as it was.
+    """
+    try:
+        if not target.exists():
+            return
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(
+            target.stat().st_mtime, tz=timezone.utc
+        ).strftime("%Y%m%dT%H%M%SZ")
+        retired = target.with_name(f"{target.stem}.{stamp}{target.suffix}")
+        serial = 1
+        while retired.exists():
+            retired = target.with_name(
+                f"{target.stem}.{stamp}-{serial}{target.suffix}"
+            )
+            serial += 1
+        target.replace(retired)
+    except OSError:  # pragma: no cover - diagnostics must never fail a run
+        return
+
+
 def _write_failure_capture(
     *,
     phase_dir: str,
@@ -2812,6 +2933,7 @@ def _write_failure_capture(
             else arg
             for arg in argv
         ]
+        _retire_capture(capture_dir / name)
         _atomic_write_json(str(capture_dir / name), _redact_json({
             "task_id": task.get("task_id"),
             "kind": task.get("kind"),
@@ -3715,6 +3837,7 @@ def _parse_and_validate(
     gave_up = _salvage_gave_up(kind, data)
     if gave_up is not None:
         return STATUS_SALVAGE_UNRECOVERABLE, gave_up, data
+    _report_normalized(kind, normalize_result(kind, data))
     errors = validate_result(kind, data)
     if errors:
         return (
@@ -3814,6 +3937,7 @@ def _parse_with_schema_policy(
             f"structured output: no document conforming to {schema.name}"
         ), None, None
     if verdict.marker == structured_output.MARKER_NATIVE and verdict.data is not None:
+        _report_normalized(kind, normalize_result(kind, verdict.data))
         errors = validate_result(kind, verdict.data)
         if errors:
             return (

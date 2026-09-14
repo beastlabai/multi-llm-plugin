@@ -338,12 +338,24 @@ def _progress_text(progress: Dict[str, Any]) -> str:
     return ", ".join(parts) or "(none recorded)"
 
 
-#: The modes whose parser registers ``--reaggregate`` — the retry-only-the-
-#: failures verb a failed run resumes with (D2 step 4). Every other mode keeps
-#: ``--force``, the only resume verb it accepts. ``status`` cannot afford to
-#: import each orchestrator's parser to derive this, so it is the one list in
-#: this module that is typed rather than read.
-_REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code", "generate-tasks")
+#: The modes whose ``--reaggregate`` is the retry-only-the-failures verb a
+#: failed run resumes with (D2 step 4): it re-dispatches the failed batches and
+#: re-reads the rest. Every mode in neither table keeps ``--force``, the only
+#: resume verb it accepts. ``status`` cannot afford to import each
+#: orchestrator's parser to derive this, so these are the two tables in this
+#: module that are typed rather than read.
+_REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
+
+#: Modes whose retry verb is neither. ``generate-tasks`` has a ``--reaggregate``
+#: too, but there it is the native host's second half — it only ever *consumes*
+#: an existing ``task_generation_result.json`` and refuses when there is none —
+#: so it never re-dispatches a failed task. The plain re-invoke does both:
+#: re-dispatches what failed, consumes a valid result if one is on disk. This is
+#: the verb that phase's own retry hint prints, and the ``resume with:`` line
+#: has to agree with it: measured 2026-09-14, the two lines disagreed, the
+#: session model followed this one, and the run ended on ``--reaggregate found
+#: no task_generation_result.json`` with nothing re-dispatched.
+_RESUME_VERB_BY_MODE = {"generate-tasks": "--yes"}
 
 
 def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
@@ -362,7 +374,9 @@ def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
     positionals = [str(plan_path)]
     if mode == "ask" and view.get("question"):
         positionals.append(str(view["question"]))
-    verb = "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
+    verb = _RESUME_VERB_BY_MODE.get(mode) or (
+        "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
+    )
     return cli_common.retry_command(mode, *positionals, verb, flags=flags)
 
 
