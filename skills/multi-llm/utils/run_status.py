@@ -335,7 +335,36 @@ def _progress_text(progress: Dict[str, Any]) -> str:
         )
     if progress.get("failed_task_ids"):
         parts.append(f"failed {', '.join(map(str, progress['failed_task_ids']))}")
+    # The executor's mirrors (`subagent_executor._mirror_status` under
+    # `subagents`, `write_batch_scheduler._mirror_status` under
+    # `write_subagents`) are the only progress a dispatch-only phase such as
+    # `generate-tasks` records — it never calls `report_progress(step=…)` before
+    # the end — so a line that read only the step keys printed "(none recorded)"
+    # beside a mirror that said `ok: 1`. Measured 2026-09-14.
+    for key in ("subagents", "write_subagents"):
+        parts.extend(_mirror_text(key, progress.get(key)))
     return ", ".join(parts) or "(none recorded)"
+
+
+def _mirror_text(key: str, mirror: Any) -> List[str]:
+    """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
+    task did not end ``ok``, the non-ok statuses and the failed ids."""
+    if not isinstance(mirror, dict) or not isinstance(mirror.get("total"), int):
+        return []
+    kind = mirror.get("kind") or key
+    total = mirror["total"]
+    counts = mirror.get("counts") if isinstance(mirror.get("counts"), dict) else {}
+    ok = mirror.get("ok")
+    if not isinstance(ok, int):
+        ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
+    parts = [f"{kind} {ok}/{total} ok"]
+    for status, count in sorted(counts.items()):
+        if status != "ok" and count:
+            parts.append(f"{status} {count}")
+    failed = mirror.get("failed_task_ids") or []
+    if failed:
+        parts.append(f"failed {', '.join(map(str, failed))}")
+    return parts
 
 
 #: The modes whose ``--reaggregate`` is the retry-only-the-failures verb a

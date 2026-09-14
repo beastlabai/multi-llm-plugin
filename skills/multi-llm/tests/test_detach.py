@@ -923,6 +923,59 @@ class TestStatusSurface:
         assert "workflow phase: completed" in out
         assert "not yet marked completed" not in out
 
+    def test_the_executor_mirror_is_progress_too(self, tmp_path, capsys):
+        """A dispatch-only phase (`generate-tasks`) records no `step`; the
+        executor's `progress.subagents` mirror is all the progress it has, and
+        the line used to print "(none recorded)" beside it (measured 2026-09-14).
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mirror-001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "failed", "exit_code": 3, "detached": True,
+            "mode": "generate-tasks",
+        })
+        status_file.update_status(str(phase), {
+            "phase": "generate-tasks", "state": "subagents_failed",
+            "progress": {"subagents": {
+                "kind": "task_generation", "invoker": "executor",
+                "total": 1, "ok": 0, "counts": {"timeout": 1},
+                "failed_task_ids": ["task_generation"],
+            }},
+        })
+        # A failed run is exit 3 from `status` too — the verdict is the run's.
+        assert run_status.main(["--plan-file", str(plan)]) == 3
+        out = capsys.readouterr().out
+        assert (
+            "progress:       task_generation 0/1 ok, timeout 1, failed task_generation"
+            in out
+        )
+        assert "(none recorded)" not in out
+
+        # And the successful retry: the mirror says so, the step agrees.
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mirror-002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "generate-tasks",
+        })
+        status_file.update_status(str(phase), {
+            "state": "complete",
+            "progress": {
+                "step": "complete",
+                "subagents": {
+                    "kind": "task_generation", "invoker": "executor",
+                    "total": 1, "ok": 1, "counts": {"ok": 1},
+                    "failed_task_ids": [],
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "phase state:    complete" in out
+        assert "progress:       complete, task_generation 1/1 ok" in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):
