@@ -665,3 +665,42 @@ class TestOmittedListKeysOnTheNativePath:
         err = capsys.readouterr().err
         assert "acceptance_criteria" in err and "files_to_create" not in err
         assert not _tasks_md(plan).exists()
+
+
+# ---------------------------------------------------------------------------
+# 9. The phase machine reaches `complete` on success
+# ---------------------------------------------------------------------------
+
+class TestPhaseStateOnSuccess:
+    """`.status.json`'s top-level `state` is the phase machine, and `claim_run`
+    deliberately leaves it alone (a native host's `task_generation_pending`
+    must survive into the `--reaggregate` run). So a successful consume has to
+    write its own terminal word, or a `done` run reads beside whatever the last
+    failed attempt left — measured 2026-09-14: `phase state: subagents_failed`
+    under `run.state: done`, shown to the session model on the retry that
+    worked."""
+
+    def test_a_successful_consume_records_complete(self, tmp_path, capsys):
+        from utils import status_file
+
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        # What a failed executor dispatch leaves behind (review_orchestrator_base).
+        status_file.update_status(str(_phase_dir(plan)), {"state": "subagents_failed"})
+        _persist(plan, _valid_document())
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
+        capsys.readouterr()
+        assert status_file.read_status(str(_phase_dir(plan))).get("state") == "complete"
+
+    def test_a_failed_consume_leaves_the_state_alone(self, tmp_path, capsys):
+        from utils import status_file
+
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        status_file.update_status(str(_phase_dir(plan)), {"state": "subagents_failed"})
+        document = _valid_document()
+        document["tasks"][0].pop("acceptance_criteria")
+        (_phase_dir(plan) / RESULT_NAME).write_text(json.dumps(document), encoding="utf-8")
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 3
+        capsys.readouterr()
+        assert status_file.read_status(str(_phase_dir(plan))).get("state") == "subagents_failed"

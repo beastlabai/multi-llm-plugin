@@ -502,6 +502,17 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     tasks_path = get_output_paths(plan_path, "tasks", phase="tasks")
     record_artifact(tasks_path)
     record_artifact(plan_path)
+    # The phase machine's terminal word, exactly where the review phases write
+    # theirs. Without it `.status.json`'s top-level `state` keeps whatever the
+    # last *failed* attempt left (`subagents_failed`), and `status` renders a
+    # `done` run beside `phase state: subagents_failed` — measured 2026-09-14,
+    # on the successful retry the opencode plugin then showed the session model.
+    from utils import detach as _detach
+    from utils.status_file import update_status as _update_status
+
+    phase_dir = str(get_phase_dir(plan_path, PHASE_NAME))
+    _update_status(phase_dir, {"state": "complete"})
+    _detach.report_progress(phase_dir, step="complete")
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
     print(
         "Next: "
