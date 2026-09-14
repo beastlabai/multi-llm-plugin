@@ -274,10 +274,13 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
         RunnerRejected,
         eligible_runners,
         preflight_runner,
-        resolve_task_runner,
+        resolve_task_runner_source,
     )
 
-    spec = resolve_task_runner(task, anchor=anchor)
+    # The key carries the ladder's layer word (`driver.subagent_runner
+    # (session)`), so a refusal or a warning here names the rung that supplied
+    # the spec, the way the executor's own preflight does.
+    spec, key = resolve_task_runner_source(task, anchor=anchor)
     provider_name, _model = parse_model_spec(spec, anchor=anchor)
     provider = get_provider(provider_name)
     if provider is not None and not provider.supports_workspace_reads:
@@ -305,7 +308,7 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
     # Adapter present, model spec parseable, `agent-readonly` implemented, binary
     # on PATH, version within the supported window — one shared formatter, so this
     # refusal reads like every other runner refusal.
-    preflight_runner(spec, profile=PROFILE_AGENT_READONLY, anchor=anchor)
+    preflight_runner(spec, profile=PROFILE_AGENT_READONLY, anchor=anchor, key=key)
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +424,30 @@ def consume_document(plan_path: Path, result_path: str) -> int:
             f"       Re-run with --force to re-dispatch task {TASK_ID}; nothing "
             f"was written to the plan."
         )
+
+    # The native host writes the reply itself, so the executor's completion of
+    # an omitted-but-empty list key has not happened yet on this path. It runs
+    # here, and the completed document goes back to disk before validation:
+    # `update_plan_tasks` reads the *file*, and a later `task_is_complete`
+    # re-validates the file, so what was validated is what is on disk.
+    from utils.subagent_executor import normalize_result
+
+    notes = normalize_result(TASK_KIND, data)
+    if notes:
+        print(
+            f"[generate-tasks] {RESULT_NAME} omitted {', '.join(notes)}; "
+            f"supplied [] before validating (absent and empty mean the same "
+            f"thing to every consumer of this document)."
+        )
+        try:
+            Path(result_path).write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            return _fail(
+                f"ERROR: {result_path} could not be rewritten with the completed "
+                f"document ({exc}). Nothing was written to the plan."
+            )
 
     errors = validate_document(data)
     if errors:

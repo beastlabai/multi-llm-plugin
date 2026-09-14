@@ -631,3 +631,37 @@ class TestResume:
     def test_a_missing_plan_is_exit_one(self, tmp_path, capsys):
         assert multi_llm.main(["generate-tasks", str(tmp_path / "nope.md")]) == 1
         assert "Plan file not found" in capsys.readouterr().err
+
+
+class TestOmittedListKeysOnTheNativePath:
+    """The native host writes the reply itself, so the executor's completion of
+    an omitted-but-empty list key runs on consume instead — and the completed
+    document goes back to disk, because `update_plan_tasks` reads the file."""
+
+    def test_a_reply_without_files_to_create_is_consumed(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        document = _valid_document()
+        for task in document["tasks"]:
+            task.pop("files_to_create")
+        path = _phase_dir(plan) / RESULT_NAME
+        path.write_text(json.dumps(document), encoding="utf-8")
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
+        out = capsys.readouterr().out
+        assert f"[generate-tasks] {RESULT_NAME} omitted 'files_to_create' on 2 task(s)" in out
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert all(t["files_to_create"] == [] for t in on_disk["tasks"])
+        assert _tasks_md(plan).exists()
+
+    def test_a_missing_substantive_field_is_still_schema_invalid(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        document = _valid_document()
+        document["tasks"][0].pop("acceptance_criteria")
+        document["tasks"][0].pop("files_to_create")
+        path = _phase_dir(plan) / RESULT_NAME
+        path.write_text(json.dumps(document), encoding="utf-8")
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 3
+        err = capsys.readouterr().err
+        assert "acceptance_criteria" in err and "files_to_create" not in err
+        assert not _tasks_md(plan).exists()

@@ -741,3 +741,40 @@ class TestStatusRoute:
         resume = [l for l in out.splitlines() if "resume with:" in l][0]
         assert _tokens(resume.split("resume with:", 1)[1]).count(question) == 1
         assert "--question" not in resume and "--quick --force" in resume
+
+
+class TestResumeVerbAgreesWithThePhase:
+    """`status`'s `resume with:` and the phase's own retry hint are two
+    renderings of one command. Measured 2026-09-14 on a failed
+    `generate-tasks`: the hint said re-invoke plain, the status line said
+    `--reaggregate`, the session model followed the status line, and the run
+    ended on `--reaggregate found no task_generation_result.json` with nothing
+    re-dispatched."""
+
+    def _resume(self, mode, flags=("--host", "opencode", "--detach")):
+        view = {"run": {"mode": mode, "replay_flags": list(flags)}, "progress": {}}
+        return run_status._resume_command(view, Path(PLAN)).split()
+
+    def test_generate_tasks_resumes_with_the_plain_re_invoke(self):
+        tokens = self._resume("generate-tasks")
+        assert "--reaggregate" not in tokens and "--force" not in tokens
+        assert tokens[-4:] == ["--host", "opencode", "--detach", "--yes"]
+
+    def test_a_recorded_reaggregate_flag_is_not_replayed_on_it(self):
+        tokens = self._resume(
+            "generate-tasks", ("--host", "opencode", "--skip-prerequisites", "--reaggregate")
+        )
+        assert "--reaggregate" not in tokens
+        assert tokens[-4:] == ["--host", "opencode", "--skip-prerequisites", "--yes"]
+
+    @pytest.mark.parametrize("mode", ["review-plan", "review-tasks", "review-code"])
+    def test_the_review_phases_keep_reaggregate_which_re_dispatches_there(self, mode):
+        assert self._resume(mode)[-1] == "--reaggregate"
+
+    def test_it_matches_the_phases_own_retry_hint(self):
+        """Same builder, same verb: the hint `generate_tasks_orchestrator`
+        prints after a failed dispatch."""
+        cli_common.clear_invocation()
+        flags = ["--host", "opencode", "--skip-prerequisites"]
+        hint = cli_common.retry_command("generate-tasks", PLAN, "--yes", flags=flags)
+        assert self._resume("generate-tasks", flags) == hint.split()
