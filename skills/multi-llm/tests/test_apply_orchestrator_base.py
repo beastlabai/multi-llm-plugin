@@ -3753,6 +3753,67 @@ class TestStateTransitionParity:
         assert state.is_phase_completed("apply-code-fixes")
         assert not state.is_phase_completed("apply-fixes")
 
+    def _run_mark_completed_over_an_edited_plan(self, tmp_path, edits_the_plan):
+        """Drive `--mark-completed` after the plan on disk moved."""
+        from utils.state_manager import StateManager
+
+        config = self.ORCHESTRATOR_CONFIGS["apply-suggestions"]
+        plan_path = self._setup_plan_for_config(tmp_path, config)
+        # The state the phase inherits, stamped with the plan as it stood
+        # before the host's write loop.
+        StateManager(plan_path).save()
+
+        plan_path.write_text("# Test Plan\n\nEdited.\n", encoding="utf-8")
+
+        # A fresh class per call, so setting the flag on it affects nothing else.
+        OrchClass = self._make_orchestrator_class(config)
+        OrchClass.edits_the_plan = edits_the_plan
+        args = _make_args(plan_file=str(plan_path), mark_completed=True)
+        with pytest.raises(SystemExit):
+            OrchClass(args).run()
+        return StateManager(plan_path)
+
+    def test_mark_completed_re_stamps_the_plan_hash_for_a_plan_editing_phase(
+        self, tmp_path
+    ):
+        """F1: this is the native leg's finalizer, and for apply-suggestions it
+        runs after the host rewrote the plan. Without a re-stamp the next
+        `StateManager` reads the phase's own edit as a human editing the plan
+        and `implement --resume` warns about it — and `plan_changed` is
+        set-only at load now, so the residue has to be kept out here, at the
+        writing end.
+        """
+        after = self._run_mark_completed_over_an_edited_plan(
+            tmp_path, edits_the_plan=True
+        )
+
+        assert after.has_plan_changed() is False
+        assert after.get("plan_hash") == after._compute_plan_hash()
+
+    def test_a_phase_that_never_opens_the_plan_leaves_the_flag_alone(
+        self, tmp_path
+    ):
+        """The other half: apply-code-fixes and apply-task-suggestions edit
+        source and the tasks file. Drift in the PLAN across their run is a
+        human's edit, and clearing it would swallow the warning."""
+        after = self._run_mark_completed_over_an_edited_plan(
+            tmp_path, edits_the_plan=False
+        )
+
+        assert after.has_plan_changed() is True
+
+    def test_only_apply_suggestions_declares_that_it_edits_the_plan(self):
+        """The wiring the two tests above stand on, on the real classes."""
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+        from apply_task_suggestions_orchestrator import (
+            ApplyTaskSuggestionsOrchestrator,
+        )
+
+        assert ApplySuggestionsOrchestrator.edits_the_plan is True
+        assert ApplyCodeFixesOrchestrator.edits_the_plan is False
+        assert ApplyTaskSuggestionsOrchestrator.edits_the_plan is False
+
 
 # ======================================================================
 # Test: Exit code and interactive prompt parity across migrated orchestrators

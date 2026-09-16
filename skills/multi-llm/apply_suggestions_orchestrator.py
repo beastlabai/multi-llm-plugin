@@ -70,6 +70,9 @@ class ApplySuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Suggest
     guard_double_nesting = False
     # One shared artifact (the plan), so batches are strictly sequential (D3h).
     write_kind = "apply_suggestions"
+    # That artifact being the plan is also what makes `--mark-completed` re-stamp
+    # `plan_hash`: this phase's own edits are not a human's.
+    edits_the_plan = True
 
     # ----------------------------------------------------------------
     # Argument parser

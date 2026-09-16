@@ -98,15 +98,59 @@ def _porcelain_destination(path_field: str) -> str:
     return path_field
 
 
-def _unquote_porcelain_path(path: str) -> str:
-    """Drop the surrounding quotes git adds to a path that needs them.
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", '"': '"',
+}
 
-    Only the quotes: the C-style escapes inside them are left alone, so a
-    prefix comparison against an exotic filename is best-effort. Every path
-    this repo's baselines have ever held is unquoted.
+
+def _unescape_c_quoted(body: str) -> str:
+    """Undo git's C-style escaping inside a quoted path field.
+
+    Git escapes the control characters and the quote/backslash by name and
+    every other byte it does not consider printable as a three-digit octal
+    ``\\303`` — one per UTF-8 *byte*, so the octals are collected as bytes and
+    decoded together at the end (``errors="replace"``, matching `_run_git`).
+    """
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out += ch.encode("utf-8")
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _C_ESCAPES:
+            out += _C_ESCAPES[nxt].encode("utf-8")
+            i += 2
+        elif nxt.isdigit() and len(body) >= i + 4:
+            try:
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+            except ValueError:
+                out += ch.encode("utf-8")
+                i += 1
+        else:
+            # Not an escape git produces; keep the backslash verbatim rather
+            # than inventing a path that does not exist.
+            out += ch.encode("utf-8")
+            i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _unquote_porcelain_path(path: str) -> str:
+    """Return the real on-disk path behind a quoted ``git status`` path field.
+
+    Git quotes a path that contains a space, a quote or a non-printable byte
+    and C-escapes what is inside. Both halves have to come off: a census entry
+    left as ``"sp ace.txt"`` (quotes included) matches no baseline entry, lands
+    in ``tracked_files`` verbatim, and `review-code` then diffs a path that
+    does not exist (F6, 2026-09-16). An unquoted path is returned untouched —
+    a literal backslash in a bare porcelain path is not an escape.
     """
     if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
-        return path[1:-1]
+        return _unescape_c_quoted(path[1:-1])
     return path
 
 
@@ -185,10 +229,37 @@ def get_modified_files() -> List[str]:
         status = line[:2]
         if not status.strip():
             continue
-        filename = _porcelain_destination(line[3:])
+        # Unquote here and not only in `subtract_baseline`: the census is what
+        # gets STORED (in `tracked_files`, and handed to every consumer that
+        # opens the file), so a path with a space has to leave this function as
+        # the path it really is (F6, 2026-09-16).
+        filename = _unquote_porcelain_path(_porcelain_destination(line[3:]))
         if filename:
             files.append(filename)
     return files
+
+
+def list_untracked_files(directory: str) -> List[str]:
+    """List the untracked files git reports under ``directory``.
+
+    The counterpart of the compact census above: `get_modified_files` collapses
+    an untracked directory to one ``dir/`` entry, which is what lets a stored
+    baseline subtract a whole pre-existing tree cheaply — but a directory the
+    run itself CREATED survives that subtraction, and a directory path is not
+    something a diff or a file read can act on. Expanding just that entry
+    recovers the files without re-censusing the whole repo.
+
+    ``-z`` so the paths come back raw, with no C-quoting to undo. Best-effort:
+    a git failure (or a directory that has since gone) returns nothing and the
+    caller keeps whatever it had.
+    """
+    stdout, _, rc = _run_git(
+        "ls-files", "--others", "--exclude-standard", "-z", "--", directory,
+        check=False,
+    )
+    if rc != 0:
+        return []
+    return [path for path in stdout.split("\0") if path]
 
 def get_staged_files() -> List[str]:
     """Get list of currently staged files."""

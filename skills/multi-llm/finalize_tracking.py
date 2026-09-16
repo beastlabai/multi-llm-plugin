@@ -27,7 +27,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
 from utils import get_modified_files as utils_get_modified_files
-from utils import baseline_covers, get_staged_files, subtract_baseline
+from utils import (
+    baseline_covers,
+    get_staged_files,
+    list_untracked_files,
+    subtract_baseline,
+)
+from utils.state_manager import compute_plan_hash
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
 # of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
@@ -52,6 +58,59 @@ def get_all_modified_files() -> Set[str]:
         print(f"Warning: Failed to get modified files: {e}", file=sys.stderr)
 
     return modified
+
+
+def _expand_uncovered_directories(entries: Set[str]) -> Set[str]:
+    """Replace each surviving ``dir/`` entry with the files inside it.
+
+    The census is deliberately directory-granular (see
+    ``git_utils.get_modified_files``), which is what lets the stored baselines
+    subtract a whole pre-existing tree. What survives that subtraction is a
+    directory the *phase itself* created, and a directory path is useless to
+    every consumer: `capture_diff_hunks` finds no per-file diff for it and
+    skips it silently, so on the native leg (no ``--touched``) `review-code`
+    reports the entry and reviews none of the new module's files (F2,
+    2026-09-16).
+
+    Only the survivors are expanded, so a baseline-covered ``plans/`` with
+    1 511 files under it is never listed — that expansion is the regression
+    4b3d14c reverted, and it must not come back. An entry git can no longer
+    list is kept as-is rather than silently dropped.
+    """
+    expanded: Set[str] = set()
+    for entry in entries:
+        if not entry.endswith("/"):
+            expanded.add(entry)
+            continue
+        files = list_untracked_files(entry)
+        expanded.update(files or {entry})
+    return expanded
+
+
+def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:
+    """Re-stamp ``plan_hash`` after this command's own edit to the plan.
+
+    ``--plan-file`` makes this a plan writer, and it writes after the state
+    file above. Left alone, the next ``StateManager`` built on this plan hashes
+    content the stored ``plan_hash`` no longer matches, records
+    ``plan_changed`` and ``implement --resume`` reports "Plan has changed since
+    last session" about the plugin's own back-reference insertion. The executor
+    leg re-stamps at exactly this point (``WriteBatchScheduler._finalize``,
+    after ``_insert_plan_reference``); this is the native leg's counterpart.
+
+    Best-effort and never fatal: a failure here costs a spurious warning, and
+    the census — this command's actual job — is already on disk.
+    """
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or "plan_hash" not in state:
+            # No hash recorded means nothing reads one; do not invent a field.
+            return
+        state["plan_hash"] = compute_plan_hash(plan_path)
+        state.pop("plan_changed", None)
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Warning: could not re-stamp plan_hash: {e}", file=sys.stderr)
 
 
 def _print_path_list(entries) -> None:
@@ -154,6 +213,10 @@ def main(argv=None) -> int:
     pre_existing = list(state.get("pre_existing_changes", []))
     implementation_changes = set(subtract_baseline(current_modified, pre_existing))
 
+    # A directory that survived the subtraction is one this phase created:
+    # expand it to the files inside it, which is what every consumer needs.
+    implementation_changes = _expand_uncovered_directories(implementation_changes)
+
     # ...except for the files the executor verified it changed: those are
     # implementation changes whether or not they were dirty at the start.
     verified = [f for f in args.touched if f and f.strip()]
@@ -210,6 +273,7 @@ def main(argv=None) -> int:
         code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
         if code:
             return code
+        _restamp_plan_hash(state_path, Path(args.plan_file))
     return 0
 
 

@@ -473,6 +473,15 @@ your host.
    The tracked files are stored in state and used by the code review phase to focus
    only on implementation changes (ignoring unrelated uncommitted changes).
 
+   **Add `--touched "<repo-relative path>"` (repeatable) for every file your
+   subagents reported changing** — e.g. `… --state-file "$STATE_FILE" --touched
+   "src/game.js" --touched "index.html"`. The census is `git status
+   --porcelain`, which reports a *new* directory as one `newdir/` entry (that
+   one is expanded back to its files for you) and cannot tell an edit inside an
+   already-untracked tree from the rest of it. A file the run edited that was
+   **already dirty when the phase started** is subtracted as pre-existing
+   unless `--touched` names it, and is then invisible to the code review.
+
 8. **Run post-implementation regression tests:**
    After all tasks complete, run the project's test suite **once** to catch any integration issues:
 
