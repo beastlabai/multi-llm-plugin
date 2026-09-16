@@ -14,11 +14,12 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -38,7 +39,12 @@ from utils import (
     get_current_head,
 )
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import EXIT_NEEDS_HUMAN, build_parent_parser, dispatcher_command
+from utils.cli_common import (
+    EXIT_NEEDS_HUMAN,
+    build_parent_parser,
+    dispatcher_command,
+    record_artifacts,
+)
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
 from utils.provider_registry import set_run_anchor
@@ -688,6 +694,100 @@ def maybe_detach_implement_phase(
     )
 
 
+def _seed_pending_task_statuses(state: StateManager, tasks: List[Dict[str, Any]]) -> None:
+    """F5: give every materialized task a ``pending`` status before dispatch.
+
+    ``WriteBatchScheduler`` only calls ``state.update_task_status`` when a task
+    finishes or is skipped (``write_batch_scheduler.py:1864,2129``) — nothing
+    seeds the map before the loop starts. On a 14-task plan that made
+    ``check_workflow_prerequisites``' denominator (``len(task_status)``) read
+    "tasks recorded so far" instead of "tasks in the plan": a workflow snapshot
+    taken mid-run showed ``(1/2 tasks)`` and later ``(6/7 tasks)`` on the same
+    14-task implement phase. Only a task with no status yet is touched — a
+    ``--resume`` restores completed/failed/skipped statuses from disk before
+    this runs, and re-marking one of those ``pending`` would erase it.
+    """
+    seeded = False
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        if task_id and state.get_task_status(task_id) is None:
+            state.update_task_status(task_id, TaskStatus.PENDING.value)
+            seeded = True
+    if seeded:
+        state.save()
+
+
+def _record_implement_write_artifacts(
+    *,
+    phase_dir: str,
+    output_dir: str,
+    task_file: str,
+    plan_file: str,
+    result: Any,
+) -> None:
+    """Hand back the files this phase produced (F7).
+
+    ``implement`` never goes through ``ApplyOrchestratorBase`` — this function
+    drives ``WriteBatchScheduler`` directly — so it never got that base's
+    ``_record_write_artifacts``: a fully completed detached run's result line
+    said ``"artifacts": []`` and ``status`` had no ``output_files:`` block,
+    unlike every apply phase. This mirrors ``ApplyOrchestratorBase.
+    _record_write_artifacts``'s shape (same two channels: ``record_output_files``
+    feeds ``.status.json`` for ``status``, ``record_artifacts`` feeds the
+    terminal ``MULTI_LLM_RESULT`` line) for the files implement itself writes,
+    plus the file(s) the write executor actually verified changed
+    (``files_touched`` on every ``ok`` outcome — e.g. ``index.html``), never the
+    runner's own claim. Every path is existence-guarded, so a stopped run names
+    only what it produced.
+
+    ``files_touched`` entries are the pinned-repo-root-relative paths
+    ``TaskSnapshot.changed()`` records (D3f/D3h), not paths relative to this
+    process's own cwd — a host can invoke ``implement`` from anywhere, and
+    checking existence against the wrong root would silently drop every touched
+    file. Resolved against the same ``write_safety.resolve_repo_root`` anchor
+    the scheduler itself pins the write path to, never the process cwd.
+    """
+    paths: Dict[str, str] = {"write_tasks": task_file}
+    report_path = getattr(result, "report_path", None)
+    paths["write_batch_report"] = report_path or os.path.join(
+        phase_dir, "write_batch_report.json"
+    )
+    # The executor's own per-dispatch report (BatchReport.write(), F9/D3i) —
+    # `implement` is not one of the kinds that shares a phase dir
+    # (KINDS_SHARING_A_WRITE_PHASE_DIR), so its filename is the bare one.
+    paths["subagent_batch_report"] = os.path.join(
+        phase_dir, "subagent_batch_report.json"
+    )
+    paths["prior_changes"] = os.path.join(output_dir, "prior_changes.jsonl")
+    summary_file = getattr(result, "summary_file", None)
+    paths["summary"] = summary_file or os.path.join(phase_dir, "summary.md")
+
+    from utils import write_safety as _write_safety
+
+    repo_root = _write_safety.resolve_repo_root(plan_file)
+
+    touched: List[str] = []
+    seen: set = set()
+    for outcome in getattr(result, "outcomes", None) or []:
+        if not getattr(outcome, "ok", False):
+            continue
+        for touched_path in getattr(outcome, "files_touched", None) or []:
+            if touched_path and touched_path not in seen:
+                seen.add(touched_path)
+                touched.append(touched_path)
+    for index, touched_path in enumerate(touched, start=1):
+        resolved = (
+            touched_path if os.path.isabs(touched_path)
+            else os.path.join(repo_root, touched_path)
+        )
+        paths[f"touched_file_{index}"] = resolved
+
+    from utils import detach as _detach
+
+    _detach.record_output_files(phase_dir, **paths)
+    record_artifacts(path for path in paths.values() if path and os.path.exists(path))
+
+
 def run_implement_write_phase(
     args: argparse.Namespace,
     *,
@@ -696,6 +796,7 @@ def run_implement_write_phase(
     output_data: Dict[str, Any],
     human_task_strategy: Optional[str],
     human_task_decisions: Dict[str, str],
+    tasks_file: Optional[Path] = None,
 ) -> Optional[int]:
     """Schedule the implement batches through the write executor, or decline (D3n).
 
@@ -714,6 +815,14 @@ def run_implement_write_phase(
     :func:`maybe_detach_implement_phase`, which the caller crosses just above this
     call so ``--detach`` works on every implement invocation rather than only the
     executor-backed one.
+
+    ``tasks_file`` (F15) is the external ``tasks/tasks.md`` this run's prompts
+    were actually parsed from, when the plan carries a ``TASKS_FILE`` marker —
+    ``None`` for the legacy embedded-task format. Threaded into the two
+    materializer calls so ``write_tasks.json`` records ``inputs.tasks_sha256``
+    the way ``review-tasks`` and ``apply-task-suggestions`` already do, and a
+    hand-edited tasks file invalidates a stored ``write_tasks.json`` on
+    ``--resume`` the same way an edited plan does.
     """
     if not (getattr(args, "exec_subagents", False)
             or getattr(args, "dry_run_subagents", False)):
@@ -728,23 +837,31 @@ def run_implement_write_phase(
     phase_dir = str(get_phase_dir(plan_path, "implement"))
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
     plan_file = str(plan_path.absolute())
+    output_dir = str(get_output_dir(plan_path))
+    tasks_file_str = str(tasks_file) if tasks_file else None
 
     tasks = materialize_write_tasks(
         kind="implement",
         batches=output_data.get("batches") or [],
         phase_dir=phase_dir,
         plan_file=plan_file,
+        tasks_file=tasks_file_str,
     )
     task_file = write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
+        tasks_file=tasks_file_str,
     )
     print(f"[write-subagents] materialized {len(tasks)} implement task(s): {task_file}")
+
+    # F5: seed before the scheduler loop starts, not inside it — see the
+    # function's own docstring.
+    _seed_pending_task_statuses(state, tasks)
 
     scheduler = WriteBatchScheduler(
         tasks=tasks,
         phase_dir=phase_dir,
         kind="implement",
-        output_dir=str(get_output_dir(plan_path)),
+        output_dir=output_dir,
         state=state,
         plan_file=plan_file,
         summary_file=output_data.get("summary_file"),
@@ -762,6 +879,10 @@ def run_implement_write_phase(
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:
         print(f"[write-subagents] implementation summary: {result.summary_file}")
+    _record_implement_write_artifacts(
+        phase_dir=phase_dir, output_dir=output_dir, task_file=task_file,
+        plan_file=plan_file, result=result,
+    )
     return result.exit_code
 
 
@@ -983,6 +1104,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             }, indent=2))
             sys.exit(EXIT_NEEDS_HUMAN)
 
+    # F15: the external tasks file this run's prompts are actually built from,
+    # captured here (before `tasks_file_path` is reassigned below to the
+    # phase-based `tasks_file` output path) so `run_implement_write_phase` can
+    # stamp `write_tasks.json` with `inputs.tasks_sha256` — `None` for the
+    # legacy embedded-task format, where there is no such file.
+    implement_tasks_file: Optional[Path] = tasks_file_path if tasks_file_ref else None
+
     # Record pre-existing changes (before implementation modifies anything)
     record_pre_existing_changes(state)
 
@@ -1023,12 +1151,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         unattended=unattended,
         resume=args.resume,
     )
+    # F8: this fires before `run()`'s equivalent — `maybe_detach_implement_phase`,
+    # further down — crosses the detach boundary, so no run handle is claimed
+    # yet: recording against the phase dir here is a silent no-op
+    # (`detach.record_resolution` only writes when `_ACTIVE` names that phase
+    # dir), and `.status.json.resolutions` stayed `[]` even though the log's
+    # `[AUTO_RESOLVED]` line printed. Buffer it instead, the way
+    # `ApplyOrchestratorBase._record_resolution`/`_flush_resolutions` do, and
+    # replay it once this process owns the phase dir, just past the boundary.
+    pending_resolutions: List[Tuple[str, str]] = []
     if human_task_ids and human_task_strategy and unattended and not args.force_strategy:
-        unattended_mod.record_resolution(
-            str(get_phase_dir(plan_path, "implement")),
-            unattended_mod.row(8).site_id,
-            f"{human_task_strategy} for {len(human_task_ids)} human task(s)",
-        )
+        decision = f"{human_task_strategy} for {len(human_task_ids)} human task(s)"
+        unattended_mod.record_resolution(None, unattended_mod.row(8).site_id, decision)
+        pending_resolutions.append((unattended_mod.row(8).site_id, decision))
     if human_task_decisions:
         # Row 9's answer channel: a per-task decision arrives as a flag, is
         # recorded in state.json, and is handed to the driving agent in the task
@@ -1158,6 +1293,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if detached is not None:
         return detached
 
+    # F8: past the boundary this process owns the phase dir (the ordinary
+    # foreground run, or the detached worker once it has claimed it), so the
+    # D6 row-8 decision buffered above can finally be written where `status`
+    # reads it (`run.resolutions`). Quiet: the marker line already printed at
+    # the decision site, and printing it twice would make one decision read as
+    # two.
+    if pending_resolutions:
+        resolutions_phase_dir = str(get_phase_dir(plan_path, "implement"))
+        for site_id, decision in pending_resolutions:
+            unattended_mod.record_resolution(
+                resolutions_phase_dir, site_id, decision, quiet=True
+            )
+
     # --- the write executor (D3n): schedule the batches in this process --------
     # Strictly additive: with neither flag set this returns None and everything
     # below is byte-for-byte the native path that shipped before the executor.
@@ -1168,6 +1316,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         output_data=output_data,
         human_task_strategy=human_task_strategy,
         human_task_decisions=dict(state.get("human_task_decisions") or {}),
+        tasks_file=implement_tasks_file,
     )
     if scheduled is not None:
         return scheduled

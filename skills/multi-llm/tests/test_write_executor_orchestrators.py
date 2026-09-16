@@ -187,6 +187,40 @@ class TestImplementOrchestratorWiring:
         assert report["finalized"] is True
         assert report["exit"] == 0
 
+    def test_a_stopped_batch_still_seeds_pending_for_every_undispatched_task(
+        self, repo
+    ):
+        """F5: `check_workflow_prerequisites`'s denominator is `len(task_status)`
+        (`state.implementation_task_statuses()`), and nothing used to seed it
+        before a task's first finish/skip — a batch that stops the loop
+        (partial application, D3g/D3n) leaves later batches entirely
+        undispatched, and before the seed, entirely absent from `task_status`
+        too. A workflow snapshot taken mid-run read `(1/2 tasks)`, then
+        `(6/7 tasks)`, on the same 14-task plan this bug was measured against.
+        """
+        _seed_generate_tasks(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        # Every dispatch attests only to T001, so T002's batch (expected_ids
+        # ["T002"]) edits bytes but reports an id it never asked for — a
+        # partial application, which stops the loop at the batch boundary.
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+        code = implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+        ])
+        assert code == 3  # the loop stopped at a batch boundary
+
+        from utils.state_manager import get_or_create_state
+        state = get_or_create_state(repo.plan)
+        # T003's batch was never dispatched — its status is seeded, not
+        # absent.
+        assert state.get_task_status("T003") == "pending"
+        statuses = state.implementation_task_statuses()
+        assert set(statuses) == {"T001", "T002", "T003"}
+        assert statuses["T001"] == "completed"
+        assert statuses["T002"] == "failed"  # recorded by the scheduler itself
+
     def test_dry_run_subagents_starts_no_child(self, repo):
         _seed_generate_tasks(repo)
         log = repo.tmp_path / "calls.jsonl"
@@ -269,6 +303,80 @@ class TestImplementOrchestratorWiring:
         assert report["pending_human_tasks"] == []
         # Only the unblocked task was dispatched.
         assert [t["task_id"] for t in report["tasks"]] == ["T001"]
+
+    def test_a_detached_run_hands_back_its_artifacts_and_resolution(
+        self, repo, monkeypatch
+    ):
+        """F7/F8: implement never goes through ``ApplyOrchestratorBase``.
+
+        A fully successful detached run used to report ``artifacts: []`` and no
+        ``output_files``, and ``.status.json.resolutions`` stayed empty even
+        though the log printed ``[AUTO_RESOLVED] human-task-strategy: …`` — the
+        row-8 decision was recorded before this process owned the phase dir.
+
+        Mirrors ``test_unattended.TestApplyPhaseRowsAreRecorded.
+        test_a_detached_apply_run_lands_both_in_status_json``: a fake
+        ``RunHandle`` is installed as ``detach._ACTIVE`` (claimed via
+        ``status_file.claim_run``, never ``.start()``, so no lock/heartbeat/
+        signal-handler machinery runs) and the orchestrator is driven in the
+        foreground (no ``--detach``/``--internal-worker``) — ``detach.
+        record_resolution``/``record_output_files`` only check whether
+        ``_ACTIVE`` names this phase dir, not how it got there.
+        """
+        from utils import detach, status_file
+
+        _seed_generate_tasks(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+
+        original = implement_orchestrator.TaskDecomposer
+
+        class SeededDecomposer(original):
+            def parse_plan(self, content):
+                tasks = super().parse_plan(content)
+                self.tasks["T002"].executor_role = "human"
+                self.tasks["T002"].subagent_type = "human"
+                return tasks
+
+        repo.monkeypatch.setattr(
+            implement_orchestrator, "TaskDecomposer", SeededDecomposer
+        )
+
+        phase_dir = _phase_dir(repo)
+        handle = detach.RunHandle(
+            str(phase_dir), run_id="run-1", mode="implement",
+            plan_file=str(repo.plan), detached=True,
+        )
+        status_file.claim_run(str(phase_dir), {"run_id": "run-1", "state": "running"})
+        monkeypatch.setattr(detach, "_ACTIVE", handle)
+
+        code = implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+        ])
+        assert code == 0
+
+        # F8: the row-8 auto-resolution buffered before the detach boundary now
+        # reaches `run.resolutions`.
+        run = status_file.read_run(str(phase_dir))
+        assert [r["site"] for r in run["resolutions"]] == ["human-task-strategy"]
+        assert "skip-dependents" in run["resolutions"][0]["decision"]
+
+        # F7: the phase hands back its own artifacts.
+        status = json.loads((phase_dir / ".status.json").read_text())
+        output_files = status.get("output_files") or {}
+        for key in (
+            "write_tasks", "write_batch_report", "subagent_batch_report",
+            "prior_changes", "summary",
+        ):
+            assert key in output_files, output_files
+            assert Path(output_files[key]).is_file()
+        touched = [
+            path for key, path in output_files.items()
+            if key.startswith("touched_file_")
+        ]
+        assert any(Path(path).name == "main.py" for path in touched), output_files
 
     def test_force_strategy_skip_continue_records_the_override(self, repo):
         _seed_generate_tasks(repo)
