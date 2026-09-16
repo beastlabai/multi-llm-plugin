@@ -412,6 +412,39 @@ changes:
       The flag is now set when the review-plan phase completes; it was seeded
       False and never written by any code path.
 
+  # ---------------------------------------------------------------------------
+  # 2026-09-16, the apply-suggestions audit of the opencode-host pipeline: the two
+  # unattended decision sites that belong to the apply phases (D6 rows 10 and 11)
+  # are now *recorded* rather than merely taken, and the phase that overwrites a
+  # single markdown file snapshots it before the first batch. Both are additive —
+  # a marker line and a file — and both are gated on `--yes`, which this fixture
+  # passes.
+  # ---------------------------------------------------------------------------
+  - pointer: /markers/apply-suggestions
+    rationale: >
+      Two `[AUTO_RESOLVED]` lines join `[OUTPUT_FILE]`: row 10 (`--yes` implies
+      `--claude-decide`, flipped in the constructor since D5a and until now
+      silent) and row 11 (no user selections were found, so ALL valid items are
+      applied). The fixture runs `--yes`, so both fire; with `--yes` unset neither
+      is announced and the marker list is what it was. The list is covered rather
+      than its leaves because the bundle flattens positionally and `[OUTPUT_FILE]`
+      shifts by two.
+  - pointer: /markers/apply-code-fixes
+    rationale: >
+      The same two rows at the same two sites — they live in the shared
+      `utils/apply_orchestrator_base.py`, so all three apply phases record them.
+  - pointer: /phases/apply-suggestions/created_paths
+    rationale: >
+      The phase now writes `{phase}/backup.md` — the pre-run bytes of the file it
+      is about to overwrite — before the first batch. The only backup on disk used
+      to be review-plan's, taken before the *review*, so the file named "backup"
+      was not a backup of what this phase overwrote. Kept (not re-stamped) when one
+      already exists, so a resumed run cannot bury the pre-run copy under its own
+      half-applied bytes. apply-fixes writes none (no single target) and
+      apply-task-suggestions already had `tasks-backup.md`, so neither phase's
+      path set moves. `/output_root_paths` shifts with it and is already declared
+      above.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

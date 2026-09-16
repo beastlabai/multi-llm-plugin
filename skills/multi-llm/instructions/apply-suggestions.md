@@ -203,6 +203,11 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 This prints a formatted summary with each suggestion's title and status. Display this output to the user before proceeding.
 
+On the `--exec-subagents` leg (below) this step never runs — the phase finishes in
+one invocation — so the run prints the same breakdown itself at the end: batches
+ok/failed with duration and runner, the count applied, and every skipped
+suggestion with its status, group id and reason.
+
 ### 4. Read the Orchestrator Output
 
 Read `{plan}/apply-suggestions/orchestrator_output.json`.

@@ -5476,3 +5476,355 @@ class TestApplyCodeFixesCompletionContract:
         # the phase DIRECTORY word.
         assert '--phase "apply-fixes"' in text
         assert '--phase "apply-code-fixes"' in text
+
+
+# ======================================================================
+# How an apply phase ENDS: the backup, the artifacts, the outcome summary
+# ======================================================================
+
+
+class _FakeOutcome:
+    """The `TaskOutcome` fields the outcome summary reads, and no more."""
+
+    def __init__(self, task_id, status="ok", write_outcome="applied",
+                 duration_seconds=1.0, runner="mock:model", reason=None):
+        self.task_id = task_id
+        self.status = status
+        self.write_outcome = write_outcome
+        self.duration_seconds = duration_seconds
+        self.runner = runner
+        self.reason = reason
+
+    @property
+    def ok(self):
+        return self.status == "ok"
+
+
+class _FakeSchedulerResult:
+    def __init__(self, outcomes, report_path=None, stopped_at_batch=None):
+        self.outcomes = outcomes
+        self.report_path = report_path
+        self.stopped_at_batch = stopped_at_batch
+
+
+def _orchestrator_on(tmp_path, **arg_overrides):
+    """A MockApplyOrchestrator that has been through _setup on a real plan."""
+    plan_path = _setup_plan_with_output(tmp_path)
+    args = _make_args(plan_file=str(plan_path), **arg_overrides)
+    orch = MockApplyOrchestrator(args)
+    orch._setup()
+    return orch
+
+
+class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
+    """F14: the phase that overwrites a file writes a backup of its own."""
+
+    def test_the_phase_snapshots_the_file_it_is_about_to_overwrite(self, tmp_path):
+        orch = _orchestrator_on(tmp_path)
+        written = orch.write_target_backup()
+        backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
+        assert written == str(backup)
+        assert backup.read_text(encoding="utf-8") == Path(
+            orch.plan_path
+        ).read_text(encoding="utf-8")
+
+    def test_an_existing_backup_is_kept_not_overwritten(self, tmp_path):
+        """A resumed run's target is part-applied; re-stamping would destroy it."""
+        orch = _orchestrator_on(tmp_path)
+        orch.write_target_backup()
+        backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
+        pre_run_bytes = backup.read_text(encoding="utf-8")
+
+        Path(orch.plan_path).write_text("# Half applied\n", encoding="utf-8")
+        assert orch.write_target_backup() is None
+        assert backup.read_text(encoding="utf-8") == pre_run_bytes
+
+    def test_fresh_re_stamps_it(self, tmp_path):
+        """`--fresh` declares prior progress void, so the backup goes with it."""
+        orch = _orchestrator_on(tmp_path)
+        orch.write_target_backup()
+        Path(orch.plan_path).write_text("# New run\n", encoding="utf-8")
+        orch.args.fresh = True
+        assert orch.write_target_backup() is not None
+        backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
+        assert backup.read_text(encoding="utf-8") == "# New run\n"
+
+    def test_a_dry_run_writes_none(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, dry_run=True)
+        assert orch.write_target_backup() is None
+        assert not (Path(orch.out_dir) / orch.phase_name / "backup.md").exists()
+
+    def test_a_phase_with_no_single_target_writes_none(self, tmp_path):
+        """apply-code-fixes partitions by file_key: there is no one file to hold."""
+        orch = _orchestrator_on(tmp_path)
+        orch.has_single_write_target = False
+        assert orch.write_target_file() is None
+        assert orch.write_target_backup() is None
+
+    def test_apply_code_fixes_is_the_phase_that_declares_that(self):
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+        from apply_task_suggestions_orchestrator import (
+            ApplyTaskSuggestionsOrchestrator,
+        )
+
+        assert ApplyCodeFixesOrchestrator.has_single_write_target is False
+        assert ApplySuggestionsOrchestrator.has_single_write_target is True
+        assert ApplyTaskSuggestionsOrchestrator.has_single_write_target is True
+
+    def test_apply_task_suggestions_answers_with_its_own_tasks_backup(self, tmp_path):
+        """It already writes one, under the name its output publishes."""
+        from apply_task_suggestions_orchestrator import (
+            ApplyTaskSuggestionsOrchestrator,
+        )
+
+        probe = ApplyTaskSuggestionsOrchestrator.__new__(
+            ApplyTaskSuggestionsOrchestrator
+        )
+        probe.out_dir = str(tmp_path / "out")
+        phase_dir = Path(probe.out_dir) / probe.phase_name
+        phase_dir.mkdir(parents=True)
+        assert probe.write_target_backup() is None
+        (phase_dir / "tasks-backup.md").write_text("# tasks\n", encoding="utf-8")
+        assert probe.write_target_backup() == str(phase_dir / "tasks-backup.md")
+        assert not (phase_dir / "backup.md").exists()
+
+
+class TestTheExecutorLegHandsBackItsArtifacts:
+    """F3: a fully successful run used to report `artifacts: []`."""
+
+    def test_the_files_the_phase_produced_are_recorded(self, tmp_path):
+        from utils import cli_common
+
+        orch = _orchestrator_on(tmp_path)
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = phase_dir / "orchestrator_output.json"
+        output_path.write_text("{}", encoding="utf-8")
+        report_path = phase_dir / "write_batch_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+        prior = Path(orch.out_dir) / "prior_changes.jsonl"
+        prior.write_text("", encoding="utf-8")
+        orch.write_result = _FakeSchedulerResult([], report_path=str(report_path))
+
+        context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
+        cli_common.activate_result(context)
+        try:
+            orch._record_write_artifacts(str(output_path))
+        finally:
+            cli_common.deactivate_result()
+
+        recorded = set(context.artifacts)
+        assert orch.plan_path in recorded
+        assert str(output_path) in recorded
+        assert str(report_path) in recorded
+        assert str(prior) in recorded
+
+    def test_a_file_that_does_not_exist_is_not_named(self, tmp_path):
+        """A stopped run must name what it produced, not what it meant to."""
+        from utils import cli_common
+
+        orch = _orchestrator_on(tmp_path)
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = phase_dir / "orchestrator_output.json"
+        output_path.write_text("{}", encoding="utf-8")
+        orch.write_result = _FakeSchedulerResult([])
+
+        context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
+        cli_common.activate_result(context)
+        try:
+            orch._record_write_artifacts(str(output_path))
+        finally:
+            cli_common.deactivate_result()
+
+        recorded = context.artifacts
+        assert not any("write_batch_report.json" in path for path in recorded)
+        assert not any("prior_changes.jsonl" in path for path in recorded)
+
+
+class TestTheExecutorLegReportsItsOutcome:
+    """F8/F10: the summary said what WOULD happen, after it already had."""
+
+    def _orchestrator_with_outcomes(self, tmp_path, outcomes, tasks):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = tasks
+        orch.write_result = _FakeSchedulerResult(outcomes)
+        return orch
+
+    def test_it_reports_batches_items_and_per_batch_status(self, tmp_path, capsys):
+        orch = self._orchestrator_with_outcomes(
+            tmp_path,
+            [
+                _FakeOutcome("apply-batch-0", duration_seconds=89.5,
+                             runner="opencode:deepseek"),
+                _FakeOutcome("apply-batch-1", status="batch_failed",
+                             write_outcome=None, duration_seconds=3.25,
+                             runner="opencode:deepseek", reason="no bytes moved"),
+            ],
+            [
+                {"task_id": "apply-batch-0", "expected_ids": ["a", "b", "c"]},
+                {"task_id": "apply-batch-1", "expected_ids": ["d"]},
+            ],
+        )
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+
+        assert "Batches: 1/2 ok" in out
+        assert "Suggestions applied: 3" in out
+        assert "apply-batch-0: ok (applied), 3 suggestion(s), 89.5s, runner opencode:deepseek" in out
+        assert "apply-batch-1: batch_failed" in out
+        assert "reason: no bytes moved" in out
+        # The plan of work must NOT be what a finished run prints.
+        assert "SUGGESTIONS TO APPLY" not in out
+
+    def test_the_decision_summary_travels_with_it(self, tmp_path, capsys):
+        """F10: `util decisions` never runs on this leg, so the run prints it."""
+        orch = self._orchestrator_with_outcomes(
+            tmp_path, [_FakeOutcome("apply-batch-0")],
+            [{"task_id": "apply-batch-0", "expected_ids": ["a"]}],
+        )
+        orch.formatted_skipped = [
+            {
+                "group_id": "f08971a8deadbeef",
+                "title": "Plan file could not be read",
+                "theme": "Tooling",
+                "importance": "LOW",
+                "status": "invalid",
+                "reason": "the plan file exists and is readable",
+            }
+        ]
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+
+        assert "Skipped: 1" in out
+        assert "[invalid] Plan file could not be read [f08971a8]" in out
+        assert "reason: the plan file exists and is readable" in out
+
+    def test_the_native_leg_still_prints_the_plan_of_work(self, tmp_path, capsys):
+        """With no executor requested, the summary really is a plan of work."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(plan_file=str(plan_path))
+        orch = MockApplyOrchestrator(args)
+        assert orch.run() == 0
+        assert "print_text_summary" in orch.call_log
+
+    def test_write_outputs_routes_the_executor_leg_to_the_outcome(
+        self, tmp_path, capsys
+    ):
+        """The routing, not just the text: `_write_outputs` must swap them."""
+        from utils import cli_common
+
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(plan_file=str(plan_path), yes=True)
+
+        class ExecutorOrch(MockApplyOrchestrator):
+            phase_name = "apply-executor-leg"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                self.write_tasks = [
+                    {"task_id": "apply-batch-0", "expected_ids": ["a", "b"]}
+                ]
+                self.write_result = _FakeSchedulerResult(
+                    [_FakeOutcome("apply-batch-0")]
+                )
+                return 0
+
+        orch = ExecutorOrch(args)
+        context = cli_common.ResultContext(
+            mode="apply-executor-leg", phase="apply-executor-leg"
+        )
+        cli_common.activate_result(context)
+        try:
+            assert orch.run() == 0
+        finally:
+            cli_common.deactivate_result()
+
+        out = capsys.readouterr().out
+        assert "APPLY-EXECUTOR-LEG: RESULT" in out
+        assert "Batches: 1/1 ok" in out
+        assert "Suggestions applied: 2" in out
+        # The plan of work belongs to the native leg only.
+        assert "print_text_summary" not in orch.call_log
+        # F3: a run that finished must name what it produced.
+        assert any(
+            path.endswith("orchestrator_output.json") for path in context.artifacts
+        )
+        assert orch.plan_path in context.artifacts
+
+    def test_a_dry_run_subagents_preflight_keeps_the_plan_of_work(
+        self, tmp_path, capsys
+    ):
+        """It dispatches nothing, so there is no outcome and no backup to take."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(
+            plan_file=str(plan_path), yes=True, dry_run_subagents=True
+        )
+
+        class DryOrch(MockApplyOrchestrator):
+            phase_name = "apply-dry-leg"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                self.write_result = _FakeSchedulerResult([])
+                return 0
+
+        orch = DryOrch(args)
+        assert orch.run() == 0
+        out = capsys.readouterr().out
+        assert "print_text_summary" in orch.call_log
+        assert "APPLY-DRY-LEG: RESULT" not in out
+        assert not (Path(orch.out_dir) / orch.phase_name / "backup.md").exists()
+
+
+class TestASkipCanBeTracedBackToItsReportEntry:
+    """F11: `skipped_items` carried no group id."""
+
+    def test_the_skipped_entry_carries_its_group_id(self, tmp_path, capsys):
+        groups = [
+            {
+                "theme": "A",
+                "group_hash": "bb5d722c00000000",
+                "suggestions": [
+                    {"title": "S1", "desc": "d", "importance": "MEDIUM"}
+                ],
+            }
+        ]
+        validation = [{"status": "invalid", "reason": "not a defect",
+                       "confidence": 0.9}]
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(plan_file=str(plan_path))
+
+        class DataOrch(MockApplyOrchestrator):
+            phase_name = "apply-skip-id"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def load_data(self):
+                return (groups, validation)
+
+            def handle_no_items_early_exit(self):
+                raise SystemExit(0)
+
+        orch = DataOrch(args)
+        with pytest.raises(SystemExit):
+            orch.run()
+        capsys.readouterr()
+
+        assert orch.formatted_skipped
+        entry = orch.formatted_skipped[0]
+        assert entry["group_id"] == "bb5d722c00000000"
+        assert entry["status"] == "invalid"
+        assert entry["reason"] == "not a defect"

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +40,7 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
-from .cli_common import build_parent_parser
+from .cli_common import build_parent_parser, record_artifacts
 from .apply_selection_helpers import (
     merge_validation_with_groups,
     resolve_priority_args,
@@ -81,6 +82,7 @@ from .human_decisions import (
     record_verdicts,
     write_judge_tasks,
 )
+from . import unattended as _unattended
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +486,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ``--exec-subagents`` (D3g/D3n). ``""`` means the phase has no write
     # executor path and always emits task JSON for a native invoker.
     write_kind: str = ""
+    # Whether ``write_phase_artifact()`` names ONE file the phase overwrites.
+    # apply-suggestions edits the plan and apply-task-suggestions the tasks file,
+    # so each can snapshot its target as ``{phase}/backup.md`` before the first
+    # batch and name it as an artifact afterwards. apply-code-fixes partitions by
+    # ``file_key`` — its declared set is per batch and it has no single target —
+    # so it sets this False and does neither.
+    has_single_write_target: bool = True
 
     # ------------------------------------------------------------------
     # Subclass validation
@@ -522,7 +531,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        # D6 rows 10/11 are recorded, not merely applied — see
+        # `_record_resolution` for why they have to be buffered rather than
+        # written straight through to `.status.json`.
+        self._pending_resolutions: List[Tuple[str, str]] = []
+        claude_decide_before = getattr(args, "claude_decide", False)
         apply_unattended_defaults(args)
+        if not claude_decide_before and getattr(args, "claude_decide", False):
+            self._record_resolution(
+                _unattended.row(10).site_id,
+                "--claude-decide implied by --yes: needs-human-decision items "
+                "are judged, never prompted",
+            )
         self.logger = logging.getLogger(f"orchestrator.{self.phase_name}")
 
         # State populated during lifecycle phases
@@ -570,6 +590,76 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.batches: List[Any] = []
         self.batching_stats: Dict[str, Any] = {}
 
+        # What the write executor did, kept so the end-of-run summary can report
+        # outcomes instead of restating the plan of work (the scheduler's
+        # `SchedulerResult`, and the materialized tasks whose `expected_ids` say
+        # how many items each batch carried).
+        self.write_result: Optional[Any] = None
+        self.write_tasks: List[Dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # D6 auto-resolutions (rows 10 and 11)
+    # ------------------------------------------------------------------
+
+    def _record_resolution(self, site_id: str, decision: str) -> None:
+        """Announce one auto-resolved decision now; record it after the detach.
+
+        `unattended.record_resolution` does both halves at once, but an apply
+        phase cannot: BOTH of its decision sites (row 10 in the constructor, row
+        11 in `_apply_user_feedback`) fire *before* `run()` crosses the detach
+        boundary, where no run handle is active yet — so the `.status.json` half
+        would be a silent no-op and `run.resolutions` would stay `[]` on exactly
+        the runs that need it. The marker line is printed here (the foreground
+        record, D6's minimum) and the entry is replayed into `run.resolutions`
+        by :meth:`_flush_resolutions` once the worker owns the phase dir.
+
+        Announced only under ``--yes``, like every other D6 site: with ``--yes``
+        unset a run stays byte-for-byte what it was, and a bypass that came from
+        ``--no-confirm`` or a bulk-approval flag alone is a flag the caller typed
+        rather than a question the run answered for them.
+        """
+        if not getattr(self.args, "yes", False):
+            return
+        _unattended.record_resolution(None, site_id, decision)
+        self._pending_resolutions.append((site_id, decision))
+
+    def _no_selection_bypass_flags(self) -> str:
+        """Which flag(s) made row 11's bypass deliberate, for the record.
+
+        ``should_bypass_no_selection_confirmation`` is an ``or`` over nine flags
+        and returns only a bool; an auto-resolution that says "bypassed" without
+        saying *by what* is not attributable, so the same flags are named here.
+        """
+        set_flags = [
+            name for name, value in (
+                ("--no-confirm", getattr(self.args, "no_confirm", False)),
+                ("--yes", getattr(self.args, "yes", False)),
+                ("--force", getattr(self.args, "force", False)),
+                ("--approve-all", getattr(self.args, "approve_all", False)),
+                ("--skip-all-human", getattr(self.args, "skip_all_human", False)),
+                ("--approve-all-low", getattr(self.args, "approve_all_low", False)),
+                ("--approve-importance",
+                 bool(getattr(self.args, "approve_importance", None))),
+                ("--approve-validation-failed",
+                 getattr(self.args, "approve_validation_failed", False)),
+                ("--dry-run", getattr(self.args, "dry_run", False)),
+            ) if value
+        ]
+        return ", ".join(set_flags) if set_flags else "(no flag)"
+
+    def _flush_resolutions(self) -> None:
+        """Replay the pre-boundary auto-resolutions into ``{phase}/.status.json``.
+
+        Quiet: the marker line was already printed at the decision site, and
+        printing it twice would make one decision read as two.
+        """
+        if not self._pending_resolutions:
+            return
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        for site_id, decision in self._pending_resolutions:
+            _unattended.record_resolution(phase_dir, site_id, decision, quiet=True)
+        self._pending_resolutions = []
+
     # ------------------------------------------------------------------
     # Template method
     # ------------------------------------------------------------------
@@ -605,6 +695,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             detached = self.maybe_detach_write_phase()
             if detached is not None:
                 return detached
+            # Past the boundary this process owns the phase dir, so the D6
+            # decisions taken above can finally be written where `status` reads
+            # them (`run.resolutions`).
+            self._flush_resolutions()
             self._handle_human_decisions()
             self._prepare_batches()
             return self._write_outputs()
@@ -1088,6 +1182,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 )
                 print(json.dumps(output, indent=2))
                 sys.exit(0)
+            # Row 11 taken, and therefore recorded. This is the decision a `--yes`
+            # apply run actually makes — "nobody selected anything, apply ALL of
+            # it" — and until now it left no trace at all: not in the log (the
+            # notice above is printed before the detach boundary), not in
+            # `run.resolutions`, not in the terminal payload.
+            self._record_resolution(
+                _unattended.row(11).site_id,
+                f"apply all valid items of {len(self.groups)} loaded "
+                f"{self.item_noun} group(s); bypassed by "
+                f"{self._no_selection_bypass_flags()}",
+            )
 
         # Step 21: Handle revalidation (if supports_revalidation)
         self.handle_revalidation()
@@ -1284,6 +1389,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 skip_status = status
             self.formatted_skipped.append(
                 {
+                    # The same key `format_item_for_output` puts on every
+                    # `to_apply` entry, and for the same reason: without it a
+                    # skip can only be traced back to its report entry by
+                    # string-matching the title, which is neither stable nor
+                    # unique. A skip is the one outcome a reader most needs to
+                    # look up.
+                    "group_id": g.get("group_hash", ""),
                     "title": title,
                     "theme": g.get("theme", ""),
                     "importance": importance,
@@ -1612,6 +1724,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # reaches this line the process is either the ordinary foreground run or
         # the detached worker that already owns the phase dir.
 
+        # Step 33aa: the target file is about to be rewritten — by the scheduler
+        # below, or by the host following the JSON just written — so snapshot it
+        # first, on both legs.
+        self.write_target_backup()
+
         # Step 33b: the write executor (D3n). Strictly additive — with neither
         # `--exec-subagents` nor `--dry-run-subagents` this returns None and the
         # rest of this method is byte-for-byte the native path. When it DOES run it
@@ -1619,10 +1736,25 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # skipped, because a stopped batch loop must leave the phase incomplete.
         scheduled = self.run_write_executor()
         if scheduled is not None:
+            self._record_write_artifacts(output_path)
+            dispatched = not getattr(self.args, "dry_run_subagents", False)
             try:
-                self.print_text_summary(self.batches, output_path)
+                # `print_text_summary` is a *plan of work* — "SUGGESTIONS TO
+                # APPLY", every batch, every description — and on this leg it ran
+                # after `run_write_executor()` had already applied them, i.e. it
+                # described finished work in the future tense and named no
+                # outcome at all. So the outcome takes its place here, and the
+                # plan of work keeps the two legs where it is still a plan: the
+                # native path below, and `--dry-run-subagents`, which dispatches
+                # nothing. Under `--output-format json` the machine payload is
+                # emitted regardless, because that flag is a contract.
+                if (not dispatched
+                        or getattr(self.args, "output_format", "text") == "json"):
+                    self.print_text_summary(self.batches, output_path)
+                if dispatched:
+                    self.print_write_outcome_summary()
             except Exception as e:  # noqa: BLE001 - summary is non-fatal
-                self.logger.warning("print_text_summary failed: %s", e)
+                self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
 
         if self.marks_phase_completed and self.state is not None:
@@ -1699,6 +1831,159 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return self.plan_path
 
+    def write_target_file(self) -> Optional[str]:
+        """The single file this phase overwrites, or ``None`` when there is none.
+
+        The backup and the "here is the file I edited" artifact both need a *one
+        file* answer, which ``write_phase_artifact`` gives for the two suggestion
+        phases and deliberately does not give for apply-code-fixes (its declared
+        set is per batch). ``has_single_write_target`` is the switch.
+        """
+        if not self.has_single_write_target:
+            return None
+        return self.write_phase_artifact() or None
+
+    def write_target_backup(self) -> Optional[str]:
+        """Snapshot the file this phase overwrites as ``{phase}/backup.md``.
+
+        The only ``backup.md`` on disk used to be review-plan's, written when the
+        plan was *reviewed* — an hour, and any human edit, before this phase
+        rewrote the same file, so the file named "backup" was not a backup of what
+        got overwritten. Recovery did exist (batch 0's ``pre_batch/`` snapshot),
+        just nowhere a user would look.
+
+        An existing backup is **kept**, because a re-invoked or resumed phase's
+        target is already part-applied and overwriting the backup with
+        part-applied bytes would destroy the only copy of the pre-run file;
+        ``--fresh`` declares prior progress void and therefore re-stamps it.
+        Returns the path written, or ``None`` when nothing was.
+
+        Neither dry run writes one: ``--dry-run`` reports and stops, and
+        ``--dry-run-subagents`` is a preflight that dispatches nothing, so there
+        is nothing about to be overwritten on either.
+        """
+        if getattr(self.args, "dry_run", False) or getattr(
+            self.args, "dry_run_subagents", False
+        ):
+            return None
+        target = self.write_target_file()
+        if not target or not os.path.isfile(target):
+            return None
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        backup_path = os.path.join(phase_dir, "backup.md")
+        if os.path.exists(backup_path) and not getattr(self.args, "fresh", False):
+            print(
+                f"Backup kept: {backup_path} (pre-run bytes from an earlier "
+                f"attempt at this phase)",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            shutil.copy2(target, backup_path)
+        except OSError as exc:  # noqa: BLE001 - a backup must not fail the phase
+            print(f"Warning: could not write {backup_path}: {exc}", file=sys.stderr)
+            return None
+        print(f"Backup saved: {backup_path}", file=sys.stderr)
+        return backup_path
+
+    def _record_write_artifacts(self, output_path: str) -> None:
+        """Hand back the files this phase produced, on the executor leg.
+
+        A fully successful detached run reported ``artifacts: []`` and no
+        ``output_files``: the phase that rewrote the plan never named the plan,
+        its own output JSON, its batch report or the prior-changes log, so the
+        host was left to glob a phase dir or mine a log it cannot see. Same two
+        channels the review base writes — ``record_output_files`` feeds
+        ``.status.json`` for ``status``, ``record_artifacts`` feeds the terminal
+        ``MULTI_LLM_RESULT`` line every host is told to trust — and both drop
+        paths that do not exist, so a stopped run names only what it produced.
+        """
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        paths: Dict[str, str] = {}
+        target = self.write_target_file()
+        if target:
+            paths["applied_to"] = target
+        paths["orchestrator_output"] = output_path
+        report_path = getattr(self.write_result, "report_path", None)
+        paths["write_batch_report"] = report_path or os.path.join(
+            phase_dir, "write_batch_report.json"
+        )
+        paths["prior_changes"] = os.path.join(self.out_dir, "prior_changes.jsonl")
+        try:
+            from . import detach as _detach
+        except ImportError:  # pragma: no cover - direct script runs
+            import detach as _detach  # type: ignore
+        _detach.record_output_files(phase_dir, **paths)
+        record_artifacts(
+            path for path in paths.values() if path and os.path.exists(path)
+        )
+
+    def print_write_outcome_summary(self) -> None:
+        """Report what the batch loop DID, plus the decision summary.
+
+        Two gaps close here. The first is tense: the log's 12 KB tail described
+        batches that had already run, and carried no outcome, duration or runner
+        anywhere in it. The second is reach: ``util decisions`` (step 3 of the
+        apply instructions) is the only surface for the applied/skipped
+        breakdown, and on the ``--exec-subagents`` leg the phase finishes in one
+        invocation, so that step never runs — the per-item reasons, which are the
+        good part, existed only inside ``orchestrator_output.json``.
+        """
+        result = self.write_result
+        outcomes = list(getattr(result, "outcomes", None) or [])
+        expected_by_task = {
+            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
+            for task in self.write_tasks
+        }
+        ok = [o for o in outcomes if getattr(o, "ok", False)]
+        applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
+        target = self.write_target_file()
+
+        print(f"\n{'=' * 60}")
+        print(f"{self.phase_name.upper()}: RESULT")
+        print(f"{'=' * 60}")
+        print(f"File: {target or self.plan_path}")
+        print(f"Batches: {len(ok)}/{len(outcomes)} ok")
+        print(f"{self.item_noun.capitalize()}s applied: {applied_items}")
+        print(f"Skipped: {len(self.formatted_skipped)}")
+        if getattr(result, "stopped_at_batch", None) is not None:
+            print(f"Stopped at batch: {result.stopped_at_batch}")
+
+        if outcomes:
+            print("\nBatches:")
+            for outcome in outcomes:
+                count = len(expected_by_task.get(outcome.task_id, []))
+                verdict = getattr(outcome, "write_outcome", None) or "-"
+                print(
+                    f"  {outcome.task_id}: {outcome.status} ({verdict}), "
+                    f"{count} {self.item_noun}(s), "
+                    f"{getattr(outcome, 'duration_seconds', 0.0):.1f}s, "
+                    f"runner {getattr(outcome, 'runner', '') or '(none)'}"
+                )
+                reason = getattr(outcome, "reason", None)
+                if reason and not getattr(outcome, "ok", False):
+                    print(f"      reason: {reason}")
+
+        # The decision summary, folded in: every skip with the status and the
+        # specific reason validation gave it, plus its group id so the skip can
+        # be looked up in the review report.
+        if self.formatted_skipped:
+            print(f"\nSkipped {self.item_noun}s (not applied):")
+            for item in self.formatted_skipped:
+                gid = str(item.get("group_id") or "")
+                label = f" [{gid[:8]}]" if gid else ""
+                print(
+                    f"  - [{item.get('status', 'unknown')}] "
+                    f"{item.get('title', 'Unknown')}{label}"
+                )
+                if item.get("reason"):
+                    print(f"      reason: {item['reason']}")
+        if self.formatted_human:
+            print(f"\nStill needing a human ({len(self.formatted_human)}):")
+            for item in self.formatted_human:
+                print(f"  - {item.get('title', 'Unknown')}")
+
     def run_write_executor(self) -> Optional[int]:
         """Drive this phase's batches through the write scheduler, or decline.
 
@@ -1763,7 +2048,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             resume=True,
             dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
         )
+        self.write_tasks = list(tasks)
         result = scheduler.run()
+        self.write_result = result
         for line in result.messages:
             print(line, file=sys.stderr if result.exit_code else sys.stdout)
         if result.report_path:

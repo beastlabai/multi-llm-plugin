@@ -556,6 +556,11 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     # Partitioned by `file_key`, so batches MAY co-schedule — subject to
     # driver.max_concurrent_write_subagents and the disjointness check (D3h).
     write_kind = "apply_code_fixes"
+    # No single target: the batches edit source files named per batch, so there is
+    # nothing one `{phase}/backup.md` could hold and nothing one `applied_to`
+    # artifact could name. (Each batch still snapshots its own declared set under
+    # `{phase}/pre_batch/{task_id}/`, which is the restore point here.)
+    has_single_write_target = False
 
     # Instance state populated by post_load_hook
     issue_to_group_map: Optional[Dict[int, Tuple[int, int]]] = None

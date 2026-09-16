@@ -76,6 +76,19 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
         """The tasks file, not the plan: that is what these batches edit (D3h)."""
         return self.tasks_file or self.plan_path
 
+    def write_target_backup(self) -> Optional[str]:
+        """Already taken, under the name this phase's own output publishes.
+
+        `build_output_json` copies tasks.md to `{phase}/tasks-backup.md` before
+        any batch runs (kept across a resume, so it still holds the pre-phase
+        bytes) and hands the path back as `tasks_file_backup`, which
+        `instructions/apply-task-suggestions.md` tells the agent to preserve. A
+        second copy named `backup.md` would be the same bytes under a name
+        nothing references, so the base's snapshot is answered rather than run.
+        """
+        path = os.path.join(self.out_dir, self.phase_name, "tasks-backup.md")
+        return path if os.path.isfile(path) else None
+
     # ----------------------------------------------------------------
     # Argument parser
     # ----------------------------------------------------------------
