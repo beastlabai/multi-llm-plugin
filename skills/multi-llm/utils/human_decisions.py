@@ -130,7 +130,14 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
 
     The judge is handed values, never a path to the report: ``group_id``,
     ``title``, ``description``, ``importance``, ``validation_reason``,
-    ``confidence`` and ``models``.
+    ``confidence`` and ``models`` — plus ``file`` and ``line_range`` when the
+    primary suggestion carries them (mirrors ``apply_code_fixes_orchestrator
+    .format_fix_for_output``'s primary/group fallback). A plan-suggestion group
+    (apply-suggestions, apply-task-suggestions) never has these; a code-review
+    group (apply-code-fixes) always does, and without them the judge decided
+    "Approve / Salvage / Skip" about a concrete code change from title and
+    prose alone — never told where in the repository to look, even though its
+    task runs ``agent-readonly`` and could read the file (F9, 2026-09-16).
     """
     suggestions = group.get("suggestions") or []
     primary = suggestions[0] if suggestions else {}
@@ -139,7 +146,7 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
         for s in suggestions
     ]
     description = "\n\n".join(d for d in descriptions if d)
-    return {
+    item = {
         "group_id": group_id_of(group),
         "title": primary.get("title") or group.get("theme") or "Untitled",
         "description": description or group.get("desc") or group.get("description") or "",
@@ -150,6 +157,13 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
         "validation_confidence": group.get("validation_confidence", 0.0),
         "models": list(group.get("models", [])),
     }
+    file_path = primary.get("file") or group.get("file")
+    line_range = primary.get("line_range") or group.get("line_range")
+    if file_path:
+        item["file"] = file_path
+    if line_range:
+        item["line_range"] = list(line_range)
+    return item
 
 
 # ---------------------------------------------------------------------------

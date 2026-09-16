@@ -484,6 +484,37 @@ changes:
       instead of only a bare `print` a detached caller never saw. The fixture's
       mock review returns findings that group into 2 distinct HIGH groups.
 
+  # ---------------------------------------------------------------------------
+  # F5, 2026-09-16, the apply-code-fixes audit: isolated-high-risk batches now
+  # dispatch first, not last.
+  #
+  # `code_fix_batcher.CodeFixBatch.priority_score` is a SUM of its fixes'
+  # importance weights, so three LOW/MEDIUM fixes (1+2+2=5.0) always outranked
+  # one isolated HIGH fix (3.0) under the old `batches.sort(key=lambda b:
+  # -b.priority_score)` — inverting the isolation step 40 lines above it and
+  # dispatching the riskiest, deliberately-isolated edit LAST, on top of every
+  # other batch's edits, rather than first, onto known-good bytes.
+  # `batch_sort_key` now ranks isolation (any high-risk fix in the batch) above
+  # peak importance, above the summed score as a tiebreak, at both sort sites
+  # (the early-return branch and the main one), so they cannot disagree again.
+  #
+  # This fixture's three apply-fixes batches include one isolated HIGH fix
+  # ("Define minimum password requirements") that used to land at index 2 and
+  # now lands at index 0 — the whole list permuted, not one value drifting in
+  # place, so (like `/phases/review-plan/created_paths` above) the pointer
+  # covers the list rather than enumerating every leaf a full reorder touches:
+  # `batch_type`, `fix_count`, every `fixes[]` field, `prompt`,
+  # `priority_score` and `total_chars`, across all three batches. Placed after
+  # the L1 model-spec and `prior_changes_id` leaf entries above (both under
+  # this same subtree) so those keep matching by list order first — this entry
+  # only absorbs what neither of them already explains.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches
+    rationale: >
+      F5, 2026-09-16 — the whole `batches` list reordered (the isolated
+      HIGH-risk batch now dispatches first instead of last); see the block
+      comment above.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

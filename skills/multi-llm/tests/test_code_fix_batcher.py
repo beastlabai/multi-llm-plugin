@@ -726,6 +726,141 @@ class TestFormatFixBatchPrompt:
         assert "{prior_changes_context}" in prompt
         assert "## Changes Applied in Prior Batches" in prompt
 
+    def test_implementation_record_omitted_without_output_dir(self):
+        """F3: no output_dir -> no section, exactly like before this fix."""
+        batch = CodeFixBatch(file_key="src/main.py")
+        batch.add(make_fix())
+
+        prompt = format_fix_batch_prompt(batch, "plans/feature.md")
+        assert "## Implementation record" not in prompt
+
+    def test_implementation_record_omitted_with_no_implement_entries(self, tmp_path):
+        """No prior_changes.jsonl at all -> no section (the common case: most
+        plans' apply-code-fixes runs touch files implement never logged)."""
+        batch = CodeFixBatch(file_key="index.html")
+        batch.add(make_fix(file="index.html"))
+
+        prompt = format_fix_batch_prompt(
+            batch, "plans/feature.md", output_dir=str(tmp_path)
+        )
+        assert "## Implementation record" not in prompt
+
+    def test_implementation_record_carries_the_deliberate_tune_forward(self, tmp_path):
+        """F3: the exact regression the audit found — a runner reverted a
+        deliberate, logged implement-phase tune because the fix prompt never
+        showed it. It must now reach the prompt, with an explicit
+        do-not-silently-revert instruction."""
+        from utils.prior_changes import append
+
+        append(str(tmp_path), "T003", "implement", "accel tuned 28->32 for <4s")
+
+        batch = CodeFixBatch(file_key="index.html")
+        batch.add(make_fix(file="index.html", description="accel looks too high"))
+
+        prompt = format_fix_batch_prompt(
+            batch, "plans/feature.md", output_dir=str(tmp_path)
+        )
+
+        assert "## Implementation record" in prompt
+        assert "accel tuned 28->32 for <4s" in prompt
+        assert "do NOT silently revert it" in prompt
+
+    def test_implementation_record_ignores_this_phases_own_entries(self, tmp_path):
+        """Only the implement phase's record belongs here — this phase's own
+        prior-batch log is the separate {prior_changes_context} section."""
+        from utils.prior_changes import append
+
+        append(str(tmp_path), "apply-fix-batch-0", "apply-code-fixes", "fog fixed")
+
+        batch = CodeFixBatch(file_key="index.html")
+        batch.add(make_fix(file="index.html"))
+
+        prompt = format_fix_batch_prompt(
+            batch, "plans/feature.md", output_dir=str(tmp_path)
+        )
+
+        assert "## Implementation record" not in prompt
+
+    def test_implementation_record_prefers_entries_naming_the_batch_file(self, tmp_path):
+        """When the budget can't hold every implement entry, ones naming the
+        batch's own file sort first rather than falling off the tail."""
+        from utils.prior_changes import append
+        from utils.code_fix_batcher import MAX_IMPLEMENTATION_RECORD_ENTRIES
+
+        for i in range(MAX_IMPLEMENTATION_RECORD_ENTRIES + 1):
+            append(str(tmp_path), f"T{i:03d}", "implement", f"unrelated change {i}")
+        append(str(tmp_path), "T099", "implement", "index.html: accel tuned 28->32")
+
+        batch = CodeFixBatch(file_key="index.html")
+        batch.add(make_fix(file="index.html"))
+
+        prompt = format_fix_batch_prompt(
+            batch, "plans/feature.md", output_dir=str(tmp_path)
+        )
+
+        assert "index.html: accel tuned 28->32" in prompt
+
+    def test_implementation_record_appears_in_multi_fix_format_too(self, tmp_path):
+        from utils.prior_changes import append
+
+        append(str(tmp_path), "T003", "implement", "accel tuned 28->32 for <4s")
+
+        batch = CodeFixBatch(file_key="index.html", batch_type="bug")
+        batch.add(make_fix(file="index.html", title="Fix 1", line_range=(10, 15)))
+        batch.add(make_fix(file="index.html", title="Fix 2", line_range=(20, 25)))
+
+        prompt = format_fix_batch_prompt(
+            batch, "plans/feature.md", output_dir=str(tmp_path)
+        )
+
+        assert "## Implementation record" in prompt
+        assert "accel tuned 28->32 for <4s" in prompt
+
+
+class TestBatchSortKey:
+    """F5: batches sort isolated-high-risk first, then by importance, and
+    only then by the summed priority_score."""
+
+    def test_isolated_high_risk_batch_dispatches_before_higher_summed_batches(self):
+        """The audit's exact shape: 3 mixed + 3 mixed (each summing to 5.0)
+        plus 1 isolated HIGH batch (3.0) -> the HIGH batch must be first,
+        not last, even though its raw sum is lower."""
+        fixes = (
+            [
+                make_fix(file="file1.py", line_range=(i * 10, i * 10 + 5), importance=imp)
+                for i, imp in enumerate(["LOW", "MEDIUM", "MEDIUM"])
+            ]
+            + [
+                make_fix(file="file2.py", line_range=(i * 10, i * 10 + 5), importance=imp)
+                for i, imp in enumerate(["LOW", "MEDIUM", "MEDIUM"])
+            ]
+            + [make_fix(file="file3.py", importance="HIGH")]
+        )
+
+        result = batch_code_fixes(fixes)
+
+        assert len(result) == 3
+        assert result[0].size == 1
+        assert result[0].fixes[0]["importance"] == "HIGH"
+        assert result[0].priority_score == 3.0
+        for batch in result[1:]:
+            assert batch.priority_score == 5.0
+
+    def test_security_isolated_batch_also_dispatches_first(self):
+        """A security fix is isolated the same way a HIGH fix is (F5 covers
+        both isolation reasons, not just the importance level)."""
+        fixes = [
+            make_fix(file="a.py", importance="LOW"),
+            make_fix(file="a.py", importance="MEDIUM"),
+            make_fix(file="a.py", importance="MEDIUM"),
+            make_fix(file="b.py", fix_type="security", importance="LOW"),
+        ]
+
+        result = batch_code_fixes(fixes)
+
+        assert result[0].size == 1
+        assert result[0].fixes[0]["type"] == "security"
+
 
 class TestEstimateBatchProcessingStats:
     """Tests for estimate_batch_processing_stats function."""

@@ -638,6 +638,32 @@ class TestEmbeddedContextAndReply:
         prompt = build_human_decision_judge_prompt(JUDGE_ITEMS)
         assert "never by position" in prompt
 
+    def test_judge_prompt_has_no_read_the_file_note_without_a_file(self):
+        """JUDGE_ITEMS names no file (a plan-suggestion item) -> no note, and
+        the golden fixture stays byte-identical."""
+        prompt = build_human_decision_judge_prompt(JUDGE_ITEMS)
+        assert "you may read" not in prompt.lower()
+
+    def test_judge_prompt_embeds_file_and_line_range_and_permits_reading_it(self):
+        """F9: a code-fix item (carrying file/line_range) gets both embedded
+        and an explicit note that the judge may read the cited file."""
+        item = {**JUDGE_ITEMS[0], "file": "index.html", "line_range": [93, 97]}
+        prompt = build_human_decision_judge_prompt([item])
+
+        assert '"file": "index.html"' in prompt
+        assert '"line_range"' in prompt
+        assert "you may read" in prompt.lower()
+        # The rules and reply contract are unchanged either way.
+        assert HUMAN_DECISION_JUDGE_RULES in prompt
+
+    def test_judge_prompt_omits_file_key_when_item_has_none(self):
+        """A plan-suggestion item (no file) never renders a null/empty `file`
+        key — the note's presence is keyed on the field actually being
+        there, not on a placeholder."""
+        prompt = build_human_decision_judge_prompt(JUDGE_ITEMS)
+        assert '"file"' not in prompt
+        assert '"line_range"' not in prompt
+
     def test_task_generation_reply_is_the_document(self):
         prompt = build_task_generation_prompt(plan_text=PLAN_TEXT, repo_root="/r")
         assert '"plan_preamble"' in prompt

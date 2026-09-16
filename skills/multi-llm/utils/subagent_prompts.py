@@ -456,13 +456,17 @@ def build_human_decision_judge_prompt(items: Sequence[Dict[str, Any]]) -> str:
     Args:
         items: The items in scope. Each carries ``group_id``, ``title``,
             ``description``, ``importance``, ``validation_reason``,
-            ``confidence`` and ``models`` — the values, not a path to the report.
+            ``confidence`` and ``models`` — the values, not a path to the
+            report — plus ``file``/``line_range`` when the item is about a
+            concrete code change (apply-code-fixes; see
+            ``human_decisions.judge_item_from_group``).
 
     Returns:
         The complete prompt text, with the judging rules inlined verbatim.
     """
-    embedded = [
-        {
+    embedded = []
+    for item in items:
+        entry = {
             "group_id": item.get("group_id", ""),
             "title": item.get("title", ""),
             "description": item.get("description", item.get("desc", "")),
@@ -471,10 +475,27 @@ def build_human_decision_judge_prompt(items: Sequence[Dict[str, Any]]) -> str:
             "confidence": item.get("validation_confidence", item.get("confidence", 0.0)),
             "models": list(item.get("models", [])),
         }
-        for item in items
-    ]
+        if item.get("file"):
+            entry["file"] = item["file"]
+        if item.get("line_range"):
+            entry["line_range"] = list(item["line_range"])
+        embedded.append(entry)
+
     count = len(embedded)
     noun = "item" if count == 1 else "items"
+
+    # F9, 2026-09-16: an item naming a `file` is a judgment about a concrete
+    # code change, not prose — this task's profile (agent-readonly) permits
+    # reading it, so say so rather than leaving the judge to decide from the
+    # title and description alone.
+    file_note = (
+        "\nSome items above name a `file` (and `line_range`): you may read "
+        "that file before deciding — this task runs read-only and the "
+        "profile permits it — rather than judging a code change from title "
+        "and description alone.\n"
+        if any("file" in entry for entry in embedded)
+        else ""
+    )
 
     return f'''You are deciding what to do with {count} review {noun} that automated validation
 could not settle. For each one, choose Approve, Salvage or Skip.
@@ -482,7 +503,7 @@ could not settle. For each one, choose Approve, Salvage or Skip.
 ## Items to judge ({count})
 
 {_json_block(embedded)}
-
+{file_note}
 {HUMAN_DECISION_JUDGE_RULES}
 
 ## Reply
