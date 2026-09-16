@@ -1480,11 +1480,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return
 
         items = [judge_item_from_group(g) for g in remaining]
+        # Same "does this phase have a tasks file distinct from the plan?"
+        # question `run_write_executor` asks via `write_phase_artifact()` (D3h) —
+        # apply-task-suggestions judges decisions about tasks.md, not the plan,
+        # so its judging tasks need `inputs.tasks_sha256` too (F8).
+        artifact = self.write_phase_artifact()
+        tasks_file = artifact if artifact != self.plan_path else None
         try:
             document = build_judge_tasks(
                 items=items,
                 phase_dir=phase_dir,
                 plan_file=str(self.plan_path),
+                tasks_file=tasks_file,
             )
             tasks_path = write_judge_tasks(document, phase_dir)
         except Exception as exc:  # noqa: BLE001 - must not fail the apply run
@@ -2011,6 +2018,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         os.makedirs(phase_dir, exist_ok=True)
         grouped_file = os.path.join(self.out_dir, self.review_subdir, "grouped.json")
         artifact = self.write_phase_artifact()
+        tasks_file = artifact if artifact != self.plan_path else None
         tasks = materialize_write_tasks(
             kind=self.write_kind,
             batches=[
@@ -2019,12 +2027,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             ],
             phase_dir=phase_dir,
             plan_file=self.plan_path,
-            tasks_file=artifact if artifact != self.plan_path else None,
+            tasks_file=tasks_file,
             grouped_file=grouped_file if os.path.exists(grouped_file) else None,
         )
         task_file = write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path,
+            tasks_file=tasks_file,
             grouped_file=grouped_file if os.path.exists(grouped_file) else None,
         )
         print(

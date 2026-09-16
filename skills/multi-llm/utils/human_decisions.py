@@ -184,6 +184,7 @@ def build_judge_tasks(
     phase_dir: str,
     plan_file: str = "",
     grouped_file: Optional[str] = None,
+    tasks_file: Optional[str] = None,
     prompt_budget: Optional[PromptBudget] = None,
 ) -> Dict[str, Any]:
     """Materialize one judging task per in-scope item.
@@ -197,6 +198,11 @@ def build_judge_tasks(
         phase_dir: The apply phase dir the verdict files land in.
         plan_file: Plan path for ``inputs.plan_sha256`` (provenance only).
         grouped_file: Optional grouped.json path for ``inputs.grouped_sha256``.
+        tasks_file: Optional ``tasks/tasks.md`` path for ``inputs.tasks_sha256``,
+            passed by the one phase (apply-task-suggestions) whose judged items
+            are decisions about that file rather than the plan — without it a
+            hand-edited tasks.md does not invalidate a stored judging task the
+            way an edited plan already does.
         prompt_budget: Optional D2d budget. A single item's prompt cannot be
             split, so an over-budget prompt fails loudly rather than truncating.
 
@@ -206,6 +212,7 @@ def build_judge_tasks(
     inputs = build_inputs(
         plan_file=plan_file,
         grouped_file=grouped_file,
+        tasks_file=tasks_file,
         items=[item.get("group_id", "") for item in items],
     )
     budget = prompt_budget or PromptBudget(None)

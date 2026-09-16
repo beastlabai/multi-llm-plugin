@@ -70,7 +70,6 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
 
     # Instance state populated by pre_validate_hook
     tasks_file: str = ""
-    tasks_content: str = ""
 
     def write_phase_artifact(self) -> str:
         """The tasks file, not the plan: that is what these batches edit (D3h)."""
@@ -139,9 +138,12 @@ Bulk Approval Examples:
 
         print(f"Tasks file: {self.tasks_file}", file=sys.stderr)
 
-        # Read tasks content for prompt generation
-        with open(self.tasks_file, "r", encoding="utf-8") as f:
-            self.tasks_content = f.read()
+        # Batch prompts no longer embed a snapshot of this file (F7): all 11
+        # batches used to carry the identical header/dependency-graph excerpt
+        # frozen at this point, which was exactly what each batch's own
+        # instructions told it to regenerate — by the last few batches the
+        # "reference" text was stale. Each prompt now just tells the runner to
+        # read the live file first, so there is nothing left to read here.
 
         # Prerequisite check: review-tasks must be completed or skipped
         state = StateManager(Path(self.plan_path))
@@ -517,10 +519,9 @@ For each suggestion type, follow these rules precisely:
 **Target file (to edit)**: {self.tasks_file}
 **Plan file (context only)**: {self.plan_path}
 
-**Current tasks.md content** (for reference — read the actual file for the latest version):
-```
-{self.tasks_content[:3000]}{"..." if len(self.tasks_content) > 3000 else ""}
-```
+This prompt was materialized before any batch ran, so it carries no snapshot of
+tasks.md — earlier batches in this run may have already changed its header
+metadata and dependency graph. Read the file (step 1 below) before editing it.
 
 **Suggestion**: {s.get('title', 'Untitled')}
 **Type**: {s.get('type', 'modification')}
@@ -556,10 +557,10 @@ Return a brief summary of what was changed."""
             f"**Plan file (context only)**: {self.plan_path}",
             f"**Batch type**: {batch.batch_type}",
             f"**Suggestions in this batch**: {len(suggestions)}",
-            f"\n**Current tasks.md content** (for reference — read the actual file for the latest version):",
-            "```",
-            f"{self.tasks_content[:3000]}{'...' if len(self.tasks_content) > 3000 else ''}",
-            "```\n",
+            "\nThis prompt was materialized before any batch ran, so it carries no "
+            "snapshot of tasks.md — earlier batches in this run may have already "
+            "changed its header metadata and dependency graph. Read the file "
+            "(step 1 below) before editing it.",
         ]
 
         for i, s in enumerate(suggestions, 1):

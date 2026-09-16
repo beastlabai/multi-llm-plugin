@@ -34,6 +34,7 @@ from utils.suggestion_batcher import group_suggestions_for_subagents  # noqa: E4
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
     materialize_write_tasks,
+    write_task_file_for_phase,
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
@@ -434,6 +435,77 @@ class TestBridge:
         assert tasks[0]["executor_role"] == "human"
         assert tasks[0]["is_human"] is True
         assert tasks[0]["subagent_type"] == "human"
+
+    def test_a_tasks_file_stamps_tasks_sha256_on_every_task_and_the_document(
+        self, repo
+    ):
+        """F8: apply-task-suggestions' tasks.md invalidates a stored task file too.
+
+        ``build_inputs`` already supports ``tasks_file=`` (review-tasks' own
+        validation tasks use it), but neither this bridge's per-task ``inputs``
+        nor ``write_tasks.json``'s document-level ``inputs`` forwarded it, so a
+        hand-edited tasks.md never invalidated a stored write-task file the way
+        an edited plan already does.
+        """
+        tasks_file = repo.root / "plans" / "tasks.md"
+        tasks_file.write_text("# Tasks\n\n### Task T001\n", encoding="utf-8")
+        tasks = materialize_write_tasks(
+            kind="apply_task_suggestions",
+            batches=[
+                {"prompt": "p {prior_changes_context}", "section_key": "step_1",
+                 "suggestions": [{"group_id": "abc"}]},
+            ],
+            phase_dir=str(repo.root / "phase"),
+            plan_file=str(repo.plan),
+            tasks_file=str(tasks_file),
+        )
+        assert "tasks_sha256" in tasks[0]["inputs"]
+
+        task_file_path = write_task_file_for_phase(
+            kind="apply_task_suggestions",
+            tasks=tasks,
+            phase_dir=str(repo.root / "phase"),
+            plan_file=str(repo.plan),
+            tasks_file=str(tasks_file),
+        )
+        document = json.loads(Path(task_file_path).read_text(encoding="utf-8"))
+        assert document["inputs"]["tasks_sha256"] == tasks[0]["inputs"]["tasks_sha256"]
+
+        # Editing tasks.md changes the hash, exactly like an edited plan does.
+        tasks_file.write_text("# Tasks\n\n### Task T001\n### Task T002\n", encoding="utf-8")
+        retasked = materialize_write_tasks(
+            kind="apply_task_suggestions",
+            batches=[
+                {"prompt": "p {prior_changes_context}", "section_key": "step_1",
+                 "suggestions": [{"group_id": "abc"}]},
+            ],
+            phase_dir=str(repo.root / "phase"),
+            plan_file=str(repo.plan),
+            tasks_file=str(tasks_file),
+        )
+        assert retasked[0]["inputs"]["tasks_sha256"] != tasks[0]["inputs"]["tasks_sha256"]
+
+    def test_no_tasks_file_means_no_tasks_sha256(self, repo):
+        """apply-suggestions/apply-code-fixes edit the plan, not a tasks file."""
+        tasks = materialize_write_tasks(
+            kind="apply_suggestions",
+            batches=[
+                {"prompt": "p {prior_changes_context}", "section_key": "step_1",
+                 "suggestions": [{"group_id": "abc"}]},
+            ],
+            phase_dir=str(repo.root / "phase"),
+            plan_file=str(repo.plan),
+        )
+        assert "tasks_sha256" not in tasks[0]["inputs"]
+
+        task_file_path = write_task_file_for_phase(
+            kind="apply_suggestions",
+            tasks=tasks,
+            phase_dir=str(repo.root / "phase"),
+            plan_file=str(repo.plan),
+        )
+        document = json.loads(Path(task_file_path).read_text(encoding="utf-8"))
+        assert "tasks_sha256" not in document["inputs"]
 
 
 class TestPriorChangesIdsAreUniquePerBatch:

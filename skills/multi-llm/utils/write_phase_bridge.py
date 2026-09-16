@@ -224,7 +224,9 @@ def materialize_write_tasks(
     """
     if kind not in _ADAPTERS:
         raise ValueError(f"{kind!r} is not a write kind this bridge materializes")
-    inputs = build_inputs(plan_file=plan_file, grouped_file=grouped_file)
+    inputs = build_inputs(
+        plan_file=plan_file, grouped_file=grouped_file, tasks_file=tasks_file
+    )
     context: Dict[str, Any] = {
         "plan_file": str(Path(plan_file).resolve()) if plan_file else "",
         "tasks_file": str(Path(tasks_file).resolve()) if tasks_file else None,
@@ -269,17 +271,25 @@ def write_task_file_for_phase(
     phase_dir: str,
     plan_file: str,
     grouped_file: Optional[str] = None,
+    tasks_file: Optional[str] = None,
 ) -> str:
     """Persist the phase's materialized write tasks. Returns the path written.
 
     The file is written even under ``--dry-run-subagents``: it is the input a
     ``--resume`` re-reads and the artifact that makes "what exactly would have been
     dispatched" inspectable without re-deriving it from an orchestrator run.
+
+    ``tasks_file`` (apply-task-suggestions only, mirroring the same argument on
+    :func:`materialize_write_tasks`) stamps ``inputs.tasks_sha256`` on the
+    document too, so a hand-edited ``tasks/tasks.md`` invalidates a stored
+    ``write_tasks.json`` on ``--resume`` the way an edited plan already does.
     """
     document = make_task_file(
         kind=kind,
         tasks=list(tasks),
-        inputs=build_inputs(plan_file=plan_file, grouped_file=grouped_file),
+        inputs=build_inputs(
+            plan_file=plan_file, grouped_file=grouped_file, tasks_file=tasks_file
+        ),
         task_list_key="batches",
         extra={
             "total_batches": len(tasks),
