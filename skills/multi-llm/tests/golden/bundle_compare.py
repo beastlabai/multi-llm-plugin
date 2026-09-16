@@ -42,7 +42,7 @@ other ten rows.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -63,7 +63,7 @@ import yaml
 # definition instead of two implementations that agree today.
 try:  # pragma: no cover - exercised by whichever import style ran
     from .instruction_refactor_bundle import (  # noqa: F401
-        diff_bundles,
+        diff_bundles as _diff_positional,
         normalize_run,
         _COMPARED_JSON as COMPARED_JSON,
         _derived as derived_scalars,
@@ -76,7 +76,7 @@ try:  # pragma: no cover - exercised by whichever import style ran
     )
 except ImportError:  # flat import, `tests/golden` on sys.path
     from instruction_refactor_bundle import (  # noqa: F401
-        diff_bundles,
+        diff_bundles as _diff_positional,
         normalize_run,
         _COMPARED_JSON as COMPARED_JSON,
         _derived as derived_scalars,
@@ -90,6 +90,10 @@ except ImportError:  # flat import, `tests/golden` on sys.path
 
 __all__ = [
     "diff_bundles",
+    "align_batch_lists",
+    "batch_identity",
+    "ALIGNED_LIST_KEY",
+    "DISPATCH_ORDER_LEAF",
     "normalize_run",
     "COMPARED_JSON",
     "derived_scalars",
@@ -104,6 +108,146 @@ __all__ = [
     "format_unexplained",
     "AllowlistError",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Batch lists compare as multisets
+#
+# `_flatten` addresses a list by position, so a permuted `batches` list — the
+# apply phases' dispatch order is sorted, and the sort key is code — reads as
+# every leaf under it changing at once (67 leaves in this guard's own fixture
+# when isolated-HIGH batches moved to the front). The only allowlist entry that
+# could absorb that was a pointer on the whole list, and a prefix entry that
+# wide excuses any future drift underneath it: a changed prompt template, a fix
+# that moved batch, a `priority_score` that no longer sums. So the comparison,
+# not the allowlist, understands what a batch list is: the fresh list is
+# aligned onto the baseline's slots by the titles of each batch's members, the
+# leaves are then diffed in place (a changed leaf inside a moved batch is still
+# reported, at the baseline's index, where the leaf-exact entries already
+# point), and the order itself is reported once, as its own leaf, so a reorder
+# still needs one entry with a rationale — a narrow one.
+# ---------------------------------------------------------------------------
+
+#: The key whose list value is aligned by content. Only the apply phases'
+#: `orchestrator_output.json` carries one, but the rule is by key, not path,
+#: so the container lane's bundles get the same reading.
+ALIGNED_LIST_KEY = "batches"
+#: The synthetic leaf a reorder is reported at, under the list's own pointer.
+DISPATCH_ORDER_LEAF = "@dispatch_order"
+#: Member lists a batch may carry, in the order they are looked for.
+_BATCH_MEMBER_KEYS = ("fixes", "suggestions", "tasks")
+
+
+def batch_identity(batch: Any) -> Optional[Tuple[str, ...]]:
+    """The titles of a batch's members — what makes it *this* batch.
+
+    ``None`` for a value that is not a batch (no member list), which keeps its
+    position: alignment only ever moves what it can name.
+    """
+    if not isinstance(batch, dict):
+        return None
+    for key in _BATCH_MEMBER_KEYS:
+        members = batch.get(key)
+        if isinstance(members, list):
+            return tuple(
+                str(m.get("title", m.get("id", ""))) for m in members
+                if isinstance(m, dict)
+            )
+    return None
+
+
+def _align_batch_list(baseline: list, fresh: list) -> Tuple[list, bool]:
+    """Reorder *fresh* onto *baseline*'s slots by batch identity.
+
+    Each baseline slot takes the first unclaimed fresh batch with the same
+    identity; a slot nothing matches takes the next unclaimed fresh batch in
+    dispatch order (so a batch whose *content* changed still diffs leaf by
+    leaf, in place, rather than as one absence plus one addition); anything
+    still unclaimed is appended, where it reads as added. The second value
+    says whether the dispatch order differed at all.
+    """
+    fresh_ids = [batch_identity(b) for b in fresh]
+    base_ids = [batch_identity(b) for b in baseline]
+    claimed = [False] * len(fresh)
+    aligned: List[Any] = [None] * len(baseline)
+    for slot, identity in enumerate(base_ids):
+        if identity is None:
+            continue
+        for j, candidate in enumerate(fresh_ids):
+            if not claimed[j] and candidate == identity:
+                aligned[slot] = fresh[j]
+                claimed[j] = True
+                break
+    leftovers = [j for j, taken in enumerate(claimed) if not taken]
+    for slot in range(len(baseline)):
+        if aligned[slot] is None and leftovers:
+            aligned[slot] = fresh[leftovers.pop(0)]
+    result = [b for b in aligned if b is not None]
+    result.extend(fresh[j] for j in leftovers)
+    return result, fresh_ids != base_ids
+
+
+def _pointer_token(key: Any) -> str:
+    return str(key).replace("~", "~0").replace("/", "~1")
+
+
+def align_batch_lists(
+    baseline: Any, fresh: Any, prefix: str = ""
+) -> Tuple[Any, List[Tuple[str, Any, Any]]]:
+    """Walk both bundles together; return *fresh* with every ``batches`` list
+    aligned onto the baseline's, plus one ``@dispatch_order`` diff per list
+    whose order differed (``(pointer, baseline_identities, fresh_identities)``).
+    """
+    order_diffs: List[Tuple[str, Any, Any]] = []
+    if isinstance(baseline, dict) and isinstance(fresh, dict):
+        out: dict = {}
+        for key, value in fresh.items():
+            pointer = f"{prefix}/{_pointer_token(key)}"
+            if key not in baseline:
+                out[key] = value
+                continue
+            left = baseline[key]
+            if (key == ALIGNED_LIST_KEY and isinstance(left, list)
+                    and isinstance(value, list)):
+                aligned, reordered = _align_batch_list(left, value)
+                if reordered:
+                    order_diffs.append((
+                        f"{pointer}/{DISPATCH_ORDER_LEAF}",
+                        [list(i) if i is not None else None for i in map(batch_identity, left)],
+                        [list(i) if i is not None else None for i in map(batch_identity, value)],
+                    ))
+                value = aligned
+                left_items = left
+            else:
+                left_items = left
+            out[key], nested = align_batch_lists(left_items, value, pointer)
+            order_diffs.extend(nested)
+        return out, order_diffs
+    if isinstance(baseline, list) and isinstance(fresh, list):
+        out_list = []
+        for index, item in enumerate(fresh):
+            if index < len(baseline):
+                aligned_item, nested = align_batch_lists(
+                    baseline[index], item, f"{prefix}/{index}"
+                )
+                out_list.append(aligned_item)
+                order_diffs.extend(nested)
+            else:
+                out_list.append(item)
+        return out_list, order_diffs
+    return fresh, order_diffs
+
+
+def diff_bundles(baseline: Any, fresh: Any) -> List[Tuple[str, Any, Any]]:
+    """Every difference as ``(json-pointer, baseline, fresh)``, pointer-sorted.
+
+    Positional everywhere except a ``batches`` list, which is compared as a
+    multiset keyed by its members' titles (see the block comment above): its
+    leaves are reported at the baseline's indices and its order once, at
+    ``<list>/@dispatch_order``.
+    """
+    aligned, order_diffs = align_batch_lists(baseline, fresh)
+    return sorted(_diff_positional(baseline, aligned) + order_diffs)
 
 
 class AllowlistError(AssertionError):

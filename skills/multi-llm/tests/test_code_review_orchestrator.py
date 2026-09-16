@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
 from utils import cli_common, status_file
+from utils import review_orchestrator_base as base
 
 
 def _make_args(plan_path: Path, **overrides) -> argparse.Namespace:
@@ -607,9 +608,10 @@ class TestTheFanoutReportsProgressWhileItRuns:
     """F6: `run_all_reviews` never advanced `progress.models_done` — it was
     written `0` once before dispatch and recomputed only after the last model
     returned, so a mid-run poll read `models 0/4` beside three finished
-    reviewers (measured 2026-09-16: 646 s of an 833 s run). Mirrors
-    `review_orchestrator_base`'s own `slot_finished()` and its test in
-    test_review_plan_orchestrator.py.
+    reviewers (measured 2026-09-16: 646 s of an 833 s run). The counter is
+    the base's `fanout_slot_counter` (shared with `run_all_models`, tested in
+    test_review_plan_orchestrator.py), which reports through the base's own
+    `_detach` — the seam patched here.
     """
 
     def test_each_finished_slot_advances_the_counter(self, tmp_path):
@@ -625,7 +627,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         with patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(cro, "report_progress", record):
+             patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
                 plan_path, tmp_path, 30, 3,
@@ -658,7 +660,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         with patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(cro, "report_progress", record):
+             patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,

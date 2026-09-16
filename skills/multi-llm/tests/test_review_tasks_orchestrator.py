@@ -1268,3 +1268,69 @@ class TestValidationJsonIsNamedOnBothChannels:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTheHighPriorityGroupCountIsRecordedForEveryLane:
+    """review-code recorded its distinct-HIGH-group count in `.status.json`
+    and on the result line; review-plan and review-tasks printed
+    `HIGH priority: N` (suggestions, during validation prep only) and
+    recorded nothing, although their suggestions carry the same `importance`.
+    `aggregate_results` records it through the base's one helper now."""
+
+    def _aggregate(self, phase_dir, temp_dir, groups):
+        from utils import status_file
+
+        with open(os.path.join(phase_dir, "grouped.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"groups": groups}, handle)
+        plan_path = temp_dir / "test-plan.md"
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            aggregate_results(
+                prefix="test-plan",
+                out_dir=str(temp_dir),
+                phase_dir=phase_dir,
+                phase_name="review-tasks",
+                models=["model-a"],
+                failed_models={},
+                validated_groups=groups,
+                plan_path=str(plan_path),
+            )
+        finally:
+            cli_common.deactivate_result()
+        return status_file.read_status(phase_dir), context.payload(0)
+
+    @staticmethod
+    def _group(title, *importances):
+        return {
+            "theme": title,
+            "suggestions": [
+                {"title": title, "desc": f"{title} body", "importance": imp,
+                 "reference": "T001", "type": "modification",
+                 "source_model": f"model-{n}"}
+                for n, imp in enumerate(importances)
+            ],
+            "models": [f"model-{n}" for n in range(len(importances))],
+        }
+
+    def test_distinct_high_groups_reach_the_checkpoint_and_the_result_line(
+        self, phase_dir, temp_dir
+    ):
+        # Two models on one HIGH finding is ONE group; a MEDIUM group is none.
+        groups = [
+            self._group("T003 missing dependency", "HIGH", "HIGH"),
+            self._group("Ordering", "MEDIUM"),
+            self._group("Missing rollback", "high"),
+        ]
+        status, payload = self._aggregate(phase_dir, temp_dir, groups)
+        assert status.get("high_priority_groups") == {"count": 2}
+        assert payload["high_priority_groups"] == {"count": 2}
+
+    def test_no_high_group_records_nothing(self, phase_dir, temp_dir):
+        """Absent, not zero: the key is optional, like `consolidation_recommended`."""
+        status, payload = self._aggregate(
+            phase_dir, temp_dir, [self._group("Ordering", "MEDIUM", "LOW")]
+        )
+        assert "high_priority_groups" not in status
+        assert "high_priority_groups" not in payload

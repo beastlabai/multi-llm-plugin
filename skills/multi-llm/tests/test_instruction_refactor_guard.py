@@ -237,3 +237,70 @@ class TestZeroDiffAgainstThePreRefactorBaseline:
             f"them, or the file decays into a blanket ignore): {stale}"
         )
         assert len(allowed) == len(diffs)
+
+
+class TestBatchListsCompareAsMultisets:
+    """A `batches` list is a set of batches plus a dispatch order. Read by
+    position, a reorder is every leaf under the list changing at once — 67 in
+    this guard's own fixture when the isolated-HIGH batches moved first — and
+    the only entry that could absorb it, a pointer on the whole list, went on
+    excusing any drift underneath. So `diff_bundles` aligns the fresh list
+    onto the baseline's slots by each batch's member titles, reports leaves
+    at the baseline's index, and reports the order once, as its own leaf."""
+
+    @staticmethod
+    def _bundle(*batches):
+        return {"phases": {"apply-fixes": {"artifacts": {"orchestrator_output.json": {
+            "batches": list(batches), "to_apply": [],
+        }}}}}
+
+    @staticmethod
+    def _batch(*titles, score=1.0, prompt="p"):
+        return {
+            "fixes": [{"title": t, "importance": "HIGH"} for t in titles],
+            "priority_score": score, "prompt": prompt, "batch_type": "mixed",
+        }
+
+    ORDER = "/phases/apply-fixes/artifacts/orchestrator_output.json/batches/@dispatch_order"
+    LEAF = "/phases/apply-fixes/artifacts/orchestrator_output.json/batches"
+
+    def test_a_pure_reorder_is_exactly_one_diff_at_the_order_leaf(self):
+        mixed, high_a, high_b = (self._batch("A", "B"), self._batch("C"), self._batch("D"))
+        diffs = diff_bundles(self._bundle(mixed, high_a, high_b),
+                             self._bundle(high_a, high_b, mixed))
+        assert diffs == [(self.ORDER, [["A", "B"], ["C"], ["D"]], [["C"], ["D"], ["A", "B"]])]
+
+    def test_a_changed_leaf_inside_a_moved_batch_is_still_reported_at_its_baseline_slot(self):
+        baseline = self._bundle(self._batch("A", "B"), self._batch("C"))
+        fresh = self._bundle(self._batch("C", prompt="rewritten"), self._batch("A", "B"))
+        diffs = diff_bundles(baseline, fresh)
+        pointers = [pointer for pointer, _b, _a in diffs]
+        assert f"{self.LEAF}/1/prompt" in pointers, pointers
+        assert self.ORDER in pointers
+        assert len(diffs) == 2, diffs
+
+    def test_a_batch_whose_members_changed_diffs_in_place_not_as_absent_plus_added(self):
+        baseline = self._bundle(self._batch("A"), self._batch("B"))
+        fresh = self._bundle(self._batch("A"), self._batch("Z"))
+        pointers = [pointer for pointer, _b, _a in diff_bundles(baseline, fresh)]
+        assert f"{self.LEAF}/1/fixes/0/title" in pointers, pointers
+        assert not any(p.startswith(f"{self.LEAF}/2") for p in pointers), pointers
+
+    def test_an_identical_list_is_no_diff_at_all(self):
+        same = self._bundle(self._batch("A"), self._batch("B", "C"))
+        assert diff_bundles(same, self._bundle(self._batch("A"), self._batch("B", "C"))) == []
+
+    def test_lists_under_any_other_key_stay_positional(self):
+        left = {"phases": {"x": {"created_paths": ["a", "b"]}}}
+        right = {"phases": {"x": {"created_paths": ["b", "a"]}}}
+        assert [p for p, _b, _a in diff_bundles(left, right)] == [
+            "/phases/x/created_paths/0", "/phases/x/created_paths/1",
+        ]
+
+    def test_the_container_lane_diffs_through_the_same_function(self):
+        """One definition of "the same run" (C8): the container lane's
+        `diff_bundles` is this one, alignment included."""
+        import bundle_compare
+        import container_bundle
+
+        assert container_bundle.diff_bundles is bundle_compare.diff_bundles

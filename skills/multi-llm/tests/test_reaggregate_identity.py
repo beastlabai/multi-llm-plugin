@@ -955,12 +955,14 @@ class TestReaggregateReusesTheGroupedFileValidationIsBoundTo:
 
 class TestReaggregateAttributesTheExecutorsOwnRunner:
     """F3: this branch (`validation_tasks.json` already on disk, its batch
-    files complete) merges and saves validation inline rather than calling
-    the shared `review_orchestrator_base.merge_validation_batches`, so it
-    owes itself the same runner attribution: a batch's own `metadata.model`
-    is a subagent's free-hand self-report, and `subagent_batch_report.json`
-    — written only when `--exec-subagents` dispatched the batch itself — is
-    the executor's own record of what actually ran it.
+    files complete) used to merge and save validation inline rather than
+    calling the shared `review_orchestrator_base.merge_validation_batches`,
+    and owed itself the same runner attribution: a batch's own
+    `metadata.model` is a subagent's free-hand self-report, and
+    `subagent_batch_report.json` — written only when `--exec-subagents`
+    dispatched the batch itself — is the executor's own record of what
+    actually ran it. Since 2026-09-17 it calls the shared merge (the last
+    test pins that); the attribution is still asserted end to end.
     """
 
     def test_metadata_names_the_executors_dispatch_record_not_the_self_report(
@@ -994,6 +996,33 @@ class TestReaggregateAttributesTheExecutorsOwnRunner:
         assert validation["metadata"]["runner"] == (
             "opencode:openrouter/~deepseek/deepseek-flash-latest"
         )
+
+    def test_the_merge_is_the_base_s_shared_one(self, tmp_path):
+        """One implementation of "batch files -> validation.json -> groups":
+        the branch re-implemented the three steps (importing the base's
+        private runner lookup to do it) and could drift from the base's."""
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        calls = []
+        real_merge = cro.merge_validation_batches
+
+        def spy(phase_dir_arg, batch_metadata, grouped, validation_path):
+            calls.append((phase_dir_arg, validation_path, len(grouped)))
+            return real_merge(phase_dir_arg, batch_metadata, grouped, validation_path)
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False,
+            extra_patches=(patch.object(cro, "merge_validation_batches", spy),),
+        )
+
+        assert calls == [(str(phase_dir), str(phase_dir / "validation.json"),
+                          len(_groups_on_disk(phase_dir)))]
+        validation = json.loads(
+            (phase_dir / "validation.json").read_text(encoding="utf-8")
+        )
+        assert len(validation["groups"]) == len(_groups_on_disk(phase_dir))
 
     def test_falls_back_to_the_self_report_with_no_executor_record(
         self, tmp_path

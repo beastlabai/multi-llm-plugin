@@ -502,3 +502,39 @@ class TestMergeValidationBatchesRunnerAttribution:
         saved = json.loads(validation_path.read_text(encoding="utf-8"))
         assert saved["metadata"]["model"] == "claude-code:sonnet"
         assert "runner" not in saved["metadata"]
+
+
+class TestTheHighPriorityGroupCountReachesTheHost:
+    """The route a detached host reads: the result line and `.status.json`.
+    review-code has recorded `high_priority_groups` there since F4; a plan
+    review's HIGH suggestions were only ever a bare print."""
+
+    def _run(self, tmp_path, importance):
+        plan = _plan(tmp_path)
+        argv = ["--plan-file", str(plan), "--models", "cursor-agent:auto",
+                "--skip-validation", "--timeout", "5"]
+
+        def reply(**kwargs):
+            answer = _ok_reply(kwargs["model_spec"])
+            answer["data"][0]["importance"] = importance
+            return answer
+
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            with patch.object(base, "invoke_with_file_output", side_effect=reply), \
+                    patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+                assert asyncio.run(rpo.main(argv)) == 0
+        finally:
+            cli_common.deactivate_result()
+        status = status_file.read_status(str(base.get_phase_dir(plan, "review-plan")))
+        return status, context.payload(0)
+
+    def test_a_high_suggestion_is_one_high_group_on_both_channels(self, tmp_path):
+        status, payload = self._run(tmp_path, "HIGH")
+        assert status.get("high_priority_groups") == {"count": 1}
+        assert payload["high_priority_groups"] == {"count": 1}
+
+    def test_a_review_with_no_high_suggestion_records_nothing(self, tmp_path):
+        status, payload = self._run(tmp_path, "LOW")
+        assert "high_priority_groups" not in status
+        assert "high_priority_groups" not in payload

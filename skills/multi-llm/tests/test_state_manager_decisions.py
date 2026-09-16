@@ -945,3 +945,152 @@ class TestPlanChangedSurvivesUntilItsConsumerReadsIt:
         sm1.save()
 
         assert StateManager(sample_plan_file).has_plan_changed() is False
+
+
+def _finding(title, file, desc="The call is not wrapped in try/except.", line=(10, 12)):
+    return {
+        "title": title, "desc": desc, "type": "bug", "importance": "high",
+        "file": file, "line_range": list(line),
+    }
+
+
+class TestStampStableIdsTellsSameContentGroupsApart:
+    """Neither `generate_group_id` nor `generate_suggestion_id` hashes `file`,
+    and the grouper never merges across files, so one reviewer's boilerplate
+    finding in two files is two groups — which used to be stamped with ONE
+    `group_hash`. Only suggestions had a collision discriminator; every
+    consumer filtering by group hash (an apply-phase Skip, an `invalid` mark,
+    a human decision) then hit both groups at once."""
+
+    def _two_file_groups(self):
+        return [
+            {"theme": "Missing error handling",
+             "suggestions": [_finding("Missing error handling", "a.py")]},
+            {"theme": "Missing error handling",
+             "suggestions": [_finding("Missing error handling", "b.py")]},
+        ]
+
+    def test_two_word_identical_groups_in_two_files_get_distinct_hashes(self):
+        from utils.state_manager import generate_group_id, stamp_stable_ids
+
+        groups = self._two_file_groups()
+        assert generate_group_id(groups[0]) == generate_group_id(groups[1])
+        stamp_stable_ids(groups)
+        assert groups[0]["group_hash"] != groups[1]["group_hash"]
+        # The first keeps the plain content hash every stored decision and
+        # golden was keyed on; only the collider is discriminated.
+        assert groups[0]["group_hash"] == generate_group_id(groups[0])
+        assert groups[1]["group_hash"] == generate_group_id(groups[1], 1)
+
+    def test_the_discriminated_hashes_are_reproduced_by_a_re_stamp(self):
+        from utils.state_manager import stamp_stable_ids
+
+        first = self._two_file_groups()
+        stamp_stable_ids(first)
+        again = self._two_file_groups()
+        stamp_stable_ids(again)
+        assert [g["group_hash"] for g in first] == [g["group_hash"] for g in again]
+        assert (
+            [s["suggestion_hash"] for g in first for s in g["suggestions"]]
+            == [s["suggestion_hash"] for g in again for s in g["suggestions"]]
+        )
+
+    def test_the_suggestion_discriminator_is_the_rehash_it_always_was(self):
+        """The inline rehash moved into `generate_suggestion_id(…, n)`; the
+        bytes it produces must not have moved with it, or every stamped
+        duplicate on disk changes id."""
+        import hashlib
+        import json
+
+        from utils.state_manager import (
+            ID_ALGO_VERSION, canonicalize_hash_input, generate_suggestion_id,
+            stamp_stable_ids,
+        )
+
+        groups = self._two_file_groups()
+        stamp_stable_ids(groups)
+        second = groups[1]["suggestions"][0]
+        legacy_fields = {
+            "v": ID_ALGO_VERSION,
+            "title": canonicalize_hash_input(second["title"]),
+            "type": canonicalize_hash_input(second["type"]),
+            "description": canonicalize_hash_input(second["desc"]),
+            "reference": "",
+            "discriminator": "-1",
+        }
+        legacy = hashlib.sha256(
+            json.dumps(legacy_fields, sort_keys=True).encode()
+        ).hexdigest()[:16]
+        assert second["suggestion_hash"] == legacy == generate_suggestion_id(second, 1)
+        assert groups[0]["suggestions"][0]["suggestion_hash"] == generate_suggestion_id(second)
+
+    def test_a_group_sharing_a_hash_with_a_suggestion_is_not_discriminated(self):
+        """Groups and suggestions are two namespaces, as before."""
+        from utils.state_manager import generate_group_id, stamp_stable_ids
+
+        group = {"theme": "x", "suggestions": [_finding("x", "a.py")]}
+        stamp_stable_ids([group])
+        assert group["group_hash"] == generate_group_id(group)
+
+
+class TestMatchIssuesToSuggestions:
+    """issues.json is written before stamping, so an entry carries no
+    `suggestion_hash`; the join is the content hash, and same-hash entries
+    must be told apart by where they point rather than sent to the first."""
+
+    def _grouped(self, *files):
+        from utils.state_manager import stamp_stable_ids
+
+        groups = [
+            {"theme": "Missing error handling",
+             "suggestions": [_finding("Missing error handling", f)]}
+            for f in files
+        ]
+        stamp_stable_ids(groups)
+        return groups
+
+    def test_identical_findings_in_two_files_map_to_their_own_groups(self):
+        from utils.state_manager import match_issues_to_suggestions
+
+        issues = [_finding("Missing error handling", "a.py"),
+                  _finding("Missing error handling", "b.py")]
+        assert match_issues_to_suggestions(issues, self._grouped("a.py", "b.py")) == {
+            1: (1, 1), 2: (2, 1),
+        }
+
+    def test_the_file_decides_when_issues_json_and_grouped_order_disagree(self):
+        """The grouper sorts by file; issues.json is in the order the model
+        emitted them. Occurrence order alone would cross them over."""
+        from utils.state_manager import match_issues_to_suggestions
+
+        issues = [_finding("Missing error handling", "b.py"),
+                  _finding("Missing error handling", "a.py")]
+        assert match_issues_to_suggestions(issues, self._grouped("a.py", "b.py")) == {
+            1: (2, 1), 2: (1, 1),
+        }
+
+    def test_a_stamped_hash_on_the_issue_wins_over_the_file(self):
+        """The live run hands the renderer the very dicts that were stamped."""
+        from utils.state_manager import match_issues_to_suggestions
+
+        grouped = self._grouped("a.py", "b.py")
+        issues = [dict(grouped[1]["suggestions"][0]), dict(grouped[0]["suggestions"][0])]
+        assert match_issues_to_suggestions(issues, grouped) == {1: (2, 1), 2: (1, 1)}
+
+    def test_an_issue_with_no_free_location_is_left_out_not_guessed(self):
+        from utils.state_manager import match_issues_to_suggestions
+
+        issues = [_finding("Missing error handling", "a.py")] * 3
+        assert match_issues_to_suggestions(issues, self._grouped("a.py", "b.py")) == {
+            1: (1, 1), 2: (2, 1),
+        }
+
+    def test_a_consensus_finding_still_maps_each_copy_to_the_one_group(self):
+        from utils.state_manager import match_issues_to_suggestions, stamp_stable_ids
+
+        a = _finding("Null deref", "a.py", desc="cfg is dereferenced before the None check.")
+        b = dict(a)
+        groups = [{"theme": "Null deref", "suggestions": [a, b]}]
+        stamp_stable_ids(groups)
+        issues = [dict(a, model="m1"), dict(b, model="m2")]
+        assert match_issues_to_suggestions(issues, groups) == {1: (1, 1), 2: (1, 2)}

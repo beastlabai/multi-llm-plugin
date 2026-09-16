@@ -779,3 +779,19 @@ class TestTheHostIsToldWhatWasProduced:
         status = status_file.read_status(str(_phase_dir(plan)))
         assert "output_files" not in status
         assert "tasks_total" not in (status.get("progress") or {})
+
+
+class TestAForegroundRunNamesItsArtifactsOnTheResultLine:
+    """`record_output_files` is detached-only by design; the terminal
+    `MULTI_LLM_RESULT.artifacts` list is what a foreground host reads, and
+    `consume_document` records the task list and the plan there too."""
+
+    def test_the_task_list_and_the_plan_are_on_the_result_line(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
+        result = parse_result_line(capsys.readouterr().out)
+        assert result is not None and result["exit"] == 0
+        assert str(_tasks_md(plan)) in result["artifacts"]
+        assert str(plan) in result["artifacts"]
