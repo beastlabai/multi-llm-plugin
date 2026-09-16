@@ -464,6 +464,38 @@ class StateManager:
                     pass
             raise IOError(f"Failed to save state: {e}") from e
 
+    def reload(self) -> None:
+        """Re-read ``state.json`` from disk, replacing the in-memory dict.
+
+        **Every unsaved in-memory change is discarded** — a caller with pending
+        edits must ``save()`` first. This exists for the one legitimate case of
+        a second writer: a file-level helper such as ``finalize_tracking.py``
+        reads ``state.json``, adds to it and writes it back, while ``save()``
+        dumps this object's dict wholesale and never merges. Whoever saves last
+        wins, and until 2026-09-16 that was `_finalize`'s closing `save()`,
+        which erased the `tracked_files` `finalize_tracking` had just computed —
+        an implement run that wrote `index.html` finalized with the two stale
+        entries earlier phases had left, and `review-code` would have reviewed
+        those (F3). Calling this straight after the external writer makes the
+        later `save()` carry its work instead of overwriting it.
+
+        Unlike construction, this does not re-run the plan-change detection:
+        `plan_changed` answers "did a human edit the plan since the last
+        session", which is a question about the session, not about a re-read
+        mid-run (a write phase edits the plan itself).
+        """
+        if not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # A corrupt or unreadable file is not worth losing the dict we hold:
+            # the next `save()` rewrites it wholesale anyway.
+            return
+        if isinstance(loaded, dict):
+            self.state = loaded
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get a state value."""
         return self.state.get(key, default)
@@ -471,6 +503,37 @@ class StateManager:
     def set(self, key: str, value: Any) -> None:
         """Set a state value."""
         self.state[key] = value
+
+    # --- Metrics (in-memory; see utils/metrics.py for the file-level CLI) ---
+
+    def start_metrics_phase(self, phase: str, total_batches: int) -> None:
+        """Stamp ``metrics_progress.{phase}`` so ETAs have a baseline.
+
+        The in-memory twin of ``metrics.start_phase``. Routing metrics through
+        this object rather than through ``metrics.py``'s own reader/writer is
+        what stops the two racing on ``state.json`` — see :meth:`reload`.
+        """
+        from . import metrics as _metrics
+
+        _metrics.start_phase_in_state(self.state, phase, int(total_batches))
+
+    def finish_metrics_phase(self, phase: str) -> Optional[int]:
+        """The in-memory twin of ``metrics.finish_phase``."""
+        from . import metrics as _metrics
+
+        if phase not in (self.state.get("metrics_progress") or {}):
+            return None
+        return _metrics.finish_phase_in_state(self.state, phase)
+
+    def record_metric(self, phase: str, label: str, **kwargs: Any) -> Optional[str]:
+        """Append one ``metrics.{phase}`` entry in memory; ``save()`` persists it.
+
+        The in-memory twin of ``metrics.record_metric``; returns the rendered
+        ``[ETA]`` line (or None) for the caller to place, and prints nothing.
+        """
+        from . import metrics as _metrics
+
+        return _metrics.record_metric_in_state(self.state, phase, label, **kwargs)
 
     def update_task_status(self, task_id: str, status: str, reason: Optional[str] = None) -> None:
         """Update status of a task.

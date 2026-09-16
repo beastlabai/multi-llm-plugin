@@ -37,6 +37,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import metrics  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import restore_batch  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
@@ -331,8 +332,9 @@ class FakeState:
 
     def __init__(self, path: Path) -> None:
         self.state_file = str(path)
-        self.state = {}
-        path.write_text(json.dumps({"metrics": {}}), encoding="utf-8")
+        self.state = {"metrics": {}}
+        self._path = path
+        self.save()
 
     def get(self, key, default=None):
         return self.state.get(key, default)
@@ -341,7 +343,27 @@ class FakeState:
         self.state[key] = value
 
     def save(self):
-        pass
+        """A **real** write, because ``pass`` is what hid F3/F4 from CI.
+
+        `_finalize` interleaves this object's saves with `finalize_tracking`'s
+        own file-level write of the same file; with a no-op `save()` the clobber
+        was unobservable, and the metrics assertion below passed against a
+        second writer's file that production's next `save()` was erasing."""
+        self._path.write_text(
+            json.dumps(self.state, indent=2), encoding="utf-8"
+        )
+
+    def reload(self):
+        self.state = json.loads(self._path.read_text(encoding="utf-8"))
+
+    def start_metrics_phase(self, phase, total_batches):
+        metrics.start_phase_in_state(self.state, phase, total_batches)
+
+    def finish_metrics_phase(self, phase):
+        return metrics.finish_phase_in_state(self.state, phase)
+
+    def record_metric(self, phase, label, **kwargs):
+        return metrics.record_metric_in_state(self.state, phase, label, **kwargs)
 
     def update_task_status(self, task_id, status, reason=None):
         self.state.setdefault("task_status", {})[task_id] = status
@@ -2353,6 +2375,79 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         state = FakeState(env.tmp_path / "state.json")
         env.scheduler([env.apply_task(0)], state=state).run()
         assert seen and "--touched" not in seen[0]
+
+    def test_the_finalized_state_keeps_the_tracked_files_and_the_metrics(
+        self, env, monkeypatch
+    ):
+        """F3/F4, against the REAL ``StateManager``: `_finalize` used to save,
+        let `finalize_tracking` write `tracked_files` into the same file, then
+        dump its pre-finalize dict over the top. An implement run whose log said
+        "Tracked 1 implementation files: index.html" finalized with the two stale
+        entries earlier phases had left, and the metric every batch recorded went
+        with it (three audited runs ended `metrics: null`)."""
+        import finalize_tracking
+        from utils.state_manager import StateManager
+
+        # The census is `git status` on the *test process's* cwd; the `--touched`
+        # set is what this assertion is about, so pin the other half to empty.
+        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        state = StateManager(env.plan)
+        state.set("tracked_files", [
+            {"path": "stale.md", "action": "modified", "task_id": "implementation"}
+        ])
+        state.save()
+
+        summary = env.out_dir / "apply-suggestions" / "implementation_summary.md"
+        result = env.scheduler(
+            [env.apply_task(0)], state=state, summary_file=str(summary),
+        ).run()
+        assert result.exit_code == 0, result.messages
+        assert result.finalized is True
+
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert [f["path"] for f in on_disk["tracked_files"]] == ["plans/p.md"]
+        assert len(on_disk["metrics"]["apply-suggestions"]) == 1
+        # ...and the dict this object holds agrees with the file it just wrote.
+        assert state.get("tracked_files") == on_disk["tracked_files"]
+
+    def test_the_scheduler_stamps_an_eta_baseline_before_the_first_dispatch(
+        self, env
+    ):
+        """F4: only the `util metrics start` CLI leg ever called `start_phase`,
+        so on the executor path `metrics_progress` — and the `[ETA]` line
+        `instructions/implement.md` step 5 describes — never existed."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        state = FakeState(env.tmp_path / "state.json")
+        lines = []
+        result = env.scheduler(
+            [env.apply_task(0)], state=state, finalize=False, log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert on_disk["metrics_progress"]["apply-suggestions"]["total_batches"] == 1
+        eta = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
+        assert len(eta) == 1, lines
+        assert "batch 1/1" in eta[0]
+
+    def test_every_batch_leaves_one_line_in_the_phase_log(self, env):
+        """F7: every `self.log` inside the loop was exceptional, so a 25-minute
+        run that applied five batches left an 11-line log — and `status` points
+        the user at that log."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        assert result.exit_code == 0, result.messages
+        batch_lines = [l for l in lines if "batch 0: apply-batch-0" in l]
+        assert len(batch_lines) == 1, lines
+        assert "applied" in batch_lines[0]
+        assert "plans/p.md" in batch_lines[0]
 
     def test_the_mirror_records_a_phase_state(self, env):
         env.edits([_patch_edit(env.plan)],

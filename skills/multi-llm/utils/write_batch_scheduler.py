@@ -858,6 +858,7 @@ class WriteBatchScheduler:
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
         # and a long first batch is exactly when the step matters (F4).
+        self._metrics_start()
         self._mirror_status(result)
         for batch_index, batch_tasks in ordered:
             runnable = [
@@ -1886,7 +1887,19 @@ class WriteBatchScheduler:
                 status = "completed" if outcome.ok else "failed"
                 reason = None if outcome.ok else (outcome.reason or outcome.status)
                 self.state.update_task_status(task_id, status, reason=reason)
+                # Persists the metric recorded just above too: it is a mutation
+                # of this object's dict now, not a second writer's file (F4).
                 self.state.save()
+
+            # One line per batch, on the happy path (F7). Every other `self.log`
+            # in the loop is exceptional, so a 25-minute five-batch run left an
+            # 11-line log — and `status` points the user at that log.
+            self.log(
+                f"[write-subagents] batch {batch_index}: {task_id} "
+                f"{outcome.write_outcome or outcome.status} in "
+                f"{outcome.duration_seconds:.1f}s — "
+                f"{', '.join(outcome.files_touched) or 'no files changed'}"
+            )
 
             if outcome.output_path:
                 # A result file only counts as this task's on resume when it was
@@ -1898,20 +1911,22 @@ class WriteBatchScheduler:
     def _record_metrics(
         self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int
     ) -> None:
-        """``metrics.py record`` with the values the runner actually reported (D3g).
+        """The metric for one batch, with the values the runner reported (D3g).
 
         Duration is the executor's own wall clock. Tokens and tool uses come from
         the adapter's normalized usage where the provider reports them and are
         simply **omitted** where it does not — ``record_metric`` treats all three as
         optional, and a fabricated zero would average into per-phase totals and read
         as a free run.
+
+        Recorded **through the ``StateManager``**, not through ``metrics.py``'s own
+        file-level read/modify/write: the caller's ``state.save()`` follows
+        immediately and dumps this object's dict wholesale, so a second writer's
+        entry was erased the moment it landed — three audited runs finished with
+        no ``metrics`` key at all after every batch had recorded one (F4).
         """
-        if self.state is None or not getattr(self.state, "state_file", None):
+        if self.state is None or not hasattr(self.state, "record_metric"):
             return
-        try:
-            from . import metrics as _metrics
-        except ImportError:  # pragma: no cover
-            from utils import metrics as _metrics
         usage = outcome.usage or {}
         label = (
             f"{task.get('task_id')}: "
@@ -1919,8 +1934,7 @@ class WriteBatchScheduler:
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
         try:
-            _metrics.record_metric(
-                Path(self.state.state_file),
+            eta_line = self.state.record_metric(
                 self.phase,
                 label,
                 subagent_type=outcome.runner,
@@ -1937,10 +1951,15 @@ class WriteBatchScheduler:
                 duration_ms=int(outcome.duration_seconds * 1000),
                 total_batches=len(self.tasks) or None,
                 batch_index=batch_index + 1,
-                print_eta=False,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
+            return
+        if eta_line:
+            # The `[ETA]` line `instructions/implement.md` step 5 describes. It
+            # goes through `self.log` rather than stderr so it lands in the
+            # phase log `status` points at, beside the batch line above it.
+            self.log(eta_line)
 
     # -- snapshots ------------------------------------------------------
 
@@ -2288,6 +2307,12 @@ class WriteBatchScheduler:
             self.state.refresh_plan_hash()
             self.state.save()
             self._finalize_tracking(result)
+            # `finalize_tracking` is a file-level writer: it read the state we
+            # just saved, computed `tracked_files` and wrote it back. Adopt its
+            # file before touching the dict again, or the `save()` below dumps
+            # the pre-finalize dict over it and the phase's only deliverable is
+            # not tracked at all (F3, measured 2026-09-16).
+            self._reload_state()
         if self.summary_file:
             result.summary_file = self._write_summary(result)
             self._insert_plan_reference(result.summary_file)
@@ -2299,13 +2324,36 @@ class WriteBatchScheduler:
                 self.state.save()
         result.finalized = True
 
+    def _reload_state(self) -> None:
+        """Re-read `state.json` after an external writer touched it."""
+        reload = getattr(self.state, "reload", None)
+        if reload is None:
+            return
+        try:
+            reload()
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+            self.log(f"[write-subagents] warning: state reload failed: {exc}")
+
+    def _metrics_start(self) -> None:
+        """Stamp the phase's ETA baseline before the first dispatch.
+
+        Only the `util metrics start` CLI leg ever called `start_phase`, so on
+        the executor path `metrics_progress` never existed and neither did the
+        `[ETA]` line `instructions/implement.md` step 5 describes (F4).
+        """
+        if self.state is None or not hasattr(self.state, "start_metrics_phase"):
+            return
+        try:
+            self.state.start_metrics_phase(self.phase, len(self.tasks))
+            self.state.save()
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
+            pass
+
     def _metrics_finish(self) -> None:
+        if not hasattr(self.state, "finish_metrics_phase"):
+            return
         try:
-            from . import metrics as _metrics
-        except ImportError:  # pragma: no cover
-            from utils import metrics as _metrics
-        try:
-            _metrics.finish_phase(Path(self.state.state_file), self.phase)
+            self.state.finish_metrics_phase(self.phase)
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
 
