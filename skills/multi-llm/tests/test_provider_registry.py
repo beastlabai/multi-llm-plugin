@@ -2390,6 +2390,32 @@ class TestTheSessionRung:
         """It is implicit: below a config layer, above a shipped floor."""
         assert registry.SESSION_LAYER not in registry.EXPLICIT_DRIVER_LAYERS
 
+    def test_the_pickers_variant_survives_the_whole_spec_round_trip(
+        self, monkeypatch
+    ):
+        """`provider:model:effort` with `/` and `~` in the model id still splits.
+
+        The host now reports its variant as the adapter's own `:effort` suffix,
+        so the spec carries three `:`-delimited parts *and* a model id with its
+        own separators. `parse_model_spec` splits on the FIRST colon (the
+        provider) and `split_reasoning_effort` on the LAST (the effort), which is
+        what leaves the model id — slashes, tilde and all — intact between them.
+        """
+        from utils.providers.base import split_reasoning_effort
+        from utils.providers.opencode import REASONING_EFFORTS
+
+        _detected(monkeypatch)
+        model = "openrouter/~deepseek/deepseek-flash-latest"
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, f"{model}:low")
+
+        spec, layer = registry.resolve_subagent_runner("full", host_id="opencode")
+
+        assert (spec, layer) == (f"opencode:{model}:low", registry.SESSION_LAYER)
+        provider_name, model_spec = registry.parse_model_spec(spec)
+        assert provider_name == "opencode"
+        base, effort = split_reasoning_effort(model_spec, REASONING_EFFORTS)
+        assert (base, effort) == (model, "low")
+
     def test_the_cheap_tier_takes_the_session_model_too(self, monkeypatch):
         """One model was selected, not a tier map.
 

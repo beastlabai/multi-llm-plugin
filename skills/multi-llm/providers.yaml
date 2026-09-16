@@ -330,6 +330,11 @@ providers:
       # but on opencode 1.18.12 every --variant run hangs indefinitely without
       # writing a byte to either stream or reaching session creation — it burns
       # the full timeout instead. Plain (no suffix) answers in ~3s.
+      # The denylist itself is NOT in this file: it is `EFFORT_LADDER.model_caps`
+      # in utils/providers/opencode.py, which `build_command` consults before it
+      # emits --variant, so a suffix that reaches it from anywhere — this list,
+      # a --models spec, or the host session's own picker variant — is dropped
+      # with one warning rather than dispatched. One owner, both routes.
       - openrouter/deepseek/deepseek-v4-flash-0731
 
   codex:
