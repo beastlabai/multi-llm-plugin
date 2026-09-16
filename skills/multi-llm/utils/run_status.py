@@ -68,7 +68,12 @@ from .cli_common import (
     record_notice,
     record_state,
 )
-from .output_handler import output_dir_path, phase_dir_path, slugify_question
+from .output_handler import (
+    PHASE_DIRECTORIES,
+    output_dir_path,
+    phase_dir_path,
+    slugify_question,
+)
 from .stream_bootstrap import bootstrap_streams
 
 #: ``--wait``'s default. Deliberately under the tightest surveyed host shell cap
@@ -963,6 +968,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def _resolve_phase(word: Optional[str]) -> Optional[str]:
     """Resolve ``--phase``/``--mode`` through the mode table (mode word or phase).
 
+    Also accepts the on-disk phase-*directory* word for a phase whose directory
+    name differs from its ``modes.py`` phase name (``apply-code-fixes`` is the
+    only one today, dir ``apply-fixes``) — a human polling by eye reads the
+    directory, not the phase table, and ``PHASE_DIRECTORIES`` is the one place
+    that mapping is recorded. Returned as-is: ``phase_dir_path``'s own identity
+    fallback resolves a dir word that is already a ``PHASE_DIRECTORIES`` key.
+
     An unknown selector is a *usage* error, so it exits **3** like every other
     "this run cannot proceed without a human" case (D1a, and this command's own
     epilog) rather than the exit 1 a string-valued ``SystemExit`` would be mapped
@@ -976,10 +988,15 @@ def _resolve_phase(word: Optional[str]) -> Optional[str]:
 
     modes = _modes()
     resolved = modes.phase_from_selector(word)
+    if resolved is None and word in PHASE_DIRECTORIES:
+        resolved = word
     if resolved is None:
+        valid = list(modes.phase_names()) + sorted(
+            set(PHASE_DIRECTORIES) - set(modes.phase_names())
+        )
         print(
             f"ERROR: unknown phase or mode '{word}'. Valid phases: "
-            + ", ".join(modes.phase_names()),
+            + ", ".join(valid),
             file=sys.stderr,
         )
         raise SystemExit(EXIT_NEEDS_HUMAN)

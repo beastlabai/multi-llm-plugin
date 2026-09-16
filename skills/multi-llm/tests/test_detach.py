@@ -1535,6 +1535,40 @@ class TestStatusSurface:
             run_status.main(["--plan-file", str(plan), "--phase", "nonsense"])
         capsys.readouterr()
 
+    def test_unknown_phase_error_lists_apply_fixes_as_valid(self, tmp_path, capsys):
+        """F1: before the fix, `apply-fixes` (the on-disk directory word) was
+        itself rejected as "unknown phase or mode" — the error's own "Valid
+        phases" list must name a selector that actually works.
+        """
+        plan = _plan(tmp_path)
+        with pytest.raises(SystemExit):
+            run_status.main(["--plan-file", str(plan), "--phase", "nonsense"])
+        err = capsys.readouterr().err
+        assert "apply-fixes" in err
+
+    def test_apply_code_fixes_selector_finds_the_apply_fixes_dir(
+        self, tmp_path, capsys
+    ):
+        """F1: apply-code-fixes is the one phase whose modes.py phase name
+        (``apply-code-fixes``) differs from its on-disk directory
+        (``apply-fixes``). Both spellings of ``--phase`` must resolve to the
+        same, real ``apply-fixes/`` directory — before the fix, the mode word
+        (the tool's own printed ``next`` command) found no run at all, and the
+        directory word was rejected outright as an unknown phase.
+        """
+        plan = _plan(tmp_path)
+        directory = _phase_dir(plan, "apply-fixes")
+        status_file.write_status(str(directory), {"phase": "apply-code-fixes", "state": "x"})
+
+        for selector in ("apply-code-fixes", "apply-fixes"):
+            assert run_status.main(
+                ["--plan-file", str(plan), "--view", "run", "--phase", selector,
+                 "--json"]
+            ) == 2
+            payload = json.loads(_json_body(capsys.readouterr().out))
+            assert len(payload["runs"]) == 1
+            assert payload["runs"][0]["phase_dir"] == str(directory)
+
     def test_json_view_all_has_two_top_level_keys(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)

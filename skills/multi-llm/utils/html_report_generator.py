@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -2117,7 +2118,7 @@ def regenerate_report_with_human_decisions(
     phase_dir: Path,
     human_decisions: Dict[str, Dict[str, Any]],
     template_style: Optional[str] = None,
-) -> Optional[Path]:
+) -> Tuple[Optional[Path], int]:
     """Re-render ``{phase_dir}/report.html`` with human decisions overlaid.
 
     Loads the ``report_data.json`` sidecar (persisted at review time), overlays
@@ -2125,16 +2126,21 @@ def regenerate_report_with_human_decisions(
     the template — no reconstruction of the original runtime inputs
     (diff_data, base_ref, models, ...).
 
-    Returns the report path on success, or ``None`` if the sidecar is missing
-    (e.g. a report generated before this feature existed) so callers can warn
-    and continue rather than crash.
+    Returns ``(report_path, matched)`` on success, or ``(None, 0)`` if the
+    sidecar is missing (e.g. a report generated before this feature existed)
+    so callers can warn and continue rather than crash. ``matched`` is
+    ``_overlay_human_decisions``'s own count — the number of decisions that
+    actually joined a group by ``group_hash`` — so a caller can tell "wrote a
+    report" from "wrote a report that matched what it was handed": a code-review
+    report whose groups carry no ``groupHash`` (F2) re-renders byte-identical
+    with ``matched == 0`` and no error, which only the count exposes.
     """
     phase_dir = Path(phase_dir)
     sidecar = phase_dir / "report_data.json"
     if not sidecar.exists():
-        return None
+        return None, 0
     report_data = json.loads(sidecar.read_text(encoding="utf-8"))
-    _overlay_human_decisions(report_data, human_decisions or {})
+    matched = _overlay_human_decisions(report_data, human_decisions or {})
     style = template_style or report_data.get("templateStyle", "pr")
     template = _load_report_template(style)
     html = _embed_report_data(report_data, template)
@@ -2145,7 +2151,7 @@ def regenerate_report_with_human_decisions(
         sidecar.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
     except OSError:
         pass
-    return report_path
+    return report_path, matched
 
 
 #: ``apply-code-fixes`` is the one apply phase whose mode word is not its
@@ -2221,7 +2227,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         decisions = _read_human_decisions_from_state(
             Path(args.state_file), args.apply_phase
         )
-        result = regenerate_report_with_human_decisions(
+        result, matched = regenerate_report_with_human_decisions(
             phase_dir, decisions, args.template_style
         )
         if result is None:
@@ -2232,9 +2238,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 0
         print(
-            f"HTML report regenerated with {len(decisions)} human decision(s): "
-            f"{result}"
+            f"HTML report regenerated with {matched} of {len(decisions)} human "
+            f"decision(s) matched: {result}"
         )
+        if matched < len(decisions):
+            print(
+                f"WARNING: {len(decisions) - matched} decision(s) did not match "
+                "any group in this report (no groupHash on the group, or the "
+                "decision's id is stale). The report was still written.",
+                file=sys.stderr,
+            )
         return 0
     return 1
 

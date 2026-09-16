@@ -198,9 +198,10 @@ class TestRegenerateReport:
         with tempfile.TemporaryDirectory() as d:
             phase_dir = Path(d)
             self._sidecar(phase_dir)
-            out = regenerate_report_with_human_decisions(
+            out, matched = regenerate_report_with_human_decisions(
                 phase_dir, {"aaa": SALVAGE_REC}
             )
+            assert matched == 1
             assert out is not None and out.exists()
             html = out.read_text(encoding="utf-8")
             # The overlaid decision data is embedded in reportData JSON.
@@ -213,10 +214,11 @@ class TestRegenerateReport:
 
     def test_missing_sidecar_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
-            out = regenerate_report_with_human_decisions(
+            out, matched = regenerate_report_with_human_decisions(
                 Path(d), {"aaa": SALVAGE_REC}
             )
             assert out is None
+            assert matched == 0
 
     def test_cli_graceful_skip_when_no_sidecar(self, capsys):
         with tempfile.TemporaryDirectory() as d:

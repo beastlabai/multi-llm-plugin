@@ -2724,8 +2724,16 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 secondary, reviewed_code = build_validation_secondary_context(
                     grouped_list, plan_path, project_root=project_root
                 )
+                # `grouped_list`, not `grouped`: it already carries the stable
+                # `group_hash`/`display_label` `stamp_stable_ids` stamped above
+                # (and is what `grouped.json` was written from). Handing the
+                # un-stamped objects here means every group this phase reports
+                # on downstream — through `merge_validation_batches`, below —
+                # has no `group_hash`, which is the key `_overlay_human_decisions`
+                # joins on; the decisions overlay then matches nothing and
+                # reports success anyway.
                 batched_tasks = prepare_batched_validation_tasks(
-                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    groups=grouped_list,
                     context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content}",
                     output_dir=str(phase_dir),
                     plan_file=str(plan_path),
@@ -2780,7 +2788,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         plan_path, "code_review_validation", phase='code-review'
                     )
                     validated_groups_for_report = merge_validation_batches(
-                        str(phase_dir), batched_tasks, grouped, str(validation_path)
+                        str(phase_dir), batched_tasks, grouped_list, str(validation_path)
                     )
                     validated_groups = validated_groups_for_report
                 else:
@@ -2790,7 +2798,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     return  # Exit early - Claude Code handles validation
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
-                validated_groups = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
+                # `grouped_list`, same reason as the validated branch above:
+                # it carries the stamped `group_hash` the decisions overlay
+                # joins on.
+                validated_groups = grouped_list
                 # Every other branch above sets both names to the same value;
                 # this one set only `validated_groups`, so `--skip-validation`
                 # left `validated_groups_for_report` `None` — which starved

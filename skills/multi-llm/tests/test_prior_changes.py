@@ -15,9 +15,11 @@ from utils.prior_changes import (
     ENTRY_ID_DIGEST_CHARS,
     FILENAME,
     MAX_CHARS,
+    PHASE_ALIASES,
     _jsonl_path,
     _load_entries,
     append,
+    canonical_phase,
     entries as read_entries,
     entry_id,
     render,
@@ -689,4 +691,104 @@ class TestRenderPhaseFiltering:
         assert "accel tuned" in render(
             out, phase="implement", tail=200, max_chars=20000
         )
+
+
+class TestApplyCodeFixesPhaseAliasing:
+    """F6: the write executor appends under ``apply-code-fixes`` (its mode/
+    ``PHASE_BY_WRITE_KIND`` word) while ``instructions/apply-code-fixes.md``
+    step 5.7 mandates ``--phase "apply-fixes"`` (the phase-directory word) for
+    the native leg's ``util prior-changes append``. Both must be treated as one
+    phase — by ``append``'s dedup, by ``render``'s same-phase preference, and
+    by the CLI (``cmd_append``), which is what the native leg actually
+    invokes — or a run that starts on one leg and resumes on the other
+    re-appends every batch instead of recognising the duplicate, and reads a
+    prior-changes context that calls its own predecessors "other phases".
+    """
+
+    def test_canonical_phase_maps_the_mode_word_to_the_dir_word(self) -> None:
+        assert canonical_phase("apply-code-fixes") == "apply-fixes"
+        assert canonical_phase("apply-fixes") == "apply-fixes"
+        # Unrelated phases pass through unchanged.
+        assert canonical_phase("implement") == "implement"
+        assert canonical_phase(None) is None
+        assert PHASE_ALIASES == {"apply-code-fixes": "apply-fixes"}
+
+    def test_append_dedupes_across_both_spellings_in_process(
+        self, tmp_path: Path
+    ) -> None:
+        """The write executor's own call: `_prior_changes.append(out, id, self.phase, ...)`."""
+        out = str(tmp_path)
+        # First dispatch, as the executor writes it today (self.phase ==
+        # PHASE_BY_WRITE_KIND["apply_code_fixes"] == "apply-code-fixes").
+        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A") is True
+        # A resumed batch re-dispatched under the native leg's documented
+        # spelling must be recognised as the same entry, not appended again.
+        assert append(out, "index.html#abc", "apply-fixes", "Fix A (retry)") is False
+
+        stored = read_entries(out)
+        assert len(stored) == 1
+        # Stored under the canonical (phase-directory) spelling either way.
+        assert stored[0]["phase"] == "apply-fixes"
+        assert stored[0]["summary"] == "Fix A"
+
+    def test_append_dedupes_across_both_spellings_reversed_order(
+        self, tmp_path: Path
+    ) -> None:
+        out = str(tmp_path)
+        assert append(out, "index.html#abc", "apply-fixes", "Fix A") is True
+        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A (retry)") is False
+
+        stored = read_entries(out)
+        assert len(stored) == 1
+        assert stored[0]["phase"] == "apply-fixes"
+
+    def test_cli_append_normalizes_the_stored_phase(self, tmp_path: Path) -> None:
+        """`util prior-changes append` (the native leg's own command)."""
+        out = str(tmp_path)
+        result = _append(out, "index.html#abc", "apply-code-fixes", "Fix A")
+        assert result.returncode == 0
+        stored = read_entries(out)
+        assert len(stored) == 1
+        assert stored[0]["phase"] == "apply-fixes"
+
+    def test_cli_append_and_in_process_append_dedupe_across_the_two_legs(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact round trip: executor dispatches a batch, then the same
+        batch is re-dispatched (e.g. on --resume) through the native leg's
+        CLI, or vice versa — neither leg should double the entry.
+        """
+        out = str(tmp_path)
+        # Executor leg (in-process, mode word).
+        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A") is True
+        # Native leg (CLI, phase-dir word) resumes the same batch.
+        result = _append(out, "index.html#abc", "apply-fixes", "Fix A (retry)")
+        assert "already exists, skipping" in result.stderr
+
+        stored = read_entries(out)
+        assert len(stored) == 1
+        assert stored[0]["summary"] == "Fix A"
+
+        # And the reverse direction: native leg first, executor resumes.
+        assert append(out, "index.html#def", "apply-fixes", "Fix B") is True
+        assert append(out, "index.html#def", "apply-code-fixes", "Fix B (retry)") is False
+        assert len(read_entries(out)) == 2
+
+    def test_render_prefers_same_phase_entries_under_either_spelling(
+        self, tmp_path: Path
+    ) -> None:
+        out = str(tmp_path)
+        append(out, "index.html#abc", "apply-fixes", "Restored accel 28")
+        append(out, "index.html#def", "apply-code-fixes", "OOB teleport resync")
+        append(out, "s1", "apply-suggestions", "unrelated phase")
+
+        # Both spellings see the SAME phase-scoped entries — one phase, not
+        # two, however the caller spells it.
+        by_dir_word = render(out, phase="apply-fixes")
+        by_mode_word = render(out, phase="apply-code-fixes")
+        assert by_dir_word == by_mode_word
+        assert "Restored accel 28" in by_dir_word
+        assert "OOB teleport resync" in by_dir_word
+        assert "unrelated phase" not in by_dir_word
+        assert "... and 1 earlier batches from other phases" in by_dir_word
 
