@@ -1502,6 +1502,61 @@ class TestAdditivityAndDetach:
         assert progress["items_total"] == 1
         assert progress["items_applied"] == 0
 
+    def test_the_step_moves_with_the_write_phase_instead_of_freezing(self, env):
+        """F4: `progress.step` is set before a dispatch and never replaced, so a
+        write phase preceded by judging printed `dispatching human-decision
+        judging` for its whole run and in the terminal payload, next to
+        `run.state: done`."""
+        from utils import status_file
+
+        status_file.update_status(
+            str(env.phase_dir),
+            {"progress": {"step": "dispatching human-decision judging"}},
+        )
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        env.scheduler([env.apply_task(0)]).run()
+        progress = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]
+        assert progress["step"] == "complete"
+        # Every sibling counter survives the key-by-key merge.
+        assert progress["write_subagents"]["total"] == 1
+
+    def test_the_step_reads_applying_before_the_first_batch_lands(
+        self, env, monkeypatch
+    ):
+        """The mirror runs after a dispatch returns, so a long first batch would
+        otherwise keep the stale step on screen for its whole duration."""
+        from utils import status_file
+
+        steps = []
+        real_update = status_file.update_status
+
+        def record(phase_dir, updates):
+            step = (updates.get("progress") or {}).get("step")
+            if step:
+                steps.append(step)
+            real_update(phase_dir, updates)
+
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        monkeypatch.setattr(status_file, "update_status", record)
+        env.scheduler([env.apply_task(0)]).run()
+        assert steps[0] == "applying"
+        assert steps[-1] == "complete"
+
+    def test_a_stopped_loop_says_stopped_rather_than_the_previous_step(self, env):
+        env.edits([], result={"status": "failed", "ids": [],
+                              "files_touched": [], "summary": "no"})
+        env.scheduler([env.apply_task(0)]).run()
+        progress = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]
+        assert progress["step"] == "stopped"
+
     def test_the_write_mirror_moves_once_per_task_not_once_per_batch(
         self, env, monkeypatch
     ):
@@ -1525,7 +1580,9 @@ class TestAdditivityAndDetach:
 
         monkeypatch.setattr(status_file, "update_status", record)
         env.scheduler(tasks).run()
-        assert rows[:2] == [1, 2]
+        # Row 0 is the pre-dispatch mirror that plants `progress.step:
+        # applying` (F4); the per-task advance is what follows it.
+        assert rows[:3] == [0, 1, 2]
         progress = json.loads(
             (env.phase_dir / ".status.json").read_text()
         )["progress"]["write_subagents"]

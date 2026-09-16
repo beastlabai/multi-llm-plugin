@@ -635,6 +635,23 @@ class TestOrchestratorHook:
         # Nothing is left to judge, so no task file is re-materialized.
         assert not (phase_dir / JUDGE_TASKS_FILENAME).exists()
 
+    def test_the_rebuilt_skip_list_marks_the_judge_as_the_source(self, tmp_path):
+        """F2: the skip list is published beside its own count, and the judge's
+        skip reached neither before the rebuild. The status word is derived from
+        the `decision_source` this module stamps, so the two cannot drift."""
+        orch, phase_dir = self._orchestrator(tmp_path)
+        orch.needs_human = [_group(GROUP_A)]
+        _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_SKIP)])
+        orch._handle_human_decisions()
+        orch._rebuild_formatted_skipped()
+
+        assert len(orch.formatted_skipped) == len(orch.skipped) == 1
+        entry = orch.formatted_skipped[0]
+        assert entry["group_id"] == GROUP_A
+        assert entry["status"] == "claude_skipped"
+        assert entry["decision_source"] == "claude_auto_decide"
+        assert entry["reason"].startswith("Claude auto-decide:")
+
     def test_unattended_run_skips_a_group_the_judge_did_not_cover(self, tmp_path, capsys):
         """Judging ran but missed one group: --yes skips it with a warning rather
         than stalling. Interactively it stays needs-human-decision."""

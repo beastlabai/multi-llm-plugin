@@ -249,7 +249,12 @@ concurrency comes from `driver.max_concurrent_write_subagents` (default **1**, a
 raise it above 1 only for this phase, whose batches are partitioned by file — and even then two batches co-schedule only when their declared file sets are provably disjoint).
 
 Do **not** combine the two: with `--exec-subagents` the phase finishes in that one
-invocation and there is no batch left for this agent to run.
+invocation and there is no batch left for this agent to run. It also writes this
+phase's own summary report itself: the batch loop's outcome block names every item
+the judge decided, `{phase}/summary.md` is written with the same sections the
+*Generate Summary Report* step below describes, the recorded decisions are overlaid
+onto the review report, and the phase is marked completed only once every batch
+verified. Those steps below belong to the native path; do not run them a second time.
 
 Three flags belong to that path and are worth knowing even on this one:
 

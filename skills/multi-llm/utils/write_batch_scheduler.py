@@ -854,6 +854,11 @@ class WriteBatchScheduler:
             return result
 
         # 3. The batches, in order, each verified before the next is dispatched.
+        # Mirrored once before the first dispatch so `progress.step` reads
+        # `applying` for the whole stretch rather than only from the first
+        # *finished* task — the in-batch mirror runs after a dispatch returns,
+        # and a long first batch is exactly when the step matters (F4).
+        self._mirror_status(result)
         for batch_index, batch_tasks in ordered:
             runnable = [
                 task for task in batch_tasks
@@ -2420,6 +2425,18 @@ class WriteBatchScheduler:
                 phase_state = "subagents_failed"
             else:
                 phase_state = "running"
+            # F4: `progress.step` is set before a dispatch and never replaced, so
+            # a write phase whose last `report_progress` came from the judging
+            # dispatch printed `dispatching human-decision judging` for the whole
+            # 288 s of batch application AND in the terminal payload, beside
+            # `run.state: done` (measured 2026-09-16). The mirror already writes
+            # `progress` on every advance, so it is the one place that can move
+            # the step with the work; it is written key-by-key, so every sibling
+            # counter survives.
+            step = {
+                "complete": "complete",
+                "subagents_failed": "stopped",
+            }.get(phase_state, "applying")
             # F9: the mirror's `total`/`ok` count BATCHES, not the suggestions
             # or fixes inside them — a 15-batch, 29-suggestion apply-suggestions
             # run mirrored (and the model then reported) "15/15 ok, applied 15",
@@ -2444,6 +2461,7 @@ class WriteBatchScheduler:
                 "state": phase_state,
                 "phase": self.phase,
                 "progress": {
+                    "step": step,
                     "write_subagents": {
                         "kind": self.kind,
                         "invoker": self.invoker,
