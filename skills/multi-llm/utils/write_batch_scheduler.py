@@ -89,6 +89,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         MAX_SNAPSHOT_BYTES,
         AuditLog,
         PolicyViolation,
+        contain_under_root,
         TaskSnapshot,
         WritePolicy,
         WriteSafetyError,
@@ -144,6 +145,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         MAX_SNAPSHOT_BYTES,
         AuditLog,
         PolicyViolation,
+        contain_under_root,
         TaskSnapshot,
         WritePolicy,
         WriteSafetyError,
@@ -684,6 +686,71 @@ class WriteBatchScheduler:
         context = _prior_changes.render(self.output_dir)
         return prompt.replace(PRIOR_CHANGES_TOKEN, context)
 
+    def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
+        """Append the write-batch result contract the classification reads.
+
+        The batchers' prompts end in the prose "Return Format" the native
+        markdown flow compresses into a one-line summary; the scheduler — on
+        both invokers — validates the reply against
+        ``write_batch_result.schema.json`` instead, and reads ``ids`` against
+        the task's ``expected_ids``. A runner that was never shown that shape
+        answers in prose and fails rung 5 with its edits on disk. Measured
+        2026-09-15 on ``apply-task-suggestions``: three attempts applied the
+        batch to ``tasks.md`` and reported it as asked, every one was recorded
+        ``unparseable_result`` / ``schema-rejection``, and a fourth run's
+        runner, reading the already-applied file, replied "already addressed"
+        in prose and failed the same way.
+
+        The ids are spelled out in the order the items appear in the prompt,
+        because the prompt itself never names them; a reply that omits an id
+        for an item it found already applied would otherwise read as a partial
+        application and stop the loop.
+        """
+        expected = [str(i) for i in (task.get("expected_ids") or [])]
+        if self.kind == "implement":
+            id_lines = (
+                f"- `ids`: this task's id, `{expected[0]}`, when you applied it "
+                f"or found it already implemented; leave it out on `failed`."
+                if expected else
+                "- `ids`: the task ids you applied."
+            )
+        else:
+            item = "fix" if self.kind == "apply_code_fixes" else "suggestion"
+            listed = ", ".join(
+                f"{item} {index} = `{member}`"
+                for index, member in enumerate(expected, 1)
+            )
+            id_lines = (
+                f"- `ids`: the ids of the {item}s you applied **or found already "
+                f"applied by a prior batch**, from this list (numbered in the "
+                f"order they appear above): {listed}. Leave out only the ones "
+                f"you could not apply."
+            )
+        return (
+            f"{prompt.rstrip()}\n\n"
+            "## Result (required — this is how the batch is verified)\n\n"
+            "Do the work above, then end your reply with ONE JSON object (a "
+            "fenced ```json block is fine) of exactly this shape:\n\n"
+            "```json\n"
+            '{"status": "applied", "ids": ["<id>", "..."], '
+            '"files_touched": ["<repo-relative path>"], '
+            '"summary": "<one line, at most 200 characters>", '
+            '"notes": "<the per-item summary requested above>"}\n'
+            "```\n\n"
+            "- `status`: `applied` if you edited any file; `no-op` if every "
+            "change was already present and you edited nothing; `failed` if "
+            "you could not apply the batch.\n"
+            f"{id_lines}\n"
+            "- `files_touched`: repo-root-relative paths you edited (empty for "
+            "`no-op` and `failed`).\n"
+            "- `summary`: one line; it is recorded verbatim as this batch's "
+            "entry in the prior-changes log the next batch reads.\n"
+            "- `notes`: the per-item summary the return format above asks for.\n\n"
+            "A reply without this JSON object is recorded as a FAILED batch even "
+            "when the edits landed, so send it in every case — including when "
+            "nothing needed changing.\n"
+        )
+
     # -- the loop -------------------------------------------------------
 
     def run(self) -> SchedulerResult:
@@ -872,7 +939,7 @@ class WriteBatchScheduler:
             return outcome
 
         try:
-            prompt = self.dispatched_prompt(task)
+            prompt = self._with_result_contract(task, self.dispatched_prompt(task))
         except ResultRejected as exc:
             return TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
@@ -1717,12 +1784,56 @@ class WriteBatchScheduler:
                 f"Populate `declared_files`/`snapshot_files` on the materialized "
                 f"task (D3h). Nothing was dispatched."
             )
+        reused = self._reusable_snapshot(task_id, files) if self.resume else None
+        if reused is not None:
+            self.log(
+                f"[write-subagents] {task_id}: reusing the pre-batch snapshot a "
+                f"previous run took at {reused.directory} — the rollback point "
+                f"stays the bytes from before this batch's FIRST dispatch"
+            )
+            self.snapshots[task_id] = reused
+            return reused
         snapshot = TaskSnapshot.take(
             phase_dir=self.phase_dir, task_id=task_id, files=files,
             root=self.repo_root,
         )
         self.snapshots[task_id] = snapshot
         return snapshot
+
+    def _reusable_snapshot(
+        self, task_id: str, files: Sequence[str]
+    ) -> Optional[TaskSnapshot]:
+        """A previous run's snapshot for this batch, when it still applies.
+
+        A batch reaching ``_snapshot`` under resume is one that has not
+        succeeded yet (``_already_done`` skips the rest), and its half-applied
+        edits are deliberately left on disk for a human to inspect. Retaking
+        the snapshot over them would make *those* bytes the rollback point:
+        measured 2026-09-15 across four resumed runs of one failed batch, each
+        run re-snapshotted the previous run's partial edits, so ``util
+        restore-batch`` could no longer reach the file as it was before the
+        batch, and the "pre-batch snapshots are intact" line was untrue.
+
+        Reused only when the manifest names the same declared set, byte for
+        byte; a batch whose file set changed (the D2g resume guard should have
+        refused it first) takes a fresh snapshot.
+        """
+        existing = TaskSnapshot.load(self.phase_dir, task_id)
+        if existing is None:
+            return None
+        try:
+            wanted = sorted(
+                relative_to_root(str(contain_under_root(
+                    candidate, self.repo_root, what="snapshot target"
+                )), self.repo_root)
+                for candidate in files
+            )
+        except WriteSafetyError:  # a path outside the root: `take` refuses it
+            return None
+        recorded = sorted(e.relative for e in existing.declared_entries())
+        if wanted != recorded:
+            return None
+        return existing
 
     # -- resume's inputs binding (D2g/D3i) ------------------------------
 

@@ -345,11 +345,21 @@ Bulk Approval Examples:
         """Assemble the final orchestrator_output.json payload."""
         phase_dir = os.path.join(self.out_dir, self.phase_name)
 
-        # Backup tasks.md before any modifications
+        # Backup tasks.md before any modifications. A resumed run finds the
+        # file as the failed batch left it — half-applied, by design — so the
+        # backup a previous run took is the one that still holds the pre-phase
+        # bytes, and it is kept rather than overwritten (measured 2026-09-15:
+        # three resumes in a row each copied the partial edits over it).
         tasks_backup_path = os.path.join(phase_dir, "tasks-backup.md")
         os.makedirs(phase_dir, exist_ok=True)
-        shutil.copy2(self.tasks_file, tasks_backup_path)
-        print(f"Tasks file backup: {tasks_backup_path}", file=sys.stderr)
+        if getattr(self.args, "resume", False) and os.path.isfile(tasks_backup_path):
+            print(
+                f"Tasks file backup kept from the previous run: {tasks_backup_path}",
+                file=sys.stderr,
+            )
+        else:
+            shutil.copy2(self.tasks_file, tasks_backup_path)
+            print(f"Tasks file backup: {tasks_backup_path}", file=sys.stderr)
 
         return {
             "format_version": CURRENT_FORMAT_VERSION,

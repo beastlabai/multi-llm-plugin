@@ -1762,3 +1762,41 @@ class TestReplayFlagsAcrossTheDetachBoundary:
         assert carriers
         assert all("--quick" in line for line in carriers), out
         assert "--force" not in out
+
+
+class TestReaggregateCrossesTheDetachBoundary:
+    """`--reaggregate --detach` launches a worker exactly as the fan-out does.
+
+    Measured 2026-09-14 on review-tasks: the reaggregate branch ran ahead of
+    `maybe_detach`, the re-dispatch of the two failed validation batches
+    completed in the invoker's foreground with no run banner, and the opencode
+    plugin — which composes `--detach` on every launch and adopts a run only
+    from that banner — reported the finished run as an error ("the launch
+    reported no run_id on its banner").
+    """
+
+    @pytest.mark.parametrize("mode,phase", [
+        ("review-plan", "review-plan"),
+        ("review-tasks", "review-tasks"),
+        ("review-code", "code-review"),
+    ])
+    def test_the_reaggregate_branch_launches_a_worker(self, mode, phase, tmp_path,
+                                                      monkeypatch, capsys):
+        launched = {}
+
+        def fake_launch(*, mode, argv, phase_dir, plan_file, args, **kwargs):
+            launched.update(mode=mode, argv=list(argv), phase_dir=phase_dir)
+            return 0
+
+        monkeypatch.setattr(detach, "launch", fake_launch)
+        plan = _plan(tmp_path)
+        # The branch's one pre-flight, kept in the foreground: the dir exists.
+        _phase_dir(plan, phase)
+        code = multi_llm.main([mode, str(plan), "--detach", "--reaggregate"])
+        out = capsys.readouterr()
+        assert code == 0, (out.out, out.err)
+        assert launched["mode"] == mode
+        assert "--reaggregate" in launched["argv"]
+        assert Path(launched["phase_dir"]).name == phase
+        # Nothing re-aggregated in the invoker: the worker owns that.
+        assert "Reaggregation complete" not in out.out

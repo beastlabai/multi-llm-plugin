@@ -778,3 +778,78 @@ class TestResumeVerbAgreesWithThePhase:
         flags = ["--host", "opencode", "--skip-prerequisites"]
         hint = cli_common.retry_command("generate-tasks", PLAN, "--yes", flags=flags)
         assert self._resume("generate-tasks", flags) == hint.split()
+
+
+class TestTheWritePhasesResumeWithResume:
+    """`status`'s `resume with:` for the four write phases is `--resume`.
+
+    That is the verb their own exit-3 block names ("re-invoke with --resume,
+    which re-dispatches only the unfinished batches"); `--force` is the apply
+    parsers' alias for `--yes`, under which the apply base re-ingests every
+    human decision instead of replaying the recorded ones. Measured 2026-09-15
+    on a failed `apply-task-suggestions`: the log said `--resume`, the status
+    line said `--force`, and the session model ran `--claude-decide --force`
+    twice before a human typed `--resume` by hand.
+    """
+
+    WRITE_MODES = ("apply-suggestions", "apply-task-suggestions",
+                   "apply-code-fixes", "implement")
+
+    def _resume(self, mode, flags):
+        view = {"run": {"mode": mode, "replay_flags": list(flags)}, "progress": {}}
+        return run_status._resume_command(view, Path(PLAN)).split()
+
+    @pytest.mark.parametrize("mode", WRITE_MODES)
+    def test_the_verb_is_resume_and_never_force(self, mode):
+        tokens = self._resume(mode, ["--host", "opencode", "--detach"])
+        assert tokens[-1] == "--resume"
+        assert "--force" not in tokens and "--reaggregate" not in tokens
+        assert tokens[-4:-1] == ["--host", "opencode", "--detach"]
+
+    def test_the_selection_flags_survive_ahead_of_the_verb(self):
+        tokens = self._resume(
+            "apply-task-suggestions", ["--host", "opencode", "--claude-decide"]
+        )
+        assert tokens[-4:] == ["--host", "opencode", "--claude-decide", "--resume"]
+
+    def test_a_recorded_resume_or_force_is_not_doubled(self):
+        tokens = self._resume(
+            "apply-task-suggestions", ["--host", "opencode", "--resume", "--force"]
+        )
+        assert tokens.count("--resume") == 1
+        assert "--force" not in tokens
+
+    def test_the_cost_line_counts_batches_and_never_mentions_the_panel(self):
+        view = {
+            "run": {"mode": "apply-task-suggestions", "replay_flags": []},
+            "phase": "apply-task-suggestions",
+            "progress": {"write_subagents": {
+                "kind": "apply_task_suggestions", "total": 12,
+                "tasks": [
+                    {"task_id": "apply-task-batch-0", "status": "ok"},
+                    {"task_id": "apply-task-batch-1", "status": "unparseable_result"},
+                ],
+                "failed_task_ids": ["apply-task-batch-1"],
+            }},
+        }
+        lines = run_status._resume_lines(view, Path(PLAN))
+        assert lines[0].strip().startswith("resume with:")
+        assert lines[0].rstrip().endswith("--resume")
+        assert "1 failed batch(es)" in lines[1]
+        assert "keeps the 1 already applied" in lines[1]
+        assert "restore-batch" in lines[1]
+        assert "reviewer panel" not in lines[1]
+
+    def test_the_review_phases_keep_their_own_cost_line(self):
+        view = {
+            "run": {"mode": "review-tasks", "replay_flags": []},
+            "progress": {"subagents": {
+                "kind": "validation", "total": 8, "ok": 6,
+                "counts": {"ok": 6, "timeout": 2},
+                "failed_task_ids": ["validation-batch-0", "validation-batch-3"],
+            }},
+        }
+        lines = run_status._resume_lines(view, Path(PLAN))
+        assert lines[0].rstrip().endswith("--reaggregate")
+        assert "re-dispatches the 2 failed task(s)" in lines[1]
+        assert "reviewer panel" in lines[1]

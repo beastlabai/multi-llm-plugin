@@ -1696,3 +1696,154 @@ class TestReadDryRun:
         )
         oc.sweep_config_home()
         oc.reset_hermetic_state()
+
+
+# ===========================================================================
+# The result contract the runner is shown, and the rollback point a resume keeps
+# ===========================================================================
+
+class TestResultContract:
+    """Every dispatched write prompt ends with the JSON shape the verdict reads.
+
+    The batchers' prompts end in a prose "Return Format" the native markdown
+    flow compresses into a summary line; the scheduler validates the reply
+    against ``write_batch_result.schema.json`` and reads ``ids`` against
+    ``expected_ids``. Measured 2026-09-15 on ``apply-task-suggestions`` against
+    a real runner: it applied the batch, reported it exactly as the prompt
+    asked, and was recorded ``unparseable_result`` four attempts in a row.
+    """
+
+    def _dispatched(self, log: Path) -> str:
+        lines = [l for l in log.read_text().splitlines() if l]
+        return json.loads(lines[-1])["prompt"]
+
+    def test_the_contract_names_every_expected_id_in_prompt_order(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0", "s1"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        task = env.apply_task(0, expected_ids=["s0", "s1"])
+        result = env.scheduler([task]).run()
+        assert result.exit_code == 0, result.messages
+        prompt = self._dispatched(log)
+        assert "## Result (required" in prompt
+        assert '"status": "applied"' in prompt and "`no-op`" in prompt
+        assert "suggestion 1 = `s0`, suggestion 2 = `s1`" in prompt
+        assert "or found already applied by a prior batch" in prompt
+        assert PRIOR_CHANGES_TOKEN not in prompt
+        # The contract is bound at dispatch, like the prior-changes context: the
+        # hash-bound task file never learns it.
+        assert "## Result" not in task["prompt"]
+        assert prompt.index("Apply batch 0") < prompt.index("## Result")
+
+    def test_the_implement_kind_names_its_task_id(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["T001"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        task = env.apply_task(0, kind="implement", task_id="T001",
+                              expected_ids=["T001"],
+                              output_name="implement_batch_0.json")
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler([task], state=state, kind="implement",
+                               finalize=False).run()
+        assert result.exit_code == 0, result.messages
+        prompt = self._dispatched(log)
+        assert "this task's id, `T001`" in prompt
+        assert "## Result (required" in prompt
+
+    def test_the_native_invoker_is_shown_the_same_contract(self, env):
+        seen = {}
+
+        def respond(task, prompt):
+            seen["prompt"] = prompt
+            (env.plan).write_text(env.plan.read_text() + "native\n")
+            return {"status": "applied", "ids": ["s0"],
+                    "files_touched": ["plans/p.md"], "summary": "S"}
+
+        result = env.scheduler([env.apply_task(0)], respond=respond).run()
+        assert result.exit_code == 0, result.messages
+        assert "## Result (required" in seen["prompt"]
+        assert "suggestion 1 = `s0`" in seen["prompt"]
+
+
+class TestSnapshotReuseOnResume:
+    """A resumed batch keeps the rollback point from before its FIRST dispatch.
+
+    A failed batch leaves its half-applied edits in place by design. Measured
+    2026-09-15 across four resumed runs of one batch: each run re-snapshotted
+    the previous run's partial edits as the "pre-batch" bytes, so ``util
+    restore-batch`` could no longer reach the file as it was before the batch
+    and the "pre-batch snapshots are intact" line was untrue.
+    """
+
+    def _fail_once(self, env) -> bytes:
+        original = env.plan.read_bytes()
+        # The runner edits, then narrates: rung 5, edit left on disk.
+        env.edits([_patch_edit(env.plan, "half\n")], prose=True)
+        first = env.scheduler([env.apply_task(0)]).run()
+        assert first.exit_code == 3
+        assert env.plan.read_bytes() != original
+        return original
+
+    def _snapshot(self, env):
+        directory = env.phase_dir / "pre_batch" / "apply-batch-0"
+        manifest = json.loads((directory / "manifest.json").read_text())
+        payload = next((directory / "files").iterdir()).read_bytes()
+        return manifest, payload
+
+    def test_a_resumed_batch_keeps_the_original_rollback_point(self, env):
+        original = self._fail_once(env)
+        manifest_before, payload_before = self._snapshot(env)
+        assert payload_before == original
+
+        env.edits([_patch_edit(env.plan, "rest\n")],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "done"})
+        second = env.scheduler([env.apply_task(0)]).run()  # resume is the default
+        assert second.exit_code == 0, second.messages
+        assert second.outcomes[0].write_outcome == executor.WRITE_APPLIED
+
+        manifest_after, payload_after = self._snapshot(env)
+        assert manifest_after == manifest_before
+        assert payload_after == original
+        dispatched = [
+            r for r in write_safety.AuditLog(str(env.phase_dir)).records()
+            if r["event"] == "dispatched"
+        ]
+        # The prose failure is retried inside the first run, so it records more
+        # than one dispatch; every one of them, and the resumed run's, names
+        # the same pre-batch hash.
+        assert len(dispatched) >= 2
+        assert {json.dumps(r["snapshot_before"], sort_keys=True) for r in dispatched} \
+            == {json.dumps(dispatched[0]["snapshot_before"], sort_keys=True)}
+        # And the rollback command really lands on the pre-batch bytes.
+        from utils import restore_batch
+        restore_batch.restore(
+            phase_dir=str(env.phase_dir), task_ids=["apply-batch-0"],
+            force=True, dry_run=False,
+        )
+        assert env.plan.read_bytes() == original
+
+    def test_a_fresh_run_retakes_the_snapshot(self, env):
+        self._fail_once(env)
+        env.edits([_patch_edit(env.plan, "rest\n")],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "done"})
+        result = env.scheduler([env.apply_task(0)], resume=False).run()
+        assert result.exit_code == 0, result.messages
+        _manifest, payload = self._snapshot(env)
+        assert b"half" in payload, "without resume the current bytes are the baseline"
+
+    def test_a_changed_declared_set_takes_a_fresh_snapshot(self, env):
+        self._fail_once(env)
+        other = env.root / "plans" / "other.md"
+        other.write_text("other\n", encoding="utf-8")
+        env.edits([_patch_edit(env.plan, "rest\n")],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "done"})
+        task = env.apply_task(0, declared_files=[str(env.plan), str(other)])
+        result = env.scheduler([task]).run()
+        assert result.exit_code == 0, result.messages
+        manifest, _payload = self._snapshot(env)
+        assert len(manifest["files"]) == 2
