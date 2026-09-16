@@ -994,6 +994,24 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str
         return verdict
 
 
+def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> Optional[str]:
+    """The reason to refuse this slot before dispatch, or ``None`` to dispatch.
+
+    The one gate all three fan-out lanes ask — :func:`run_single_model` for
+    review-plan/review-tasks, ``code_review_orchestrator.run_single_review``
+    and ``ask_orchestrator``'s ``ask_one`` — so they share one cache, one
+    probe and one wording. Blocking (it may spawn the probe), so each lane
+    hands it to ``asyncio.to_thread``. ``ok``, ``unknown`` and ``not-required``
+    all answer ``None``: a probe that could not be read is a diagnostic and
+    never a gate, and a sandbox that dies mid-dispatch still lands on the D3k
+    ladder as rung 1.
+    """
+    state, tail = _fanout_sandbox_verdict(provider_name, cwd)
+    if state != "unavailable":
+        return None
+    return sandbox_unavailable_reason(provider_name, tail)
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -1109,11 +1127,8 @@ async def run_single_model(
     # exactly as before: a probe that could not be read is a diagnostic and never
     # a gate, and a sandbox that then dies mid-dispatch still lands on the D3k
     # ladder as rung 1.
-    sandbox_state, sandbox_tail = await asyncio.to_thread(
-        _fanout_sandbox_verdict, provider_name, project_root
-    )
-    if sandbox_state == "unavailable":
-        reason = sandbox_unavailable_reason(provider_name, sandbox_tail)
+    reason = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+    if reason is not None:
         print(f"[{display_name}] {reason}")
         return {
             "success": False, "output": None,

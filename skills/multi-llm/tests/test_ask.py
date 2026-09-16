@@ -1125,3 +1125,53 @@ class TestRoutingAndDocs:
         assert "--detach" in ask_md
         assert "PYTHONUNBUFFERED" in ask_md
         assert ".log" in ask_md
+
+
+# ---------------------------------------------------------------------------
+# D6 step 3 — ask's lane asks the same pre-dispatch sandbox question
+# ---------------------------------------------------------------------------
+
+class TestTheAskFanoutGatesOnTheSandboxProbe:
+    """`ask_one` is the third lane that reaches `generate`, so it asks too.
+
+    An ask slot answers in prose, which is what makes the ungated failure
+    invisible here: a runner whose sandbox cannot start writes a paragraph
+    about the plan file it could not open, and a non-empty answer file *is*
+    success. The refusal comes off the same once-per-run cache and carries the
+    same `[SANDBOX_UNAVAILABLE]` wording as the review lanes.
+    """
+
+    #: Real bubblewrap on a stock Ubuntu 24.04, replayed verbatim.
+    BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+
+    def test_the_ask_fanout_refuses_a_slot_whose_sandbox_cannot_start(
+        self, plan, monkeypatch
+    ):
+        from utils import provider_registry as registry
+        from utils import review_orchestrator_base as rob
+        from utils.providers.base import PROFILE_GENERATE
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        # The real adapter, with only its probe argv replaced: `sh` really runs,
+        # and what it prints is the line bwrap prints where it cannot start.
+        broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            lambda _self, profile: broken if profile == PROFILE_GENERATE else None,
+        )
+        inv = FakeInvoker()
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "codex:gpt-5.2-codex"], inv)
+
+        # D6 row 3: zero answers has nothing to aggregate, so it is exit 3.
+        assert rc == 3
+        assert inv.calls == []  # nothing was dispatched
+        d = qdir(plan, "Q")
+        reason = read_status(d)["models_failed"]["codex:gpt-5.2-codex"]
+        assert reason.startswith("[SANDBOX_UNAVAILABLE]")
+        assert "codex's sandbox cannot start here" in reason
+        assert self.BWRAP_LINE in reason
+        assert "multi_llm.py doctor" in reason
+        # The failed-model section of answers.md carries the same sentence.
+        assert reason in read_answers(d)
