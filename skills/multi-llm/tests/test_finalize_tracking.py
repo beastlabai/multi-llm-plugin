@@ -581,3 +581,134 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
         state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert [e["path"] for e in state["tracked_files"]] == ["new.py"]
         assert "Verified by the write executor" not in capsys.readouterr().out
+
+
+class TestADirectoryBaselineCoversThePathsUnderIt:
+    """A baseline entry is whatever ``git status --porcelain`` printed, and an
+    untracked *directory* is one line standing for everything beneath it."""
+
+    @pytest.fixture
+    def legacy_directory_baseline_state(self, temp_dir):
+        """The shape every real state file carries: four untracked directories."""
+        state = {
+            "pre_existing_changes": [".claude/", ".multi-llm/", "plans/", "saved/"],
+            "created_at": "2025-01-01T00:00:00",
+        }
+        state_path = temp_dir / "state.json"
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return state_path
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_only_the_verified_files_survive_a_file_granular_census(
+        self, mock_get_files, legacy_directory_baseline_state
+    ):
+        """The regression: a plain set difference subtracted none of these."""
+        mock_get_files.return_value = {
+            ".claude/video/thumb.dat",
+            "saved/session.json",
+            "plans/game.md",
+            "plans/game/tasks/tasks.md",
+        }
+
+        result = main([
+            "--state-file", str(legacy_directory_baseline_state),
+            "--touched", "plans/game.md",
+            "--touched", "plans/game/tasks/tasks.md",
+        ])
+
+        assert result == 0
+        state = json.loads(legacy_directory_baseline_state.read_text(encoding="utf-8"))
+        assert [e["path"] for e in state["tracked_files"]] == [
+            "plans/game.md",
+            "plans/game/tasks/tasks.md",
+        ]
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_touched_file_under_a_directory_baseline_is_reported_as_kept(
+        self, mock_get_files, legacy_directory_baseline_state, capsys
+    ):
+        """The "kept although modified before the phase started" note reads the
+        baseline the same prefix-aware way the subtraction does."""
+        mock_get_files.return_value = {"plans/game.md"}
+
+        main([
+            "--state-file", str(legacy_directory_baseline_state),
+            "--touched", "plans/game.md",
+        ])
+
+        out = capsys.readouterr().out
+        assert "1 kept although modified before the phase started: plans/game.md" in out
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_rerun_shrinks_a_bloated_tracked_files_list(
+        self, mock_get_files, temp_dir
+    ):
+        """``tracked_files`` is replaced, never unioned, so the repair command
+        (`util finalize-tracking --touched ...`) can undo a bad census."""
+        state = {
+            "pre_existing_changes": [".claude/", "plans/", "saved/"],
+            "tracked_files": [
+                {"path": f"saved/junk_{i}.json", "action": "modified",
+                 "task_id": "implementation"}
+                for i in range(1511)
+            ],
+            "created_at": "2025-01-01T00:00:00",
+        }
+        state_path = temp_dir / "state.json"
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        mock_get_files.return_value = {"saved/junk_0.json", "plans/game.md"}
+
+        result = main([
+            "--state-file", str(state_path),
+            "--touched", "plans/game.md",
+        ])
+
+        assert result == 0
+        updated = json.loads(state_path.read_text(encoding="utf-8"))
+        assert [e["path"] for e in updated["tracked_files"]] == ["plans/game.md"]
+
+
+class TestTheTrackedFileDumpIsTruncated:
+    """The run log is the only durable record of a detached run; a 1 500-line
+    path dump buries everything else in it (state.json keeps the full list)."""
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_only_the_first_twenty_paths_are_printed(
+        self, mock_get_files, empty_pre_existing_state, capsys
+    ):
+        mock_get_files.return_value = {f"file_{i:03d}.py" for i in range(50)}
+
+        main(["--state-file", str(empty_pre_existing_state)])
+
+        out = capsys.readouterr().out
+        assert "Tracked 50 implementation files:" in out
+        assert "  - file_019.py" in out
+        assert "  - file_020.py" not in out
+        assert "  … and 30 more (see state.json.tracked_files)" in out
+        state = json.loads(empty_pre_existing_state.read_text(encoding="utf-8"))
+        assert len(state["tracked_files"]) == 50
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_the_dry_run_branch_is_truncated_too(
+        self, mock_get_files, empty_pre_existing_state, capsys
+    ):
+        mock_get_files.return_value = {f"file_{i:03d}.py" for i in range(25)}
+
+        main(["--state-file", str(empty_pre_existing_state), "--dry-run"])
+
+        out = capsys.readouterr().out
+        assert "  - file_019.py" in out
+        assert "  - file_020.py" not in out
+        assert "  … and 5 more (see state.json.tracked_files)" in out
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_short_list_is_printed_whole_without_a_tail(
+        self, mock_get_files, empty_pre_existing_state, capsys
+    ):
+        mock_get_files.return_value = {"a.py", "b.py"}
+
+        main(["--state-file", str(empty_pre_existing_state)])
+
+        out = capsys.readouterr().out
+        assert "  - a.py" in out and "  - b.py" in out
+        assert "more (see state.json.tracked_files)" not in out

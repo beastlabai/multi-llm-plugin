@@ -27,7 +27,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
 from utils import get_modified_files as utils_get_modified_files
-from utils import get_staged_files
+from utils import baseline_covers, get_staged_files, subtract_baseline
+
+# A tracked-file dump is a reference list, not a reading; state.json holds all
+# of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
+# 1 585 log lines on this list, burying the batch outcomes either side of it.
+MAX_LISTED_PATHS = 20
 
 
 def get_all_modified_files() -> Set[str]:
@@ -47,6 +52,15 @@ def get_all_modified_files() -> Set[str]:
         print(f"Warning: Failed to get modified files: {e}", file=sys.stderr)
 
     return modified
+
+
+def _print_path_list(entries) -> None:
+    """Print at most ``MAX_LISTED_PATHS`` of the tracked entries."""
+    for entry in entries[:MAX_LISTED_PATHS]:
+        print(f"  - {entry['path']}")
+    remaining = len(entries) - MAX_LISTED_PATHS
+    if remaining > 0:
+        print(f"  … and {remaining} more (see state.json.tracked_files)")
 
 
 def main(argv=None) -> int:
@@ -133,15 +147,19 @@ def main(argv=None) -> int:
     # Get current modified files (using shared utilities for consistency)
     current_modified = get_all_modified_files()
 
-    # Subtract pre-existing changes
-    pre_existing = set(state.get("pre_existing_changes", []))
-    implementation_changes = current_modified - pre_existing
+    # Subtract pre-existing changes. Prefix-aware, because a baseline entry is
+    # whatever `git status --porcelain` printed, and an untracked *directory* is
+    # one `plans/` line standing for every path beneath it: a plain set
+    # difference subtracts none of them.
+    pre_existing = list(state.get("pre_existing_changes", []))
+    implementation_changes = set(subtract_baseline(current_modified, pre_existing))
 
     # ...except for the files the executor verified it changed: those are
     # implementation changes whether or not they were dirty at the start.
     verified = [f for f in args.touched if f and f.strip()]
     kept_pre_existing = sorted(
-        f for f in verified if f in pre_existing and f not in implementation_changes
+        f for f in verified
+        if baseline_covers(f, pre_existing) and f not in implementation_changes
     )
     implementation_changes |= set(verified)
 
@@ -169,8 +187,7 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         print("\nDry run - would track these files:")
-        for entry in tracked_files:
-            print(f"  - {entry['path']}")
+        _print_path_list(tracked_files)
         return 0
 
     # Update state
@@ -185,8 +202,7 @@ def main(argv=None) -> int:
         return 1
 
     print(f"\nTracked {len(tracked_files)} implementation files:")
-    for entry in tracked_files:
-        print(f"  - {entry['path']}")
+    _print_path_list(tracked_files)
 
     print(f"\nState file updated: {state_path}")
 
