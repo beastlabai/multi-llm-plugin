@@ -1427,6 +1427,80 @@ class TestStatusSurface:
             "29/29 items applied, applied 15"
         ) in out
 
+    def test_the_write_mirror_names_a_task_still_in_flight(self, tmp_path, capsys):
+        """F10: the mirror's `dispatched` counter used to count FINISHED
+        tasks — for an 11-minute single-task batch it read `dispatched: 0`
+        the whole time, indistinguishable from a stall. `in_flight`
+        (`write_batch_scheduler._begin_sweep`/`_mirror_status`) names the
+        task that is still running and how long it has been running for."""
+        import re
+        from datetime import datetime, timedelta
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-write-003", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "running", "exit_code": None, "detached": True,
+            "mode": "implement",
+        })
+        started = (datetime.now() - timedelta(seconds=200)).isoformat()
+        rows = [
+            {"task_id": "T001", "batch_index": 0, "status": "ok",
+             "write_outcome": "applied", "files_touched": ["index.html"]},
+        ]
+        status_file.update_status(str(phase), {
+            "phase": "implement", "state": "running",
+            "progress": {"write_subagents": {
+                "kind": "implement", "invoker": "executor", "total": 14,
+                "completed": 1, "finalized": False, "tasks": rows,
+                "failed_task_ids": [],
+                "in_flight": [{"task_id": "T002", "dispatched_at": started}],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 2
+        out = capsys.readouterr().out
+        assert re.search(
+            r"progress:       implement 1/14 ok, in flight: T002 "
+            r"\(since \d+m \d+s\)",
+            out,
+        ), out
+
+    def test_the_write_mirror_names_a_deferred_manual_task(self, tmp_path, capsys):
+        """F9: `skipped_task_ids`/`human_task_strategy` — resolved before
+        dispatch and already on `.status.json` — were rendered nowhere, so a
+        finished run's own progress line said nothing about the human task
+        `--yes`'s default strategy deferred."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-write-004", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "implement",
+        })
+        rows = [
+            {"task_id": f"T00{i}", "batch_index": i, "status": "ok",
+             "write_outcome": "applied", "files_touched": ["index.html"]}
+            for i in range(1, 14)
+        ]
+        status_file.update_status(str(phase), {
+            "phase": "implement", "state": "complete",
+            "progress": {"write_subagents": {
+                "kind": "implement", "invoker": "executor", "total": 13,
+                "completed": 13, "finalized": True, "tasks": rows,
+                "failed_task_ids": [],
+                "human_task_strategy": "skip-dependents",
+                "skipped_task_ids": ["T014"],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert (
+            "progress:       implement 13/13 ok, applied 13, "
+            "deferred manual: T014 (skip-dependents)"
+        ) in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):

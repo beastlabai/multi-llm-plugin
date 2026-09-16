@@ -557,15 +557,20 @@ class WriteBatchScheduler:
         #: reached `_classify` without ever double-recording one that did.
         self._audited: set = set()
         #: The post-run containment sweep's own state: the pre-dispatch census
-        #: per in-flight task, and the union of the declared sets that have
-        #: already passed their pre-dispatch policy check. A co-scheduled
-        #: sibling writes its OWN declared files while this task is being
-        #: classified, so those paths are subtracted before the sweep's result
-        #: reaches the policy — otherwise a disjoint group would report each
-        #: other's legitimate writes as undeclared.
+        #: per in-flight task, and each in-flight task's OWN declared set —
+        #: added on dispatch (`_begin_sweep`), removed on classification
+        #: (`_undeclared_writes`). A co-scheduled sibling writes its OWN
+        #: declared files while this task is being classified, so those paths
+        #: are subtracted before the sweep's result reaches the policy —
+        #: otherwise a disjoint group would report each other's legitimate
+        #: writes as undeclared. F13: this used to be one set unioned for the
+        #: whole PHASE and never pruned, so once any task declared a path, a
+        #: LATER task's undeclared write to that same path was invisible for
+        #: the rest of the run — the justification above only ever needed the
+        #: in-flight sets.
         self._sweep_lock = threading.Lock()
         self._census_before: Dict[str, Optional[Dict[str, Tuple[int, int]]]] = {}
-        self._declared_seen: set = set()
+        self._declared_by_task: Dict[str, set] = {}
         self._sweep_warned = False
         #: The rollback half of the same sweep. Observing an undeclared write is
         #: worth little if it cannot be undone, and the snapshot only ever held
@@ -575,10 +580,17 @@ class WriteBatchScheduler:
         #: that keeps a file from being re-hashed while its (size, mtime_ns) is
         #: unchanged, `_retained_before` is the per-in-flight-task view a sibling
         #: dispatch cannot overwrite, and `_retained_bytes` accounts the store
-        #: against `SWEEP_RETAIN_MAX_BYTES`.
+        #: against `SWEEP_RETAIN_MAX_BYTES`. `_counted_digests` is what keeps
+        #: that accounting honest across an inherited store (F12): a blob
+        #: already on disk — this run's own earlier copy, or one a killed run
+        #: left behind — costs real bytes on disk whether or not `_store_blob`
+        #: copies anything this call, so each digest is counted once, on
+        #: whichever call finds it first, rather than only on the call that
+        #: wrote it.
         self._retained: Dict[str, Tuple[Tuple[int, int], Optional[str]]] = {}
         self._retained_before: Dict[str, Dict[str, str]] = {}
         self._retained_bytes = 0
+        self._counted_digests: set = set()
         self._retain_warned = False
         #: ``{spec: version}`` for every distinct runner this run actually
         #: preflighted (F12), populated as ``_dispatch_executor`` dispatches —
@@ -586,6 +598,17 @@ class WriteBatchScheduler:
         #: ``_preflight_batch_runners``; the write path preflights inline, per
         #: dispatch, and this is where its return value was being discarded.
         self._runner_versions: Dict[str, str] = {}
+        #: ``task_id -> dispatched_at`` (ISO, `_begin_sweep`'s own clock) for a
+        #: dispatch that has started and not yet been classified (F10) — what
+        #: lets the mirror report "in flight since Ns" through a batch that
+        #: runs for minutes instead of reading `dispatched: 0` the whole time,
+        #: indistinguishable from a stall. Popped in step with
+        #: `_declared_by_task`/`_census_before` in `_undeclared_writes`, so a
+        #: task that never reaches classification (an exception raised before
+        #: `_classify`) is the one case this can go stale — the run's next
+        #: mirror write self-heals it, or the process is gone and the
+        #: heartbeat says so.
+        self._dispatch_started: Dict[str, str] = {}
 
     # -- ceilings -------------------------------------------------------
 
@@ -965,7 +988,7 @@ class WriteBatchScheduler:
             outcome = self._dispatch_one(task, batch_index)
             with mirror_lock:
                 outcomes_so_far.append(outcome)
-                self._mirror_status(result, in_flight=outcomes_so_far)
+                self._mirror_status(result, finished_in_batch=outcomes_so_far)
             return outcome
 
         for group in groups:
@@ -1154,10 +1177,12 @@ class WriteBatchScheduler:
         the runner starts, because neither can be reconstructed afterwards.
         """
         census = self._census()
+        dispatched_at = datetime.now().isoformat()
         with self._sweep_lock:
             self._census_before[task_id] = census
             self._retained_before[task_id] = self._retain(census)
-            self._declared_seen.update(declared)
+            self._declared_by_task[task_id] = set(declared)
+            self._dispatch_started[task_id] = dispatched_at
             if census is None and not self._sweep_warned:
                 self._sweep_warned = True
                 self.log(
@@ -1166,6 +1191,47 @@ class WriteBatchScheduler:
                     f"is skipped for this run and driver.write_paths is enforced "
                     f"against the declared set only (D3l)."
                 )
+        # F10: the mirror's own writes only happen at a batch's boundaries
+        # (`_mirror_status`), which says nothing while a single-task batch is
+        # still running — measured 2026-09-16, T001 ran 659s as one batch and
+        # `.status.json` read `dispatched: 0` the entire time. This is the one
+        # place a dispatch's start time is known, so it patches the mirror's
+        # `in_flight` list directly rather than waiting for the next full
+        # recompute; that next call (whenever it lands) replaces the whole
+        # `write_subagents` object, `in_flight` included, from
+        # `self._dispatch_started` afresh, so a stale patch here never lingers.
+        self._publish_in_flight()
+
+    def _publish_in_flight(self) -> None:
+        """Patch ``progress.write_subagents.in_flight`` alone. Best-effort.
+
+        Reads back whatever :meth:`_mirror_status` last wrote and patches only
+        the one key this owns, so a dispatch starting mid-batch can never race
+        that fuller write for the other fields — at worst this reads a
+        `write_subagents` object one write stale, and the next real
+        :meth:`_mirror_status` call (or the next dispatch's own call here)
+        corrects it.
+        """
+        try:
+            from . import status_file as _status_file
+        except ImportError:  # pragma: no cover
+            from utils import status_file as _status_file
+        try:
+            existing = _status_file.read_status(self.phase_dir)
+            mirror = dict(
+                ((existing.get("progress") or {}).get("write_subagents")) or {}
+            )
+            with self._sweep_lock:
+                in_flight = sorted(self._dispatch_started.items())
+            mirror["in_flight"] = [
+                {"task_id": task_id, "dispatched_at": started}
+                for task_id, started in in_flight
+            ]
+            _status_file.update_status(self.phase_dir, {
+                "progress": {"write_subagents": mirror}
+            })
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            pass
 
     def _sweep_exclusions(self) -> Tuple[str, ...]:
         """Absolute paths the sweep must never attribute to the runner.
@@ -1318,8 +1384,6 @@ class WriteBatchScheduler:
         size = stamp[0]
         if size > MAX_SNAPSHOT_BYTES:
             return None
-        if self._retained_bytes + size > SWEEP_RETAIN_MAX_BYTES:
-            return None
         absolute = os.path.join(self.repo_root, relative)
         if self.policy.violation(absolute) is not None:
             return None
@@ -1328,7 +1392,21 @@ class WriteBatchScheduler:
             return None
         blob = self._blob_path(digest)
         if os.path.isfile(blob):
+            # F12: the blob may be this run's own earlier copy (a second
+            # `relative` with identical content) or one a killed run's store
+            # left behind — either way its bytes are already on disk, and the
+            # budget/utilisation line are both about bytes on disk, not bytes
+            # THIS call copied. Returning here without counting is the bug: a
+            # run that inherited a 47 MB store from a killed predecessor
+            # reported "0.1 MB of 64 MB retained" and the cap went unenforced
+            # for the rest of the run. Content-addressed, so it is counted
+            # once per digest no matter how many relative paths reach it.
+            if digest not in self._counted_digests:
+                self._counted_digests.add(digest)
+                self._retained_bytes += size
             return digest
+        if self._retained_bytes + size > SWEEP_RETAIN_MAX_BYTES:
+            return None
         try:
             os.makedirs(os.path.dirname(blob), exist_ok=True)
             # Same temp-then-replace shape every other executor write uses, so a
@@ -1339,6 +1417,7 @@ class WriteBatchScheduler:
             os.replace(pending, blob)
         except OSError:
             return None
+        self._counted_digests.add(digest)
         self._retained_bytes += size
         return digest
 
@@ -1373,7 +1452,20 @@ class WriteBatchScheduler:
         with self._sweep_lock:
             before = self._census_before.pop(task_id, None)
             retained = self._retained_before.pop(task_id, None) or {}
-            ignored = set(self._declared_seen)
+            # F13: the union of every task IN FLIGHT right now — this task's
+            # own declared set (still present; popped below) plus any
+            # co-scheduled sibling's (the justification this method's
+            # docstring names). `self._declared_by_task[task_id]` is popped
+            # AFTER this union is taken, so a LATER task's undeclared write to
+            # a path this task declared is visible to ITS OWN classification —
+            # before this fix the set was unioned for the whole phase and
+            # never pruned, so a path declared once stayed invisible for
+            # every task dispatched afterward.
+            ignored: set = set()
+            for declared in self._declared_by_task.values():
+                ignored.update(declared)
+            self._declared_by_task.pop(task_id, None)
+            self._dispatch_started.pop(task_id, None)
         if before is None:
             return UndeclaredWrites()
         after = self._census()
@@ -2518,21 +2610,24 @@ class WriteBatchScheduler:
         return path
 
     def _mirror_status(
-        self, result: SchedulerResult, *, in_flight: Sequence[TaskOutcome] = ()
+        self, result: SchedulerResult, *,
+        finished_in_batch: Sequence[TaskOutcome] = ()
     ) -> None:
         """Per-task write progress in ``.status.json`` (D3g/D4a). Best-effort.
 
-        ``in_flight`` is the current batch's finished tasks, which are not on
-        ``result.outcomes`` until the batch returns; passing them is what makes
-        the counts advance *during* a batch instead of at its boundary. The
-        rows are appended, never merged, so a task cannot be counted twice.
+        ``finished_in_batch`` is the current batch's finished tasks, which are
+        not on ``result.outcomes`` until the batch returns; passing them is
+        what makes the counts advance *during* a batch instead of at its
+        boundary. The rows are appended, never merged, so a task cannot be
+        counted twice. (Named to leave ``in_flight`` — the JSON key below —
+        for tasks that are the opposite: dispatched and NOT yet finished.)
         """
         try:
             from . import status_file as _status_file
         except ImportError:  # pragma: no cover
             from utils import status_file as _status_file
         try:
-            outcomes = list(result.outcomes) + list(in_flight)
+            outcomes = list(result.outcomes) + list(finished_in_batch)
             if result.finalized:
                 phase_state = "complete"
             elif result.stopped_at_batch is not None or result.exit_code:
@@ -2558,16 +2653,32 @@ class WriteBatchScheduler:
             # declared item list (`write_phase_bridge`: suggestion/fix member
             # ids for the three apply kinds, the task id itself for implement),
             # so both counts are already on hand with no new bookkeeping.
+            #
+            # F9 (2026-09-16): both denominators also used to include the human
+            # task(s) `human_task_strategy` skips — they never dispatch, so a
+            # clean 14-task run with one deferred manual task mirrored
+            # `13/14 batches ok`, a run that did everything it could reading as
+            # one short. `result.human_plan.skipped` is resolved before this is
+            # ever called (`_run`'s step 1), so it is on hand the same way.
+            skipped_ids = set(result.human_plan.skipped)
             expected_ids_by_task = {
                 str(task.get("task_id", "")):
                     [str(i) for i in (task.get("expected_ids") or [])]
                 for task in self.tasks
+                if str(task.get("task_id", "")) not in skipped_ids
             }
+            total = len(self.tasks) - len(skipped_ids)
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len(expected_ids_by_task.get(o.task_id, []))
                 for o in outcomes if o.write_outcome == WRITE_APPLIED
             )
+            # F10: a dispatch that has started and not yet been classified —
+            # `_dispatch_started`, added in `_begin_sweep` and removed in
+            # `_undeclared_writes`. Read under the same lock those methods take,
+            # since a disjoint group dispatches on threads.
+            with self._sweep_lock:
+                in_flight = sorted(self._dispatch_started.items())
             _status_file.update_status(self.phase_dir, {
                 # The read phases record a phase-level `state` beside the run
                 # record; without one here `status` printed `phase state: (none)`
@@ -2579,8 +2690,21 @@ class WriteBatchScheduler:
                     "write_subagents": {
                         "kind": self.kind,
                         "invoker": self.invoker,
-                        "total": len(self.tasks),
-                        "dispatched": len(outcomes),
+                        # F9: excludes tasks `human_task_strategy` skipped —
+                        # they will never dispatch, so counting them here read
+                        # a clean run as short by exactly its deferred tasks.
+                        "total": total,
+                        # F10: was `dispatched`, and counted FINISHED tasks —
+                        # for an 11-minute single-task batch it read
+                        # `dispatched: 0` the whole time, which a reader
+                        # cannot tell from a stall. Renamed to say what it
+                        # actually counts; `in_flight` below is the dispatched
+                        # count this used to be mistaken for.
+                        "completed": len(outcomes),
+                        "in_flight": [
+                            {"task_id": task_id, "dispatched_at": started}
+                            for task_id, started in in_flight
+                        ],
                         "items_total": items_total,
                         "items_applied": items_applied,
                         # F7: the run's own resolved runner, so `status` polled

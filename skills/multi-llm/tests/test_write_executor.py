@@ -59,6 +59,7 @@ from utils.write_batch_scheduler import (  # noqa: E402
     STRATEGY_PAUSE,
     STRATEGY_SKIP_CONTINUE,
     STRATEGY_SKIP_DEPENDENTS,
+    SchedulerResult,
     WriteBatchScheduler,
     resolve_human_task_plan,
 )
@@ -1828,8 +1829,14 @@ class TestAdditivityAndDetach:
         real_update = status_file.update_status
 
         def record(phase_dir, updates):
-            mirror = (updates.get("progress") or {}).get("write_subagents")
-            if isinstance(mirror, dict):
+            progress = updates.get("progress") or {}
+            mirror = progress.get("write_subagents")
+            # F10: `_begin_sweep` also patches `write_subagents` (its
+            # `in_flight` entry), one write per dispatch START rather than
+            # per task completion — real, but a different advance than the
+            # one this test pins. Only a full `_mirror_status` write carries
+            # `step`, so that is what distinguishes the two here.
+            if "step" in progress and isinstance(mirror, dict):
                 rows.append(len(mirror["tasks"]))
             real_update(phase_dir, updates)
 
@@ -2581,3 +2588,231 @@ class TestTheRollbackStoreWarningNamesItsFiles:
         assert not any(
             l.startswith("[write-subagents] rollback store:") for l in lines
         )
+
+
+class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
+    """F12: `_store_blob` returned early for an already-present
+    content-addressed blob WITHOUT adding its size to `_retained_bytes`, so a
+    run that inherited another run's store (e.g. one killed before its own
+    `finally` tore it down) reported a fraction of the store's real size and
+    the 64 MB cap went unenforced for the rest of that run."""
+
+    def test_a_blob_already_on_disk_is_counted_once(self, env):
+        relative = "src/a.py"
+        absolute = env.root / relative
+        info = absolute.stat()
+        stamp = (info.st_size, info.st_mtime_ns)
+        digest = write_safety.file_sha256(str(absolute))
+
+        scheduler = env.scheduler([env.apply_task(0)])
+        blob = scheduler._blob_path(digest)
+        os.makedirs(os.path.dirname(blob), exist_ok=True)
+        shutil.copy2(absolute, blob)
+        assert scheduler._retained_bytes == 0
+
+        returned = scheduler._store_blob(relative, stamp)
+        assert returned == digest
+        assert scheduler._retained_bytes == info.st_size
+
+        # A second call for the same content (a re-hash after an edit then a
+        # revert, or a second relative path with identical bytes) must not
+        # double-count it — the store is content-addressed once.
+        again = scheduler._store_blob(relative, stamp)
+        assert again == digest
+        assert scheduler._retained_bytes == info.st_size
+
+    def test_a_fresh_copy_is_still_counted_exactly_once(self, env):
+        """The companion case: nothing pre-exists, so `_store_blob` copies
+        the bytes itself — this must still count, and only once."""
+        relative = "src/b.py"
+        absolute = env.root / relative
+        info = absolute.stat()
+        stamp = (info.st_size, info.st_mtime_ns)
+
+        scheduler = env.scheduler([env.apply_task(0)])
+        digest = scheduler._store_blob(relative, stamp)
+        assert digest is not None
+        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._store_blob(relative, stamp) == digest
+        assert scheduler._retained_bytes == info.st_size
+
+    def test_a_run_that_inherits_a_killed_runs_store_counts_its_bytes_too(
+        self, env
+    ):
+        """End to end: a second scheduler pointed at a phase dir a killed
+        run's store survived in retains its own file AND the inherited
+        bytes, rather than reporting only the smaller, most-recent slice.
+
+        ``run()``'s own ``finally`` tears the store down (and zeroes
+        ``_retained_bytes`` with it) right after reporting the utilisation
+        line, so ``_discard_rollback_store`` is stubbed out here to inspect
+        the counter ``run()`` itself computed — the fixture's files are only
+        tens of bytes, too small for the printed ``X.Y MB`` text to tell a
+        few bytes counted from a few bytes silently dropped.
+        """
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        first = env.scheduler([env.apply_task(0)])
+        # A killed run never reaches `run()`'s `finally` (which tears the
+        # store down) — simulate that by calling the retain step directly.
+        first._retain(first._census())
+        assert (env.phase_dir / "rollback_store").is_dir()
+        inherited_bytes = first._retained_bytes
+        assert inherited_bytes > 0
+
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(1, expected_ids=["s0"])], log=lines.append,
+        )
+        second._discard_rollback_store = lambda: None
+        result = second.run()
+        assert result.exit_code == 0, result.messages
+        assert second._retained_bytes >= inherited_bytes
+        reported = [
+            l for l in lines if l.startswith("[write-subagents] rollback store:")
+        ]
+        assert len(reported) == 1, lines
+
+
+class TestMirrorDenominatorsExcludeDeferredHumanTasks:
+    """F9 (mirror half): `total`/`items_total` used to include the human
+    task(s) `human_task_strategy` skips — they never dispatch, so a clean run
+    that finished everything it could mirrored one short of its own task
+    count (measured 2026-09-16: a 14-task implement run with one deferred
+    manual task read `13/14 batches ok`)."""
+
+    def test_a_skipped_human_task_does_not_count_toward_the_denominators(
+        self, env
+    ):
+        from utils import status_file
+
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s1"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        tasks = [
+            env.apply_task(0, task_id="T-human", executor_role="human",
+                           expected_ids=["T-human"]),
+            env.apply_task(1, task_id="T-real", expected_ids=["s1"]),
+        ]
+        result = env.scheduler(
+            tasks, human_task_strategy=STRATEGY_SKIP_DEPENDENTS,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        mirror = status_file.read_status(
+            str(env.phase_dir)
+        )["progress"]["write_subagents"]
+        assert mirror["skipped_task_ids"] == ["T-human"]
+        # One real task, and the mirror's own denominators say so — not two.
+        assert mirror["total"] == 1
+        assert mirror["items_total"] == 1
+        assert mirror["items_applied"] == 1
+
+
+class TestTheInFlightMirrorNamesADispatchInProgress:
+    """F10: `.status.json`'s write-progress counter used to count FINISHED
+    tasks, so a batch that runs for minutes read `dispatched: 0` for its
+    whole duration — indistinguishable from a stall. `_begin_sweep` (the one
+    place a dispatch's start time is known) now patches `in_flight` directly,
+    and the classification step that follows it clears the entry again."""
+
+    def test_a_dispatch_in_progress_is_named_then_cleared_on_completion(
+        self, env
+    ):
+        from utils import status_file
+
+        task = env.apply_task(0)
+        scheduler = env.scheduler([task])
+        result = SchedulerResult(kind=scheduler.kind, phase=scheduler.phase)
+        # The pre-loop mirror `_run` writes before dispatching anything —
+        # `_begin_sweep`'s patch preserves whatever this last wrote.
+        scheduler._mirror_status(result)
+
+        snapshot = scheduler._snapshot(task)
+        scheduler._begin_sweep("apply-batch-0", ["plans/p.md"])
+
+        mirror = status_file.read_status(
+            str(env.phase_dir)
+        )["progress"]["write_subagents"]
+        assert [row["task_id"] for row in mirror["in_flight"]] == ["apply-batch-0"]
+        assert mirror["in_flight"][0]["dispatched_at"]
+        assert mirror["completed"] == 0
+        # The patch touched only `in_flight` — the fuller fields survive.
+        assert mirror["total"] == 1
+
+        scheduler._undeclared_writes("apply-batch-0", snapshot)
+        scheduler._mirror_status(result)
+        mirror = status_file.read_status(
+            str(env.phase_dir)
+        )["progress"]["write_subagents"]
+        assert mirror["in_flight"] == []
+
+
+class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
+    """F13: `_begin_sweep` used to union every dispatch's declared set into a
+    PHASE-LIFETIME `_declared_seen`, so once ANY task declared a path, a
+    LATER task's undeclared write to that same path was invisible to
+    `_undeclared_writes` for the rest of the run — even long after the
+    declaring task had completed. The stated justification (a co-scheduled
+    sibling writing its own declared files while a neighbour is being
+    classified) only ever needed the declared sets of tasks still IN FLIGHT."""
+
+    def test_an_undeclared_write_after_the_declaring_task_completed_is_caught(
+        self, env
+    ):
+        secret = env.root / ".env"
+        secret.write_text("TOKEN=original\n", encoding="utf-8")
+        task_a = env.apply_task(0, task_id="T-A", declared_files=[str(secret)],
+                                 snapshot_files=[str(secret)])
+        task_b = env.apply_task(1, task_id="T-B", declared_files=[str(env.plan)],
+                                 snapshot_files=[str(env.plan)])
+        scheduler = env.scheduler([task_a, task_b])
+
+        # T-A dispatches, declares .env, edits it (its OWN declared write —
+        # correctly never flagged), and is classified: no longer in flight.
+        snap_a = scheduler._snapshot(task_a)
+        scheduler._begin_sweep("T-A", [".env"])
+        secret.write_text("TOKEN=updated-by-A\n", encoding="utf-8")
+        undeclared_a = scheduler._undeclared_writes("T-A", snap_a)
+        assert undeclared_a.paths == []
+
+        # T-B dispatches later, declares only the plan — but its runner
+        # touches `.env` too: a genuine containment failure T-B never
+        # declared, and T-A is long done by now.
+        snap_b = scheduler._snapshot(task_b)
+        scheduler._begin_sweep("T-B", ["plans/p.md"])
+        secret.write_text("TOKEN=leaked-by-B\n", encoding="utf-8")
+        undeclared_b = scheduler._undeclared_writes("T-B", snap_b)
+
+        assert ".env" in undeclared_b.paths
+        with pytest.raises(write_safety.PolicyViolation):
+            scheduler.policy.check(undeclared_b.paths, when="post-run")
+
+    def test_a_co_scheduled_siblings_own_declared_write_is_still_ignored(
+        self, env
+    ):
+        """The one case the phase-lifetime union WAS protecting: two tasks in
+        flight AT THE SAME TIME, each legitimately editing its own declared
+        file while the other is still being classified. Pruning on
+        completion rather than never must not reintroduce this as a false
+        positive."""
+        file_a = env.root / "src" / "a.py"
+        file_b = env.root / "src" / "b.py"
+        task_a = env.apply_task(0, task_id="T-A", declared_files=[str(file_a)],
+                                 snapshot_files=[str(file_a)])
+        task_b = env.apply_task(1, task_id="T-B", declared_files=[str(file_b)],
+                                 snapshot_files=[str(file_b)])
+        scheduler = env.scheduler([task_a, task_b])
+
+        snap_a = scheduler._snapshot(task_a)
+        snap_b = scheduler._snapshot(task_b)
+        # Both dispatched into the same disjoint group: both in flight.
+        scheduler._begin_sweep("T-A", ["src/a.py"])
+        scheduler._begin_sweep("T-B", ["src/b.py"])
+        file_a.write_text("a = 2\n", encoding="utf-8")
+        file_b.write_text("b = 2\n", encoding="utf-8")
+
+        # T-A is classified first, while T-B is still in flight — T-B's own
+        # (legitimate, declared) edit must not read as T-A's undeclared write.
+        undeclared_a = scheduler._undeclared_writes("T-A", snap_a)
+        assert "src/b.py" not in undeclared_a.paths
