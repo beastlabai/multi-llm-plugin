@@ -874,3 +874,57 @@ class TestReviewPhaseCompletedFlag:
 
         reloaded = StateManager(sample_plan_file)
         assert reloaded.is_review_phase_completed() is False
+
+
+class TestPlanChangedFlagIsNotSticky:
+    """F8: `_load_or_create` only ever SET `plan_changed` on a hash mismatch;
+    nothing cleared it when a later load found the hash agreeing again, so
+    the flag survived every read-only phase after the run that set it and
+    `implement --resume` kept warning about a change that was not there."""
+
+    def test_a_real_edit_sets_the_flag(self, sample_plan_file):
+        """Sanity check: editing the plan between loads still sets it."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.save()
+
+        sample_plan_file.write_text("# Edited\n", encoding="utf-8")
+
+        sm2 = StateManager(sample_plan_file)
+        assert sm2.has_plan_changed() is True
+
+    def test_the_flag_clears_once_the_hash_agrees_again(self, sample_plan_file):
+        """The residue case: a stale `plan_changed: True` sits in state.json
+        (e.g. left over from a run that predates a hash re-stamp) while the
+        stored `plan_hash` already matches the plan on disk. A fresh load
+        must not keep repeating a change that is not there."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.save()
+
+        # Hand-craft the residue: the stored hash matches the plan, but a
+        # previous (buggy or interrupted) run left `plan_changed: True`
+        # sitting beside it.
+        state_data = json.loads(sm1.state_file.read_text(encoding="utf-8"))
+        assert state_data["plan_hash"] == sm1._compute_plan_hash()
+        state_data["plan_changed"] = True
+        sm1.state_file.write_text(json.dumps(state_data), encoding="utf-8")
+
+        sm2 = StateManager(sample_plan_file)
+        assert sm2.has_plan_changed() is False
+        assert "plan_changed" not in sm2.state
+
+    def test_the_cleared_flag_stays_clear_on_the_next_save_reload(
+        self, sample_plan_file
+    ):
+        """The clear happens at load, not only in memory — it has to survive
+        a save so the next session (e.g. `implement --resume`) reads it too."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.save()
+        state_data = json.loads(sm1.state_file.read_text(encoding="utf-8"))
+        state_data["plan_changed"] = True
+        sm1.state_file.write_text(json.dumps(state_data), encoding="utf-8")
+
+        sm2 = StateManager(sample_plan_file)
+        sm2.save()
+
+        sm3 = StateManager(sample_plan_file)
+        assert sm3.has_plan_changed() is False

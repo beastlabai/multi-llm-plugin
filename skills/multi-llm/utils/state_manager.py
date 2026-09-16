@@ -376,6 +376,15 @@ class StateManager:
                 if self.state.get("plan_hash") != current_hash:
                     self.state["plan_hash"] = current_hash
                     self.state["plan_changed"] = True
+                else:
+                    # The stored hash still matches what's on disk, so any
+                    # earlier `plan_changed` is stale residue — nothing here
+                    # sets the flag when the hash agrees, but nothing used to
+                    # clear it either, so it survived every read-only phase
+                    # after the run that set it and `implement --resume` kept
+                    # warning about a change that was not there (F8, audited
+                    # 2026-09-16).
+                    self.state.pop("plan_changed", None)
 
             except json.JSONDecodeError:
                 self.state = self._create_initial_state()
