@@ -644,6 +644,42 @@ class TestPrepareBatchedValidationTasks:
             for batch in batches:
                 assert long_context in batch["prompt"]
 
+    def test_a_context_over_its_budget_says_so_on_stderr(
+        self, sample_groups, tmp_path, capsys
+    ):
+        """F3: the only trace of a cut used to be a line inside the prompt.
+
+        A 200 KB plan lost its whole tail — acceptance criteria live there — and
+        the run said nothing about it on any channel an operator reads.
+        """
+        from utils.validation import VALIDATION_CONTEXT_LIMIT
+
+        over_by = 4321
+        prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context="x" * (VALIDATION_CONTEXT_LIMIT + over_by),
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+            secondary_context="y" * (VALIDATION_CONTEXT_LIMIT + 9),
+            secondary_context_label="Second block",
+        )
+
+        err = capsys.readouterr().err
+        assert f"[VALIDATION_CONTEXT_TRUNCATED] context {over_by} chars over" in err
+        assert "[VALIDATION_CONTEXT_TRUNCATED] secondary-context 9 chars over" in err
+
+    def test_a_context_inside_its_budget_says_nothing(
+        self, sample_groups, sample_context, tmp_path, capsys
+    ):
+        prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+
+        assert "[VALIDATION_CONTEXT_TRUNCATED]" not in capsys.readouterr().err
+
 
 # ============================================================================
 # Tests for merge_batched_validation_results()

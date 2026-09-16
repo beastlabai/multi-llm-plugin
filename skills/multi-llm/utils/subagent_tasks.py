@@ -728,6 +728,25 @@ def check_task_file_version(document: Any, path: str, phase_dir: str) -> None:
     )
 
 
+#: What each recorded input hash *is*, said in the words a reader can act on.
+#: A bare `tasks_sha256: materialized from 'a1b2', now 'c3d4'` names a key
+#: nothing on screen explains: a `review-tasks --reaggregate` after
+#: apply-task-suggestions rewrote `tasks/tasks.md` is a routine exit 3, and the
+#: refusal has to say which file moved before "--force" means anything.
+_INPUT_CHANGE_REASONS = {
+    "plan_sha256": "the plan file was edited since this phase materialized",
+    "grouped_sha256": "grouped.json was rewritten (a re-group or a reaggregate)",
+    "tasks_sha256": (
+        "tasks.md changed since validation — apply-task-suggestions rewrites it"
+    ),
+    "diff_sha256": "the diff under review changed",
+    "diff_base": "the diff was taken against a different base ref",
+    "reviewed_code_sha256": "a reviewed file changed at the lines these issues cite",
+    "salvage_request_sha256": "the salvage request was rewritten",
+    "items_sha256": "the item list changed",
+}
+
+
 def check_task_file_inputs(
     document: Dict[str, Any],
     path: str,
@@ -756,7 +775,9 @@ def check_task_file_inputs(
     if not changed:
         return
     details = "; ".join(
-        f"{key}: materialized from {was!r}, now {now!r}" for key, was, now in changed
+        f"{key} ({_INPUT_CHANGE_REASONS.get(key, 'changed')}): materialized "
+        f"from {was!r}, now {now!r}"
+        for key, was, now in changed
     )
     raise TaskFileError(
         f"Refusing task file {path}: the inputs it was materialized from have "

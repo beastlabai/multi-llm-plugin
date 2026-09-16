@@ -95,6 +95,8 @@ from utils.review_orchestrator_base import (
 # checkpoint write into a warning.
 from utils.status_file import read_status
 from utils.validation import (
+    VALIDATION_CONTEXT_LIMIT,
+    excerpt_context_reported,
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
     resolved_reaggregate_command,
@@ -510,11 +512,43 @@ def _issue_line_windows(
     return merged
 
 
+def _readable_inside_repo(path: str, root: Path) -> Optional[str]:
+    """The on-disk path a cited ``file`` may be read from, or ``None``.
+
+    ``path`` is **model output** — it arrives inside a reviewer's JSON — and
+    whatever it names is read, embedded in every validation batch prompt and
+    written into ``validation_tasks.json``, which lives under the plan's output
+    dir and is commonly committed. A relative path with ``..`` escaped the
+    project root and an absolute one was used verbatim, so a reviewer (or a
+    prompt injection in a comment a reviewer echoes) citing
+    ``../../.config/multi-llm/e2e.env`` had those lines shipped to the
+    validation provider.
+
+    A code-review finding is about the code under review, so the boundary is the
+    repository: absolute paths are refused outright — ``prompts/code_review.txt``
+    asks for ``"file": string, relative path to affected file``, so an absolute
+    one is already off-contract — and a relative one is kept only when it
+    resolves *inside* ``root``. Both sides are ``resolve()``d, so a symlink
+    inside the tree pointing out of it is refused too.
+    """
+    if os.path.isabs(path):
+        return None
+    try:
+        candidate = (root / path).resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        return None
+    return str(candidate)
+
+
 def build_reviewed_code_excerpt(
     groups: List[Any],
     *,
     project_root: Optional[str] = None,
     context_lines: int = REVIEWED_CODE_CONTEXT_LINES,
+    budget: Optional[int] = None,
 ) -> str:
     """The code these issues are about, as the line windows they cite.
 
@@ -533,23 +567,38 @@ def build_reviewed_code_excerpt(
     budget — and truncating that would put the same hole back one block over.
     Windows scale with the number of findings instead, and they carry the real
     line numbers the issue records cite, which a unified diff only implies.
+
+    ``budget`` fits the excerpt into a character count by dropping **whole
+    files, named** (a half-shown window reads as a complete one to a validator,
+    and a file the prompt never mentions at least cannot be misread). The first
+    file is always kept, so a single over-budget file falls through to the
+    caller's own trim rather than producing nothing. Confinement to
+    ``project_root`` is :func:`_readable_inside_repo`'s job.
     """
     windows = _issue_line_windows(groups, context_lines)
     if not windows:
         return ""
 
-    root = Path(project_root) if project_root else None
-    resolved = {
-        path: str(root / path) if root and not os.path.isabs(path) else path
-        for path in windows
-    }
-    snapshots = capture_file_snapshots(sorted(set(resolved.values())))
+    # With no git root (a plan outside a repository) the run's own working
+    # directory is the only boundary there is, and a code review always runs
+    # against the tree it reviews — so it stands in rather than disabling the
+    # confinement entirely.
+    root = Path(project_root) if project_root else Path.cwd()
+    resolved = {path: _readable_inside_repo(path, root) for path in windows}
+    snapshots = capture_file_snapshots(
+        sorted({on_disk for on_disk in resolved.values() if on_disk})
+    )
 
-    sections: List[str] = []
+    sections: List[Tuple[str, str]] = []
     for path in sorted(windows):
         on_disk = resolved[path]
+        if on_disk is None:
+            sections.append(
+                (path, f"### {path}\n\n(outside the repository; not shown)")
+            )
+            continue
         if on_disk not in snapshots:
-            sections.append(f"### {path}\n\n(not readable at review time)")
+            sections.append((path, f"### {path}\n\n(not readable at review time)"))
             continue
         blocks: List[str] = []
         for start, end in windows[path]:
@@ -563,15 +612,29 @@ def build_reviewed_code_excerpt(
             )
             blocks.append(f"```\n{body}\n```")
         if blocks:
-            sections.append(f"### {path}\n\n" + "\n\n".join(blocks))
+            sections.append((path, f"### {path}\n\n" + "\n\n".join(blocks)))
 
     if not sections:
         return ""
-    return (
+    header = (
         "Lines are numbered as they are in the file. Only the windows these "
         "issues cite are shown; nothing between them is.\n\n"
-        + "\n\n".join(sections)
     )
+    kept: List[str] = []
+    dropped: List[str] = []
+    used = len(header)
+    for path, rendered in sections:
+        if budget is not None and kept and used + len(rendered) + 2 > budget:
+            dropped.append(path)
+            continue
+        kept.append(rendered)
+        used += len(rendered) + 2
+    if dropped:
+        kept.append(
+            "(Over this block's budget, so the windows for these files are not "
+            "shown: " + ", ".join(dropped) + ".)"
+        )
+    return header + "\n\n".join(kept)
 
 
 def build_implementation_record(plan_path: Path) -> str:
@@ -606,14 +669,32 @@ def build_implementation_record(plan_path: Path) -> str:
             for task_id, status in state.implementation_task_statuses().items()
             if status != "completed"
         )
-        if unfinished:
-            rendered = []
-            for task_id, status in unfinished:
-                reason = state.get_task_status_reason(task_id)
-                rendered.append(f"{task_id} ({status}{f': {reason}' if reason else ''})")
+        # Two lists, not one. "Must not be reported as missing" is a claim about
+        # a *decision* — a task somebody chose not to run — and implement seeds
+        # every task `pending` at start (879f3b3), so a run that crashed, was
+        # aborted, or whose batch failed used to hand the reviewers every task
+        # it never finished under exactly the sentence that tells them to ignore
+        # the gap. A task that failed is the one whose missing work a code
+        # review most needs to report, so it goes on the other line with its
+        # recorded reason for context.
+        decided = []
+        unfinished_gaps = []
+        for task_id, status in unfinished:
+            reason = state.get_task_status_reason(task_id)
+            rendered = f"{task_id} ({status}{f': {reason}' if reason else ''})"
+            if status in ("skipped", "deferred") or (status == "pending" and reason):
+                decided.append(rendered)
+            else:
+                unfinished_gaps.append(rendered)
+        if decided:
             lines.append(
-                "- Tasks the implement phase did not complete, and whose work "
-                "must not be reported as missing: " + "; ".join(rendered)
+                "- Tasks the implement phase was told not to do, and whose work "
+                "must not be reported as missing: " + "; ".join(decided)
+            )
+        if unfinished_gaps:
+            lines.append(
+                "- Tasks the implement phase did not finish (report gaps in "
+                "their work normally): " + "; ".join(unfinished_gaps)
             )
 
     changes = prior_changes.render(
@@ -651,17 +732,52 @@ def build_validation_secondary_context(
 
     The two halves travel in one block because ``build_validation_prompt``
     renders exactly two, and the record is the shorter and the more load-bearing
-    of them — so it goes first, where the shared per-context excerpt cannot drop
-    it. Only the code half comes back separately, to be hashed into
-    ``inputs.reviewed_code_sha256``: the record is regenerated on every read and
-    hashing it would refuse a stored task file over a summary line rather than
-    over the code a verdict was reached about.
+    of them — so it goes first.
+
+    **One budget each, not one between them.** Putting the record first under
+    the shared ``VALIDATION_CONTEXT_LIMIT`` made the *code* the half that gets
+    cut, and the code is the block's reason to exist: measured, a 150-entry
+    implement record (~20 KB) plus 20 cited files left 11 of the 20 files with
+    no window at all, traced only by a `[... truncated ...]` line inside the
+    prompt. The record is therefore excerpted on its own
+    ``IMPLEMENTATION_RECORD_CHARS`` and the code gets everything that is left,
+    which is the same rule ``review-tasks`` applies to its two blocks.
+
+    Only the code half comes back separately, to be hashed into
+    ``inputs.reviewed_code_sha256``, and it is the **untrimmed** excerpt: the
+    hash answers "did the cited code move on disk", which is what the resume
+    check needs and what the reaggregate site recomputes with no budget of its
+    own. The record is regenerated on every read, so hashing it would refuse a
+    stored task file over a summary line rather than over the code a verdict was
+    reached about.
     """
+    record = excerpt_context_reported(
+        build_implementation_record(plan_path),
+        "implementation-record",
+        IMPLEMENTATION_RECORD_CHARS,
+    )
+    record_part = f"#### Implementation record\n\n{record}"
+    code_heading = "#### Code at the cited lines\n\n"
+    code_budget = VALIDATION_CONTEXT_LIMIT - len(record_part) - len(code_heading) - 2
+
     reviewed_code = build_reviewed_code_excerpt(groups, project_root=project_root)
-    record = build_implementation_record(plan_path)
-    parts = [f"#### Implementation record\n\n{record}"]
-    if reviewed_code:
-        parts.append(f"#### Code at the cited lines\n\n{reviewed_code}")
+    embedded = reviewed_code
+    if len(embedded) > code_budget:
+        # Re-cut by whole files rather than letting the caller's shared excerpt
+        # slice the last file mid-window. Only reached when the code really is
+        # over budget, so the common case reads the files once.
+        embedded = build_reviewed_code_excerpt(
+            groups, project_root=project_root, budget=code_budget
+        )
+        print(
+            f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code "
+            f"{len(reviewed_code) - code_budget} chars over",
+            file=sys.stderr,
+        )
+
+    parts = [record_part]
+    if embedded:
+        parts.append(f"{code_heading}{embedded}")
     return "\n\n".join(parts), reviewed_code
 
 
@@ -1720,8 +1836,16 @@ def _format_issue(
     if siblings and validation_status:
         validation_str += " (group verdict)"
 
+    # The header and the Skip box are one unit to `report_parser`: it reads the
+    # checkbox off the line *immediately* after `### N.`. A title is model
+    # output and can hold a newline, which pushes the box a line further down
+    # and loses the tick with no warning — so the title is flattened onto its
+    # own line here rather than the parser being taught to hunt for the box.
+    title = str(issue.get("title", "Untitled")).replace("\r\n", " ").replace(
+        "\n", " "
+    ).replace("\r", " ")
     lines = [
-        f"### {index}. {issue.get('title', 'Untitled')}",
+        f"### {index}. {title}",
         f"- [ ] Skip",  # Skip checkbox
     ]
 

@@ -443,6 +443,38 @@ class TestReadSideRefusals:
             read_task_file(str(path), phase_dir=str(tmp_path), current_inputs=moved)
         assert "grouped_sha256" in str(excinfo.value)
 
+    def test_the_refusal_says_which_file_moved_and_not_only_which_key(self):
+        """F8: `review-tasks --reaggregate` is exit 3 once tasks.md is edited.
+
+        That is what the hash is for — apply-task-suggestions rewrites the file
+        — but `tasks_sha256: materialized from 'a1b2', now 'c3d4'` names a key
+        nothing on screen explains, so the message has to say which artifact
+        moved before "--force" means anything.
+        """
+        with pytest.raises(TaskFileError) as excinfo:
+            check_task_file_inputs(
+                {"inputs": {"plan_sha256": "a" * 16, "tasks_sha256": "b" * 16}},
+                "/p/validation_tasks.json",
+                "/p",
+                {"plan_sha256": "a" * 16, "tasks_sha256": "c" * 16},
+            )
+        message = str(excinfo.value)
+        assert "tasks.md changed since validation" in message
+        assert "apply-task-suggestions rewrites it" in message
+        assert "--force" in message
+        # The key and both hashes are still there for a machine reader.
+        assert "tasks_sha256" in message and "'b" in message and "'c" in message
+
+    def test_every_recorded_input_key_can_explain_itself(self):
+        """A new `build_inputs` key with no reason reads as an unexplained hash."""
+        from utils.subagent_tasks import _INPUT_CHANGE_REASONS
+
+        recorded = build_inputs(
+            plan_file="", grouped_file="", tasks_file="x", diff_base="ref",
+            diff_text="", reviewed_code="", salvage_request_file="", items=[],
+        )
+        assert set(recorded) <= set(_INPUT_CHANGE_REASONS)
+
     def test_inputs_a_caller_cannot_recompute_are_not_checked(self):
         """Only keys present in both blocks are compared, so a code path with no
         diff available does not fail the file spuriously."""
