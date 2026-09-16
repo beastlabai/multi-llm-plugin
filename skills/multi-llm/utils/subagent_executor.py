@@ -220,8 +220,10 @@ __all__ = [
     "STATUS_SALVAGE_UNRECOVERABLE",
     "STATUS_PARTIAL",
     "STATUS_POLICY_VIOLATION",
+    "STATUS_BATCH_FAILED",
     "WRITE_APPLIED",
     "WRITE_CLEAN_FAILURE",
+    "WRITE_NO_OP",
     "WRITE_PARTIAL",
     "WRITE_SCHEMA_REJECTED",
     "WRITE_POLICY_VIOLATION",
@@ -324,6 +326,15 @@ RECLASSIFIABLE_STATUSES = frozenset({STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE})
 #: look reasonable, which it never is for a half-applied file).
 STATUS_PARTIAL = "partial_application"
 STATUS_POLICY_VIOLATION = "policy_violation"
+#: The third: the batch itself said ``failed`` (or its runner exited non-zero)
+#: and the byte comparison agrees that nothing moved. Not ``ok`` — a runner that
+#: reports it could not do the work has not done it, and continuing to the next
+#: batch would build on the gap — and not retried either: the runner already
+#: tried, and its own verdict, not a transport fault, is what is recorded.
+#: Measured 2026-09-16: before this status a schema-valid ``{"status":
+#: "failed"}`` with an empty diff was recorded as a *clean failure* with
+#: ``status: ok``, the loop went on, and the phase completed at exit 0.
+STATUS_BATCH_FAILED = "batch_failed"
 
 #: Every read/analyze kind runs read-only; every write kind runs ``agent-write``.
 #: Derived from the kind by the executor (D3e), never read from the task JSON —
@@ -381,6 +392,13 @@ def schema_phase_for_kind(kind: str) -> Optional[str]:
 #: continues past, while "partial application" and "policy violation" stop it.
 WRITE_APPLIED = "applied"
 WRITE_CLEAN_FAILURE = "clean-failure"
+#: The runner said ``no-op`` and the byte comparison agrees. Its own outcome
+#: rather than a clean failure, because the claim and the verdict AGREE: a
+#: clean failure is *success* claimed with nothing moved, and labelling an
+#: honest "already present" batch ``(batch failed — …)`` in the prior-changes
+#: log and the summary table told the next batch, and the reader, that the
+#: work had failed. Measured 2026-09-16 on two verification-only tasks.
+WRITE_NO_OP = "no-op"
 WRITE_PARTIAL = "partial-application"
 WRITE_SCHEMA_REJECTED = "schema-rejection"
 WRITE_POLICY_VIOLATION = "policy-violation"

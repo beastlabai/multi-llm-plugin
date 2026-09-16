@@ -267,8 +267,47 @@ class TaskDecomposer:
 
         return deps
 
+    #: The metadata lines ``plan_updater`` renders for every generated task.
+    _FILES_LINE = re.compile(
+        r'^\s*(?:\*{2}\s*files?\s+to\s+(modify|create)\s*\*{2}'
+        r'|[-*]\s+files?\s+to\s+(modify|create))\s*:\s*(?P<paths>[^\n]*)$',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    def _explicit_files(self, description: str) -> Optional[Dict[str, List[str]]]:
+        """The ``**Files to modify**:`` / ``**Files to create**:`` lines, when
+        the task carries any — ``None`` when it carries neither.
+
+        These lines are what ``plan_updater`` writes for every generated task,
+        so when they are present they are the declared file set and the
+        keyword heuristic below must not add to them: measured 2026-09-16, a
+        task whose narrative mapped plan sections to ``CONFIG.boost``,
+        ``Camera.update`` and ``HUD.update`` had every one of those dotted
+        identifiers declared as a file to *create*, so the executor
+        snapshotted, swept and reported on four files that do not exist.
+        """
+        found: Dict[str, List[str]] = {}
+        for match in self._FILES_LINE.finditer(description):
+            action = (match.group(1) or match.group(2) or "").lower()
+            paths: List[str] = found.setdefault(action, [])
+            for raw in match.group("paths").split(","):
+                item = raw.strip().strip("`\"'").strip()
+                if not item or item.lower().strip("()") in ("none", "n/a", "-", "—"):
+                    continue
+                if item not in paths:
+                    paths.append(item)
+        return found or None
+
     def _extract_files(self, description: str, action: str) -> List[str]:
-        """Extract file paths from description based on action type."""
+        """Extract file paths from description based on action type.
+
+        An explicit metadata line wins outright; the keyword heuristic is only
+        for a hand-written task that has none.
+        """
+        explicit = self._explicit_files(description)
+        if explicit is not None:
+            return list(explicit.get(action, []))
+
         files = []
 
         # Look for file paths

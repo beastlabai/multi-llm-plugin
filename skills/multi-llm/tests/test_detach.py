@@ -976,6 +976,40 @@ class TestStatusSurface:
         assert "phase state:    complete" in out
         assert "progress:       complete, task_generation 1/1 ok" in out
 
+    def test_the_write_mirror_counts_its_task_rows(self, tmp_path, capsys):
+        """`write_subagents` records one row per task and no `counts`/`ok`
+        summary; a finished nine-task run printed `implement 0/9 ok`
+        (measured 2026-09-16)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-write-001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "implement",
+        })
+        rows = [
+            {"task_id": f"T00{i}", "batch_index": i, "status": "ok",
+             "write_outcome": "applied", "files_touched": ["index.html"]}
+            for i in range(7)
+        ] + [
+            {"task_id": f"T00{i}", "batch_index": i, "status": "ok",
+             "write_outcome": "no-op", "files_touched": []}
+            for i in (7, 8)
+        ]
+        status_file.update_status(str(phase), {
+            "phase": "implement", "state": "complete",
+            "progress": {"write_subagents": {
+                "kind": "implement", "invoker": "executor", "total": 9,
+                "dispatched": 9, "finalized": True, "tasks": rows,
+                "failed_task_ids": [],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "phase state:    complete" in out
+        assert "progress:       implement 9/9 ok, applied 7, no-op 2" in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):

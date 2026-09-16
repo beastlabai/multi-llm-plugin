@@ -354,6 +354,12 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     kind = mirror.get("kind") or key
     total = mirror["total"]
     counts = mirror.get("counts") if isinstance(mirror.get("counts"), dict) else {}
+    tasks = mirror.get("tasks") if isinstance(mirror.get("tasks"), list) else []
+    if not counts and tasks:
+        # The write mirror records one row per task and no `counts`/`ok`
+        # summary; read only the summary keys and a finished nine-task run
+        # printed `implement 0/9 ok` (measured 2026-09-16).
+        counts = _write_mirror_as_counts(mirror)["counts"]
     ok = mirror.get("ok")
     if not isinstance(ok, int):
         ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
@@ -361,6 +367,13 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     for status, count in sorted(counts.items()):
         if status != "ok" and count:
             parts.append(f"{status} {count}")
+    outcomes: Dict[str, int] = {}
+    for row in tasks:
+        outcome = str((row or {}).get("write_outcome") or "")
+        if outcome:
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    for outcome, count in sorted(outcomes.items()):
+        parts.append(f"{outcome} {count}")
     failed = mirror.get("failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
