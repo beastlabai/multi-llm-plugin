@@ -2,8 +2,10 @@
 
 from .git_utils import (
     GitError,
+    baseline_covers,
     get_modified_files,
     get_staged_files,
+    subtract_baseline,
     stage_files,
     unstage_files,
     intent_to_add_untracked,
@@ -198,8 +200,10 @@ _PROVIDER_EXPORTS = tuple(sorted(_PROVIDER_CLASSES))
 __all__ = [
     # git_utils
     "GitError",
+    "baseline_covers",
     "get_modified_files",
     "get_staged_files",
+    "subtract_baseline",
     "stage_files",
     "unstage_files",
     "intent_to_add_untracked",

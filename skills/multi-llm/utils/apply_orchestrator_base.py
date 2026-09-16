@@ -2074,9 +2074,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             from utils.git_utils import get_modified_files, get_staged_files
         if self.state.get("pre_existing_changes") is not None:
             existing = self.state.get("pre_existing_changes") or []
+            # "path(s)", not "file(s)": `git status --porcelain` collapses an
+            # untracked directory into one entry, so a baseline routinely names
+            # directories (`plans/`) as well as files.
             print(
                 f"[write-subagents] dirty-tree baseline already recorded "
-                f"({len(existing)} file(s))"
+                f"({len(existing)} path(s))"
             )
             return
         try:
@@ -2091,7 +2094,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if pre_existing:
             print(
                 f"[write-subagents] dirty tree at start: {len(pre_existing)} "
-                f"uncommitted file(s) recorded as the baseline — they are NOT part "
+                f"uncommitted path(s) recorded as the baseline — they are NOT part "
                 f"of this run's changes: {', '.join(pre_existing[:10])}"
                 + (" …" if len(pre_existing) > 10 else "")
             )

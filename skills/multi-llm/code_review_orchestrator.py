@@ -47,6 +47,7 @@ from utils import (
     save_validation_results,
     sanitize_prefix,
     intent_to_add_untracked,
+    subtract_baseline,
     PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
@@ -2006,11 +2007,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
             except Exception:
                 changed_files = []
 
-        # Filter out pre-existing changes that were present before implementation
-        pre_existing = set(state.get("pre_existing_changes", []))
+        # Filter out pre-existing changes that were present before implementation.
+        # Through `subtract_baseline`, so a baseline entry that is an untracked
+        # *directory* (`plans/`, one porcelain line) covers the files under it.
+        pre_existing = list(state.get("pre_existing_changes", []))
         if pre_existing and changed_files:
             original_count = len(changed_files)
-            changed_files = [f for f in changed_files if f not in pre_existing]
+            changed_files = subtract_baseline(changed_files, pre_existing)
             filtered_count = original_count - len(changed_files)
             if filtered_count > 0:
                 print(f"Filtered out {filtered_count} pre-existing files (not part of implementation)")

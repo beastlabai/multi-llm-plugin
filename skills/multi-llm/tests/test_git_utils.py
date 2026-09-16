@@ -18,6 +18,7 @@ from utils.git_utils import (
     _parse_unified_diff,
     _run_git,
     _split_diff_by_file,
+    baseline_covers,
     capture_diff_hunks,
     capture_file_context,
     get_branch_name,
@@ -31,6 +32,7 @@ from utils.git_utils import (
     intent_to_add_untracked,
     is_clean_working_tree,
     stage_files,
+    subtract_baseline,
     unstage_files,
 )
 
@@ -165,7 +167,7 @@ class TestGetModifiedFiles:
         files = get_modified_files()
 
         assert files == []
-        mock_run_git.assert_called_once_with("status", "--porcelain", "-uall")
+        mock_run_git.assert_called_once_with("status", "--porcelain")
 
     @patch("utils.git_utils._run_git")
     def test_modified_file_returns_in_list(self, mock_run_git):
@@ -342,14 +344,13 @@ class TestGetModifiedFiles:
 
         assert files == ["kept.py"]
 
-    def test_untracked_directory_expands_to_its_files(self, temp_git_repo):
-        """An untracked *directory* must not collapse into one porcelain line.
+    def test_an_untracked_directory_stays_one_collapsed_entry(self, temp_git_repo):
+        """An untracked *directory* is censused as one ``plans/`` entry.
 
-        Plain ``--porcelain`` reports an untracked directory as a single
-        ``?? some_dir/`` entry, which is what let a dirty-tree baseline built
-        from this function declare a whole untracked tree — including a plan a
-        run was about to edit — pre-existing (F6). ``-uall`` expands it: every
-        file under the directory gets its own entry.
+        Expanding it (``-uall``) makes the census disagree with every baseline
+        already stored in a state file and, in a repo with a large untracked
+        tree, writes all of it into ``tracked_files``. The compact entry is what
+        ``subtract_baseline`` knows how to read.
         """
         untracked_dir = temp_git_repo / "plans"
         untracked_dir.mkdir()
@@ -358,8 +359,44 @@ class TestGetModifiedFiles:
 
         files = get_modified_files()
 
-        assert "plans/" not in files
-        assert sorted(files) == ["plans/one.md", "plans/two.md"]
+        assert files == ["plans/"]
+
+
+class TestSubtractBaseline:
+    """A baseline entry ending in ``/`` covers every path beneath it."""
+
+    def test_a_directory_baseline_entry_covers_the_files_under_it(self):
+        current = [
+            "plans/game.md",
+            "plans/game/tasks/tasks.md",
+            "saved/session.json",
+            "src/main.py",
+        ]
+        baseline = [".claude/", ".multi-llm/", "plans/", "saved/"]
+
+        assert subtract_baseline(current, baseline) == ["src/main.py"]
+
+    def test_a_file_baseline_entry_still_matches_exactly(self):
+        """A plain entry must not become a prefix: `src/a.py` is not `src/ab.py`."""
+        current = ["src/a.py", "src/ab.py", "src/a.pyc"]
+
+        assert subtract_baseline(current, ["src/a.py"]) == ["src/ab.py", "src/a.pyc"]
+
+    def test_the_directory_itself_is_covered_with_and_without_the_slash(self):
+        assert subtract_baseline(["plans/", "plans"], ["plans/"]) == []
+
+    def test_input_order_is_preserved(self):
+        assert subtract_baseline(["z.py", "a.py"], []) == ["z.py", "a.py"]
+
+    def test_a_quoted_directory_entry_covers_its_quoted_children(self):
+        """Git quotes a path containing a space on both sides of the comparison."""
+        current = ['"my plans/one.md"', "src/main.py"]
+
+        assert subtract_baseline(current, ['"my plans/"']) == ["src/main.py"]
+
+    def test_baseline_covers_answers_for_a_single_path(self):
+        assert baseline_covers("plans/game.md", ["plans/"])
+        assert not baseline_covers("src/main.py", ["plans/"])
 
 
 class TestGetStagedFiles:
@@ -1873,11 +1910,7 @@ class TestGetModifiedFilesAgainstRealGit:
 
         files = get_modified_files()
 
-        # F6: `get_modified_files` runs with `-uall`, so the untracked
-        # `.multi-llm/` directory is expanded to the file inside it rather
-        # than collapsed to one `.multi-llm/` entry — a plain `--porcelain`
-        # (asserted above) would still collapse it.
-        assert files == ["src/auth.py", ".multi-llm/state.json", "src/security.py"], files
+        assert files == ["src/auth.py", ".multi-llm/", "src/security.py"], files
         assert all(
             (temp_git_repo / path.rstrip("/")).exists() for path in files
         ), files

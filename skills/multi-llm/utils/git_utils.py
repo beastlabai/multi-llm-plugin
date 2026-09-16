@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 class GitError(Exception):
     """Raised when a git operation fails."""
@@ -98,17 +98,81 @@ def _porcelain_destination(path_field: str) -> str:
     return path_field
 
 
+def _unquote_porcelain_path(path: str) -> str:
+    """Drop the surrounding quotes git adds to a path that needs them.
+
+    Only the quotes: the C-style escapes inside them are left alone, so a
+    prefix comparison against an exotic filename is best-effort. Every path
+    this repo's baselines have ever held is unquoted.
+    """
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        return path[1:-1]
+    return path
+
+
+def subtract_baseline(paths: Iterable[str], baseline: Iterable[str]) -> List[str]:
+    """Return the ``paths`` a dirty-tree ``baseline`` does *not* already cover.
+
+    A baseline entry ending in ``/`` is a *directory*, and it covers everything
+    under it. That is not a convenience: ``git status --porcelain`` reports an
+    untracked directory as a single ``?? some_dir/`` line, so every baseline
+    ever recorded names directories alongside files, and a plain set difference
+    subtracts none of them — no file path equals ``"plans/"``. Measured
+    2026-09-16: a run whose baseline was the four directories ``.claude/``,
+    ``.multi-llm/``, ``plans/``, ``saved/`` subtracted nothing and tracked all
+    1 511 untracked files in the repo as its own changes.
+
+    Order is preserved so a caller's list stays in the order it discovered
+    things in.
+    """
+    exact = set()
+    prefixes = []
+    for entry in baseline:
+        if not entry:
+            continue
+        exact.add(entry)
+        bare = _unquote_porcelain_path(entry)
+        if bare.endswith("/"):
+            # The directory itself, with and without the separator, plus
+            # everything beneath it.
+            exact.add(bare)
+            exact.add(bare.rstrip("/"))
+            prefixes.append(bare)
+        else:
+            exact.add(bare)
+    kept = []
+    for path in paths:
+        if path in exact:
+            continue
+        bare_path = _unquote_porcelain_path(path)
+        if bare_path in exact:
+            continue
+        if any(bare_path.startswith(prefix) for prefix in prefixes):
+            continue
+        kept.append(path)
+    return kept
+
+
+def baseline_covers(path: str, baseline: Iterable[str]) -> bool:
+    """True when ``baseline`` already accounts for ``path`` (see above)."""
+    return not subtract_baseline([path], baseline)
+
+
 def get_modified_files() -> List[str]:
     """Get list of modified and untracked files.
 
-    ``-uall`` matters for an untracked *directory*: plain ``--porcelain``
-    collapses one into a single ``?? some_dir/`` line, so a baseline built from
-    it (``record_pre_existing_changes`` and friends) declared the *whole* tree
-    pre-existing — in a repo where e.g. ``plans/`` is untracked, that included
-    the very plan a run was about to edit. With ``-uall`` every file under an
-    untracked directory gets its own porcelain line.
+    Deliberately plain ``--porcelain``, so an untracked *directory* stays one
+    ``?? some_dir/`` line instead of expanding to every file beneath it. A
+    file-granular census cannot tell an edit inside an untracked tree from the
+    rest of that tree anyway — an untracked file has no "modified" state in git
+    — so the expansion bought nothing and cost a great deal: it made the census
+    disagree with the compact baselines already stored in ``state.json`` (see
+    ``subtract_baseline``, which is what reconciles the two), and in a repo with
+    1 511 untracked files it wrote all of them into ``tracked_files``. The
+    authoritative signal for what a run changed is the write executor's verified
+    ``files_touched``, threaded to ``finalize_tracking`` as ``--touched``.
     """
-    stdout, _, _ = _run_git("status", "--porcelain", "-uall")
+    stdout, _, _ = _run_git("status", "--porcelain")
     files = []
     # NEVER strip leading whitespace off this output: a worktree-only change is
     # reported as `" M path"`, so `stdout.strip()` would eat the first line's

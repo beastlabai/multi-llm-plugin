@@ -296,7 +296,7 @@ def record_pre_existing_changes(state: StateManager) -> None:
     """
     # Only record if not already recorded (avoid overwriting on --resume)
     if state.get("pre_existing_changes") is not None:
-        print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} files)")
+        print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
         return
 
     # Get all modified files (staged and unstaged)
@@ -311,7 +311,7 @@ def record_pre_existing_changes(state: StateManager) -> None:
         state.save()
 
         if pre_existing:
-            print(f"Recorded {len(pre_existing)} pre-existing changed files")
+            print(f"Recorded {len(pre_existing)} pre-existing changed paths")
         else:
             print("No pre-existing changes to record")
     except Exception as e:
