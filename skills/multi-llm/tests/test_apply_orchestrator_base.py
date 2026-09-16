@@ -5828,3 +5828,273 @@ class TestASkipCanBeTracedBackToItsReportEntry:
         assert entry["group_id"] == "bb5d722c00000000"
         assert entry["status"] == "invalid"
         assert entry["reason"] == "not a defect"
+
+
+class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
+    """F2: the one decision the run MADE was missing from every surface."""
+
+    def _judged_orchestrator(self, tmp_path):
+        """An orchestrator whose one group the judge decided to skip."""
+        group = {
+            "theme": "Complexity estimate",
+            "group_hash": "3b810046f0a56e8c",
+            "suggestions": [
+                {"title": "T001 complexity underestimated", "desc": "d",
+                 "importance": "LOW"}
+            ],
+            "validation_status": "needs-human-decision",
+            "validation_reason": "a human estimation call",
+        }
+        plan_path = _setup_plan_with_output(tmp_path)
+        orch = MockApplyOrchestrator(
+            _make_args(plan_file=str(plan_path), yes=True)
+        )
+        orch._setup()
+        orch.valid = []
+        orch.needs_human = []
+        orch.skipped = []
+        orch.formatted_skipped = []
+        return orch, group
+
+    def test_a_judge_skip_appended_after_the_first_build_still_lands(
+        self, tmp_path
+    ):
+        orch, group = self._judged_orchestrator(tmp_path)
+        orch._rebuild_formatted_skipped()
+        assert orch.formatted_skipped == []
+
+        # What `apply_verdicts_to_work_set` does to a skipped group.
+        group["validation_status"] = "skipped"
+        group["reason"] = "Claude auto-decide: not decidable from the text"
+        group["decision_source"] = "claude_auto_decide"
+        orch.skipped.append(group)
+
+        orch._rebuild_formatted_skipped()
+        assert len(orch.formatted_skipped) == len(orch.skipped) == 1
+        entry = orch.formatted_skipped[0]
+        assert entry["group_id"] == "3b810046f0a56e8c"
+        assert entry["status"] == "claude_skipped"
+        assert entry["decision_source"] == "claude_auto_decide"
+        assert entry["reason"] == (
+            "Claude auto-decide: not decidable from the text"
+        )
+
+    def test_a_validation_skip_keeps_its_status_and_gains_no_source_key(
+        self, tmp_path
+    ):
+        """The key is added only when there is one, so nothing else moves."""
+        orch, group = self._judged_orchestrator(tmp_path)
+        group["validation_status"] = "invalid"
+        orch.skipped.append(group)
+        orch._rebuild_formatted_skipped()
+        entry = orch.formatted_skipped[0]
+        assert entry["status"] == "invalid"
+        assert "decision_source" not in entry
+        assert entry["reason"] == "a human estimation call"
+
+    def test_run_rebuilds_the_skip_list_after_judging(self, tmp_path):
+        """The count and the list are published together and must agree."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        judged = {
+            "theme": "Judged",
+            "group_hash": "3b810046f0a56e8c",
+            "suggestions": [{"title": "J", "desc": "d", "importance": "LOW"}],
+            "validation_status": "skipped",
+            "reason": "Claude auto-decide: subjective",
+            "decision_source": "claude_auto_decide",
+        }
+
+        class JudgingOrch(MockApplyOrchestrator):
+            phase_name = "apply-judged"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def _handle_human_decisions(self):
+                # Exactly what the real one does to the work set.
+                self.skipped.append(judged)
+
+        orch = JudgingOrch(_make_args(plan_file=str(plan_path), yes=True))
+        assert orch.run() == 0
+        assert len(orch.formatted_skipped) == len(orch.skipped) == 1
+        assert orch.formatted_skipped[0]["status"] == "claude_skipped"
+
+
+class TestTheExecutorLegRunsStepSeven:
+    """F3: no summary report and no decisions overlay on --exec-subagents."""
+
+    def _orchestrator_with_a_decision(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = [
+            {"task_id": "apply-batch-0", "expected_ids": ["a", "b"]}
+        ]
+        orch.write_result = _FakeSchedulerResult(
+            [_FakeOutcome("apply-batch-0", duration_seconds=21.3)]
+        )
+        orch.formatted_valid = [
+            {"group_id": "3b810046f0a56e8c", "title": "Raise T001 to high"}
+        ]
+        orch.state.record_human_decision(
+            phase=orch.phase_name,
+            group_id="3b810046f0a56e8c",
+            decision="skipped",
+            reason="Claude auto-decide: not decidable from the text",
+            batch_context={
+                "batch_id": "claude_decide_efabfefb",
+                "batch_action": "claude_auto_decide",
+                "decision_source": "claude_auto_decide",
+                "importance_at_decision": "LOW",
+            },
+        )
+        orch.state.save()
+        return orch
+
+    def test_claude_decisions_selects_only_judge_sourced_records(self, tmp_path):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.state.record_human_decision(
+            phase=orch.phase_name, group_id="deadbeef00000000",
+            decision="approved", reason="the user said so",
+            batch_context={"decision_source": "user"},
+        )
+        orch.state.save()
+        assert list(orch.claude_decisions()) == ["3b810046f0a56e8c"]
+
+    def test_the_result_block_names_what_claude_decided(self, tmp_path, capsys):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert "Decided by Claude (1)" in out
+        assert "[skipped] Raise T001 to high [3b810046]" in out
+        assert "source: claude_auto_decide" in out
+        assert "not decidable from the text" in out
+
+    def test_the_summary_report_the_instructions_advertise_is_written(
+        self, tmp_path
+    ):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        path = orch.write_apply_summary_report()
+        assert path == str(Path(orch.out_dir) / orch.phase_name / "summary.md")
+        text = Path(path).read_text(encoding="utf-8")
+        assert "## Summary" in text
+        assert "Batches processed: 1/1" in text
+        assert "Suggestions applied: 2" in text
+        assert "## Decided by Claude" in text
+        assert "Raise T001 to high (LOW) — Skipped" in text
+        assert "claude_auto_decide" in text
+
+    def test_the_report_omits_the_decision_section_when_nothing_was_judged(
+        self, tmp_path
+    ):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = []
+        orch.write_result = _FakeSchedulerResult([])
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "## Decided by Claude" not in text
+
+    def test_the_overlay_is_regenerated_from_the_review_sidecar(self, tmp_path):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        review_dir = Path(orch.out_dir) / orch.review_subdir
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "report_data.json").write_text(
+            json.dumps({"templateStyle": "flat", "groups": []}),
+            encoding="utf-8",
+        )
+        written = orch.regenerate_decisions_overlay()
+        assert written == str(review_dir / "report.html")
+        assert (review_dir / "report.html").exists()
+
+    def test_a_review_predating_the_sidecar_is_a_quiet_no_op(self, tmp_path):
+        """The command it mirrors exits 0 with a notice; so does this."""
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        review_dir = Path(orch.out_dir) / orch.review_subdir
+        assert not (review_dir / "report_data.json").exists()
+        assert orch.regenerate_decisions_overlay() is None
+
+    def test_write_outputs_produces_both_on_the_executor_leg(
+        self, tmp_path, capsys
+    ):
+        from utils import cli_common
+
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(plan_file=str(plan_path), yes=True)
+
+        class ExecutorOrch(MockApplyOrchestrator):
+            phase_name = "apply-step-seven"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                self.write_tasks = [
+                    {"task_id": "apply-batch-0", "expected_ids": ["a"]}
+                ]
+                self.write_result = _FakeSchedulerResult(
+                    [_FakeOutcome("apply-batch-0")]
+                )
+                return 0
+
+        orch = ExecutorOrch(args)
+        context = cli_common.ResultContext(
+            mode="apply-step-seven", phase="apply-step-seven"
+        )
+        cli_common.activate_result(context)
+        try:
+            assert orch.run() == 0
+        finally:
+            cli_common.deactivate_result()
+
+        summary = Path(orch.out_dir) / orch.phase_name / "summary.md"
+        assert summary.exists()
+        assert any(path.endswith("summary.md") for path in context.artifacts)
+
+    def test_a_dry_run_subagents_preflight_writes_no_report(self, tmp_path):
+        """It dispatched nothing; a report would describe a run that never ran."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(
+            plan_file=str(plan_path), yes=True, dry_run_subagents=True
+        )
+
+        class DryOrch(MockApplyOrchestrator):
+            phase_name = "apply-step-seven-dry"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                self.write_result = _FakeSchedulerResult([])
+                return 0
+
+        orch = DryOrch(args)
+        assert orch.run() == 0
+        assert not (
+            Path(orch.out_dir) / orch.phase_name / "summary.md"
+        ).exists()
+
+    def test_all_three_apply_phases_inherit_step_seven(self):
+        """They share the base, so none of them can be missing it."""
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+        from apply_task_suggestions_orchestrator import (
+            ApplyTaskSuggestionsOrchestrator,
+        )
+
+        for cls in (
+            ApplyCodeFixesOrchestrator,
+            ApplySuggestionsOrchestrator,
+            ApplyTaskSuggestionsOrchestrator,
+        ):
+            assert cls.write_apply_summary_report is (
+                ApplyOrchestratorBase.write_apply_summary_report
+            )
+            assert cls.regenerate_decisions_overlay is (
+                ApplyOrchestratorBase.regenerate_decisions_overlay
+            )
+            assert cls._rebuild_formatted_skipped is (
+                ApplyOrchestratorBase._rebuild_formatted_skipped
+            )

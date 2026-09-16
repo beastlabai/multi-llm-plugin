@@ -700,6 +700,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # them (`run.resolutions`).
             self._flush_resolutions()
             self._handle_human_decisions()
+            # Judging moves groups between the three work sets, so the skip list
+            # published downstream has to be re-derived from what it left behind
+            # — not from the pre-judging snapshot `_apply_user_feedback` built.
+            self._rebuild_formatted_skipped()
             self._prepare_batches()
             return self._write_outputs()
         except OrchestratorError as e:
@@ -1368,41 +1372,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 )
 
         # Build formatted_skipped for output
-        self.formatted_skipped = []
-        for g in self.skipped:
-            suggestions = g.get("suggestions", [])
-            title = (
-                suggestions[0].get("title", g.get("theme", "Unknown"))
-                if suggestions
-                else g.get("theme", "Unknown")
-            )
-            importance = get_highest_importance(g)
-            status = g.get("validation_status", "unknown")
-            reason = g.get("validation_reason", "")
-            if status == "invalid":
-                skip_status = "invalid"
-            elif g.get("_bulk_skipped"):
-                skip_status = "bulk_skipped"
-            elif status == "valid":
-                skip_status = "below_priority"
-            else:
-                skip_status = status
-            self.formatted_skipped.append(
-                {
-                    # The same key `format_item_for_output` puts on every
-                    # `to_apply` entry, and for the same reason: without it a
-                    # skip can only be traced back to its report entry by
-                    # string-matching the title, which is neither stable nor
-                    # unique. A skip is the one outcome a reader most needs to
-                    # look up.
-                    "group_id": g.get("group_hash", ""),
-                    "title": title,
-                    "theme": g.get("theme", ""),
-                    "importance": importance,
-                    "status": skip_status,
-                    "reason": reason,
-                }
-            )
+        self._rebuild_formatted_skipped()
 
         # Step 27: handle_no_items_early_exit
         if not self.valid and not self.needs_human:
@@ -1414,6 +1384,66 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             len(self.needs_human),
             len(self.skipped),
         )
+
+    def _rebuild_formatted_skipped(self) -> None:
+        """Re-derive ``formatted_skipped`` from ``self.skipped`` as it stands now.
+
+        Called twice on purpose — once at the end of ``_apply_user_feedback``,
+        once after ``_handle_human_decisions`` — because judging *appends* to
+        ``self.skipped`` (``apply_verdicts_to_work_set``, ``_skip_unjudged``)
+        long after the first build. Built once, the list and the count it is
+        published beside disagreed by exactly the judged items: measured
+        2026-09-16, `orchestrator_output.json` said `skipped_count: 3` over two
+        `skipped_items`, the RESULT block said `Skipped: 2`, and `util decisions`
+        listed 19 of 20 groups — the one decision the run actually *made* was the
+        one missing from every surface meant to report decisions.
+        """
+        self.formatted_skipped = []
+        for g in self.skipped:
+            suggestions = g.get("suggestions", [])
+            title = (
+                suggestions[0].get("title", g.get("theme", "Unknown"))
+                if suggestions
+                else g.get("theme", "Unknown")
+            )
+            importance = get_highest_importance(g)
+            status = g.get("validation_status", "unknown")
+            reason = g.get("validation_reason", "")
+            # A judge-sourced skip is not a validation skip and must not be
+            # bucketed with one: it carries its own reason (the judge's, on
+            # `reason`) and the `decision_source` that says who decided. The
+            # marker is the key `apply_verdicts_to_work_set` stamps on the group.
+            decision_source = str(g.get("decision_source") or "")
+            if decision_source.startswith("claude_auto_decide"):
+                skip_status = "claude_skipped"
+                reason = g.get("reason") or reason
+            elif status == "invalid":
+                skip_status = "invalid"
+            elif g.get("_bulk_skipped"):
+                skip_status = "bulk_skipped"
+            elif status == "valid":
+                skip_status = "below_priority"
+            else:
+                skip_status = status
+            entry = {
+                # The same key `format_item_for_output` puts on every
+                # `to_apply` entry, and for the same reason: without it a
+                # skip can only be traced back to its report entry by
+                # string-matching the title, which is neither stable nor
+                # unique. A skip is the one outcome a reader most needs to
+                # look up.
+                "group_id": g.get("group_hash", ""),
+                "title": title,
+                "theme": g.get("theme", ""),
+                "importance": importance,
+                "status": skip_status,
+                "reason": reason,
+            }
+            # Added only when there is one, so a run with no judged item emits
+            # byte-identical output to the one it emitted before this key existed.
+            if decision_source:
+                entry["decision_source"] = decision_source
+            self.formatted_skipped.append(entry)
 
     # ==================================================================
     # Phase 4 — _prepare_batches
@@ -1743,8 +1773,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # skipped, because a stopped batch loop must leave the phase incomplete.
         scheduled = self.run_write_executor()
         if scheduled is not None:
-            self._record_write_artifacts(output_path)
             dispatched = not getattr(self.args, "dry_run_subagents", False)
+            if dispatched:
+                # The instructions' *Generate Summary Report* step, run here
+                # because this leg never returns to the host to run it: the
+                # report plus the decisions overlay on the review HTML. Written
+                # *before* the artifact record, so the report is one of the
+                # files handed back.
+                try:
+                    self.write_apply_summary_report()
+                    self.regenerate_decisions_overlay()
+                except Exception as e:  # noqa: BLE001 - reporting is non-fatal
+                    self.logger.warning("summary report failed: %s", e)
+            self._record_write_artifacts(output_path)
             try:
                 # `print_text_summary` is a *plan of work* — "SUGGESTIONS TO
                 # APPLY", every batch, every description — and on this leg it ran
@@ -1917,6 +1958,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             phase_dir, "write_batch_report.json"
         )
         paths["prior_changes"] = os.path.join(self.out_dir, "prior_changes.jsonl")
+        # The summary report this leg writes itself (F3). Dropped like every
+        # other path when absent, so `--dry-run-subagents` names no report.
+        paths["summary"] = os.path.join(phase_dir, "summary.md")
         try:
             from . import detach as _detach
         except ImportError:  # pragma: no cover - direct script runs
@@ -1986,10 +2030,231 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 )
                 if item.get("reason"):
                     print(f"      reason: {item['reason']}")
+        # What the judge decided, on the leg where nothing else reports it. The
+        # instructions put a `## Decided by Claude` section in the summary
+        # report, but that step lives on the native leg only, so before
+        # this the one decision a `--yes --exec-subagents` run actually *made*
+        # reached no output the phase wrote (measured 2026-09-16).
+        decided = self.claude_decisions()
+        if decided:
+            print(f"\nDecided by Claude ({len(decided)}):")
+            titles = self._titles_by_group_id()
+            for group_id, record in decided.items():
+                title = titles.get(group_id, group_id)
+                context = record.get("batch_context") or {}
+                print(
+                    f"  - [{record.get('decision', 'unknown')}] {title} "
+                    f"[{group_id[:8]}]"
+                )
+                print(f"      source: {context.get('decision_source', 'unknown')}")
+                if record.get("reason"):
+                    print(f"      reason: {record['reason']}")
+
         if self.formatted_human:
             print(f"\nStill needing a human ({len(self.formatted_human)}):")
             for item in self.formatted_human:
                 print(f"  - {item.get('title', 'Unknown')}")
+
+    # ------------------------------------------------------------------
+    # The executor leg's own summary report and decisions overlay (F3)
+    # ------------------------------------------------------------------
+
+    def claude_decisions(self) -> Dict[str, Dict[str, Any]]:
+        """This phase's recorded decisions that a judge subagent made.
+
+        The same filter the instructions' ``## Decided by Claude`` section
+        specifies: ``human_decisions_{phase}`` entries whose
+        ``batch_context.decision_source`` is ``claude_auto_decide`` or
+        ``claude_auto_decide_salvage``.
+        """
+        if self.state is None:
+            return {}
+        try:
+            recorded = self.state.get_all_human_decisions(self.phase_name)
+        except Exception:  # noqa: BLE001 - reporting must not fail a run
+            return {}
+        return {
+            group_id: record
+            for group_id, record in (recorded or {}).items()
+            if str(
+                ((record or {}).get("batch_context") or {}).get("decision_source")
+                or ""
+            ).startswith("claude_auto_decide")
+        }
+
+    def _titles_by_group_id(self) -> Dict[str, str]:
+        """``group_id -> title`` over every work set, for decision reporting."""
+        titles: Dict[str, str] = {}
+        for formatted in (
+            self.formatted_valid,
+            self.formatted_human,
+            self.formatted_skipped,
+        ):
+            for item in formatted or []:
+                gid = str(item.get("group_id") or "")
+                if gid:
+                    titles[gid] = str(item.get("title") or gid)
+        return titles
+
+    def write_apply_summary_report(self) -> Optional[str]:
+        """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
+
+        Their *Output Files* block lists this file for all three apply phases,
+        and their *Generate Summary Report* step describes its sections; both
+        live on the native leg, which ``--exec-subagents`` never reaches ("the phase
+        finishes in that one invocation"). So the executor leg writes the same
+        document itself, from the data it already has: the batch outcomes, the
+        skip list rebuilt after judging, and the judge's own decisions.
+
+        Best-effort and never fatal — a report is not worth failing an applied
+        run over. Returns the path written, or ``None``.
+        """
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        result = self.write_result
+        outcomes = list(getattr(result, "outcomes", None) or [])
+        expected_by_task = {
+            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
+            for task in self.write_tasks
+        }
+        ok = [o for o in outcomes if getattr(o, "ok", False)]
+        applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
+        decided = self.claude_decisions()
+        titles = self._titles_by_group_id()
+        noun = self.item_noun
+        nouns = f"{noun}s"
+
+        lines = [
+            f"# Applied {nouns.title()} Report",
+            "",
+            f"**Plan**: {self.plan_path}",
+        ]
+        target = self.write_target_file()
+        if target:
+            lines.append(f"**Applied to**: {target}")
+        lines += [
+            f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "## Summary",
+            f"- Batches processed: {len(ok)}/{len(outcomes)}",
+            f"- {nouns.capitalize()} applied: {applied_items}",
+            f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
+            f"- Decided by the judge subagent: {len(decided)}",
+            "",
+            "## Applied Changes",
+            "",
+        ]
+        if outcomes:
+            for outcome in outcomes:
+                count = len(expected_by_task.get(outcome.task_id, []))
+                verdict = getattr(outcome, "write_outcome", None) or "-"
+                lines.append(
+                    f"### {outcome.task_id} — {outcome.status} ({verdict})"
+                )
+                lines.append(
+                    f"**{nouns.capitalize()}**: {count}  "
+                    f"**Duration**: {getattr(outcome, 'duration_seconds', 0.0):.1f}s  "
+                    f"**Runner**: {getattr(outcome, 'runner', '') or '(none)'}"
+                )
+                reason = getattr(outcome, "reason", None)
+                if reason and not getattr(outcome, "ok", False):
+                    lines.append(f"**Reason**: {reason}")
+                lines.append("")
+        else:
+            lines += ["(no batches were dispatched)", ""]
+
+        if decided:
+            lines += [
+                "## Decided by Claude",
+                "",
+                f"{nouns.capitalize()} whose decision was offloaded to a judge "
+                "subagent (`--claude-decide`, or a per-item \"Let Claude "
+                "decide\" selection).",
+                "",
+            ]
+            for group_id, record in decided.items():
+                context = record.get("batch_context") or {}
+                lines.append(
+                    f"### {titles.get(group_id, group_id)} "
+                    f"({context.get('importance_at_decision', 'MEDIUM')}) — "
+                    f"{str(record.get('decision', 'unknown')).capitalize()}"
+                )
+                lines.append(f"**Group**: `{group_id}`")
+                lines.append(f"**Source**: {context.get('decision_source', 'unknown')}")
+                if context.get("salvaged_description"):
+                    lines.append(f"**Kept**: {context['salvaged_description']}")
+                if context.get("dropped"):
+                    lines.append(f"**Dropped**: {context['dropped']}")
+                if record.get("reason"):
+                    lines.append(f"**Reason**: {record['reason']}")
+                lines.append("")
+
+        if self.formatted_skipped:
+            lines += [f"## Skipped {nouns.title()}", ""]
+            for item in self.formatted_skipped:
+                lines.append(
+                    f"### {item.get('title', 'Unknown')} "
+                    f"[{item.get('status', 'unknown')}]"
+                )
+                gid = str(item.get("group_id") or "")
+                if gid:
+                    lines.append(f"**Group**: `{gid}`")
+                if item.get("reason"):
+                    lines.append(f"**Reason**: {item['reason']}")
+                lines.append("")
+
+        path = os.path.join(phase_dir, "summary.md")
+        try:
+            os.makedirs(phase_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines).rstrip() + "\n")
+        except OSError as exc:  # noqa: BLE001 - a report must not fail a run
+            self.logger.warning("summary report not written: %s", exc)
+            return None
+        print(f"[write-subagents] summary report: {path}")
+        return path
+
+    def regenerate_decisions_overlay(self) -> Optional[str]:
+        """Badge the review report's findings with this phase's decisions (F3).
+
+        The in-process twin of ``util report regenerate-decisions --apply-phase
+        {phase}``, which the instructions run on the native leg only.
+        Called as a function rather than shelled out: the executor leg is
+        already inside the process that holds the decisions, and a subprocess
+        would re-resolve the skill dir it is running from.
+
+        Best-effort by design — the command it mirrors exits 0 with a notice
+        when the review predates the ``report_data.json`` sidecar.
+        """
+        if self.state is None:
+            return None
+        review_dir = Path(self.out_dir) / self.review_subdir
+        if not (review_dir / "report_data.json").exists():
+            return None
+        decisions = self.state.get_all_human_decisions(self.phase_name)
+        if not decisions:
+            return None
+        try:
+            from .html_report_generator import (
+                regenerate_report_with_human_decisions,
+            )
+        except ImportError:  # pragma: no cover - direct script runs
+            from utils.html_report_generator import (  # type: ignore
+                regenerate_report_with_human_decisions,
+            )
+        try:
+            report_path = regenerate_report_with_human_decisions(
+                review_dir, decisions
+            )
+        except Exception as exc:  # noqa: BLE001 - an overlay must not fail a run
+            self.logger.warning("decision overlay not regenerated: %s", exc)
+            return None
+        if report_path is None:
+            return None
+        print(
+            f"[write-subagents] decisions overlaid on {report_path} "
+            f"({len(decisions)} decision(s))"
+        )
+        return str(report_path)
 
     def run_write_executor(self) -> Optional[int]:
         """Drive this phase's batches through the write scheduler, or decline.

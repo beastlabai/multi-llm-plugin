@@ -137,8 +137,15 @@ def display(data: dict, phase: str) -> None:
     invalid_items = [i for i in skipped_items if i.get("status") == "invalid"]
     bulk_skipped = [i for i in skipped_items if i.get("status") == "bulk_skipped"]
     priority_filtered = [i for i in skipped_items if i.get("status") == "below_priority"]
+    # The judge's own skips. Bucketed apart from `invalid` because they are the
+    # opposite kind of outcome: validation said the item was wrong, whereas this
+    # is a decision somebody (Claude, on the user's behalf) made about an item
+    # validation could not settle — and this command is the one surface whose
+    # whole job is to say what was decided.
+    claude_skipped = [i for i in skipped_items if i.get("status") == "claude_skipped"]
     other_skipped = [i for i in skipped_items
-                     if i.get("status") not in ("invalid", "bulk_skipped", "below_priority")]
+                     if i.get("status") not in ("invalid", "bulk_skipped",
+                                                "below_priority", "claude_skipped")]
 
     if invalid_items:
         print(f"  x INVALID ({len(invalid_items)} {item_noun_plural})")
@@ -160,6 +167,22 @@ def display(data: dict, phase: str) -> None:
             imp = importance_badge(get_importance(item))
             reason = item.get("reason", "")
             line = f"  {counter}. [{imp}] {title}"
+            if reason:
+                line += f"  -- {reason}"
+            print(line)
+            counter += 1
+        print()
+
+    if claude_skipped:
+        print(f"  ! SKIPPED BY CLAUDE ({len(claude_skipped)} {item_noun_plural})")
+        for item in claude_skipped:
+            title = get_title(item)
+            imp = importance_badge(get_importance(item))
+            reason = item.get("reason", "")
+            source = item.get("decision_source", "")
+            line = f"  {counter}. [{imp}] {title}"
+            if source:
+                line += f"  ({source})"
             if reason:
                 line += f"  -- {reason}"
             print(line)

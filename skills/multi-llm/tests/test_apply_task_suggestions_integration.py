@@ -896,6 +896,46 @@ class TestDisplayDecisions:
 
         assert "WILL APPLY" in display_result.stdout
 
+    def test_a_judge_skip_is_bucketed_apart_from_invalid(self, temp_dir):
+        """F2: `util decisions` is the surface whose job is to say what was
+        decided, and a judged skip used to print beside the validation ones —
+        or, before the skip list was rebuilt, not at all."""
+        output_file = temp_dir / "orchestrator_output.json"
+        output_file.write_text(json.dumps({
+            "to_apply": [],
+            "needs_human_review": [],
+            "skipped_items": [
+                {
+                    "group_id": "32e33c790000dead",
+                    "title": "T001 omits the import-namespace pitfall",
+                    "importance": "LOW",
+                    "status": "invalid",
+                    "reason": "the plan already names it",
+                },
+                {
+                    "group_id": "3b810046f0a56e8c",
+                    "title": "T001 complexity likely underestimated",
+                    "importance": "LOW",
+                    "status": "claude_skipped",
+                    "decision_source": "claude_auto_decide",
+                    "reason": "Claude auto-decide: not decidable from the text",
+                },
+            ],
+            "summary": {"total_groups": 2},
+        }), encoding="utf-8")
+
+        display_result = run_display_decisions(output_file)
+        assert display_result.returncode == 0, display_result.stderr[:500]
+        out = display_result.stdout
+
+        assert "x INVALID (1 task suggestions)" in out
+        assert "! SKIPPED BY CLAUDE (1 task suggestions)" in out
+        assert "claude_auto_decide" in out
+        assert "not decidable from the text" in out
+        # The judged item must not be counted as a validation skip.
+        invalid_block = out.split("INVALID")[1].split("SKIPPED BY CLAUDE")[0]
+        assert "complexity likely underestimated" not in invalid_block
+
 
 class TestStatusPhaseListing:
     """Verify --status includes apply-task-suggestions in phase listing."""
