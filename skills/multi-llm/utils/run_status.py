@@ -51,12 +51,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import cli_common, detach, status_file
+from . import cli_common, detach, process_control, status_file
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
     EXIT_OK,
+    STATE_DIED,
     STATE_RUNNING,
     build_parent_parser,
     dispatcher_command,
@@ -341,6 +342,13 @@ def render_run_text(
                     f"        {entry.get('site')}: {entry.get('decision')} "
                     f"({entry.get('at')})"
                 )
+        if _died(view):
+            # The exit-3 block a terminal failure gets, one heartbeat window
+            # early: the run is over and no amount of polling will change that,
+            # so the resume command is handed over now rather than after the
+            # close-out. `reason` carries what the probe saw.
+            lines.append(f"      {view.get('reason')}")
+            lines.extend(_resume_lines(view, plan_path))
         if view["verdict"] in (detach.VERDICT_FAILED, detach.VERDICT_ABORTED):
             lines.append(f"      exit_code: {run.get('exit_code')}")
             lines.append(f"      error:     {run.get('error')}")
@@ -352,9 +360,30 @@ def render_run_text(
     return lines
 
 
+def _died(view: Dict[str, Any]) -> bool:
+    """The run is non-terminal on paper and its process is provably gone.
+
+    ``classify_run`` calls this ``stale`` and closes it out as
+    ``failed(heartbeat_timeout)`` once the beat expires, which is right — but
+    for up to ``HEARTBEAT_STALE_AFTER_S`` the only honest word for a pid the
+    identity probe says is dead is "died", not "running (stale)". F2,
+    2026-09-16: a write subagent's ``killall -9 … python3`` SIGKILLed the
+    detached worker that dispatched it, and every poll for the next minute
+    reported the dead run as running.
+    """
+    return (
+        view.get("verdict") == detach.VERDICT_STALE
+        and view.get("identity") == process_control.DEAD
+    )
+
+
 def _verdict_text(view: Dict[str, Any]) -> str:
     verdict = view["verdict"]
     age = view.get("heartbeat_age_s")
+    if _died(view):
+        pid = view["run"].get("pid")
+        beat = f"last beat {age:.0f}s ago" if age is not None else "never beat"
+        return f"died (pid {pid} gone, {beat})"
     if verdict == detach.VERDICT_STALE:
         return (
             f"running (stale, last beat {age:.0f}s ago)" if age is not None
@@ -1044,7 +1073,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # (F11, 2026-09-16: the payload said `nothing-to-do` on the same
         # screen whose text said `generate-tasks run … running`).
         if live_views:
-            record_state(STATE_RUNNING)
+            # `died` only when every live view is one: a plan holding a dead run
+            # beside a genuinely running one is, on the whole, still running.
+            record_state(
+                STATE_DIED if all(_died(v) for v in live_views) else STATE_RUNNING
+            )
     return exit_code
 
 

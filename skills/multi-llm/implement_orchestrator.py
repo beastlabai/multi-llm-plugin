@@ -349,6 +349,21 @@ After implementation, describe what you did and any issues encountered.
 """
 
 
+#: The one sentence that says whose job these criteria are. A plan's criteria are
+#: routinely written as *manual* verification steps ("serving the repo root with
+#: a local `http.server` and opening http://localhost:8000/ renders …"), and
+#: pasted in unannotated a runner reads them as its own checklist: measured
+#: 2026-09-16, a write subagent spent 10 of an 11-minute task driving headless
+#: Chrome against a server it had started, left the server orphaned, and then
+#: `killall -9 … python3`'d the detached orchestrator that dispatched it (F2).
+#: Task-level manual work is already routed away from every dispatcher by
+#: `executor_role == "human"`; criteria have no such marker, so they get a frame.
+ACCEPTANCE_CRITERIA_FRAMING = (
+    "How a human will verify the finished feature after this phase — implement "
+    "so these would pass; do not attempt the browser or manual steps yourself."
+)
+
+
 def _build_acceptance_criteria_section(criteria: List[str]) -> str:
     """Build the acceptance criteria section from a list of criteria.
 
@@ -369,7 +384,7 @@ def _build_acceptance_criteria_section(criteria: List[str]) -> str:
     overflow = len(valid) - MAX_CRITERIA
     items = valid[:MAX_CRITERIA]
 
-    lines = ["## Acceptance Criteria"]
+    lines = ["## Acceptance Criteria", ACCEPTANCE_CRITERIA_FRAMING, ""]
     for item in items:
         if len(item) > MAX_CRITERION_CHARS:
             item = item[:MAX_CRITERION_CHARS - 3] + "..."

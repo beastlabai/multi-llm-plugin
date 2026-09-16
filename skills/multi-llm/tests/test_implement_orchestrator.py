@@ -513,6 +513,50 @@ class TestBuildTaskPromptAcceptanceCriteria:
         assert "- [ ] First criterion" in result
         assert "- [ ] Second criterion" in result
 
+    def test_criteria_are_framed_as_a_humans_verification_not_the_runners(self):
+        """F2, 2026-09-16: a plan's criteria are routinely manual browser steps
+        ("serving the repo with `python3 -m http.server` and opening
+        http://localhost:8000/ renders …"), and pasted in unannotated the
+        runner read them as its own checklist — 10 of an 11-minute task spent
+        driving headless Chrome, an orphaned server left behind, and finally a
+        `killall -9 … python3` that SIGKILLed the orchestrator. The frame goes
+        above the checklist so it survives `_enforce_token_budget`, which
+        truncates from the end."""
+        from implement_orchestrator import (
+            ACCEPTANCE_CRITERIA_FRAMING,
+            build_task_prompt,
+        )
+
+        task = Task(
+            id="T001",
+            title="Test Task",
+            description="Test description",
+            acceptance_criteria=[
+                "Opening http://localhost:8000/ renders a green ground plane",
+            ],
+        )
+
+        with patch('implement_orchestrator.load_implementation_prompt',
+                   return_value=self.TEMPLATE):
+            result = build_task_prompt(task)
+
+        assert ACCEPTANCE_CRITERIA_FRAMING in result
+        assert result.index(ACCEPTANCE_CRITERIA_FRAMING) < result.index("- [ ] ")
+        assert "do not attempt the browser or manual steps yourself" in result
+
+    def test_the_prompt_forbids_signals_and_background_processes(self):
+        """The other half of F2: the shipped `## Constraints` block said
+        nothing about killing processes, so nothing told the subagent that
+        `killall` reaches the orchestrator that dispatched it."""
+        from utils.prompt_loader import load_prompt
+
+        constraints = load_prompt("implementation_task.txt").split("## Constraints", 1)[1]
+        for forbidden in ("`kill`", "`pkill`", "`killall`"):
+            assert forbidden in constraints, forbidden
+        assert "kills the orchestrator that dispatched you" in constraints
+        assert "background server" in constraints
+        assert "Verify with static checks only" in constraints
+
     def test_omits_criteria_section_when_empty(self):
         """Test build_task_prompt omits criteria section when acceptance_criteria is empty."""
         from implement_orchestrator import build_task_prompt
