@@ -804,12 +804,21 @@ def spawn_detached(
     """Start *argv* fully detached and return the worker's pid.
 
     POSIX: two spawns. The first cuts the controlling terminal
-    (``setsid``) and every inherited descriptor (stdio to ``/dev/null``,
-    everything above it closed outright by :func:`_close_inherited_fds`, so the
-    host's stdout pipe sees EOF at once);
+    (``setsid``) and every inherited descriptor (stdin to ``/dev/null``,
+    stdout/stderr to *log_path*, everything above them closed outright by
+    :func:`_close_inherited_fds`, so the host's stdout pipe sees EOF at once);
     the second cuts the parent, so the worker reparents to ``init`` and this
     process returns with no child to wait on and no zombie for the host to reap.
-    The worker opens ``log_path`` itself (see :func:`enter_detached_worker`).
+
+    ``log_path`` is handed in as the child's stdout/stderr on **both** platforms,
+    and that is the point: the worker prints its setup lines (inputs loaded,
+    models resolved, backup written, "no user preferences detected") long before
+    it reaches ``maybe_detach`` and calls :func:`enter_detached_worker`, so a
+    worker that only reopened its own log there sent every one of them to
+    ``/dev/null`` — and with them the only durable record of what a detached run
+    decided and on what inputs. It also means a worker that dies *before* the
+    handshake (a bad re-exec, a failed ``uv`` sync) leaves its reason in the log
+    the launcher's failure message tails, rather than an empty file.
 
     Windows: one spawn. ``DETACHED_PROCESS`` already removes the console, so
     there is no intermediate and nothing to reap — but a console-less child has no
@@ -819,7 +828,7 @@ def spawn_detached(
     argv = [str(a) for a in argv]
     if IS_WINDOWS:  # pragma: no cover - Windows
         return _spawn_detached_windows(argv, cwd=cwd, env=env, log_path=log_path)
-    return _spawn_detached_posix(argv, cwd=cwd, env=env)
+    return _spawn_detached_posix(argv, cwd=cwd, env=env, log_path=log_path)
 
 
 #: Bounds for :func:`_fd_sweep_limit`, which only runs where the kernel does not
@@ -902,19 +911,62 @@ def _close_inherited_fds() -> None:
     os.closerange(3, _fd_sweep_limit())  # pragma: no cover - no fd directory
 
 
-def _spawn_detached_posix(argv: List[str], *, cwd: str, env: Dict[str, str]) -> int:
+def _open_worker_log(log_path: Optional[str]) -> Optional[int]:
+    """Append-only descriptor for the worker's stdout/stderr, or ``None``.
+
+    Append, never truncate: the launcher rotated any predecessor aside already,
+    and a worker that re-enters :func:`enter_detached_worker` must find its own
+    earlier bytes still there. Best effort — a log that cannot be opened falls
+    back to ``/dev/null`` (the pre-2026-09 behaviour) rather than sinking a
+    launch whose phase dir was already proved writable.
+    """
+    if not log_path:
+        return None
+    try:
+        return os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    except OSError:
+        return None
+
+
+def _spawn_detached_posix(
+    argv: List[str], *, cwd: str, env: Dict[str, str], log_path: Optional[str]
+) -> int:
+    # Opened here, in the invoker, so the descriptor exists before the fork and
+    # the child has nothing to fail at: it only dup2s what it was handed.
+    log_fd = _open_worker_log(log_path)
     read_fd, write_fd = os.pipe()
-    intermediate = os.fork()
+    try:
+        intermediate = os.fork()
+    except OSError:
+        for spare in (log_fd, read_fd, write_fd):
+            if spare is not None:
+                try:
+                    os.close(spare)
+                except OSError:
+                    pass
+        raise
     if intermediate == 0:
         # --- spawn one: new session, no controlling terminal, no host fds ---
         try:
             os.close(read_fd)
             os.setsid()
             devnull = os.open(os.devnull, os.O_RDWR)
-            for target in (0, 1, 2):
-                os.dup2(devnull, target)
-            if devnull > 2:
-                os.close(devnull)
+            # stdout/stderr onto the phase log from the first byte the worker
+            # writes — not from `enter_detached_worker`, which the orchestrators
+            # reach only after their setup output is already on the floor.
+            # Duplicated before stdin, so that a log that landed on a low
+            # descriptor (an invoker whose own stdin was closed) is copied up to
+            # 1 and 2 before /dev/null overwrites 0.
+            out_fd = devnull if log_fd is None else log_fd
+            os.dup2(out_fd, 1)
+            os.dup2(out_fd, 2)
+            os.dup2(devnull, 0)
+            for spare in (devnull, log_fd):
+                if spare is not None and spare > 2:
+                    try:
+                        os.close(spare)
+                    except OSError:
+                        pass
             worker = os.fork()
             if worker == 0:
                 # --- spawn two: the real worker, reparented to init on exit ---
@@ -945,6 +997,13 @@ def _spawn_detached_posix(argv: List[str], *, cwd: str, env: Dict[str, str]) -> 
             os._exit(127)
         os._exit(0)
     # --- invoker: read the worker pid, reap the intermediate, return ---
+    # The log belongs to the worker now; holding a second descriptor open here
+    # would keep the invoker attached to a file it never writes.
+    if log_fd is not None:
+        try:
+            os.close(log_fd)
+        except OSError:
+            pass
     os.close(write_fd)
     try:
         raw = os.read(read_fd, 32)
@@ -987,23 +1046,50 @@ def _spawn_detached_windows(  # pragma: no cover - Windows
     return proc.pid
 
 
+def _stdio_already_on(log_path: str) -> bool:
+    """True when fds 1 **and** 2 already name the file at *log_path*."""
+    try:
+        target = os.stat(str(log_path))
+    except OSError:
+        return False
+    for fd in (1, 2):
+        try:
+            current = os.fstat(fd)
+        except OSError:
+            return False
+        if (current.st_dev, current.st_ino) != (target.st_dev, target.st_ino):
+            return False
+    return True
+
+
 def enter_detached_worker(log_path: Optional[str]) -> None:
     """Worker-side setup: own the log, own the process group, own the tree.
 
-    POSIX: reopen fds 1 and 2 onto *log_path* append-only, so no application
-    output — the worker's own or any provider subprocess's — ever passes through a
-    descriptor the host handed us, and then re-run the stream bootstrap so the
-    log gets line-buffered UTF-8 with ``errors="replace"``. **Both** settings
-    matter: without line buffering a detached log stays empty for minutes, and
-    without the encoding a Windows-piped stream defaults to cp1252 and raises
-    ``UnicodeEncodeError`` on the first em dash a model emits.
+    Idempotent with the launcher, and that is now the normal case: since the
+    POSIX spawn hands the log in as the child's stdout/stderr (so the setup lines
+    printed *before* the detach boundary are recorded too), fds 1 and 2 usually
+    already name it and there is nothing to reopen. Reopening anyway would be
+    worse than redundant — a second file description means a second buffer over
+    one file — so the descriptors are compared by ``(st_dev, st_ino)`` first.
+    Nothing here ever truncates: the open is ``O_APPEND``, so a second call
+    cannot drop the bytes the first one wrote.
+
+    Where the comparison fails (a worker launched some other way, or one whose
+    log was rotated out from under it) POSIX reopens fds 1 and 2 onto *log_path*,
+    so no application output — the worker's own or any provider subprocess's —
+    passes through a descriptor the host handed us. Either way the stream
+    bootstrap is re-run so the log gets line-buffered UTF-8 with
+    ``errors="replace"``. **Both** settings matter: without line buffering a
+    detached log stays empty for minutes, and without the encoding a
+    Windows-piped stream defaults to cp1252 and raises ``UnicodeEncodeError`` on
+    the first em dash a model emits.
 
     Windows: the launcher already handed the log in as stdout/stderr, so there is
     nothing to reopen; instead assign this process to a Job Object with
     ``KILL_ON_JOB_CLOSE`` so the OS reaps provider children even if the worker
     crashes without running a handler.
     """
-    if not IS_WINDOWS and log_path:
+    if not IS_WINDOWS and log_path and not _stdio_already_on(log_path):
         try:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         except OSError:

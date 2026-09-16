@@ -103,6 +103,24 @@ sys.exit(EXIT_CODE)
 '''
 
 
+#: A worker that prints on both streams *before* the detach boundary, the way
+#: every orchestrator does on its way to `maybe_detach`.
+PRE_DETACH_WORKER = '''
+import os, sys
+sys.path.insert(0, {skill!r})
+from utils import process_control
+
+LOG = {log!r}
+print("stdout before the boundary", flush=True)
+sys.stderr.write("stderr before the boundary\\n")
+sys.stderr.flush()
+already_on = process_control._stdio_already_on(LOG)
+process_control.enter_detached_worker(LOG)
+print("after the boundary: already_on=%s" % already_on)
+sys.exit(0)
+'''
+
+
 def spawn_worker(
     tmp_path: Path,
     phase_dir: Path,
@@ -317,6 +335,49 @@ class TestRealDetachedWorker:
         assert "—" in text, "the log must be UTF-8, not the locale codec"
         assert "[DETACHED_RUN] run_id=run-log-0001" in text
         done.touch()
+
+    @POSIX_ONLY
+    def test_the_worker_writes_to_the_log_before_it_enters_the_detached_worker(
+        self, tmp_path
+    ):
+        """The launcher hands the log in; `enter_detached_worker` only confirms it.
+
+        The worker prints its whole pre-flight — inputs loaded, models resolved,
+        backup written — before it reaches the detach boundary, so a worker whose
+        stdio started on ``/dev/null`` threw all of it away. The launcher now
+        opens the log and dup2s it onto fds 1/2 in the intermediate, which makes
+        `enter_detached_worker` idempotent: it must neither truncate the bytes
+        already there nor open a second file description over the same file.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        log = Path(detach.log_path(str(phase)))
+        log.write_text("a predecessor's bytes\n", encoding="utf-8")
+        script = tmp_path / "pre-detach-worker.py"
+        script.write_text(
+            PRE_DETACH_WORKER.format(skill=str(SKILL_ROOT), log=str(log)),
+            encoding="utf-8",
+        )
+        pid = process_control.spawn_detached(
+            [sys.executable, str(script)],
+            cwd=str(tmp_path), env=dict(os.environ), log_path=str(log),
+        )
+        assert pid > 0
+        text = _await(
+            lambda: log.read_text(encoding="utf-8")
+            if log.exists() and "after the boundary" in log.read_text(
+                encoding="utf-8") else "",
+            timeout=20,
+        )
+        assert "a predecessor's bytes" in text, "O_APPEND, never O_TRUNC"
+        assert "stdout before the boundary" in text
+        assert "stderr before the boundary" in text
+        assert text.index("stdout before the boundary") < text.index(
+            "after the boundary"
+        )
+        # The worker's own verdict: the launcher had already put fds 1 and 2 on
+        # this file, so the reopen was correctly skipped.
+        assert "already_on=True" in text
 
     @POSIX_ONLY
     def test_worker_survives_its_launcher_and_has_no_controlling_terminal(
@@ -1746,14 +1807,29 @@ class TestFullStackDetachedFanOut:
         assert run["exit_code"] == 0
         assert run["detached"] is True
 
-        # The log begins at the fork by construction: everything knowable before
-        # it was reported on the caller's own terminal (that is the pre-flight
-        # rule), and everything after it belongs to the worker — including the
-        # MULTI_LLM_RESULT line, so a host tailing the log gets the same
-        # machine-readable contract as a host reading stdout.
+        # The log is the whole of the worker, not the part after the fork.
+        # Everything knowable before the boundary is still reported on the
+        # caller's own terminal (the pre-flight rule, unchanged) — and the
+        # *worker's* copy of those same lines is in the log above the
+        # [DETACHED_RUN] banner, because the launcher hands the log in as the
+        # child's stdout/stderr. Before that, a detaching host that keeps only
+        # the poll payload had no durable record of what a run loaded or decided:
+        # measured 2026-09-16, a completed apply-suggestions log opened at
+        # [DETACHED_RUN] with no sign of the 33 groups it had loaded or the
+        # "no user preferences detected" notice under which it applied all 29.
         assert "Models: cursor-agent" in launch.stdout
         log_text = log.read_text(encoding="utf-8")
-        assert log_text.startswith(f"[DETACHED_RUN] run_id={run_id}")
+        for line in ("Loaded plan:", "Backup saved:", "Models: cursor-agent"):
+            assert line in log_text, f"pre-detach line missing from the log: {line}"
+        banner = f"[DETACHED_RUN] run_id={run_id}"
+        assert banner in log_text
+        assert log_text.index("Backup saved:") < log_text.index(banner), (
+            "the banner marks where the invoker stopped sharing the run, so the "
+            "setup lines belong above it"
+        )
+        # Everything after it belongs to the worker — including the
+        # MULTI_LLM_RESULT line, so a host tailing the log gets the same
+        # machine-readable contract as a host reading stdout.
         assert cli_common.parse_result_line(log_text)["exit"] == 0
         assert (phase / "grouped.json").exists()
 

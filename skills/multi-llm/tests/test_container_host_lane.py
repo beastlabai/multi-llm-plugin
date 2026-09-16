@@ -1446,10 +1446,10 @@ def _transcript(result) -> str:
         if path.is_file():
             chunks.append(path.read_text(encoding="utf-8", errors="replace"))
     # AND THE DETACHED WORKER'S OWN LOG. On a detaching row the dispatcher's
-    # prose never reaches the host's stdout at all: `spawn_detached` sends the
-    # worker's stdio to /dev/null and the worker opens
-    # `{phase}/orchestrator-run.log` itself, which is exactly where each executor
-    # host's `result_source` cell already says its verdict comes from. Without
+    # prose never reaches the host's stdout at all: `spawn_detached` hands the
+    # worker `{phase}/orchestrator-run.log` as its stdout/stderr, which is exactly
+    # where each executor host's `result_source` cell already says its verdict
+    # comes from. Without
     # this, "the row failed for a named reason" would be a test of whether the
     # agent happened to run it in the foreground — and no `args` string can
     # decide that, because the shim's own step 5 adds `--detach`.

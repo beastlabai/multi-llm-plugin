@@ -1661,10 +1661,19 @@ def begin_worker_run(
     # would otherwise ride along in every child's environment).
     replay = decode_replay_flags(os.environ.pop(REPLAY_FLAGS_ENV, None))
     if detached:
-        # POSIX: the invoker handed us /dev/null; we own the log. Windows: the
-        # launcher already handed the log handle in. Either way both
-        # stream_bootstrap settings (line buffering AND utf-8/replace) apply to
-        # whatever we end up writing to.
+        # On both platforms the launcher already handed the log in as this
+        # process's stdout/stderr, so this is normally a no-op on the
+        # descriptors and a real call only for the stream bootstrap (line
+        # buffering AND utf-8/replace). It stays here rather than moving earlier
+        # because it is also the fallback for a worker that did *not* arrive
+        # through `spawn_detached`.
+        #
+        # Consequence, and it is the intended one: the phase's own setup output —
+        # everything the orchestrator printed on its way to this boundary — is
+        # already in the log above the `[DETACHED_RUN]` banner. That ordering is
+        # correct, not a leak: the banner marks where the *invoker* stopped
+        # sharing the run, and the lines above it are the worker's own copy of
+        # what the invoker printed on the caller's terminal.
         process_control.enter_detached_worker(log_path(phase_dir))
     handle = RunHandle(
         phase_dir,

@@ -462,9 +462,9 @@ So the receipt is not merely the better anchor; on the reference host it is the
 **only** one.
 
 One more thing a grader has to know: on a detaching row **one receipt is
-structurally `result: null`** and it is not a finding. `spawn_detached` sends the
-worker's stdio to `/dev/null` and the worker reopens `orchestrator-run.log`
-itself, so the `uv` wrapper that exec'd it captures nothing. The payload is on
+structurally `result: null`** and it is not a finding. `spawn_detached` points the
+worker's stdio at `{phase}/orchestrator-run.log`, never at the descriptors it was
+handed, so the `uv` wrapper that exec'd it captures nothing. The payload is on
 the launcher's receipt, the verdict is in the worker's log and `.status.json`.
 
 **Subscription (documented fallback).** Narrow `:ro` mounts copied into a tmpfs
