@@ -163,10 +163,12 @@ class TestImplementOrchestratorWiring:
         assert [t["batch_index"] for t in document["batches"]] == [0, 1, 2]
         assert document["batches"][1]["depends_on"] == ["T001"]
 
-        # 2. one batch result per task, and they are schema-valid
-        for index in range(3):
+        # 2. one batch result per task, named by the TASK ID (a positional name
+        #    is what let a resumed run adopt a predecessor's result), and they
+        #    are schema-valid
+        for task_id in ("T001", "T002", "T003"):
             payload = json.loads(
-                (phase_dir / f"implement_batch_{index}.json").read_text()
+                (phase_dir / f"implement_batch_{task_id}.json").read_text()
             )
             assert payload["status"] in ("applied", "no-op")
             assert payload["summary"]
@@ -906,8 +908,8 @@ class TestFullStackDetachedImplement:
         assert first.exit_code == 0
 
         # The "kill": the process is gone, batches 1 and 2 have no result file.
-        assert (phase_dir / "implement_batch_0.json").is_file()
-        assert not (phase_dir / "implement_batch_1.json").exists()
+        assert (phase_dir / "implement_batch_T001.json").is_file()
+        assert not (phase_dir / "implement_batch_T002.json").exists()
         log.unlink(missing_ok=True)
 
         # Run 2: resume.
@@ -932,3 +934,76 @@ class TestFullStackDetachedImplement:
         # Exactly one terminal state, and it is the successful one.
         assert second.finalized is True
         assert second.stopped_at_batch is None
+
+    def test_a_resume_over_a_shorter_task_list_still_runs_the_unrun_tasks(
+        self, repo, tmp_path
+    ):
+        """The resume the implement orchestrator actually builds, end to end.
+
+        `implement_orchestrator` re-materializes from
+        `format_batches_for_output(skip_completed=--resume)`, so run 2's list holds
+        only the tasks that never finished — it is SHORTER than run 1's, which is
+        the case `test_resume_after_a_mid_batch_kill_redispatches_only_the_incomplete`
+        never covered (it hands the scheduler the same list twice). Under the old
+        positional result name every survivor inherited a predecessor's file and
+        was skipped: measured 2026-09-16, T006-T010 were reported `applied` at
+        exit 0 having never been dispatched.
+        """
+        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_phase_bridge import materialize_write_tasks
+
+        _seed_generate_tasks(repo)
+        log = tmp_path / "calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# t1\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        phase_dir = _phase_dir(repo)
+
+        def materialize(task_ids):
+            return materialize_write_tasks(
+                kind="implement",
+                batches=[
+                    {"batch_index": index, "can_parallelize": False, "tasks": [
+                        {"id": task_id, "prompt": f"do {task_id}",
+                         "files_to_modify": ["src/main.py"], "depends_on": [],
+                         "title": task_id},
+                    ]}
+                    for index, task_id in task_ids
+                ],
+                phase_dir=str(phase_dir), plan_file=str(repo.plan),
+            )
+
+        all_three = [(0, "T001"), (1, "T002"), (2, "T003")]
+        first = WriteBatchScheduler(
+            tasks=materialize(all_three)[:1], phase_dir=str(phase_dir),
+            kind="implement", output_dir=str(repo.root / ".multi-llm"),
+            plan_file=str(repo.plan), anchor=str(repo.plan),
+            repo_root=str(repo.root), finalize=False, log=lambda line: None,
+        ).run()
+        assert first.exit_code == 0
+        log.unlink(missing_ok=True)
+
+        # The resume: T001 completed, so the orchestrator materializes T002/T003
+        # ONLY — and their batch_index values keep their original 1 and 2.
+        remaining = materialize([(1, "T002"), (2, "T003")])
+        second = WriteBatchScheduler(
+            tasks=remaining, phase_dir=str(phase_dir), kind="implement",
+            output_dir=str(repo.root / ".multi-llm"), plan_file=str(repo.plan),
+            anchor=str(repo.plan), repo_root=str(repo.root), resume=True,
+            finalize=False, log=lambda line: None,
+        ).run()
+
+        assert second.exit_code == 0, second.messages
+        assert [o.task_id for o in second.outcomes] == ["T002", "T003"]
+        assert [o.skipped for o in second.outcomes] == [False, False]
+        dispatched = [
+            json.loads(line)["prompt"]
+            for line in (log.read_text().splitlines() if log.exists() else [])
+            if json.loads(line).get("prompt")
+        ]
+        assert any("do T002" in p for p in dispatched)
+        assert any("do T003" in p for p in dispatched)
+        assert (phase_dir / "implement_batch_T002.json").is_file()
+        assert (phase_dir / "implement_batch_T003.json").is_file()

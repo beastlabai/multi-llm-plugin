@@ -1041,6 +1041,37 @@ class AuditLog:
             record["usage"] = usage
         self._append(record)
 
+    def skipped(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+        output_path: str,
+        result_ids: Sequence[str],
+        files_touched: Sequence[str],
+    ) -> None:
+        """A ``--resume`` skip. No child ran, so it is neither a dispatch nor a
+        completion — but it IS a decision the run made about a task, and this file
+        is the record of what the phase did.
+
+        Measured 2026-09-16: five tasks were declared complete on a resume and the
+        log jumped straight from the previous run's ``dispatched T006`` to
+        ``dispatched T011``, so the one artifact whose whole job is answering
+        "what did this phase actually do" had nothing to say about them.
+        ``result_ids`` is the ids the trusted file itself attests to, because that
+        is the field that would have shown the mismatch by eye.
+        """
+        self._append({
+            "event": "skipped",
+            "timestamp": _now(),
+            "task_id": task_id,
+            "kind": kind,
+            "reason": "resume: result file already present and valid",
+            "output_path": output_path,
+            "result_ids": list(result_ids),
+            "files_touched": list(files_touched),
+        })
+
     def restored(self, *, task_id: str, report: Dict[str, str], force: bool) -> None:
         """``util restore-batch``'s own line — a rollback is an auditable event."""
         self._append({

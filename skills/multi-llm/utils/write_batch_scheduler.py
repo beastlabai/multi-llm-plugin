@@ -998,6 +998,12 @@ class WriteBatchScheduler:
             # The files the earlier run verified for this batch, so a resumed
             # run's finalization (`--touched`) and summary still name them.
             outcome.files_touched = self._recorded_files_touched(outcome.output_path)
+            # One line per skip, before the early return: this branch reaches
+            # neither `_audit_terminal` nor `_record_batch_effects`, so without it
+            # a resumed run's audit log is silent about every task it declared
+            # complete — the one place the 2026-09-16 five-task skip would have
+            # been visible as it happened (D3l).
+            self._audit_resume_skip(outcome, task)
             return outcome
 
         try:
@@ -1071,6 +1077,24 @@ class WriteBatchScheduler:
                 self._retained_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index)
         return outcome
+
+    def _audit_resume_skip(
+        self, outcome: TaskOutcome, task: Dict[str, Any]
+    ) -> None:
+        """Record the one decision a resume skip makes, naming what it trusted."""
+        try:
+            data = json.loads(
+                Path(outcome.output_path).read_text(encoding="utf-8")
+            )
+            raw = data.get("ids") if isinstance(data, dict) else None
+            result_ids = [str(item) for item in raw] if isinstance(raw, list) else []
+        except (OSError, ValueError):  # noqa: BLE001 - the skip already happened
+            result_ids = []
+        self.audit.skipped(
+            task_id=outcome.task_id, kind=self.kind,
+            output_path=outcome.output_path, result_ids=result_ids,
+            files_touched=outcome.files_touched,
+        )
 
     def _audit_terminal(
         self, outcome: TaskOutcome, snapshot: TaskSnapshot, profile: str
@@ -2074,7 +2098,7 @@ class WriteBatchScheduler:
         return seen
 
     def _already_done(self, task: Dict[str, Any]) -> bool:
-        """Resume's definition of done (D3i), all four clauses of it.
+        """Resume's definition of done (D3i), all five clauses of it.
 
         The result file must exist, parse and validate — **and** the task it was
         produced from must not have moved (D2g). The bridge rewrites
@@ -2089,6 +2113,17 @@ class WriteBatchScheduler:
         A task with **no** recorded binding keeps the previous behaviour: absence
         of evidence that the inputs moved is not evidence that they did, and
         re-dispatching an apply batch that already landed would apply it twice.
+
+        The fifth clause reads the file's **own** ``ids``: a result that attests
+        to none of this task's ``expected_ids`` was produced for a different
+        task, whatever its name says. Measured 2026-09-16 — a resumed implement
+        phase re-pointed T006 at an ``implement_batch_0.json`` whose ``ids`` said
+        ``["T001"]``, and because T006 had never finished it had no recorded
+        binding either, so the fourth clause had nothing to compare and five
+        never-dispatched tasks were declared complete. The evidence was on disk
+        and simply never read. It is a *defence in depth* beside the naming fix
+        in ``subagent_tasks.implement_output_name``: neither alone is why the
+        skip is safe.
         """
         try:
             target = resolve_output_target(task, self.phase_dir)
@@ -2108,6 +2143,19 @@ class WriteBatchScheduler:
             # file existing would skip exactly the batch --resume is for.
             return False
         task_id = str(task.get("task_id", ""))
+        expected = [str(item) for item in (task.get("expected_ids") or [])]
+        returned = [
+            str(item) for item in (data.get("ids") or [])
+            if isinstance(data.get("ids"), list)
+        ]
+        if expected and returned and not (set(expected) & set(returned)):
+            self.log(
+                f"[write-subagents] {task_id}: {target.name} attests to "
+                f"{', '.join(sorted(returned))} and not to "
+                f"{', '.join(expected)} — it is another task's result, so this "
+                f"one is re-dispatched rather than resumed (D3i)."
+            )
+            return False
         recorded = self._load_fingerprints().get(task_id)
         if recorded and recorded != self._task_fingerprint(task):
             self.log(

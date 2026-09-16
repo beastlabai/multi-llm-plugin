@@ -243,16 +243,18 @@ def materialize_write_tasks(
                     "batch_index": batch_index,
                     "can_parallelize": batch.get("can_parallelize"),
                 })
-                # Two tasks in one batch cannot share an output_name, so the result
-                # file is keyed by a MONOTONIC index across the phase rather than by
-                # ``batch_index``, which repeats within a parallelizable batch.
-                # Mixing the two spellings is how one task silently overwrites
-                # another's result — and D3f's containment would happily allow it,
-                # because both names match the kind's pattern.
+                # Two tasks in one batch cannot share an output_name, and neither
+                # ``batch_index`` (it repeats within a parallelizable batch) nor a
+                # monotonic counter over this list is unique *per task*: the
+                # counter was, until 2026-09-16, and a ``--resume`` — which
+                # re-materializes from `format_batches_for_output(skip_completed)`
+                # and therefore over a SHORTER list — renamed every survivor onto a
+                # predecessor's result file. The plan task's own id is the only
+                # token that survives the filter, so `make_write_task` derives the
+                # name from it (`subagent_tasks.implement_output_name`) and this
+                # site names none.
                 tasks.append(make_write_task(
-                    kind=kind, inputs=inputs, phase_dir=phase_dir,
-                    output_name=f"implement_batch_{len(tasks)}.json",
-                    **fields,
+                    kind=kind, inputs=inputs, phase_dir=phase_dir, **fields,
                 ))
         return tasks
 
