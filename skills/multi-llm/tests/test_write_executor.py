@@ -371,6 +371,15 @@ class FakeState:
         if reason is not None:
             self.state.setdefault("task_status_reasons", {})[task_id] = reason
 
+    def get_task_status(self, task_id):
+        return self.state.get("task_status", {}).get(task_id)
+
+    def get_task_status_reason(self, task_id):
+        return self.state.get("task_status_reasons", {}).get(task_id)
+
+    def get_all_task_statuses(self):
+        return dict(self.state.get("task_status", {}))
+
     def record_dependency_override(self, task_id, overridden_deps):
         self.state.setdefault("dependency_overrides", {})[task_id] = {
             "overridden_deps": list(overridden_deps)
@@ -1257,7 +1266,7 @@ class TestScheduler:
 
         stale_lines = [
             m for m in messages
-            if "stale result files from an earlier naming" in m
+            if "result files no current task owns" in m
         ]
         assert len(stale_lines) == 1, "one warning, not one per file"
         assert "implement_batch_0.json" in stale_lines[0]
@@ -1283,7 +1292,7 @@ class TestScheduler:
         ).run()
         assert result.exit_code == 0, result.messages
         assert not any(
-            "stale result files" in m for m in messages
+            "result files no current task owns" in m for m in messages
         )
 
 
@@ -2451,6 +2460,114 @@ class TestTheEmptyDiffBranch:
         assert second.outcomes[0].skipped
         assert not log.exists() or not log.read_text().strip()
 
+    def _crashed_partial_first_run(self, env, state=None):
+        """D3k's headline case, then the resume the exit-3 message prescribes.
+
+        The runner prints a schema-valid ``applied`` naming every expected id
+        and *then* dies. The file on disk therefore reads exactly like a
+        finished batch — status `applied`, ids intersecting — while the verdict
+        was a partial application that stopped the loop.
+        """
+        _install_crashing_launcher(env.bin_dir, "codex")
+        executor.reset_version_cache()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "did it"})
+        first = env.scheduler([env.apply_task(0)], state=state).run()
+        assert first.exit_code == 3
+        assert first.outcomes[0].write_outcome == executor.WRITE_PARTIAL
+        # Back to a runner that finishes, for the resume.
+        (env.bin_dir / "codex").unlink()
+        _install_launcher(env.bin_dir, "codex")
+        executor.reset_version_cache()
+        return first
+
+    def test_a_partial_application_is_redispatched_on_resume(self, env):
+        """The result file carries the SCHEDULER's verdict, not only the
+        runner's claim (F1, 2026-09-16): the claim said `applied`, the ids
+        matched and the fingerprint was recorded for the failed outcome too,
+        so `--resume` skipped the half-applied batch as done and dispatched
+        the next batch on top of it."""
+        self._crashed_partial_first_run(env)
+        on_disk = json.loads(
+            (env.phase_dir / "apply_batch_0.json").read_text(encoding="utf-8")
+        )
+        assert on_disk["status"] == "applied"  # the claim is kept verbatim...
+        assert on_disk["verdict"]["write_outcome"] == executor.WRITE_PARTIAL
+        assert on_disk["verdict"]["ok"] is False  # ...beside the verdict
+        # No inputs binding for an outcome that did not count as done.
+        bindings = json.loads(
+            (env.phase_dir / ".write_task_inputs.json").read_text()
+        ) if (env.phase_dir / ".write_task_inputs.json").exists() else {}
+        assert "apply-batch-0" not in (bindings.get("tasks") or {})
+
+        log = env.enable_call_log()
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(0)], resume=True, log=lines.append,
+        ).run()
+        assert second.exit_code == 0, second.messages
+        assert not second.outcomes[0].skipped
+        assert second.outcomes[0].write_outcome == executor.WRITE_APPLIED
+        assert log.read_text().strip(), "the batch was re-dispatched"
+        assert any("classified it partial-application" in l for l in lines), lines
+        # A batch that really finished this time is done on the NEXT resume.
+        assert json.loads(
+            (env.phase_dir / "apply_batch_0.json").read_text()
+        )["verdict"]["ok"] is True
+
+    def test_a_recorded_failed_status_blocks_the_skip_without_a_verdict(self, env):
+        """A result file written before verdicts were stamped says nothing
+        about how the phase classified it, but `state.json` does: the task was
+        recorded `failed` by `_record_batch_effects`."""
+        state = FakeState(env.tmp_path / "state.json")
+        self._crashed_partial_first_run(env, state=state)
+        assert state.get_task_status("apply-batch-0") == "failed"
+        target = env.phase_dir / "apply_batch_0.json"
+        on_disk = json.loads(target.read_text(encoding="utf-8"))
+        del on_disk["verdict"]  # the pre-F1 file shape
+        target.write_text(json.dumps(on_disk), encoding="utf-8")
+
+        log = env.enable_call_log()
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(0)], state=state, resume=True, log=lines.append,
+        ).run()
+        assert second.exit_code == 0, second.messages
+        assert not second.outcomes[0].skipped
+        assert log.read_text().strip(), "the batch was re-dispatched"
+        assert any("state.json records it `failed`" in l for l in lines), lines
+        assert state.get_task_status("apply-batch-0") == "completed"
+
+    def test_a_resume_skip_moves_a_pending_task_status_to_completed(self, env):
+        """The result file lands before `_record_batch_effects` saves, so a
+        run killed in that window leaves a file resume trusts beside a status
+        nothing revisits: a finished phase reporting one task still `pending`
+        (state-tracking F5, 2026-09-16)."""
+        state = FakeState(env.tmp_path / "state.json")
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "done"})
+        first = env.scheduler([env.apply_task(0)], state=state).run()
+        assert first.exit_code == 0, first.messages
+        # The kill window: the file exists, the status was never moved on.
+        state.update_task_status("apply-batch-0", "pending")
+        state.save()
+        metrics_before = json.dumps(state.get("metrics"), sort_keys=True)
+
+        second = env.scheduler([env.apply_task(0)], state=state, resume=True).run()
+        assert second.exit_code == 0, second.messages
+        assert second.outcomes[0].skipped
+        assert state.get_task_status("apply-batch-0") == "completed"
+        assert state.get_task_status_reason("apply-batch-0") == (
+            "resumed from apply_batch_0.json"
+        )
+        # Persisted, not only in memory.
+        on_disk = json.loads(Path(state.state_file).read_text())
+        assert on_disk["task_status"]["apply-batch-0"] == "completed"
+        # No metric for a batch this run did not time: run 1's stands alone.
+        assert json.dumps(on_disk["metrics"], sort_keys=True) == metrics_before
+
 
 # ===========================================================================
 # N2: a `no-op` claim with a NON-empty diff is still applied, but why the
@@ -3125,6 +3242,64 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
         # The summary is still written: it is this run's only account.
         text = summary.read_text(encoding="utf-8")
         assert "**Verification**:" in text and "FAIL (exit 2)" in text
+
+    def _resumed_implement_with_nothing_left(self, env, *, verify, state, log=None):
+        """`implement --resume` after a run in which every task applied and
+        only the check failed: the orchestrator materializes only the tasks
+        still owed, which is NONE."""
+        env.use(verify_command=str(verify))
+        return env.scheduler(
+            [], kind="implement", state=state, resume=True,
+            log=(log.append if log is not None else None),
+        ).run()
+
+    def test_a_resume_with_nothing_left_to_dispatch_still_runs_the_check(self, env):
+        """F3 (2026-09-16): the gate was "this run dispatched a batch", so the
+        resume the exit-3 message prescribed dispatched nothing, ran nothing
+        and stamped the phase completed against a repository still failing
+        its own check. The gate is "this phase has applied batches" now."""
+        verify = self._script(env, "echo 'still broken'\nexit 2\n")
+        state = FakeState(env.tmp_path / "state.json")
+        state.update_task_status("T001", "completed")
+        state.update_task_status("apply-fix-batch-0", "completed")  # another phase's
+        state.save()
+        lines = []
+        result = self._resumed_implement_with_nothing_left(
+            env, verify=verify, state=state, log=lines,
+        )
+
+        assert result.exit_code == 3, result.messages
+        assert result.finalized is False
+        assert result.verification["exit_code"] == 2
+        assert "still broken" in result.verification["output_tail"]
+        assert "implement" not in (state.get("phases_completed") or {})
+        blob = "\n".join(result.messages)
+        assert "every batch an earlier run of this phase applied" in blob
+
+        # And once the repository passes, the same resume completes the phase.
+        passing = self._script(env, "exit 0\n")
+        result = self._resumed_implement_with_nothing_left(
+            env, verify=passing, state=state,
+        )
+        assert result.exit_code == 0, result.messages
+        assert result.finalized is True
+        assert result.verification["exit_code"] == 0
+        assert "implement" in state.get("phases_completed")
+
+    def test_a_phase_that_never_applied_anything_still_skips_the_check(self, env):
+        """The other half of the F3 gate: a state whose only completed ids
+        belong to ANOTHER phase's batches is not evidence implement applied
+        anything, so nothing is checked and nothing is claimed."""
+        verify = self._script(env, "exit 2\n")
+        state = FakeState(env.tmp_path / "state.json")
+        state.update_task_status("apply-fix-batch-0", "completed")
+        state.update_task_status("T001", "pending")
+        state.save()
+        result = self._resumed_implement_with_nothing_left(
+            env, verify=verify, state=state,
+        )
+        assert result.exit_code == 0, result.messages
+        assert result.verification is None
 
     def test_no_configured_command_is_a_notice_rather_than_silence(self, env):
         lines = []

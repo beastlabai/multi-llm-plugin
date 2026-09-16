@@ -221,6 +221,106 @@ class TestImplementOrchestratorWiring:
         assert statuses["T001"] == "completed"
         assert statuses["T002"] == "failed"  # recorded by the scheduler itself
 
+    def test_a_resume_redispatches_the_task_the_last_run_recorded_failed(
+        self, repo
+    ):
+        """The orchestrator's own resume, end to end (F2, 2026-09-16).
+
+        Run 1 stops at T002 (a partial application, recorded `failed`). The
+        resumed run used to re-materialize only `pending` tasks, so T002 was
+        never handed to the scheduler: T003 ran, the phase was stamped
+        completed and T002 was absent from every artifact but `task_status`.
+        """
+        _seed_generate_tasks(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+        ]) == 3
+
+        from utils.state_manager import get_or_create_state
+        state = get_or_create_state(repo.plan)
+        assert state.implementation_task_statuses() == {
+            "T001": "completed", "T002": "failed", "T003": "pending",
+        }
+
+        # Run 2: a compliant runner, and the resume the exit-3 message names.
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        log = repo.tmp_path / "calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume",
+        ]) == 0
+
+        state = get_or_create_state(repo.plan)
+        assert state.implementation_task_statuses() == {
+            "T001": "completed", "T002": "completed", "T003": "completed",
+        }
+        assert state.is_phase_completed("implement")
+        dispatched = [
+            json.loads(line)["prompt"] for line in log.read_text().splitlines()
+            if json.loads(line).get("prompt")
+        ]
+        assert any("T002" in p for p in dispatched), "T002 was re-dispatched"
+        assert not any("T001:" in p.split("\n", 1)[0] for p in dispatched)
+        phase_dir = _phase_dir(repo)
+        payload = json.loads((phase_dir / "implement_batch_T002.json").read_text())
+        assert "T002" in payload["ids"]
+        assert payload["verdict"]["ok"] is True
+
+    def test_a_resume_after_a_failed_check_reruns_the_check_before_completing(
+        self, repo
+    ):
+        """F3 end to end: every task applied, `driver.verify_command` failed,
+        exit 3. The prescribed `--resume` materializes NO task, and used to
+        complete the phase without running the check again."""
+        _seed_generate_tasks(repo)
+        verify = repo.tmp_path / "verify.sh"
+        verify.write_text("#!/bin/sh\necho 'typecheck failed'\nexit 2\n",
+                          encoding="utf-8")
+        verify.chmod(verify.stat().st_mode | stat.S_IXUSR)
+        config = repo.tmp_path / "driver.yaml"
+        config.write_text(
+            "driver:\n  subagent_runner: codex:gpt-5.5\n"
+            f"  verify_command: {verify}\n", encoding="utf-8",
+        )
+        registry._config = None
+        registry._config_key = None
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+        ]) == 3
+
+        from utils.state_manager import get_or_create_state
+        state = get_or_create_state(repo.plan)
+        assert set(state.implementation_task_statuses().values()) == {"completed"}
+        assert not state.is_phase_completed("implement")
+
+        # The resume, with nothing fixed: the check must fail the phase again.
+        log = repo.tmp_path / "calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume",
+        ]) == 3
+        assert not log.exists() or not log.read_text().strip(), "nothing re-dispatched"
+        state = get_or_create_state(repo.plan)
+        assert not state.is_phase_completed("implement")
+        mirror = json.loads((_phase_dir(repo) / ".status.json").read_text())
+        assert mirror["progress"]["write_subagents"]["verification"]["exit_code"] == 2
+
+        # The repository fixed: the same resume completes the phase.
+        verify.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume",
+        ]) == 0
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_completed("implement")
+
     def test_dry_run_subagents_starts_no_child(self, repo):
         _seed_generate_tasks(repo)
         log = repo.tmp_path / "calls.jsonl"

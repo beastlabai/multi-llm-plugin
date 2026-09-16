@@ -420,11 +420,13 @@ def _build_acceptance_criteria_section(criteria: List[str]) -> str:
 #: Rendered instead of the write-subagent template for a task whose
 #: ``executor_role`` is ``"human"`` (N4, 2026-09-16). The standard template's
 #: ``ACCEPTANCE_CRITERIA_FRAMING`` sentence ("do not attempt the browser or
-#: manual steps yourself"), its ``## Constraints`` block (kill/pkill, no
-#: background servers — subagent process-safety rules) and its terminal
-#: "Proceed with the implementation." are all written for a write subagent,
-#: and directly contradict a task whose whole job *is* the browser/manual
-#: work they forbid — a materialized T014 once read both in the same file.
+#: manual steps yourself") and its terminal "Proceed with the implementation."
+#: are both written for a write subagent, and directly contradict a task whose
+#: whole job *is* the browser/manual work the framing forbids — a materialized
+#: T014 once read both in the same file. (The process-safety rules the
+#: template's ``## Constraints`` block once carried live only in
+#: ``_with_result_contract`` now, appended per dispatch and never rendered
+#: for a human task.)
 #: Nothing dispatches a human task (``executor_role == "human"`` routes
 #: around every invoker), so there is no runner to instruct: the rendered
 #: entry exists only for the person who has to do the work by hand.
@@ -674,7 +676,9 @@ def format_batches_for_output(
     """Format task batches for JSON output.
 
     ``skip_completed`` (i.e. ``--resume``) keeps only work that is still
-    outstanding — **plus every human task that is not itself done**. A deferred
+    outstanding — ``pending``, ``failed`` or ``in_progress``, never a task the
+    last run recorded ``completed`` — **plus every human task that is not
+    itself done**. A deferred
     human task is recorded ``skipped``, not ``pending``, so a plain PENDING
     filter dropped it from the resumed run entirely: the scheduler never saw it,
     ``resolve_human_task_plan`` had no human id to resolve, and the resumed
@@ -690,9 +694,16 @@ def format_batches_for_output(
         # Filter tasks if skipping completed
         tasks_to_include = batch
         if skip_completed:
+            # PENDING alone dropped the task the last run recorded `failed`: a
+            # clean failure or partial application stops the loop at exit 3
+            # promising "--resume re-dispatches this batch", and the resumed
+            # run then never materialized it, ran the rest and stamped the
+            # phase completed with that task undone (2026-09-16).
+            # IN_PROGRESS is a run killed mid-dispatch — the same debt.
             tasks_to_include = [
                 t for t in batch
-                if t.status == TaskStatus.PENDING
+                if t.status in (TaskStatus.PENDING, TaskStatus.FAILED,
+                                TaskStatus.IN_PROGRESS)
                 or (t.executor_role == "human"
                     and t.status != TaskStatus.COMPLETED)
             ]
