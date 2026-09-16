@@ -180,8 +180,10 @@ def render(
     third of thirteen and so was trimmed away.
     """
     entries = _load_entries(_jsonl_path(output_dir))
+    if max_chars <= 0:
+        return ""
     if not entries:
-        return DEFAULT_TEXT
+        return DEFAULT_TEXT[:max_chars]
 
     phase = canonical_phase(phase)
     same_phase = (
@@ -211,13 +213,19 @@ def render(
             summary = entry.get("summary", "")
             lines.append(f"{i}. **Batch {i}** ({eid}): {summary}")
 
+        if other_count > 0:
+            lines.append(f"... and {other_count} earlier batches from other phases")
         output = "\n".join(lines)
         if len(output) <= max_chars:
             break
+        if tail == 1:
+            # A single summary can exceed the entire budget. Dropping the
+            # final entry used to exit the loop with that oversized text.
+            marker = "... [truncated]"
+            output = output[:max(0, max_chars - len(marker))] + marker[:max_chars]
+            break
         tail -= 1
 
-    if other_count > 0:
-        output = f"{output}\n... and {other_count} earlier batches from other phases"
     return output
 
 

@@ -6428,6 +6428,23 @@ class TestTheFilesChangedFallback:
         out = capsys.readouterr().out
         assert "Files changed: (none)" in out
 
+    def test_partial_application_keeps_changed_files_visible(self, tmp_path, capsys):
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [_FakeOutcome("apply-fix-batch-0", status="partial_application",
+                          write_outcome="partial-application",
+                          files_touched=["index.html"], reason="Missing one fix")],
+            [{"task_id": "apply-fix-batch-0", "expected_ids": ["a", "b"]}],
+        )
+        orch.batches = [{"fixes": [{"title": "Incomplete fix"}]}]
+        orch.print_write_outcome_summary()
+        stdout = capsys.readouterr().out
+        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "Files changed: index.html" in stdout
+        assert "**Files changed**: index.html" in report
+        assert "Incomplete fix** - Partial application; inspect batch" in report
+        assert "Suggestions applied: 0" in report
+
     def test_a_single_target_phase_still_prints_file(self, tmp_path, capsys):
         """The fallback is additive: a phase with a real target is unaffected."""
         orch = _orchestrator_on(tmp_path, yes=True)
@@ -6579,6 +6596,50 @@ class TestPerFixDetailInTheSummary:
         text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
         assert "1. **Fix the OOB teleport** - Applied" in text
         assert "2. **Drop speedForward** - Applied" in text
+
+    @pytest.mark.parametrize(
+        "verdict,label,count_label",
+        [
+            ("no-op", "No changes needed", "needing no changes"),
+            ("clean-failure", "No verified changes", "without verified changes"),
+        ],
+    )
+    def test_successful_dispatch_without_edits_is_not_reported_as_applied(
+        self, tmp_path, capsys, verdict, label, count_label
+    ):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        outcome = orch.write_result.outcomes[0]
+        outcome.write_outcome = verdict
+        outcome.files_touched = []
+        outcome.reason = "Snapshot comparison confirms no byte changes."
+
+        orch.print_write_outcome_summary()
+        stdout = capsys.readouterr().out
+        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        for text in (stdout, report):
+            assert "Suggestions applied: 0" in text
+            assert f"Suggestions {count_label}: 2" in text
+            assert outcome.reason in text
+        assert f"1. **Fix the OOB teleport** - {label}" in report
+        assert f"2. **Drop speedForward** - {label}" in report
+
+    def test_mixed_batch_counts_follow_verified_outcomes(self, tmp_path, capsys):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.write_tasks.extend([
+            {"task_id": "noop", "expected_ids": ["c", "d", "e"]},
+            {"task_id": "clean-failure", "expected_ids": ["f"]},
+        ])
+        orch.write_result.outcomes.extend([
+            _FakeOutcome("noop", write_outcome="no-op"),
+            _FakeOutcome("clean-failure", write_outcome="clean-failure"),
+        ])
+        orch.print_write_outcome_summary()
+        stdout = capsys.readouterr().out
+        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        for text in (stdout, report):
+            assert "Suggestions applied: 2" in text
+            assert "Suggestions needing no changes: 3" in text
+            assert "Suggestions without verified changes: 1" in text
 
     def test_a_two_element_line_range_renders_as_a_span(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)

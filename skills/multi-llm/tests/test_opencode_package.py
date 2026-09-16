@@ -1877,7 +1877,7 @@ class TestNeedsHumanMessage:
         payload = {
             "mode": gate["mode"], "phase": mode_table.phase_for(gate["mode"]),
             "state": "needs-human", "exit": 3, "artifacts": ["review.md"],
-            "next": None,
+            "next": None, "high_priority_groups": {"count": 2},
         }
         result = _terminal(
             built_package,
@@ -1912,6 +1912,25 @@ class TestNeedsHumanMessage:
         assert _filled(text["phase_incomplete"], phase=payload["phase"]) in (
             plain["message"]
         )
+
+    def test_fail_on_high_does_not_claim_a_refused_review_completed(
+        self, built_package
+    ):
+        text = self._text()
+        gate = pkg_build.cli_surface()["dispatcher"]["review_gate"]
+        phase = mode_table.phase_for(gate["mode"])
+        payload = {
+            "mode": gate["mode"], "phase": phase,
+            "state": "needs-human", "exit": 3, "artifacts": [], "next": None,
+        }
+        result = _terminal(
+            built_package,
+            {"stdout": "ERROR: runner authentication failed\n", "result": payload},
+            {"word": gate["mode"], "plan": "p.md", "question": "",
+             "extraFlags": [gate["flag"]]},
+        )
+        assert _filled(text["phase_incomplete"], phase=phase) in result["message"]
+        assert _filled(text["review_completed"], phase=phase) not in result["message"]
 
     def test_an_unparsable_result_line_names_no_phase_and_quotes_redacted_text(
         self, built_package

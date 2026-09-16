@@ -1070,6 +1070,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # only now does this run own a state.json on disk.
     state.save()
 
+    # Preflight resolutions are replayed after the run has claimed its phase.
+    pending_resolutions: List[Tuple[str, str]] = []
+    task_skip_reason = "auto-skipped by --yes/--no-confirm (D6 row 7)"
+    task_skip_decision = "skipped; apply-task-suggestions recorded as skipped"
+    # The detached launcher may already have saved this choice. Its worker
+    # then sees the prerequisite as met, but must still report the choice that
+    # lets this run proceed. Explicit human skips keep their existing notice.
+    if (unattended or args.no_confirm) and (
+        state.get_phase_skip_reason("apply-task-suggestions") == task_skip_reason
+    ):
+        pending_resolutions.append((unattended_mod.row(7).site_id, task_skip_decision))
+
     # Check for unapplied task suggestions (soft advisory — does NOT block)
     task_suggestions_check = check_apply_task_suggestions_prerequisite(state, plan_dir)
     if not task_suggestions_check["met"]:
@@ -1091,13 +1103,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             record_prerequisite_skip(
                 state,
                 "apply-task-suggestions",
-                reason="auto-skipped by --yes/--no-confirm (D6 row 7)",
+                reason=task_skip_reason,
             )
             unattended_mod.record_resolution(
-                str(plan_dir / "implement"),
+                None,
                 unattended_mod.row(7).site_id,
-                "skipped; apply-task-suggestions recorded as skipped",
+                task_skip_decision,
             )
+            pending_resolutions.append((unattended_mod.row(7).site_id, task_skip_decision))
 
     # Check if generate-tasks phase has been completed. Two endings, decided by
     # the same rule the row-6 gate above uses:
@@ -1225,7 +1238,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     # `[AUTO_RESOLVED]` line printed. Buffer it instead, the way
     # `ApplyOrchestratorBase._record_resolution`/`_flush_resolutions` do, and
     # replay it once this process owns the phase dir, just past the boundary.
-    pending_resolutions: List[Tuple[str, str]] = []
     if human_task_ids and human_task_strategy and unattended and not args.force_strategy:
         decision = f"{human_task_strategy} for {len(human_task_ids)} human task(s)"
         unattended_mod.record_resolution(None, unattended_mod.row(8).site_id, decision)
@@ -1361,7 +1373,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # F8: past the boundary this process owns the phase dir (the ordinary
     # foreground run, or the detached worker once it has claimed it), so the
-    # D6 row-8 decision buffered above can finally be written where `status`
+    # D6 decisions buffered above can finally be written where `status`
     # reads it (`run.resolutions`). Quiet: the marker line already printed at
     # the decision site, and printing it twice would make one decision read as
     # two.

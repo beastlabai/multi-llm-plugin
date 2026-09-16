@@ -89,6 +89,21 @@ def _expand_uncovered_directories(entries: Set[str]) -> Set[str]:
     return expanded
 
 
+def _write_state_atomic(state_path: Path, state: dict) -> None:
+    """Keep the previous state intact if either finalization write fails."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        dir=str(state_path.parent), suffix=".tmp", prefix=".tracking_",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+        os.replace(temp_path, str(state_path))
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:
     """Re-stamp ``plan_hash`` after this command's own edit to the plan.
 
@@ -110,7 +125,7 @@ def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:
             return
         state["plan_hash"] = compute_plan_hash(plan_path)
         state.pop("plan_changed", None)
-        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        _write_state_atomic(state_path, state)
     except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: could not re-stamp plan_hash: {e}", file=sys.stderr)
 
@@ -259,38 +274,11 @@ def main(argv=None) -> int:
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
 
-    # Write state back atomically. A plain `write_text` is not what the comment
-    # above it claimed: this is the ONE file-level writer that runs inside a
-    # write phase (the scheduler `save()`s, calls this, then `reload()`s), so a
-    # crash or a full disk part-way through leaves the phase's whole state file
-    # truncated rather than simply un-updated. Temp + `os.replace`, the same
-    # shape `StateManager.save()` and `metrics._write_state` use.
-    temp_fd = None
-    temp_path = None
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=str(state_path.parent), suffix=".tmp", prefix=".tracking_",
-        )
-        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2)
-        temp_fd = None  # fdopen closed it
-        os.replace(temp_path, str(state_path))
-        temp_path = None  # the file has been moved
-    except (IOError, OSError) as e:
+        _write_state_atomic(state_path, state)
+    except OSError as e:
         print(f"ERROR: Failed to write state file: {e}", file=sys.stderr)
         return 1
-    finally:
-        if temp_fd is not None:
-            try:
-                os.close(temp_fd)
-            except OSError:
-                pass
-        if temp_path is not None and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
 
     print(f"\nTracked {len(tracked_files)} implementation files:")
     _print_path_list(tracked_files)

@@ -116,6 +116,8 @@ def _render_repair() -> List[str]:
 def _run(argv: Sequence[str], *, timeout: float, cwd: Optional[str] = None) -> Optional[Tuple[int, str, str]]:
     """``(returncode, stdout, stderr)`` or ``None`` when the probe could not run
     or did not finish inside ``timeout``."""
+    if timeout <= 0:
+        return None
     from .llm_client import _resolve_executable
 
     launcher, _ = _resolve_executable(argv[0])
@@ -218,6 +220,9 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
         "state": "none", "detail": "", "ok": True, "mechanism": mechanism,
         "bypassed_by": bypassed, "probe": "",
     }
+    if timeout <= 0:
+        row.update(state="unprobed", detail="slow: the report budget was exhausted")
+        return row
     state, detail = "not-required", ""
     if not bypassed:
         state, detail = sandbox_verdict(provider, PROFILE_AGENT_WRITE, cwd=cwd, timeout=timeout)
@@ -278,22 +283,29 @@ def collect(
     # Every probe is a subprocess with its own timeout at the budget, and they
     # run concurrently, so the wall clock is the slowest probe rather than the
     # sum — what makes a seventeen-adapter roster fit in a second.
-    remaining = max(budget_s - (time.monotonic() - started), 0.05)
+    deadline = started + max(budget_s, 0.05)
     cwd = _probe_cwd(anchor)
     by_name = {row["provider"]: row for row in rows}
 
-    def probe(item: Tuple[str, Any]) -> Tuple[str, Dict[str, Any]]:
-        name, provider = item
-        return name, {
-            "version": _probe_version(provider, name, remaining),
-            "auth": _probe_auth(provider, remaining),
-            "sandbox": _probe_sandbox(provider, remaining, cwd),
-        }
+    def probe(item: Tuple[str, Any, str]) -> Tuple[str, str, Dict[str, Any]]:
+        name, provider, kind = item
+        remaining = max(deadline - time.monotonic(), 0.0)
+        if kind == "version":
+            result = _probe_version(provider, name, remaining)
+        elif kind == "auth":
+            result = _probe_auth(provider, remaining)
+        else:
+            result = _probe_sandbox(provider, remaining, cwd)
+        return name, kind, result
 
     if present:
+        # Each probe gets a job, rather than serializing three full-budget
+        # probes inside one provider job. Queued jobs use the same deadline.
+        jobs = [(name, provider, kind) for name, provider in present
+                for kind in ("version", "auth", "sandbox")]
         with ThreadPoolExecutor(max_workers=min(3 * len(present), 24)) as pool:
-            for name, result in pool.map(probe, present):
-                by_name[name].update(result)
+            for name, kind, result in pool.map(probe, jobs):
+                by_name[name][kind] = result
 
     failures: List[str] = []
     sandbox_broken = False

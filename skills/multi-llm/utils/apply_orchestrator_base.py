@@ -2072,7 +2072,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """The files the write batches actually verified changed (F7).
 
         The observed post-run byte comparison, not the runner's own claim — the
-        same set each ``ok`` outcome's ``files_touched`` carries. Repo-root-
+        same set each applied or partially applied outcome's ``files_touched``
+        carries. Partial application stops the run but preserves its edits,
+        so those files must remain visible for inspection. Repo-root-
         relative, order-preserving, de-duplicated across every outcome; empty
         before the write executor has run, or when every batch was a no-op /
         clean failure. This is the only "what did this phase change" answer for
@@ -2084,7 +2086,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         touched: List[str] = []
         seen: Set[str] = set()
         for outcome in getattr(self.write_result, "outcomes", None) or []:
-            if not getattr(outcome, "ok", False):
+            if not getattr(outcome, "ok", False) and (
+                getattr(outcome, "write_outcome", None) != "partial-application"
+            ):
                 continue
             for touched_path in getattr(outcome, "files_touched", None) or []:
                 if touched_path and touched_path not in seen:
@@ -2169,6 +2173,23 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             path for path in paths.values() if path and os.path.exists(path)
         )
 
+    def _write_item_counts(self, outcomes: List[Any]) -> Dict[str, int]:
+        """Count items by the scheduler's verdict, rather than dispatch success.
+
+        An ``ok`` dispatch may be a no-op or a clean failure. Neither is
+        evidence that its requested changes were applied.
+        """
+        expected_by_task = {
+            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
+            for task in self.write_tasks
+        }
+        counts = {"applied": 0, "no-op": 0, "clean-failure": 0}
+        for outcome in outcomes:
+            verdict = getattr(outcome, "write_outcome", None)
+            if getattr(outcome, "ok", False) and verdict in counts:
+                counts[verdict] += len(expected_by_task.get(outcome.task_id, []))
+        return counts
+
     def print_write_outcome_summary(self) -> None:
         """Report what the batch loop DID, plus the decision summary.
 
@@ -2187,7 +2208,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             for task in self.write_tasks
         }
         ok = [o for o in outcomes if getattr(o, "ok", False)]
-        applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
+        item_counts = self._write_item_counts(outcomes)
         target = self.write_target_file()
         touched = self._touched_files()
 
@@ -2204,7 +2225,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         else:
             print(f"Files changed: {', '.join(touched) if touched else '(none)'}")
         print(f"Batches: {len(ok)}/{len(outcomes)} ok")
-        print(f"{self.item_noun_plural.capitalize()} applied: {applied_items}")
+        print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
+        if item_counts["no-op"]:
+            print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
+        if item_counts["clean-failure"]:
+            print(f"{self.item_noun_plural.capitalize()} without verified changes: {item_counts['clean-failure']}")
         print(f"Skipped: {len(self.formatted_skipped)}")
         if getattr(result, "stopped_at_batch", None) is not None:
             print(f"Stopped at batch: {result.stopped_at_batch}")
@@ -2221,7 +2246,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"runner {getattr(outcome, 'runner', '') or '(none)'}"
                 )
                 reason = getattr(outcome, "reason", None)
-                if reason and not getattr(outcome, "ok", False):
+                if reason:
                     print(f"      reason: {reason}")
 
         # The decision summary, folded in: every skip with the status and the
@@ -2383,7 +2408,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if isinstance(batch, dict)
         }
         ok = [o for o in outcomes if getattr(o, "ok", False)]
-        applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
+        item_counts = self._write_item_counts(outcomes)
         decided = self.claude_decisions()
         titles = self._titles_by_group_id()
         nouns = self.item_noun_plural
@@ -2410,10 +2435,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "",
             "## Summary",
             f"- Batches processed: {len(ok)}/{len(outcomes)}",
-            f"- {nouns.capitalize()} applied: {applied_items}",
+            f"- {nouns.capitalize()} applied: {item_counts['applied']}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge subagent: {len(decided)}",
         ]
+        if item_counts["no-op"]:
+            lines.append(f"- {nouns.capitalize()} needing no changes: {item_counts['no-op']}")
+        if item_counts["clean-failure"]:
+            lines.append(f"- {nouns.capitalize()} without verified changes: {item_counts['clean-failure']}")
         # F4: the instructions' own report template requires a verification line
         # and this leg had none, so a phase that applied seven code fixes without
         # running any check read exactly like one that had. Only for the
@@ -2448,7 +2477,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     batch_by_task_id.get(outcome.task_id)
                 )
                 if items:
-                    item_status = "Applied" if getattr(outcome, "ok", False) else "Not applied"
+                    item_status = {
+                        "applied": "Applied",
+                        "no-op": "No changes needed",
+                        "clean-failure": "No verified changes",
+                        "partial-application": "Partial application; inspect batch",
+                    }.get(verdict, "Not applied")
                     for item_index, item in enumerate(items, 1):
                         item_title = item.get("title") or item.get("theme") or "Untitled"
                         lines.append(f"{item_index}. **{item_title}** - {item_status}")
@@ -2467,7 +2501,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if notes:
                     lines.append(f"**Notes**: {notes}")
                 reason = getattr(outcome, "reason", None)
-                if reason and not getattr(outcome, "ok", False):
+                if reason:
                     lines.append(f"**Reason**: {reason}")
                 lines.append("")
         else:

@@ -528,6 +528,62 @@ class TestReaggregateRecordsArtifacts:
         assert str(phase_dir / "validation.json") not in ctx.artifacts
 
 
+class TestEmptyReviewReplacesPreviousFindings:
+    @pytest.mark.parametrize("reaggregate", [False, True])
+    @pytest.mark.parametrize("skip_validation", [False, True])
+    def test_clean_review_clears_old_groups_and_completes(
+        self, tmp_path, reaggregate, skip_validation
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        old_issue = {"title": "Old bug", "desc": "already fixed", "file": "src/a.py"}
+        (phase_dir / "issues.json").write_text(json.dumps([old_issue]), encoding="utf-8")
+        (phase_dir / "grouped.json").write_text(json.dumps([{
+            "group_hash": "old", "suggestions": [old_issue],
+        }]), encoding="utf-8")
+        (phase_dir / "validation.json").write_text('[{"group_id": "old"}]', encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text("{}", encoding="utf-8")
+        (phase_dir / "report.md").write_text("Old bug", encoding="utf-8")
+        (phase_dir / "cursor-agent_auto.json").write_text("[]", encoding="utf-8")
+
+        fake_state = MagicMock()
+        fake_state.get.side_effect = lambda key, default=None: {
+            "tracked_files": [{"path": "src/a.py"}],
+            "head_at_start": "abc123",
+            "pre_existing_changes": [],
+        }.get(key, default)
+        fake_state.is_phase_completed.return_value = False
+        fake_state.state = {"phases_completed": {}}
+        args = _make_args(plan_path, force=True, skip_validation=skip_validation)
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
+             patch.object(cro, "build_unsanitize_map", return_value={"cursor-agent_auto": "cursor-agent:auto"}), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(return_value={"cursor-agent:auto": (True, [], None)})), \
+             patch.object(cro, "dispatch_subagent_tasks") as dispatch:
+            if reaggregate:
+                asyncio.run(cro.reaggregate_from_existing_files(
+                    "plan", phase_dir.parent, plan_path, args
+                ))
+            else:
+                assert asyncio.run(cro.main()) == 0
+
+        dispatch.assert_not_called()
+        assert json.loads((phase_dir / "issues.json").read_text()) == []
+        assert cro.load_groups_payload(json.loads((phase_dir / "grouped.json").read_text())) == []
+        assert json.loads((phase_dir / "validation.json").read_text()) == []
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "**Total Issues:** 0" in report
+        assert "Old bug" not in report
+        fake_state.mark_phase_completed.assert_called_with("code-review")
+        assert status_file.read_status(str(phase_dir))["state"] == "complete"
+
+
 class TestGenerateReviewReportFailedModelDerivation:
     """F10: ``success and issues`` misclassified a reviewer that legitimately
     returned ``[]`` as failed — it was listed under ``## Failed Reviews`` as

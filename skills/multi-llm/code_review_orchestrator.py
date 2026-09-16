@@ -1985,8 +1985,8 @@ async def reaggregate_from_existing_files(
 
     print(f"\nRe-aggregating {len(all_issues)} issues from {len(models_found)} models")
 
-    if not all_issues:
-        print("No issues to aggregate.")
+    if not results:
+        print("No readable model results to aggregate.")
         return
 
     # Get changed files from state (or empty list if not available)
@@ -2091,7 +2091,7 @@ async def reaggregate_from_existing_files(
             or validation_tasks_path.exists()
         )
 
-        if has_existing_validation and grouped_path.exists():
+        if all_issues and has_existing_validation and grouped_path.exists():
             print("Using existing grouped.json (preserves validation alignment)")
             with open(grouped_path, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
@@ -2119,7 +2119,10 @@ async def reaggregate_from_existing_files(
         validated_groups_for_report = None
 
         # Check if we're merging validation batch results
-        if not args.skip_validation and validation_tasks_path.exists():
+        if not grouped:
+            validated_groups_for_report = []
+            validation_path.write_text("[]\n", encoding="utf-8")
+        elif not args.skip_validation and validation_tasks_path.exists():
             print("\nMerging validation batch results...")
             # Same resume guard as the plan-review path: a v1 file (no prompts to
             # recover) or moved inputs both mean "re-materialize this phase", not
@@ -2767,12 +2770,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     issue["model"] = model_spec
                     all_issues.append(issue)
 
-        if all_issues:
-            issues_path = get_output_paths(plan_path, "code_review_issues", phase='code-review')
-            issues_path = issues_path.with_suffix(".json")
-            with open(issues_path, "w", encoding="utf-8") as f:
-                json.dump(all_issues, f, indent=2)
-            print(f"Issues JSON saved to: {issues_path}")
+        # An empty successful review replaces the previous findings too.
+        # Otherwise --force can report zero issues while apply-code-fixes
+        # still reads and applies the previous run's groups.
+        issues_path = get_output_paths(plan_path, "code_review_issues", phase='code-review')
+        issues_path = issues_path.with_suffix(".json")
+        with open(issues_path, "w", encoding="utf-8") as f:
+            json.dump(all_issues, f, indent=2)
+        print(f"Issues JSON saved to: {issues_path}")
 
         # Group similar issues and validate
         validated_groups_for_report = None
@@ -2901,6 +2906,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     plan_path,
                     out_dir
                 )
+        else:
+            validated_groups_for_report = []
+            grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
+            retire_stale_validation(str(grouped_path.parent), reason="review returned no issues")
+            grouped_path.write_text(json.dumps(save_groups_payload([]), indent=2), encoding="utf-8")
+            validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
+            validation_path.write_text("[]\n", encoding="utf-8")
 
         # Generate report (after validation so we can include validation status)
         # F10: `failed_models` is this run's own authoritative post-salvage map

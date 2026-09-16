@@ -1740,8 +1740,8 @@ function terminalResult(child, context) {
  * is consulted only to *confirm* what the launch says and never to overrule
  * it. "Did not complete" is claimed only when the result line's `state` is the
  * needs-human one — and a completed `review-code --fail-on-high`, which
- * carries that same state, is recognised from the launch and gets the
- * completed-review clause instead.
+ * carries that same state, requires both the launch flag and reported HIGH
+ * findings before it gets the completed-review clause instead.
  *
  * With no result line at all — a child that died before it emitted one, or a
  * line that was not JSON — nothing names the phase, and the last non-blank
@@ -1759,7 +1759,9 @@ function needsHumanMessage({ payload, output, stderr, values, surface }) {
   const launched = row?.phase ?? null
   const gate = surface.dispatcher.review_gate
   const held =
-    row?.name === gate.mode && (values?.extraFlags ?? []).includes(gate.flag)
+    row?.name === gate.mode && (values?.extraFlags ?? []).includes(gate.flag) &&
+    Number.isInteger(payload?.high_priority_groups?.count) &&
+    payload.high_priority_groups.count > 0
 
   let phase
   if (!payload) {

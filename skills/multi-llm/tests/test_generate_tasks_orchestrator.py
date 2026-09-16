@@ -465,6 +465,47 @@ class TestSemanticRules:
 # ---------------------------------------------------------------------------
 
 class TestRunnerRefusal:
+    def test_an_unavailable_session_model_uses_the_executor_fallback(
+        self, tmp_path, exec_env, monkeypatch, capsys
+    ):
+        from utils import subagent_executor as executor
+        from utils.provider_registry import HOST_DEFAULT_LAYER, SESSION_LAYER
+
+        exec_env("codex:gpt-5.5")
+        session_spec = "codex:unavailable-session-model"
+        fallback_spec = "codex:gpt-5.5"
+        monkeypatch.setattr(
+            executor, "resolve_subagent_runner",
+            lambda *args, skip_session=False, **kwargs: (
+                (fallback_spec, HOST_DEFAULT_LAYER) if skip_session
+                else (session_spec, SESSION_LAYER)
+            ),
+        )
+        real_preflight = executor.preflight_runner
+
+        def preflight(spec, **kwargs):
+            if spec == session_spec:
+                raise executor.RunnerRejected(
+                    "session model is absent from the CLI catalog",
+                    spec=spec, reason_code="invalid_model_catalog",
+                )
+            return real_preflight(spec, **kwargs)
+
+        monkeypatch.setattr(executor, "preflight_runner", preflight)
+        plan = _plan(tmp_path)
+        code = multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        )
+        output = capsys.readouterr()
+        assert code == 0, output.out + output.err
+        assert _tasks_md(plan).exists()
+        report = json.loads(
+            (_phase_dir(plan) / "subagent_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert report["runner_fallback"]["from"] == session_spec
+        assert report["runner_fallback"]["to"] == fallback_spec
+        assert report["tasks"][0]["runner"] == fallback_spec
+
     def test_a_runner_without_workspace_reads_is_refused_before_dispatch(
         self, tmp_path, exec_env, capsys
     ):

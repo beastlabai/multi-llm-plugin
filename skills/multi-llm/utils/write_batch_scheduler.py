@@ -684,6 +684,10 @@ class WriteBatchScheduler:
         self._sweep_lock = threading.Lock()
         self._census_before: Dict[str, Optional[Dict[str, Tuple[int, int]]]] = {}
         self._declared_by_task: Dict[str, set] = {}
+        # Each census spans the whole dispatch, so a sibling's legitimate
+        # writes remain attributable to that sibling even if it finishes first.
+        # Keep overlap declarations per census, never for the entire phase.
+        self._sweep_ignored: Dict[str, set] = {}
         self._sweep_warned = False
         #: The rollback half of the same sweep. Observing an undeclared write is
         #: worth little if it cannot be undone, and the snapshot only ever held
@@ -1211,15 +1215,40 @@ class WriteBatchScheduler:
         # disk, so a resumed run replays rather than reconstructs.
         if self.resume and self._already_done(task):
             self.log(f"[write-subagents] {task_id} already complete — skipping")
+            output_path = str(resolve_output_target(task, self.phase_dir))
+            data = json.loads(Path(output_path).read_text(encoding="utf-8"))
+            verdict = data.get("verdict")
+            if not isinstance(verdict, dict):
+                verdict = {}
+            recorded = self.audit.completion_for(task_id) or {}
             outcome = TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_OK, profile=profile, skipped=True,
-                write_outcome=WRITE_APPLIED,
+                write_outcome=(verdict.get("write_outcome")
+                               or recorded.get("write_outcome")
+                               or (WRITE_NO_OP if data.get("status") == "no-op"
+                                   else WRITE_APPLIED)),
+                summary=data.get("summary"),
+                reason=verdict.get("reason") or recorded.get("reason"),
             )
-            outcome.output_path = str(resolve_output_target(task, self.phase_dir))
+            outcome.output_path = output_path
             # The files the earlier run verified for this batch, so a resumed
             # run's finalization (`--touched`) and summary still name them.
-            outcome.files_touched = self._recorded_files_touched(outcome.output_path)
+            if "files_touched" in verdict:
+                outcome.files_touched = list(verdict["files_touched"])
+            elif "files_touched" in recorded:
+                outcome.files_touched = list(recorded["files_touched"])
+            else:
+                outcome.files_touched = self._recorded_files_touched(output_path)
+            outcome.expected_ids = list(task.get("expected_ids") or [])
+            outcome.returned_ids = list(data.get("ids") or [])
+            observed = recorded.get("observed") or {}
+            outcome.sha256_before = verdict.get("sha256_before") or {
+                path: row.get("sha256_before") for path, row in observed.items()
+            }
+            outcome.sha256_after = verdict.get("sha256_after") or {
+                path: row.get("sha256_after") for path, row in observed.items()
+            }
             # One line per skip, before the early return: this branch reaches
             # neither `_audit_terminal` nor `_record_batch_effects`, so without it
             # a resumed run's audit log is silent about every task it declared
@@ -1385,12 +1414,17 @@ class WriteBatchScheduler:
         retention pass is what makes its verdict *actionable*. Both happen before
         the runner starts, because neither can be reconstructed afterwards.
         """
-        census = self._census()
         dispatched_at = datetime.now().isoformat()
         with self._sweep_lock:
+            census = self._census()
             self._census_before[task_id] = census
             self._retained_before[task_id] = self._retain(census)
             self._declared_by_task[task_id] = set(declared)
+            for ignored in self._sweep_ignored.values():
+                ignored.update(declared)
+            self._sweep_ignored[task_id] = set().union(
+                *self._declared_by_task.values()
+            )
             self._dispatch_started[task_id] = dispatched_at
             if census is None and not self._sweep_warned:
                 self._sweep_warned = True
@@ -1661,23 +1695,18 @@ class WriteBatchScheduler:
         with self._sweep_lock:
             before = self._census_before.pop(task_id, None)
             retained = self._retained_before.pop(task_id, None) or {}
-            # F13: the union of every task IN FLIGHT right now — this task's
-            # own declared set (still present; popped below) plus any
-            # co-scheduled sibling's (the justification this method's
-            # docstring names). `self._declared_by_task[task_id]` is popped
-            # AFTER this union is taken, so a LATER task's undeclared write to
-            # a path this task declared is visible to ITS OWN classification —
-            # before this fix the set was unioned for the whole phase and
-            # never pruned, so a path declared once stayed invisible for
-            # every task dispatched afterward.
-            ignored: set = set()
-            for declared in self._declared_by_task.values():
-                ignored.update(declared)
+            # Include every sibling that overlapped this census, even one
+            # already classified. Its edits are still in the before/after
+            # difference and must never enter this task's rollback snapshot.
+            ignored = self._sweep_ignored.pop(task_id, set())
+            # Registering a new census and closing this one share the lock,
+            # so a sibling cannot start writing between this read and removal
+            # from the overlap bookkeeping.
+            after = self._census() if before is not None else None
             self._declared_by_task.pop(task_id, None)
             self._dispatch_started.pop(task_id, None)
         if before is None:
             return UndeclaredWrites()
-        after = self._census()
         if after is None:
             return UndeclaredWrites()
         moved = {
@@ -2221,6 +2250,10 @@ class WriteBatchScheduler:
                 "write_outcome": outcome.write_outcome,
                 "status": outcome.status,
                 "ok": outcome.ok,
+                "files_touched": outcome.files_touched,
+                "sha256_before": outcome.sha256_before,
+                "sha256_after": outcome.sha256_after,
+                "reason": outcome.reason,
             }
             temp = path.with_name(path.name + ".tmp")
             temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -2622,6 +2655,24 @@ class WriteBatchScheduler:
                     f"resuming it (F1)."
                 )
                 return False
+        # A crash can occur after persist_result but before classification (or
+        # before a new result replaces an older successful one). The last
+        # dispatch then has no completion: neither file is evidence of success.
+        # Un-audited legacy/native results retain their compatibility behavior.
+        latest = next((
+            row for row in reversed(self.audit.records())
+            if row.get("task_id") == task_id
+            and row.get("event") in ("dispatched", "completed")
+        ), None)
+        if latest and (
+            latest.get("event") == "dispatched"
+            or latest.get("status") != STATUS_OK
+        ):
+            self.log(
+                f"[write-subagents] {task_id}: the last dispatch has no successful "
+                "classification — re-dispatching rather than trusting its result."
+            )
+            return False
         expected = [str(item) for item in (task.get("expected_ids") or [])]
         returned = [
             str(item) for item in (data.get("ids") or [])

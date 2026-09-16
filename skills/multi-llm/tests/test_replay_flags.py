@@ -819,6 +819,14 @@ class TestTheWritePhasesResumeWithResume:
         assert tokens.count("--resume") == 1
         assert "--force" not in tokens
 
+    @pytest.mark.parametrize("mode", WRITE_MODES[:3])
+    def test_resuming_a_fresh_launch_does_not_clear_its_progress(self, mode):
+        tokens = self._resume(
+            mode, ["--host", "opencode", "--fresh", "--claude-decide"]
+        )
+        assert "--fresh" not in tokens
+        assert tokens[-4:] == ["--host", "opencode", "--claude-decide", "--resume"]
+
     def test_the_cost_line_counts_batches_and_never_mentions_the_panel(self):
         view = {
             "run": {"mode": "apply-task-suggestions", "replay_flags": []},
