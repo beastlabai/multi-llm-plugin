@@ -60,6 +60,7 @@ from .cli_common import (
     build_parent_parser,
     dispatcher_command,
     record_artifact,
+    record_consolidation_recommended,
     record_next,
 )
 from .output_handler import output_dir_path, phase_dir_path, slugify_question
@@ -288,6 +289,9 @@ def render_run_text(
             lines.append("      output_files:")
             for key in sorted(view["output_files"]):
                 lines.append(f"        {key}: {view['output_files'][key]}")
+        consolidation = _consolidation_text(view.get("consolidation_recommended"))
+        if consolidation:
+            lines.append(f"      {consolidation}")
         if run.get("resolutions"):
             lines.append("      auto-resolved while you were gone:")
             for entry in run["resolutions"]:
@@ -319,6 +323,27 @@ def _verdict_text(view: Dict[str, Any]) -> str:
     if verdict == detach.VERDICT_FAILED and view.get("reason") == "heartbeat_timeout":
         return "failed (heartbeat_timeout — the worker died without recording an outcome)"
     return str(verdict)
+
+
+def _consolidation_text(recommendation: Any) -> Optional[str]:
+    """The optional "you may want to consolidate" line, or ``None``.
+
+    The `[CONSOLIDATION_RECOMMENDED]` marker is a log line, and nobody polling a
+    detached run reads the log — so this one sentence is where a host learns the
+    recommendation exists. It names the command and never *is* one: the phase is
+    complete, and `--consolidate` is the caller's decision.
+    """
+    if not isinstance(recommendation, dict):
+        return None
+    groups = recommendation.get("valid_groups")
+    threshold = recommendation.get("threshold")
+    command = recommendation.get("command") or "--consolidate"
+    if not isinstance(groups, int) or not isinstance(threshold, int):
+        return None
+    return (
+        f"consolidation recommended: {groups} valid groups >= {threshold} "
+        f"— run {command}"
+    )
 
 
 def _progress_text(progress: Dict[str, Any]) -> str:
@@ -783,6 +808,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 record_artifact(path)
         if view["run"].get("log_path"):
             record_artifact(view["run"]["log_path"])
+    # The worker recorded this on its own result line, which a detached caller
+    # never saw; a poll is the route it reaches the host by, so the poll's line
+    # carries it too. One field, so the first view holding one wins — the text
+    # above already rendered every phase's.
+    recommended = next(
+        (v["consolidation_recommended"] for v in views
+         if v.get("consolidation_recommended")),
+        None,
+    )
+    if recommended:
+        record_consolidation_recommended(recommended)
     if exit_code == EXIT_NOTHING_TO_DO and views:
         first = views[0]
         record_next(

@@ -3559,6 +3559,22 @@ async def run_review_orchestration(
         if valid_group_count >= threshold:
             print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
             print(f"Run: --consolidate to cluster related suggestions")
+            # The marker is a *log* line, and a detached run's caller never sees
+            # the log — so on the route every host actually reads (the launch
+            # returns, `status --view run` renders the checkpoint) the
+            # recommendation used to vanish entirely. Measured 2026-09-16: a
+            # 29-group run printed the marker and the session model reported "no
+            # consolidation was recommended". Recorded here in the checkpoint and
+            # on the result line, and **never** as `next` — `--consolidate` is a
+            # mechanical continuation a host may auto-follow, and a
+            # recommendation is not an instruction.
+            recommendation = {
+                "valid_groups": valid_group_count,
+                "threshold": threshold,
+                "command": "--consolidate",
+            }
+            update_status(phase_dir, {"consolidation_recommended": recommendation})
+            cli_common.record_consolidation_recommended(recommendation)
 
     # Mark phase as completed
     state = get_or_create_state(Path(plan_path))

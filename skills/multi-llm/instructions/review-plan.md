@@ -285,7 +285,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
 9. **Suggestion Consolidation (Optional):**
 
-   After reporting results, check the log file `{plan}/review-plan/orchestrator-run.log` for a `[CONSOLIDATION_RECOMMENDED]` marker.
+   After reporting results, check the log file `{plan}/review-plan/orchestrator-run.log` for a `[CONSOLIDATION_RECOMMENDED]` marker. The same fact rides the result contract for a caller that never sees the log — `MULTI_LLM_RESULT.consolidation_recommended` (`{valid_groups, threshold, command}`, present only when recommended, and carried by `status --view run` too) — so report it from there rather than inferring it from the marker's absence.
 
    If **not present**, skip this step entirely.
 
