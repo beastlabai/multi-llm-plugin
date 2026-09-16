@@ -14,6 +14,10 @@ This is the git commit from when implementation started. Use this to see what ch
 These are the files that were modified during the implementation phase.
 Focus your review on ONLY these files. Ignore any other uncommitted changes in the repo.
 
+## Implementation Record
+
+{implementation_record}
+
 ## How to Examine Changes
 
 To see what changed in each file, use these git commands:
@@ -41,7 +45,10 @@ Read the plan file to understand:
 ## Your Task
 1. Read the plan file at the path above to understand requirements
 2. For EACH file in the "Files Changed" list, examine the actual diff using `git diff {base_ref} -- <file>`
-3. Compare the implementation against the plan requirements
+3. Compare the implementation against the plan requirements, and against the
+   Implementation Record above — a difference the record explains is a decision
+   to weigh, not an unexplained divergence, and work the record says was
+   deferred or skipped is not missing functionality
 4. Identify any issues
 
 Look for:

@@ -118,7 +118,13 @@ def _load_entries(path: Path) -> list[dict]:
     return entries
 
 
-def render(output_dir: str, phase: Optional[str] = None) -> str:
+def render(
+    output_dir: str,
+    phase: Optional[str] = None,
+    *,
+    tail: int = DEFAULT_TAIL,
+    max_chars: int = MAX_CHARS,
+) -> str:
     """The prior-batch context block, exactly as `read` prints it.
 
     Extracted from :func:`cmd_read` so the D3n write-batch scheduler can bind
@@ -139,6 +145,14 @@ def render(output_dir: str, phase: Optional[str] = None) -> str:
     nothing to prefer, so this falls back to the unfiltered behaviour rather
     than rendering an empty phase-scoped log while real prior context sits
     unread.
+
+    *tail* and *max_chars* default to the write-batch budget this was extracted
+    for — 15 entries, 2 000 chars — and exist as arguments because a *reader*
+    of the log has a different one. The code-review prompts summarize a whole
+    implement phase, and at the write-batch budget the oldest entries fall off
+    the top: the very entry that motivated showing reviewers this log at all
+    (``accel tuned 28->32``, recorded against the phase's third task) was the
+    third of thirteen and so was trimmed away.
     """
     entries = _load_entries(_jsonl_path(output_dir))
     if not entries:
@@ -153,7 +167,7 @@ def render(output_dir: str, phase: Optional[str] = None) -> str:
         other_count = 0
 
     total = len(working)
-    tail = min(DEFAULT_TAIL, total)
+    tail = min(tail, total)
     output = ""
     while tail > 0:
         skipped = total - tail
@@ -169,7 +183,7 @@ def render(output_dir: str, phase: Optional[str] = None) -> str:
             lines.append(f"{i}. **Batch {i}** ({eid}): {summary}")
 
         output = "\n".join(lines)
-        if len(output) <= MAX_CHARS:
+        if len(output) <= max_chars:
             break
         tail -= 1
 

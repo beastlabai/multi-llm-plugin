@@ -669,3 +669,24 @@ class TestRenderPhaseFiltering:
         # push the total past the budget.
         trailer = "\n... and 5 earlier batches from other phases"
         assert len(output) <= MAX_CHARS + len(trailer)
+
+    def test_a_reader_can_widen_the_budget_the_write_batch_fixed(
+        self, tmp_path: Path
+    ) -> None:
+        """The code-review prompts summarize the whole phase, not a batch tail.
+
+        At the write-batch budget the oldest entries fall off the top — which
+        is how the entry that motivated showing reviewers this log at all
+        (``accel tuned 28->32``, the phase's third task) was trimmed out of a
+        thirteen-entry implement log.
+        """
+        out = str(tmp_path)
+        append(out, "T003", "implement", "accel tuned 28->32 for <4s")
+        for i in range(4, 21):
+            append(out, f"T{i:03d}", "implement", "y" * 300)
+
+        assert "accel tuned" not in render(out, phase="implement")
+        assert "accel tuned" in render(
+            out, phase="implement", tail=200, max_chars=20000
+        )
+

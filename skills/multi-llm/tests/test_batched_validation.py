@@ -549,6 +549,51 @@ class TestPrepareBatchedValidationTasks:
         after = materialize()
         assert after["inputs"]["tasks_sha256"] != before["inputs"]["tasks_sha256"]
 
+    def test_the_reviewed_code_is_hashed_so_an_edited_file_invalidates_the_file(
+        self, sample_groups, sample_context, tmp_path
+    ):
+        """code-review's equivalent of `tasks_sha256`.
+
+        `diff_base` records the ref the diff was taken *against*, so it moves
+        for neither an edit nor a commit on the near side of it: a reviewed file
+        edited between fan-out and validation invalidated nothing.
+        """
+        def materialize(code):
+            return prepare_batched_validation_tasks(
+                groups=sample_groups,
+                context=sample_context,
+                output_dir=str(tmp_path),
+                plan_file="/path/to/plan.md",
+                base_ref="deadbeef",
+                secondary_context=f"#### Code\n\n{code}",
+                secondary_context_label="Code under review",
+                reviewed_code=code,
+            )
+
+        before = materialize("98: accel: 32")
+        after = materialize("98: accel: 33")
+        assert before["inputs"]["diff_base"] == after["inputs"]["diff_base"]
+        assert before["inputs"]["reviewed_code_sha256"]
+        assert (before["inputs"]["reviewed_code_sha256"]
+                != after["inputs"]["reviewed_code_sha256"])
+        for batch in before["batches"]:
+            assert "## Context (Code under review)" in batch["prompt"]
+            assert "98: accel: 32" in batch["prompt"]
+            assert batch["inputs"]["reviewed_code_sha256"] == (
+                before["inputs"]["reviewed_code_sha256"]
+            )
+
+    def test_a_phase_with_no_reviewed_code_records_no_code_hash(
+        self, sample_groups, sample_context, tmp_path
+    ):
+        result = prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+        assert "reviewed_code_sha256" not in result["inputs"]
+
     def test_a_phase_with_no_task_list_records_no_tasks_hash(
         self, sample_groups, sample_context, tmp_path
     ):
@@ -566,7 +611,7 @@ class TestPrepareBatchedValidationTasks:
     def test_validation_tasks_file_size_is_bounded_and_stated(self, sample_context):
         """Embedding duplicates the shared excerpt per batch — bounded, not free.
 
-        D2f costs this out explicitly: at the 30,000-char context ceiling plus
+        D2f costs this out explicitly: at the per-context ceiling plus
         per-batch suggestion JSON, a ~13-batch phase takes validation_tasks.json
         from a few KB to a few hundred KB. That is acceptable for a per-phase
         scratch file, and the ceiling below is what keeps it from becoming a

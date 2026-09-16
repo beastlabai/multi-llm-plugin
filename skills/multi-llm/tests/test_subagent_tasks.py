@@ -505,6 +505,21 @@ class TestInputsHashing:
         assert inputs["salvage_request_sha256"] == content_hash("{}")
         assert "items_sha256" in inputs
 
+    def test_reviewed_code_hashes_the_excerpt_the_prompt_embeds(self):
+        """What a code-review prompt carries, not the ref it was taken against.
+
+        `diff_base` names the far side of the diff and sits still for any edit
+        on the near side of it, so a reviewed file edited between fan-out and
+        validation used to invalidate nothing.
+        """
+        inputs = build_inputs(diff_base="abc123", reviewed_code="98: accel: 32")
+
+        assert inputs["reviewed_code_sha256"] == content_hash("98: accel: 32")
+        assert "reviewed_code_sha256" not in build_inputs(diff_base="abc123")
+        assert build_inputs(reviewed_code="")["reviewed_code_sha256"] == (
+            content_hash("")
+        )
+
     def test_items_hash_is_order_independent_of_dict_key_order(self):
         a = build_inputs(items={"b": 1, "a": 2})
         b = build_inputs(items={"a": 2, "b": 1})

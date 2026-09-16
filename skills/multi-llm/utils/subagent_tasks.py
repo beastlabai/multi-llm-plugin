@@ -216,6 +216,7 @@ def build_inputs(
     tasks_file: Optional[str] = None,
     diff_base: Optional[str] = None,
     diff_text: Optional[str] = None,
+    reviewed_code: Optional[str] = None,
     salvage_request_file: Optional[str] = None,
     items: Optional[Any] = None,
 ) -> Dict[str, str]:
@@ -232,6 +233,13 @@ def build_inputs(
     an edited ``tasks/tasks.md`` invalidate a review-tasks validation file the
     way an edited plan already does — that phase's prompts embed the task text,
     so a stale one is as wrong as a stale plan excerpt.
+
+    ``reviewed_code_sha256`` is the code-review equivalent: the hash of the
+    **code excerpt the prompts embed**, not of the files it was cut from, so
+    the thing hashed is exactly the thing a validator reads. ``diff_base``
+    alone pins the ref the diff was taken *against* and moves for neither an
+    edit nor a commit on the other side of it, which is how a file edited
+    between fan-out and validation used to invalidate nothing.
     """
     inputs: Dict[str, str] = {"plan_sha256": file_content_hash(plan_file)}
     if grouped_file is not None:
@@ -242,6 +250,8 @@ def build_inputs(
         inputs["diff_base"] = diff_base
     if diff_text is not None:
         inputs["diff_sha256"] = content_hash(diff_text)
+    if reviewed_code is not None:
+        inputs["reviewed_code_sha256"] = content_hash(reviewed_code)
     if salvage_request_file is not None:
         inputs["salvage_request_sha256"] = file_content_hash(salvage_request_file)
     if items is not None:
