@@ -720,7 +720,8 @@ class TestEta:
     """Tests for ETA computation and stderr output in ``record_metric``."""
 
     def test_eta_per_item_only(self, tmp_path, capsys):
-        """No ``start_phase`` called: only per-item ETA is shown."""
+        """No ``start_phase`` called: only the batch-duration signal exists,
+        and the line reports its result — never a labelled intermediate."""
         state_file = _create_state(tmp_path)
 
         # Record 3 batches of 8, each with a 60s duration
@@ -735,18 +736,20 @@ class TestEta:
             )
 
         err = capsys.readouterr().err
-        # Last line should reference batch 3/8 and per-item ~5m
+        # Last line should reference batch 3/8 and ~5m remaining
         last_lines = [l for l in err.splitlines() if l.startswith("[ETA]")]
         assert last_lines, f"Expected [ETA] line on stderr, got: {err!r}"
         last = last_lines[-1]
         assert "batch 3/8" in last
-        assert "per-item ~" in last
+        assert "per-item" not in last
         assert "wall-clock" not in last
         # 5 remaining * 60s avg = 300s = 5m
-        assert "~5m 0s" in last
+        assert "~5m 0s remaining" in last
 
     def test_eta_wall_clock_only(self, tmp_path, capsys, monkeypatch):
-        """``start_phase`` called, no duration_ms: only wall-clock ETA shown."""
+        """``start_phase`` called, no duration_ms: only the wall-clock signal
+        exists, and the line reports its result — never a labelled
+        intermediate."""
         state_file = _create_state(tmp_path)
         clock = _ClockController(monkeypatch, datetime(2026, 1, 1, 12, 0, 0))
 
@@ -765,13 +768,15 @@ class TestEta:
         err = capsys.readouterr().err
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
         assert "batch 1/4" in last
-        assert "wall-clock ~" in last
         assert "per-item" not in last
+        assert "wall-clock" not in last
         # 60s elapsed / 1 done * 3 remaining = 180s = 3m
-        assert "~3m 0s" in last
+        assert "~3m 0s remaining" in last
 
     def test_eta_both_signals_picks_min(self, tmp_path, capsys, monkeypatch):
-        """When both signals are available, ETA = min(per_item, wall_clock)."""
+        """When both signals are available, the printed ETA is
+        min(per_item_ms, wall_clock_ms) — neither intermediate is printed,
+        only the number a reader acts on."""
         state_file = _create_state(tmp_path)
         clock = _ClockController(monkeypatch, datetime(2026, 1, 1, 12, 0, 0))
 
@@ -794,9 +799,10 @@ class TestEta:
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
         # per-item ETA = 5m * 3 = 15m
         # wall-clock ETA = 30s / 1 * 3 = 90s = 1m 30s
-        # min should drive the "remaining" segment to wall-clock.
-        assert "per-item ~15m 0s" in last
-        assert "wall-clock ~1m 30s" in last
+        # min drives the printed "remaining" segment to wall-clock, and
+        # neither intermediate appears in the line.
+        assert "per-item" not in last
+        assert "wall-clock" not in last
         assert "~1m 30s remaining" in last
 
     def test_eta_complete_at_last_batch(self, tmp_path, capsys):
@@ -907,7 +913,7 @@ class TestEta:
         assert "[ETA]" not in err
 
     def test_record_eta_zero_durations(self, tmp_path, capsys):
-        """Zero-duration entries don't crash; per-item ETA = 0."""
+        """Zero-duration entries don't crash; the batch-rate estimate is 0."""
         state_file = _create_state(tmp_path)
 
         record_metric(
@@ -922,10 +928,11 @@ class TestEta:
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
         assert "[ETA]" in last
         # 0 duration averages to 0 -> ~0s remaining
-        assert "per-item ~0s" in last
+        assert "~0s remaining" in last
 
     def test_record_eta_resilient_to_missing_progress_key(self, tmp_path, capsys):
-        """Missing ``metrics_progress`` key: wall-clock omitted, per-item shown."""
+        """Missing ``metrics_progress`` key: wall-clock signal absent, the
+        batch-duration signal alone still drives the printed ETA."""
         state_file = _create_state(tmp_path)
 
         record_metric(
@@ -939,7 +946,8 @@ class TestEta:
 
         err = capsys.readouterr().err
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
-        assert "per-item ~" in last
+        assert "~" in last and "remaining" in last
+        assert "per-item" not in last
         assert "wall-clock" not in last
 
     def test_eta_colorizes_remaining_when_enabled(self):

@@ -206,7 +206,18 @@ def _compute_eta(
     this_duration_ms: Optional[int],
     colorize: bool = False,
 ) -> dict:
-    """Compute ETA from per-item rate and wall-clock rate.
+    """Compute ETA from two independent remaining-time estimates.
+
+    ``per_item_ms`` is ``mean(batch duration) * batches_remaining`` and
+    ``wall_clock_ms`` is ``(elapsed / done) * batches_remaining`` — both are
+    whole-phase remaining-time estimates from different signals, not a
+    per-item duration, however the first one used to be labelled: printing
+    both used to read as three quantities (a per-item time, a wall-clock
+    time, and a remaining time barely different from either), when a batch
+    ≠ item phase made "per-item" actively misleading (F13, 2026-09-16). The
+    rendered line now reports only the number a reader acts on — ``eta_ms``,
+    the min of the two — and keeps the intermediates in the returned dict
+    for callers/tests that want them.
 
     Args:
         entries: List of metric entries for this phase (including the just-
@@ -256,10 +267,6 @@ def _compute_eta(
         eta_ms = None
 
     parts = [f"[ETA] {phase}: batch {done}/{total} done in {format_duration(this_duration_ms)}"]
-    if per_item_ms is not None:
-        parts.append(f"per-item ~{format_duration(per_item_ms)}")
-    if wall_clock_ms is not None:
-        parts.append(f"wall-clock ~{format_duration(wall_clock_ms)}")
     if remaining == 0:
         parts.append(_colorize("ALL BATCHES COMPLETE", "1;32", colorize))
     elif eta_ms is not None:

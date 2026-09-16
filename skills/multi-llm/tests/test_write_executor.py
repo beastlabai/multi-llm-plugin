@@ -2749,18 +2749,20 @@ class TestTheRollbackStoreWarningNamesItsFiles:
         result = env.scheduler([env.apply_task(0)], log=lines.append).run()
         assert result.exit_code == 0, result.messages
         reported = [
-            l for l in lines if l.startswith("[write-subagents] rollback store:")
+            l for l in lines
+            if l.startswith("[write-subagents] rollback store peaked at")
         ]
         assert len(reported) == 1, lines
         match = re.search(
-            r"rollback store: \d+\.\d MB of 64 MB budget retained "
-            r"\((\d+) files, (\d+) shards\)",
+            r"rollback store peaked at \d+\.\d MB of the 64 MB budget "
+            r"\((\d+) files, (\d+) shards\); discarded now",
             reported[0],
         )
         assert match, reported[0]
         # At least the plan itself was censused and retained.
         assert int(match.group(1)) >= 1
         assert int(match.group(2)) >= 1
+        assert "restore points live in pre_batch/" in reported[0]
 
     def test_no_rollback_utilization_line_when_nothing_was_ever_retained(
         self, env
@@ -2774,7 +2776,8 @@ class TestTheRollbackStoreWarningNamesItsFiles:
                           "files_touched": ["plans/p.md"], "summary": "S"})
         env.scheduler([env.apply_task(0)], dry_run=True, log=lines.append).run()
         assert not any(
-            l.startswith("[write-subagents] rollback store:") for l in lines
+            l.startswith("[write-subagents] rollback store peaked at")
+            for l in lines
         )
 
 
@@ -2858,7 +2861,8 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         assert result.exit_code == 0, result.messages
         assert second._retained_bytes >= inherited_bytes
         reported = [
-            l for l in lines if l.startswith("[write-subagents] rollback store:")
+            l for l in lines
+            if l.startswith("[write-subagents] rollback store peaked at")
         ]
         assert len(reported) == 1, lines
 
