@@ -40,6 +40,7 @@ from utils import provider_registry as registry  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
+    PROFILE_GENERATE,
     ProfileUnsupported,
 )
 from utils.subagent_tasks import (  # noqa: E402
@@ -3993,17 +3994,32 @@ class TestSandboxUnavailable:
 
     # -- step 3: the preflight's own self-test ----------------------------
 
-    def test_codex_declares_the_probe_for_the_write_profile_only(self):
+    def test_codex_declares_the_probe_for_both_write_profiles(self):
+        """`generate` is the review fan-out's profile and it dispatches
+        `--sandbox workspace-write` too, so it is probed with the same argv: a
+        bwrap that cannot start denies the fan-out child its READ of the plan
+        file, not only the write it stopped asking for."""
         provider = registry.get_provider("codex")
-        argv = provider.sandbox_probe_command(PROFILE_AGENT_WRITE)
-        assert argv[:6] == [
+        expected_head = [
             "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", "sh",
         ]
-        assert ".multi-llm/tmp" in argv[-1]
+        write_argv = provider.sandbox_probe_command(PROFILE_AGENT_WRITE)
+        generate_argv = provider.sandbox_probe_command(PROFILE_GENERATE)
+        assert write_argv[:6] == expected_head
+        assert generate_argv == write_argv
+        assert ".multi-llm/tmp" in write_argv[-1]
+        # A read-only dispatch is never asked to write, and this probe writes.
         assert provider.sandbox_probe_command(PROFILE_AGENT_READONLY) is None
-        assert provider.sandbox_probe_command("generate") is None
         # muse turned its sandbox off (step 2), so it has nothing to probe.
         assert registry.get_provider("muse").sandbox_probe_command(PROFILE_AGENT_WRITE) is None
+        assert registry.get_provider("muse").sandbox_probe_command(PROFILE_GENERATE) is None
+        # Nobody else answers for the fan-out's profile: `not-required` is free,
+        # and a probe nobody declared is a probe the fan-out never spawns.
+        answering = {
+            name for name, adapter in registry._PROVIDERS.items()
+            if adapter.sandbox_probe_command(PROFILE_GENERATE)
+        }
+        assert answering == {"codex"}
 
     def test_a_failing_self_test_refuses_before_dispatch(
         self, tmp_path, runner_env, monkeypatch, capsys
@@ -4141,6 +4157,128 @@ class TestSandboxUnavailable:
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert info["sandbox"] == "unknown"
         assert "recording sandbox 'unknown'" in capsys.readouterr().err
+
+
+class TestTheReviewFanoutGatesOnTheSameProbe:
+    """D6 step 3 on the fan-out's own profile (Lane A, `generate`).
+
+    The review fan-out never reaches `preflight_runner` — it is
+    `review_orchestrator_base.run_single_model` — so the preflight's gate above
+    is not the one it obeys, and it has to ask the same question itself.
+    Measured 2026-09-16: a `codex:gpt-5.6-terra` slot on a machine where bwrap
+    cannot start spent 27.9 s and 61k input tokens producing one suggestion
+    saying the plan file could not be read, and was recorded a success.
+    """
+
+    class _Probed:
+        """An adapter declaring a `generate` probe that fails, as codex's does
+        on this machine. The `sh` is real; the bwrap line is replayed."""
+
+        internal_retries = None
+
+        def sandbox_probe_command(self, profile):
+            if profile != PROFILE_GENERATE:
+                return None
+            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+
+    class _Unprobed:
+        """An adapter with no OS sandbox: `not-required`, and free."""
+
+        internal_retries = None
+
+        def sandbox_probe_command(self, profile):
+            return None
+
+    @staticmethod
+    def _run_slot(rob, tmp_path, model_spec):
+        import asyncio
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("plan", encoding="utf-8")
+        return asyncio.run(rob.run_single_model(
+            model_spec=model_spec,
+            plan_path=str(plan_path),
+            prompt_template="{prefix}{output_json_path}",
+            prompt_context={},
+            phase_name="review-plan",
+            invoke_phase="plan_review",
+            timeout=1800,
+            out_dir=str(tmp_path),
+            prefix="plan",
+        ))
+
+    @pytest.fixture
+    def fanout(self, tmp_path, monkeypatch):
+        """Lane A with the probing adapter bound and no dispatch permitted."""
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+
+        def no_dispatch(**kwargs):
+            raise AssertionError("a slot was dispatched past a refused probe")
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", no_dispatch)
+        monkeypatch.setattr(rob, "invoke_with_provider", no_dispatch)
+        return rob
+
+    def test_the_fanout_refuses_a_slot_whose_sandbox_cannot_start(
+        self, fanout, tmp_path, capsys
+    ):
+        result = self._run_slot(fanout, tmp_path, "fakebwrap:m1")
+        assert result["success"] is False
+        assert result["output"] is None
+        assert result["source"] == "not-dispatched"
+        reason = result["error"]
+        assert reason.startswith("[SANDBOX_UNAVAILABLE]")
+        assert "fakebwrap's sandbox cannot start here" in reason
+        assert _BWRAP_BROKEN_LINE in reason
+        assert "multi_llm.py doctor" in reason
+        # One line, on stdout, beside every other per-slot line.
+        assert reason in capsys.readouterr().out
+        # A failure like any other: the aggregator records it under
+        # `models_failed` with this reason, and nothing ran, so there is no
+        # stream for a salvage request to ask a repair pass about.
+        assert fanout.failure_output_from_result(result) == ""
+
+    def test_the_probe_runs_once_for_two_slots_of_the_same_provider(
+        self, fanout, tmp_path, monkeypatch
+    ):
+        runs = []
+        real = executor._run_sandbox_probe
+
+        def counting(argv, **kwargs):
+            runs.append(list(argv))
+            return real(argv, **kwargs)
+
+        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        first = self._run_slot(fanout, tmp_path, "fakebwrap:m1")
+        second = self._run_slot(fanout, tmp_path, "fakebwrap:m2")
+        assert len(runs) == 1
+        assert first["error"] == second["error"]
+
+    def test_a_provider_that_declares_no_probe_costs_the_fanout_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """`not-required` spawns nothing and the slot dispatches as before."""
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+        runs = []
+        monkeypatch.setattr(
+            executor, "_run_sandbox_probe",
+            lambda argv, **kwargs: runs.append(list(argv)),
+        )
+        monkeypatch.setattr(rob, "invoke_with_file_output", lambda **kwargs: {
+            "success": True, "data": [], "source": "file",
+            "output_file": str(tmp_path / "out.json"), "details": {},
+        })
+        result = self._run_slot(rob, tmp_path, "fakeplain:m1")
+        assert result["success"] is True
+        assert runs == []
 
 
 # ---------------------------------------------------------------------------

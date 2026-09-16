@@ -2346,9 +2346,10 @@ class LLMProvider(ABC):
         ``profile`` dispatch would use, deletes it, and exits 0 on success;
         anything non-zero is read as the sandbox refusing. The executor's
         preflight runs it once per host/spec/profile with a 10 s timeout before
-        the first edit-capable dispatch, and ``doctor`` runs the same command.
-        A read-only profile is never asked to write, so adapters answer ``None``
-        for it.
+        the first edit-capable dispatch, the review fan-out runs it once per
+        provider for ``generate`` before its first slot, and ``doctor`` runs the
+        same command. A read-only profile is never asked to write, so adapters
+        answer ``None`` for it.
         """
         return None
 
