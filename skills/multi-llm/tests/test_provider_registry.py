@@ -2175,6 +2175,8 @@ ANCHORED_ACCESSORS = frozenset({
     "get_provider_max_concurrent",
     "get_max_concurrent_subagents",
     "get_max_concurrent_write_subagents",
+    "get_verify_command",
+    "get_verify_timeout_s",
     "get_write_paths",
     "get_subagent_retries",
     # ...and the ones §9.3.c gave an anchor to.

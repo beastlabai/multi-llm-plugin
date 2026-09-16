@@ -307,6 +307,11 @@
 ## silently ignored. In a repo driven from several hosts, leaving
 ## `subagent_runner` unset is the healthy arrangement: each host then resolves
 ## its own CLI instead of one host's choice being pinned for all of them.
+## `verify_command` is the exception worth setting per project: it is THIS
+## repo's own check (`pnpm typecheck && pnpm lint:fix`, `cargo check`, `make
+## test`), run once after a code-editing phase applied its batches. Left unset
+## the phase says so in one line rather than completing unchecked; a non-zero
+## exit rolls nothing back and ends the phase at exit 3.
 # driver:
 #   subagent_runner: claude-code:sonnet
 #   subagent_runner_cheap: claude-code:haiku
@@ -314,6 +319,8 @@
 #   max_concurrent_write_subagents: 1
 #   subagent_timeout_s: null
 #   subagent_retries: 1
+#   verify_command: null
+#   verify_timeout_s: 600
 #   write_paths:
 #     allow:
 #       - '**'

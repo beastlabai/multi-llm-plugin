@@ -565,6 +565,16 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         strategy = mirror.get("human_task_strategy")
         suffix = f" ({strategy})" if strategy else ""
         parts.append(f"deferred manual: {', '.join(map(str, skipped_ids))}{suffix}")
+    # F4: `driver.verify_command`'s outcome. Without it a run that applied every
+    # batch and then failed the repository's own check renders as
+    # `apply_code_fixes 3/3 batches ok` with no failed id anywhere — the only
+    # sign of the failure being a phase state the counts contradict.
+    verification = mirror.get("verification")
+    if isinstance(verification, dict) and verification.get("command"):
+        verdict = "passed" if verification.get("exit_code") == 0 else (
+            f"FAILED (exit {verification.get('exit_code')})"
+        )
+        parts.append(f"verification {verdict}: `{verification['command']}`")
     return parts
 
 

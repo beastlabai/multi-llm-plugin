@@ -1507,6 +1507,35 @@ class TestStatusSurface:
             "deferred manual: T014 (skip-dependents)"
         ) in out
 
+    def test_the_write_mirror_names_a_failed_verification(self, tmp_path, capsys):
+        """F4: a run whose batches all applied and whose repo check then failed
+        rendered as `apply_code_fixes 1/1 batches ok` with no failed id — the
+        only sign of the failure a phase state the counts contradicted."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "apply-fixes")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-write-005", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 3, "detached": True,
+            "mode": "apply-code-fixes",
+        })
+        status_file.update_status(str(phase), {
+            "phase": "apply-code-fixes", "state": "subagents_failed",
+            "progress": {"write_subagents": {
+                "kind": "apply_code_fixes", "invoker": "executor", "total": 1,
+                "completed": 1, "finalized": False, "failed_task_ids": [],
+                "tasks": [{"task_id": "apply-fix-batch-0", "batch_index": 0,
+                           "status": "ok", "write_outcome": "applied",
+                           "files_touched": ["index.html"]}],
+                "verification": {"command": "pnpm typecheck", "source": "project",
+                                 "exit_code": 2, "duration_seconds": 4.2,
+                                 "output_tail": "boom"},
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 3
+        out = capsys.readouterr().out
+        assert "verification FAILED (exit 2): `pnpm typecheck`" in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):

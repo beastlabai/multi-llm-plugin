@@ -374,6 +374,11 @@ _DRIVER_COMMENTS = [
     "## silently ignored. In a repo driven from several hosts, leaving",
     "## `subagent_runner` unset is the healthy arrangement: each host then resolves",
     "## its own CLI instead of one host's choice being pinned for all of them.",
+    "## `verify_command` is the exception worth setting per project: it is THIS",
+    "## repo's own check (`pnpm typecheck && pnpm lint:fix`, `cargo check`, `make",
+    "## test`), run once after a code-editing phase applied its batches. Left unset",
+    "## the phase says so in one line rather than completing unchecked; a non-zero",
+    "## exit rolls nothing back and ends the phase at exit 3.",
 ]
 
 _DEFAULTS_COMMENTS = [

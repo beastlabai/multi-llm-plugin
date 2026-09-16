@@ -476,12 +476,22 @@ your host.
 8. **Run post-implementation regression tests:**
    After all tasks complete, run the project's test suite **once** to catch any integration issues:
 
-   - Detect the target repository's own test runner (never this skill's — the
-     suite under test is the one the plan changed):
+   - Use **the repository's `driver.verify_command` if one is configured** in its
+     `.multi-llm/providers.yaml`. That key is the repo's own answer to "what checks
+     this?", it is what the `--exec-subagents` leg runs, and running it here keeps
+     both legs reporting the same check.
+   - Only if none is configured, detect the target repository's own test runner
+     (never this skill's — the suite under test is the one the plan changed):
      - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
      - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short 2>&1 | tail -50`
-   - Record pass/fail results for inclusion in the implementation summary
-   - Do NOT block on failure — record the results and continue to summary
+   - Record pass/fail results for inclusion in the implementation summary, naming
+     the command you ran (or `not configured` when nothing was)
+   - A failing **`driver.verify_command`** is the repo's own contract failing: do
+     not revert anything, do not mark the phase completed, and hand it to a human
+     with the command and the tail of its output. That is what the
+     `--exec-subagents` leg does (exit 3), and the two legs must agree.
+   - A failing **detected** runner is a guess, not a contract: record the results
+     and continue to summary.
 
 9. **Generate implementation summary:**
    After all tasks complete, create the implementation summary file using the `summary_file` path from the JSON output.

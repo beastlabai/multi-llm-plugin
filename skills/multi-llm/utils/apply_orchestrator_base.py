@@ -2109,6 +2109,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         Best-effort and never fatal — a report is not worth failing an applied
         run over. Returns the path written, or ``None``.
         """
+        try:
+            from .write_batch_scheduler import CODE_WRITE_KINDS, verification_line
+        except ImportError:  # pragma: no cover - direct script runs
+            from utils.write_batch_scheduler import (  # type: ignore
+                CODE_WRITE_KINDS,
+                verification_line,
+            )
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
         outcomes = list(getattr(result, "outcomes", None) or [])
@@ -2139,6 +2146,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"- {nouns.capitalize()} applied: {applied_items}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge subagent: {len(decided)}",
+        ]
+        # F4: the instructions' own report template requires a verification line
+        # and this leg had none, so a phase that applied seven code fixes without
+        # running any check read exactly like one that had. Only for the
+        # code-editing phase — a typecheck has nothing to say about a plan file.
+        if self.write_kind in CODE_WRITE_KINDS:
+            lines.append(f"- Verification: {verification_line(result)}")
+        lines += [
             "",
             "## Applied Changes",
             "",

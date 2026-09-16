@@ -942,6 +942,22 @@ driver:
   # parse_output failure). A result that parsed but failed schema validation is
   # never retried — that is a deterministic disagreement a retry would launder.
   subagent_retries: 1
+  # The repository's OWN post-write check, run ONCE by the executor after a
+  # code-editing phase (implement, apply-code-fixes) applied at least one batch.
+  # A shell command string — `pnpm typecheck && pnpm lint:fix`, `cargo check`,
+  # `make lint test` — run with cwd at the pinned repo root. The markdown apply
+  # phases (apply-suggestions, apply-task-suggestions) skip it: a typecheck has
+  # nothing to say about a plan file.
+  # null (the default) means THIS REPO DECLARES NO CHECK, and the phase says so
+  # in one line rather than completing silently — the two are different facts.
+  # A non-zero exit rolls NOTHING back (every batch was already verified against
+  # its own snapshot, and a revert would destroy what a human needs to read) but
+  # ends the phase at exit 3, naming the command and the tail of its output: a
+  # repo whose own check fails needs a human, not the next phase.
+  verify_command: null
+  # Wall-clock ceiling for the command above. Not optional and not inherited from
+  # a provider — nothing else knows how long this repo's build takes.
+  verify_timeout_s: 600
   # The declared write policy for edit-capable dispatches, resolved against the
   # pinned repo root and enforced TWICE: pre-dispatch against the batch's declared
   # file set (refused before the runner starts) and post-run against the set the
