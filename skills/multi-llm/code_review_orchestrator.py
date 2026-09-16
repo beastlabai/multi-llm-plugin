@@ -61,6 +61,7 @@ from utils.cli_common import (
     record_next,
 )
 from utils.state_manager import (
+    generate_suggestion_id,
     load_groups_payload,
     save_groups_payload,
     stamp_stable_ids,
@@ -1160,12 +1161,26 @@ def generate_review_report(
     )
     lines.append(f"**Total Issues:** {len(all_issues)}")
 
+    # The blocks below are per issue (one per model finding) but every count
+    # downstream of grouping — the validation line, grouped.json, report.html's
+    # summary — is per group, so say how many groups there are and which count
+    # is which. Without this the header read "12 issues, 7 valid, 1 invalid,
+    # 1 needs human review" and nothing reconciled 12 with 7+1+1.
+    if validated_groups:
+        lines.append(
+            f"**Groups:** {len(validated_groups)} "
+            "(issues that report the same finding are one group)"
+        )
+
     # Add validation summary if available
     if validated_groups:
         valid_count = sum(1 for g in validated_groups if g.get("validation_status") == "valid")
         invalid_count = sum(1 for g in validated_groups if g.get("validation_status") == "invalid")
         needs_human = sum(1 for g in validated_groups if g.get("validation_status") == "needs-human-decision")
-        lines.append(f"**Validation:** {valid_count} valid, {invalid_count} invalid, {needs_human} needs human review")
+        lines.append(
+            f"**Validation:** {valid_count} valid, {invalid_count} invalid, "
+            f"{needs_human} needs human review (of {len(validated_groups)} groups)"
+        )
         lines.append("")
     else:
         lines.append("")
@@ -1173,6 +1188,9 @@ def generate_review_report(
     lines.append("> **Note:** An interactive HTML report is also available at `report.html`.")
     lines.append("> If you export selections from the HTML report (`user_selections.json`),")
     lines.append("> those selections will take precedence over checkboxes in this file.")
+    if validated_groups:
+        lines.append("> Checkboxes act on the whole group: marking one issue marks every")
+        lines.append("> issue listed as the same finding, because there is one fix between them.")
     lines.append("")
 
     # Build validation info lookup from validated_groups
@@ -1223,6 +1241,37 @@ def generate_review_report(
     for idx, issue in enumerate(all_issues, 1):
         issue_global_index[id(issue)] = idx
 
+    # Which group each numbered issue belongs to, and who its siblings are.
+    # The join is the suggestion hash grouped.json stamps on every member
+    # (recomputed from the issue when absent — the same hash the apply phase's
+    # issue->group map uses, so the report and the checkbox contract agree).
+    issue_siblings: Dict[int, List[int]] = {}   # id(issue) -> other issue numbers
+    issue_group_models: Dict[int, int] = {}     # id(issue) -> models in its group
+    if validated_groups:
+        hash_to_group: Dict[str, int] = {}
+        for g_num, group in enumerate(validated_groups, 1):
+            for sugg in group.get("suggestions", []):
+                if not isinstance(sugg, dict):
+                    continue
+                shash = sugg.get("suggestion_hash") or generate_suggestion_id(sugg)
+                if shash:
+                    hash_to_group.setdefault(shash, g_num)
+        members: Dict[int, List[Dict]] = {}
+        for issue in all_issues:
+            shash = issue.get("suggestion_hash") or generate_suggestion_id(issue)
+            g_num = hash_to_group.get(shash)
+            if g_num:
+                members.setdefault(g_num, []).append(issue)
+        for group_issues in members.values():
+            if len(group_issues) < 2:
+                continue
+            model_count = len({i.get("model", "") for i in group_issues if i.get("model")})
+            numbers = [issue_global_index[id(i)] for i in group_issues]
+            for issue in group_issues:
+                mine = issue_global_index[id(issue)]
+                issue_siblings[id(issue)] = [n for n in sorted(numbers) if n != mine]
+                issue_group_models[id(issue)] = model_count
+
     # Group by importance
     high = [i for i in all_issues if i.get("importance") == "high"]
     medium = [i for i in all_issues if i.get("importance") == "medium"]
@@ -1245,7 +1294,13 @@ def generate_review_report(
     if high:
         for issue in high:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
+            lines.extend(_format_issue(
+                issue_global_index[id(issue)], issue,
+                validation_status=status, validation_reason=reason,
+                served_models=served_models,
+                siblings=issue_siblings.get(id(issue)),
+                group_model_count=issue_group_models.get(id(issue), 0),
+            ))
     else:
         lines.append("_No high priority issues._")
         lines.append("")
@@ -1256,7 +1311,13 @@ def generate_review_report(
     if medium:
         for issue in medium:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
+            lines.extend(_format_issue(
+                issue_global_index[id(issue)], issue,
+                validation_status=status, validation_reason=reason,
+                served_models=served_models,
+                siblings=issue_siblings.get(id(issue)),
+                group_model_count=issue_group_models.get(id(issue), 0),
+            ))
     else:
         lines.append("_No medium priority issues._")
         lines.append("")
@@ -1267,7 +1328,13 @@ def generate_review_report(
     if low:
         for issue in low:
             status, reason = get_validation_info(issue)
-            lines.extend(_format_issue(issue_global_index[id(issue)], issue, validation_status=status, validation_reason=reason, served_models=served_models))
+            lines.extend(_format_issue(
+                issue_global_index[id(issue)], issue,
+                validation_status=status, validation_reason=reason,
+                served_models=served_models,
+                siblings=issue_siblings.get(id(issue)),
+                group_model_count=issue_group_models.get(id(issue), 0),
+            ))
     else:
         lines.append("_No low priority issues._")
         lines.append("")
@@ -1329,6 +1396,8 @@ def _format_issue(
     validation_status: Optional[str] = None,
     validation_reason: Optional[str] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    siblings: Optional[List[int]] = None,
+    group_model_count: int = 0,
 ) -> List[str]:
     """Format a single issue for the report.
 
@@ -1341,6 +1410,13 @@ def _format_issue(
             the one place this report credits a finding to a model, so a slot
             served by a configured fallback is named here too — otherwise the
             row reads as if the primary produced it.
+        siblings: Issue numbers of the other members of this issue's group.
+            A consensus finding is rendered once per model, so without this
+            line the same bug reads as three unrelated findings with three
+            checkboxes — and the verdict shown on each is the *group's* one
+            verdict, which is why the badge says so when there are siblings.
+        group_model_count: Distinct models behind this issue's group, for the
+            agreement phrase.
     """
     file_ref = issue.get("file", "unknown")
     line_range = issue.get("line_range")
@@ -1355,6 +1431,8 @@ def _format_issue(
         "validation_failed": "? Validation Failed",
     }
     validation_str = validation_display.get(validation_status, "? Unknown") if validation_status else "? Unknown"
+    if siblings and validation_status:
+        validation_str += " (group verdict)"
 
     lines = [
         f"### {index}. {issue.get('title', 'Untitled')}",
@@ -1369,6 +1447,17 @@ def _format_issue(
     # Scoped to needs-human-decision only.
     if validation_status == "needs-human-decision":
         lines.append("- [ ] Let Claude decide")
+
+    # Name the other members of this issue's group. One finding, one verdict,
+    # one fix — and one checkbox between them, whichever block it is ticked on.
+    if siblings:
+        refs = ", ".join(f"#{n}" for n in siblings)
+        agreement = (
+            f"{group_model_count} models agree"
+            if group_model_count > 1
+            else f"{len(siblings) + 1} findings grouped"
+        )
+        lines.append(f"_Same finding as {refs} ({agreement}); marking any marks all._")
 
     lines.extend([
         f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {served_model_label(issue.get('model', 'unknown'), served_models)}",

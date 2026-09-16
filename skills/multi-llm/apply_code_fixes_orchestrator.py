@@ -72,6 +72,17 @@ from utils.validation import (
 # ---------------------------------------------------------------------------
 
 
+# Several report.md issues can map to one group (that is what grouping means),
+# so their marks can conflict. Safety-first, the same order
+# parse_validation_overrides_issues applies inside a single issue block.
+_OVERRIDE_PRECEDENCE: Dict[str, int] = {
+    "claude_decide": 1,
+    "valid": 2,
+    "needs-human-decision": 3,
+    "invalid": 4,
+}
+
+
 def build_issue_to_group_map(
     issues_json_path: str,
     grouped: List[Dict],
@@ -677,40 +688,104 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         emit_json_output(output)
         sys.exit(0)
 
-    def apply_group_validation_overrides(self) -> None:
-        """Apply validation overrides using integer issue-number keys.
+    def _group_hash_for_issue(self, issue_num: int) -> Optional[str]:
+        """Resolve a report.md issue number to the group_hash it really names.
 
-        The code-fixes orchestrator uses 1-based integer group indices as
-        override keys (from parse_validation_overrides_issues), unlike the
-        hash-based keys used by suggestion orchestrators.
+        report.md numbers *issues* — one ``### N.`` block per model finding —
+        while the checkboxes act on *groups*, and the two only line up when
+        every group has exactly one member. Using the issue number as a group
+        index therefore puts the user's mark on whichever finding happens to
+        sit at that position: on a measured 3-model review, 11 of 12
+        checkboxes hit the wrong group and three fell off the end of the list.
+        ``issue_to_group_map`` (built in ``post_load_hook`` from issues.json)
+        is the real mapping; a number it cannot place is warned about, never
+        silently dropped.
+
+        Returns ``None`` when the number cannot be resolved.
+        """
+        # merged mirrors groups one-for-one (--resume aside), so it stands in
+        # for callers that have not loaded self.groups.
+        groups = getattr(self, "groups", None) or getattr(self, "merged", None) or []
+        mapping = self.issue_to_group_map
+
+        if mapping is not None:
+            location = mapping.get(issue_num)
+            if location is None:
+                print(
+                    f"WARNING: report.md issue {issue_num} is not in the "
+                    f"issue->group map (stale report.md, or issues.json does "
+                    f"not cover it); ignoring its checkbox.",
+                    file=sys.stderr,
+                )
+                return None
+            group_idx = location[0]
+        else:
+            # No issues.json to map through: the legacy 1:1 reading, which is
+            # correct only when no two models agreed.
+            group_idx = issue_num
+
+        if not (1 <= group_idx <= len(groups)):
+            print(
+                f"WARNING: report.md issue {issue_num} resolves to group "
+                f"{group_idx}, outside the {len(groups)} loaded groups; "
+                f"ignoring its checkbox.",
+                file=sys.stderr,
+            )
+            return None
+
+        ghash = groups[group_idx - 1].get("group_hash", "")
+        if not ghash:
+            print(
+                f"WARNING: group {group_idx} (report.md issue {issue_num}) "
+                f"has no group_hash; ignoring its checkbox.",
+                file=sys.stderr,
+            )
+            return None
+        return ghash
+
+    def apply_group_validation_overrides(self) -> None:
+        """Apply validation overrides keyed by report.md issue number or group hash.
+
+        Integer keys come from ``parse_validation_overrides_issues``, i.e. the
+        ``### N.`` *issue* numbers, and are resolved to their group through
+        ``_group_hash_for_issue``; hash keys (HTML / consolidated decisions)
+        already name a group. Two members of one group can carry conflicting
+        marks, so the same safety-first precedence a single block uses applies
+        across members: invalid > needs-human-decision > valid > claude_decide.
         """
         if not self.validation_overrides:
             return
 
-        override_count = 0
-        for idx, group in enumerate(self.merged, 1):  # 1-based group index
-            # Try integer key match first (code-fixes pattern), then hash-based
-            # match (from HTML/consolidated decisions).
-            matched_key: Any = None
-            if idx in self.validation_overrides:
-                matched_key = idx
-            else:
-                ghash = group.get("group_hash", "")
-                if ghash and ghash in self.validation_overrides:
-                    matched_key = ghash
-
-            if matched_key is None:
-                continue
-
-            value = self.validation_overrides[matched_key]
+        # group_hash -> (the key the user wrote, the override value)
+        by_hash: Dict[str, Tuple[Any, str]] = {}
+        for key, value in self.validation_overrides.items():
             if value not in VALID_OVERRIDE_VALUES:
                 print(
                     f"WARNING: ignoring unknown validation override {value!r} "
-                    f"for issue {matched_key}; leaving its underlying status "
+                    f"for issue {key}; leaving its underlying status "
                     f"unchanged.",
                     file=sys.stderr,
                 )
                 continue
+            if isinstance(key, int) or (isinstance(key, str) and key.isdigit()):
+                ghash = self._group_hash_for_issue(int(key))
+                if not ghash:
+                    continue
+            else:
+                ghash = str(key)
+            previous = by_hash.get(ghash)
+            if previous is None or (
+                _OVERRIDE_PRECEDENCE.get(value, 0)
+                > _OVERRIDE_PRECEDENCE.get(previous[1], 0)
+            ):
+                by_hash[ghash] = (key, value)
+
+        override_count = 0
+        for group in self.merged:
+            entry = by_hash.get(group.get("group_hash", ""))
+            if entry is None:
+                continue
+            matched_key, value = entry
             # Route "claude_decide" as a marker, never as a status.
             if self._route_claude_decide_marker(group, matched_key, value):
                 override_count += 1
@@ -813,23 +888,25 @@ Finalization (run by the host AFTER every batch has been applied and verified):
     ) -> Tuple[Set[str], Set[str], Set[str]]:
         """Parse skipped issues from report.md.
 
-        Returns integer-based skipped issue numbers converted to group_hash
-        strings for compatibility with the base class filtering.
+        ``parse_skipped_issues`` returns *issue* numbers (the ``### N.``
+        headings), which are resolved to the group each issue belongs to
+        before they become the group_hash strings the base class filters on.
+        Skipping one member skips its whole group: the members are the same
+        finding seen by different models, so there is no partial fix to apply
+        (report.md names the siblings on each block for exactly that reason).
         """
         skipped_issue_numbers = parse_skipped_issues(report_path)
         skipped_suggestion_ids: Set[str] = set()
 
-        # Convert integer-based skipped_group_indices to hash-based Set[str]
+        # Convert issue numbers to the hash-based Set[str] the base wants
         skipped_group_hashes: Set[str] = set()
-        for g_idx in skipped_issue_numbers:
-            if isinstance(g_idx, int) and 1 <= g_idx <= len(self.groups):
-                ghash = self.groups[g_idx - 1].get("group_hash", "")
+        for key in skipped_issue_numbers:
+            if isinstance(key, int):
+                ghash = self._group_hash_for_issue(key)
                 if ghash:
                     skipped_group_hashes.add(ghash)
-                else:
-                    print(f"WARNING: Skipped group index {g_idx} has no group_hash", file=sys.stderr)
-            elif isinstance(g_idx, str):
-                skipped_group_hashes.add(g_idx)
+            elif isinstance(key, str):
+                skipped_group_hashes.add(key)
 
         return skipped_group_hashes, skipped_suggestion_ids, set()
 

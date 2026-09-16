@@ -2864,5 +2864,97 @@ class TestOrchestratorOutputClaudeDecideShape:
         assert cfg["decision_mode"] == "interactive"
 
 
+class TestReportCheckboxesResolveThroughTheIssueMap:
+    """report.md numbers *issues*; the checkboxes act on *groups*.
+
+    Measured on a 3-model review (12 issues, 9 groups): read as group
+    indices, 11 of the 12 checkboxes hit another finding and the last three
+    fell off the end of the group list and were dropped without a word.
+    """
+
+    # Three groups; issue 4 is group 1's second member (a consensus finding),
+    # so as a group index it is off the end of the list.
+    GROUPS = [
+        {"group_hash": "h_teleport", "suggestions": [{"title": "a"}, {"title": "b"}]},
+        {"group_hash": "h_selftest", "suggestions": [{"title": "c"}]},
+        {"group_hash": "h_fog", "suggestions": [{"title": "d"}]},
+    ]
+    ISSUE_MAP = {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (1, 2)}
+
+    def _orchestrator(self, groups, issue_map):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        orch.groups = groups
+        orch.merged = [dict(g) for g in groups]
+        orch.issue_to_group_map = issue_map
+        orch.validation_overrides = {}
+        orch.claude_decide_overrides = set()
+        return orch
+
+    def _report(self, tmp_path, marked):
+        """A four-issue report with *marked* carrying the ticked Skip box."""
+        blocks = []
+        for n in (1, 2, 3, 4):
+            box = "[x]" if n == marked else "[ ]"
+            blocks.append(
+                f"### {n}. Finding {n}\n- {box} Skip\n"
+                f"**Validation:** Valid | **File:** `a.py` | **Type:** bug\n\n"
+                f"Description {n}\n\n---\n"
+            )
+        path = tmp_path / "report.md"
+        path.write_text("# Code Review Report\n\n" + "\n".join(blocks), encoding="utf-8")
+        return str(path)
+
+    def test_skipping_a_consensus_issue_skips_the_group_that_holds_it(self, tmp_path):
+        """Issue 4 belongs to group 1, not to a (nonexistent) group 4."""
+        orch = self._orchestrator(self.GROUPS, self.ISSUE_MAP)
+        hashes, sugg_ids, old = orch.parse_skips_from_report(self._report(tmp_path, 4))
+        assert hashes == {"h_teleport"}
+        assert sugg_ids == set() and old == set()
+
+    def test_skipping_an_issue_whose_number_is_not_its_group_number(self, tmp_path):
+        """Issue 2 sits in group 3 under this map, and that is where the skip lands."""
+        orch = self._orchestrator(
+            self.GROUPS, {1: (1, 1), 2: (3, 1), 3: (2, 1), 4: (1, 2)}
+        )
+        hashes, _, _ = orch.parse_skips_from_report(self._report(tmp_path, 2))
+        assert hashes == {"h_fog"}
+
+    def test_an_issue_number_the_map_cannot_place_is_warned_about(self, tmp_path, capsys):
+        """A stale report.md loses the checkbox, but never silently."""
+        orch = self._orchestrator(self.GROUPS, {1: (1, 1), 2: (2, 1), 3: (3, 1)})
+        hashes, _, _ = orch.parse_skips_from_report(self._report(tmp_path, 4))
+        assert hashes == set()
+        err = capsys.readouterr().err
+        assert "issue 4" in err and "issue->group map" in err
+
+    def test_without_an_issue_map_the_number_is_still_read_positionally(self, tmp_path):
+        """No issues.json: the legacy 1:1 reading, correct when no two models agreed."""
+        orch = self._orchestrator(self.GROUPS, None)
+        hashes, _, _ = orch.parse_skips_from_report(self._report(tmp_path, 2))
+        assert hashes == {"h_selftest"}
+
+    def test_mark_invalid_lands_on_the_issue_s_own_group(self):
+        orch = self._orchestrator(self.GROUPS, self.ISSUE_MAP)
+        orch.validation_overrides = {4: "invalid"}
+        orch.apply_group_validation_overrides()
+        statuses = [g.get("validation_status") for g in orch.merged]
+        assert statuses == ["invalid", None, None]
+        assert orch.merged[0]["user_override"] is True
+
+    def test_conflicting_marks_inside_one_group_take_the_invalid(self):
+        """Issues 1 and 4 are one finding; marking them differently is safety-first."""
+        orch = self._orchestrator(self.GROUPS, self.ISSUE_MAP)
+        orch.validation_overrides = {1: "valid", 4: "invalid"}
+        orch.apply_group_validation_overrides()
+        assert orch.merged[0]["validation_status"] == "invalid"
+
+    def test_a_group_hash_key_still_overrides_its_own_group(self):
+        """HTML/consolidated decisions name the group directly."""
+        orch = self._orchestrator(self.GROUPS, self.ISSUE_MAP)
+        orch.validation_overrides = {"h_fog": "valid"}
+        orch.apply_group_validation_overrides()
+        assert orch.merged[2]["validation_status"] == "valid"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
