@@ -403,13 +403,15 @@ def record_high_priority_groups(
     Written to ``.status.json`` and onto the result line the way
     ``consolidation_recommended`` is (F4): a bare print is nothing a host
     polling ``status`` or reading only ``MULTI_LLM_RESULT`` ever sees. Only a
-    non-zero count is recorded — the key is optional, present when there is
-    something to act on. Returns the count so the caller can print it.
+    non-zero count is exposed — a clean reaggregation clears the previous
+    count so a detached poll cannot report findings the new review removed.
+    Returns the count so the caller can print it.
     """
     count = high_priority_group_count(groups)
-    if count > 0:
-        update_status(str(phase_dir), {"high_priority_groups": {"count": count}})
-        cli_common.record_high_priority_groups({"count": count})
+    data = {"count": count} if count > 0 else None
+    if data or _status_file.read_status(str(phase_dir)).get("high_priority_groups"):
+        update_status(str(phase_dir), {"high_priority_groups": data})
+    cli_common.record_high_priority_groups(data)
     return count
 
 

@@ -264,9 +264,10 @@ def list_untracked_files(directory: str) -> List[str]:
 def get_staged_files() -> List[str]:
     """Get list of currently staged files."""
     stdout, _, _ = _run_git("diff", "--cached", "--name-only")
-    # `--name-only` emits one unquoted path per line, so leading/trailing spaces
-    # in a filename are meaningful; only the line separator may be dropped.
-    return [f for f in stdout.split("\n") if f]
+    # Like porcelain, --name-only C-quotes non-ASCII and control characters.
+    # Keep the same decoded paths as get_modified_files so their union cannot
+    # contain a second, nonexistent quoted spelling of a staged file.
+    return [_unquote_porcelain_path(f) for f in stdout.split("\n") if f]
 
 def stage_files(files: List[str]) -> None:
     """Stage specific files."""

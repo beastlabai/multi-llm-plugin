@@ -667,10 +667,20 @@ class TestRenderPhaseFiltering:
 
         assert "... and 5 earlier batches from other phases" in output
         assert "earlier batches applied miscellaneous changes" in output
-        # The trailer is appended after the MAX_CHARS trim, so only it may
-        # push the total past the budget.
-        trailer = "\n... and 5 earlier batches from other phases"
-        assert len(output) <= MAX_CHARS + len(trailer)
+        assert len(output) <= MAX_CHARS
+
+    def test_one_oversized_entry_cannot_escape_the_reader_budget(self, tmp_path: Path) -> None:
+        append(str(tmp_path), "T001", "implement", "x" * 10000)
+        output = render(str(tmp_path), phase="implement", max_chars=120)
+        assert len(output) <= 120
+        assert "T001" in output
+        assert output.endswith("... [truncated]")
+
+    def test_empty_log_and_tiny_budget_stay_bounded(self, tmp_path: Path) -> None:
+        assert len(render(str(tmp_path), max_chars=4)) <= 4
+        append(str(tmp_path), "T001", "implement", "x" * 10000)
+        for limit in (0, 1, 4):
+            assert len(render(str(tmp_path), max_chars=limit)) <= limit
 
     def test_a_reader_can_widen_the_budget_the_write_batch_fixed(
         self, tmp_path: Path
@@ -791,4 +801,3 @@ class TestApplyCodeFixesPhaseAliasing:
         assert "OOB teleport resync" in by_dir_word
         assert "unrelated phase" not in by_dir_word
         assert "... and 1 earlier batches from other phases" in by_dir_word
-

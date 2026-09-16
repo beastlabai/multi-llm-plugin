@@ -151,6 +151,39 @@ class TestDoctorOnABrokenSandbox:
 
 class TestDoctorOnAHealthyMachine:
 
+    def test_one_providers_three_probes_run_concurrently(self, monkeypatch):
+        import threading
+        from types import SimpleNamespace
+
+        provider = SimpleNamespace(is_available=lambda: True)
+        monkeypatch.setattr(registry, "load_config", lambda **kwargs: {"providers": {"fake": {}}})
+        monkeypatch.setattr(registry, "get_provider", lambda name: provider)
+        monkeypatch.setattr(doctor, "_probe_cwd", lambda anchor: None)
+        barrier = threading.Barrier(3, timeout=2)
+
+        def probe(*args):
+            barrier.wait()
+            return {"ok": True, "state": "unprobed"}
+
+        for kind in ("version", "auth", "sandbox"):
+            monkeypatch.setattr(doctor, f"_probe_{kind}", probe)
+        report = doctor.collect(budget_s=3)
+        assert report["present"] == 1
+        assert report["failures"] == []
+
+    def test_exhausted_budget_does_not_start_another_probe(self, monkeypatch):
+        def forbidden(*args, **kwargs):
+            pytest.fail("an exhausted report budget started a subprocess")
+
+        monkeypatch.setattr(doctor.subprocess, "run", forbidden)
+        monkeypatch.setattr(executor, "sandbox_verdict", forbidden)
+        assert doctor._run(["unused"], timeout=0) is None
+        from types import SimpleNamespace
+
+        result = doctor._probe_sandbox(SimpleNamespace(), 0, None)
+        assert result["state"] == "unprobed"
+        assert result["ok"] is True
+
     def test_every_present_provider_passes_and_exits_0(self, clinic, monkeypatch, capsys):
         monkeypatch.setattr(doctor, "_bwrap_self_test", lambda timeout: ("ok", ""))
         assert doctor.main(["--json", "--budget", "10"]) == 0

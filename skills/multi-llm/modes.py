@@ -466,9 +466,9 @@ NEEDS_HUMAN_OPTION = (
 #: The one exit 3 that is not an unfinished run. ``review-code --fail-on-high``
 #: completes the review and *then* exits 3 to hold a standalone gate for a
 #: decision, and its result line carries the same needs-human state every other
-#: exit 3 does — so nothing in the payload distinguishes it, and the plugin
-#: reads the launch instead: this mode word, with this flag among the call's
-#: extra flags, gets the completed-review clause and never "did not complete".
+#: exit 3 does. The plugin combines the launch flag with the result's positive
+#: ``high_priority_groups.count`` before claiming completion: the flag alone
+#: also appears on preflight failures where no review ever ran.
 #: The flag is declared by ``code_review_orchestrator``'s parser; a test holds
 #: the two spellings together.
 REVIEW_GATE = {"mode": "review-code", "flag": "--fail-on-high"}

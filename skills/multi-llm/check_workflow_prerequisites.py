@@ -196,17 +196,15 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
     else:
         return {"met": True, "reason": "No actionable task suggestions found"}
 
-    # Count total suggestions across all groups
-    total_suggestions = 0
-    for group in groups:
-        suggestions = group.get("suggestions", [])
-        total_suggestions += len(suggestions)
+    # The notice and validation both count groups. Without usable verdicts,
+    # duplicate suggestions inside one group must not inflate that count.
+    total_groups = sum(bool(group.get("suggestions")) for group in groups)
 
-    if total_suggestions == 0:
+    if total_groups == 0:
         return {"met": True, "reason": "skipped (no findings)", "actionable_count": 0}
 
     # Cross-reference with validation.json if available to count valid ones
-    actionable_count = total_suggestions
+    actionable_count = total_groups
     importance_breakdown = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
 
     if validation_path.exists():
@@ -238,14 +236,14 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
             if valid_count > 0:
                 actionable_count = valid_count
-            # If validation exists but nothing is valid, still count total
+            # If validation exists but nothing is valid, still count all groups
             # as actionable (user may override validation)
         except (json.JSONDecodeError, OSError):
             pass
 
     # Prerequisite NOT met - has unapplied task suggestions
-    # `actionable_count` is `valid_count`: one increment per validation VERDICT
-    # (a group-level judgment), never per suggestion inside a group. A group
+    # `actionable_count` counts valid groups, or all nonempty groups when no
+    # usable valid verdict exists, never suggestions inside a group. A group
     # holds one or more suggestions, so "N unapplied task suggestions" reads as
     # a suggestion count when it is actually a group count — measured
     # 2026-09-16, a run with 17 valid groups (holding 26 suggestions between

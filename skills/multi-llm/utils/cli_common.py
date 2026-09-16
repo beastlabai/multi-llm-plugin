@@ -251,6 +251,11 @@ def retry_command(
         else:
             positionals.append(arg)
     drop = set(RETRY_VERBS) | {str(v).split("=", 1)[0] for v in verbs}
+    if "--resume" in verbs:
+        # A retry continues the failed run. Replaying its original --fresh
+        # would erase decisions, processed items and the prior-changes log
+        # before the apply orchestrator has a chance to resume them.
+        drop.add("--fresh")
     kept = [
         str(token) for token in (flags or [])
         if str(token).split("=", 1)[0] not in drop

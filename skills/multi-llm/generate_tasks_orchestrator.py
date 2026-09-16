@@ -268,19 +268,19 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
         RunnerRejected: exit 3, with the runner spec and the missing capability
             named.
     """
-    from utils.provider_registry import get_provider, parse_model_spec
+    from utils.provider_registry import SESSION_LAYER, get_provider, parse_model_spec
     from utils.subagent_executor import (
         PROFILE_AGENT_READONLY,
         RunnerRejected,
         eligible_runners,
         preflight_runner,
-        resolve_task_runner_source,
+        _resolve_task_source,
     )
 
     # The key carries the ladder's layer word (`driver.subagent_runner
     # (session)`), so a refusal or a warning here names the rung that supplied
     # the spec, the way the executor's own preflight does.
-    spec, key = resolve_task_runner_source(task, anchor=anchor)
+    spec, key, layer = _resolve_task_source(task, anchor=anchor)
     provider_name, _model = parse_model_spec(spec, anchor=anchor)
     provider = get_provider(provider_name)
     if provider is not None and not provider.supports_workspace_reads:
@@ -308,7 +308,14 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
     # Adapter present, model spec parseable, `agent-readonly` implemented, binary
     # on PATH, version within the supported window — one shared formatter, so this
     # refusal reads like every other runner refusal.
-    preflight_runner(spec, profile=PROFILE_AGENT_READONLY, anchor=anchor, key=key)
+    # The executor owns fallback from an implicit session selection to the
+    # host's default runner. Refusing that selection here would prevent its
+    # fallback from ever running. Explicit selections still fail immediately;
+    # session selections receive the same full preflight inside run_tasks.
+    if layer != SESSION_LAYER:
+        preflight_runner(
+            spec, profile=PROFILE_AGENT_READONLY, anchor=anchor, key=key, layer=layer
+        )
 
 
 # ---------------------------------------------------------------------------
