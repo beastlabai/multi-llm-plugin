@@ -470,6 +470,61 @@ class TestReviewTasksPrerequisites:
         output = json.loads(result.stdout)
         assert output["mode"] == "review-tasks"
 
+    def test_unapplied_task_suggestions_notice_counts_groups_not_suggestions(
+        self, temp_dir
+    ):
+        """F9.5: `actionable_count` is `valid_count` — one increment per
+        validation VERDICT, i.e. per GROUP — never per suggestion inside a
+        group. Three groups of two suggestions each (six suggestions total),
+        two valid groups: the notice must say "2 unapplied task suggestion
+        groups", not "2 unapplied task suggestions" (which reads as a
+        suggestion count, and was measured 2026-09-16 on a run where 17 valid
+        groups held 26 suggestions)."""
+        plan_path = temp_dir / "notice-wording.md"
+        plan_path.write_text("# Test Plan\n", encoding="utf-8")
+
+        review_dir = temp_dir / "notice-wording" / "review-tasks"
+        review_dir.mkdir(parents=True)
+
+        def _group(n):
+            return {
+                "category": "addition", "theme": f"group {n}",
+                "suggestions": [
+                    {"title": f"s{n}a", "desc": "d", "importance": "LOW", "type": "addition"},
+                    {"title": f"s{n}b", "desc": "d", "importance": "LOW", "type": "addition"},
+                ],
+            }
+
+        grouped = {"format_version": 2, "groups": [_group(1), _group(2), _group(3)]}
+        (review_dir / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
+        validation = {
+            "format_version": 2,
+            "groups": [
+                {"group_index": 0, "status": "valid"},
+                {"group_index": 1, "status": "valid"},
+                {"group_index": 2, "status": "invalid"},
+            ],
+        }
+        (review_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
+
+        state = StateManager(plan_path)
+        state.mark_phase_completed("review-tasks")
+        state.save()
+
+        script_path = Path(__file__).parent.parent / "check_workflow_prerequisites.py"
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--plan-file", str(plan_path), "--status"],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(script_path.parent),
+        )
+        output = json.loads(result.stdout)
+
+        notices = output.get("notices") or []
+        assert notices, f"expected a notice on the workflow status, got: {output}"
+        assert "2 unapplied task suggestion groups" in notices[0], notices[0]
+        # The old wording, without "groups", must be gone — it undercounted
+        # by calling 2 groups (6 suggestions) "2 suggestions".
+        assert "2 unapplied task suggestions." not in notices[0], notices[0]
+
 
 # --- TestSkipReasonFlags ---
 

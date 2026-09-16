@@ -3987,6 +3987,70 @@ class TestModelCatalogPreflight:
             "opencode:opencode/big-pickle  (supplied by host capabilities)"
         )
 
+    def test_the_most_recently_updated_recorded_spec_wins_and_is_named(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F4: `generate-tasks` sorts ahead of `review-tasks` alphabetically, so
+        with both listed the search used to stop at whichever recorded a spec
+        first — `generate-tasks`' pre-`--variant low` record — under a line
+        that claimed "recorded by this run's own dispatches" for a spec this
+        run never dispatched with (measured 2026-09-16). The freshest
+        `updated_at` must win, and the line must name the run it came from
+        once there is more than one candidate to choose between."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        stale_spec = "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        fresh_spec = "opencode:openrouter/~deepseek/deepseek-flash-latest:low"
+        views = [
+            {
+                "phase_dir": "/plan/generate-tasks", "phase": "generate-tasks",
+                "updated_at": "2026-09-16T16:03:00", "run": {"host": "opencode"},
+                "progress": {"subagents": {
+                    "runner_versions": {stale_spec: "1.18.31"},
+                }},
+            },
+            {
+                "phase_dir": "/plan/review-tasks", "phase": "review-tasks",
+                "updated_at": "2026-09-16T16:48:00", "run": {"host": "opencode"},
+                "progress": {"subagents": {
+                    "runner_versions": {fresh_spec: "1.18.31"},
+                }},
+            },
+        ]
+        lines = run_status.render_runner_text(plan, views=views)
+        assert lines[1].strip() == (
+            f"{fresh_spec}  (recorded by review-tasks's own dispatches)"
+        )
+
+    def test_a_single_recorded_spec_keeps_the_unattributed_wording(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """With only one view ever recording a spec there is nothing to
+        disambiguate, so the existing "this run's own dispatches" wording
+        stays exactly as specific as it always was — this is `_run_runner_facts`
+        collecting candidates now instead of returning on the first hit, and
+        it must not start naming a run when there is only one to name."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        spec = "opencode:openrouter/~deepseek/deepseek-flash-latest:low"
+        views = [
+            {
+                "phase_dir": "/plan/review-tasks", "phase": "review-tasks",
+                "updated_at": "2026-09-16T16:48:00", "run": {"host": "opencode"},
+                "progress": {"subagents": {"runner_versions": {spec: "1.18.31"}}},
+            },
+        ]
+        lines = run_status.render_runner_text(plan, views=views)
+        assert lines[1].strip() == f"{spec}  (recorded by this run's own dispatches)"
+
 
 class TestCredentialFreeModels:
     """D3 step 2: a declared credential-free model passes the auth leg; a
