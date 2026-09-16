@@ -696,3 +696,43 @@ class TestStatusMode:
 
         assert output["phases"]["review-tasks"]["status"] == "skipped"
         assert "reason" in output["phases"]["review-tasks"]
+
+    def test_status_does_not_count_apply_batches_as_implement_tasks(self, sample_plan_file):
+        """F4 regression: `implement`'s task progress must come only from the
+        decomposer's own `T###` ids, never from apply-suggestions' write-batch
+        ids (`apply-batch-N`) that share the same `task_status` map.
+
+        Before the fix, `implement` read as `(1/1 tasks)` here — and, worse,
+        would have flipped to `in_progress` on a single failed apply batch —
+        despite no implement task ever having been generated.
+        """
+        state = StateManager(sample_plan_file)
+        state.mark_phase_completed("review-plan")
+        state.mark_phase_completed("apply-suggestions")
+        state.mark_phase_completed("generate-tasks")
+        state.update_task_status("apply-batch-0", "completed")
+        state.save()
+
+        output = self.run_status_check(sample_plan_file)
+
+        assert output["phases"]["implement"]["status"] == "pending"
+        assert "tasks_done" not in output["phases"]["implement"]
+        assert "tasks_total" not in output["phases"]["implement"]
+
+    def test_status_counts_implement_t_ids_and_ignores_apply_batches(self, sample_plan_file):
+        """A mixed map (both phases have run) reports progress from the
+        implement-owned ids only."""
+        state = StateManager(sample_plan_file)
+        state.mark_phase_completed("review-plan")
+        state.mark_phase_completed("apply-suggestions")
+        state.mark_phase_completed("generate-tasks")
+        state.update_task_status("apply-batch-0", "completed")
+        state.update_task_status("T001", "completed")
+        state.update_task_status("T002", "pending")
+        state.save()
+
+        output = self.run_status_check(sample_plan_file)
+
+        assert output["phases"]["implement"]["status"] == "in_progress"
+        assert output["phases"]["implement"]["tasks_done"] == 1
+        assert output["phases"]["implement"]["tasks_total"] == 2

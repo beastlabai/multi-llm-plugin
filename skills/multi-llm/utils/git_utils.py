@@ -99,8 +99,16 @@ def _porcelain_destination(path_field: str) -> str:
 
 
 def get_modified_files() -> List[str]:
-    """Get list of modified and untracked files."""
-    stdout, _, _ = _run_git("status", "--porcelain")
+    """Get list of modified and untracked files.
+
+    ``-uall`` matters for an untracked *directory*: plain ``--porcelain``
+    collapses one into a single ``?? some_dir/`` line, so a baseline built from
+    it (``record_pre_existing_changes`` and friends) declared the *whole* tree
+    pre-existing — in a repo where e.g. ``plans/`` is untracked, that included
+    the very plan a run was about to edit. With ``-uall`` every file under an
+    untracked directory gets its own porcelain line.
+    """
+    stdout, _, _ = _run_git("status", "--porcelain", "-uall")
     files = []
     # NEVER strip leading whitespace off this output: a worktree-only change is
     # reported as `" M path"`, so `stdout.strip()` would eat the first line's
