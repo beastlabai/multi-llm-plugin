@@ -47,5 +47,3 @@ Read these files to understand existing patterns before implementing.
 - Stay focused on the specific task at hand
 - Only run tests directly related to this task's changed files — do NOT run broad test suites or regression checks
 - If a test fails, be aware that other tasks may be running in parallel and modifying shared code — the failure may not be caused by your changes. Only fix failures clearly related to your own modifications.
-
-Proceed with the implementation.

@@ -12,7 +12,7 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -118,7 +118,7 @@ def _load_entries(path: Path) -> list[dict]:
     return entries
 
 
-def render(output_dir: str) -> str:
+def render(output_dir: str, phase: Optional[str] = None) -> str:
     """The prior-batch context block, exactly as `read` prints it.
 
     Extracted from :func:`cmd_read` so the D3n write-batch scheduler can bind
@@ -127,17 +127,37 @@ def render(output_dir: str) -> str:
     byte-identical text. The log is always **replayed from disk** rather than
     reconstructed from an in-memory list, which is what makes a resumed batch see
     the same context an uninterrupted run would have.
+
+    *phase*, when given, prefers this phase's own entries when trimming to the
+    entry cap / ``MAX_CHARS`` (N8): a log accumulates entries from every write
+    phase that has ever run against this plan — measured on a real run, 36
+    entries were 15 apply-suggestions, 11 apply-task-suggestions and 10
+    implement, and an unfiltered tail spent two of implement's eleven visible
+    slots on `apply-task-suggestions`' edits, numbered ``**Batch 25**``/``**Batch
+    26**`` beside the rest of the log's plain ``T001``…``T006`` implement ids.
+    With no entries recorded yet for *phase* (its first dispatch), there is
+    nothing to prefer, so this falls back to the unfiltered behaviour rather
+    than rendering an empty phase-scoped log while real prior context sits
+    unread.
     """
     entries = _load_entries(_jsonl_path(output_dir))
     if not entries:
         return DEFAULT_TEXT
 
-    total = len(entries)
+    same_phase = [e for e in entries if e.get("phase") == phase] if phase else []
+    if same_phase:
+        working = same_phase
+        other_count = len(entries) - len(same_phase)
+    else:
+        working = entries
+        other_count = 0
+
+    total = len(working)
     tail = min(DEFAULT_TAIL, total)
     output = ""
     while tail > 0:
         skipped = total - tail
-        visible = entries[total - tail:]
+        visible = working[total - tail:]
 
         lines: list[str] = []
         if skipped > 0:
@@ -152,6 +172,9 @@ def render(output_dir: str) -> str:
         if len(output) <= MAX_CHARS:
             break
         tail -= 1
+
+    if other_count > 0:
+        output = f"{output}\n... and {other_count} earlier batches from other phases"
     return output
 
 

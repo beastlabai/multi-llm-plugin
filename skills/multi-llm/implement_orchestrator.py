@@ -373,6 +373,29 @@ ACCEPTANCE_CRITERIA_FRAMING = (
 )
 
 
+def _checklist_bullets(criteria: List[str]) -> Tuple[List[str], int]:
+    """Valid, length-capped ``- [ ] ...`` bullet lines, plus the overflow count.
+
+    The shared core of the agent-facing acceptance-criteria section and the
+    human-task checklist (N4) — both bound the same way, so the cap lives
+    once.
+    """
+    MAX_CRITERIA = 10
+    MAX_CRITERION_CHARS = 200
+
+    # Filter out empty/whitespace-only strings
+    valid = [c.strip() for c in criteria if isinstance(c, str) and c.strip()]
+    overflow = max(len(valid) - MAX_CRITERIA, 0)
+    items = valid[:MAX_CRITERIA]
+
+    bullets = []
+    for item in items:
+        if len(item) > MAX_CRITERION_CHARS:
+            item = item[:MAX_CRITERION_CHARS - 3] + "..."
+        bullets.append(f"- [ ] {item}")
+    return bullets, overflow
+
+
 def _build_acceptance_criteria_section(criteria: List[str]) -> str:
     """Build the acceptance criteria section from a list of criteria.
 
@@ -382,27 +405,50 @@ def _build_acceptance_criteria_section(criteria: List[str]) -> str:
     Returns:
         Formatted section string, or empty string if no valid criteria.
     """
-    MAX_CRITERIA = 10
-    MAX_CRITERION_CHARS = 200
-
-    # Filter out empty/whitespace-only strings
-    valid = [c.strip() for c in criteria if isinstance(c, str) and c.strip()]
-    if not valid:
+    bullets, overflow = _checklist_bullets(criteria)
+    if not bullets:
         return ""
 
-    overflow = len(valid) - MAX_CRITERIA
-    items = valid[:MAX_CRITERIA]
-
-    lines = ["## Acceptance Criteria", ACCEPTANCE_CRITERIA_FRAMING, ""]
-    for item in items:
-        if len(item) > MAX_CRITERION_CHARS:
-            item = item[:MAX_CRITERION_CHARS - 3] + "..."
-        lines.append(f"- [ ] {item}")
+    lines = ["## Acceptance Criteria", ACCEPTANCE_CRITERIA_FRAMING, "", *bullets]
 
     if overflow > 0:
         lines.append(f"_(+{overflow} more criteria; see full plan)_")
 
     return "\n".join(lines) + "\n"
+
+
+#: Rendered instead of the write-subagent template for a task whose
+#: ``executor_role`` is ``"human"`` (N4, 2026-09-16). The standard template's
+#: ``ACCEPTANCE_CRITERIA_FRAMING`` sentence ("do not attempt the browser or
+#: manual steps yourself"), its ``## Constraints`` block (kill/pkill, no
+#: background servers — subagent process-safety rules) and its terminal
+#: "Proceed with the implementation." are all written for a write subagent,
+#: and directly contradict a task whose whole job *is* the browser/manual
+#: work they forbid — a materialized T014 once read both in the same file.
+#: Nothing dispatches a human task (``executor_role == "human"`` routes
+#: around every invoker), so there is no runner to instruct: the rendered
+#: entry exists only for the person who has to do the work by hand.
+HUMAN_TASK_DEFERRAL_LINE = "This task is deferred to a human; nothing dispatches it."
+
+
+def build_human_task_prompt(task: Task) -> str:
+    """The task plus its checklist, for a task nothing ever dispatches.
+
+    Deliberately not :func:`build_task_prompt`'s template — see
+    ``HUMAN_TASK_DEFERRAL_LINE`` for why the omissions matter.
+    """
+    lines = ["## Task", f"Title: {task.title}", f"Description: {task.description}", ""]
+
+    bullets, overflow = _checklist_bullets(task.acceptance_criteria or [])
+    if bullets:
+        lines.append("## Checklist")
+        lines.extend(bullets)
+        if overflow > 0:
+            lines.append(f"_(+{overflow} more criteria; see full plan)_")
+        lines.append("")
+
+    lines.append(HUMAN_TASK_DEFERRAL_LINE)
+    return "\n".join(lines)
 
 
 def _build_dependency_section(
@@ -590,17 +636,26 @@ def format_task_for_output(
     all_tasks: Optional[Dict[str, Task]] = None,
 ) -> Dict[str, Any]:
     """Format a task for JSON output."""
+    is_human = task.executor_role == "human"
+    # A human task is never dispatched (N4): its entry is the checklist a
+    # person reads, not a write-subagent prompt, so it skips the template
+    # that would tell them not to do the exact work this task asks for.
+    prompt = (
+        build_human_task_prompt(task)
+        if is_human
+        else build_task_prompt(task, plan_preamble, plan_path, all_tasks=all_tasks)
+    )
     return {
         "id": task.id,
         "title": task.title,
         "description": task.description,
-        "prompt": build_task_prompt(task, plan_preamble, plan_path, all_tasks=all_tasks),
+        "prompt": prompt,
         # D2h: `executor_role` is what every reader branches on; `subagent_type`
         # rides along as optional Claude-only metadata for hosts whose native
         # Task tool requires the parameter.
         "executor_role": task.executor_role,
         "subagent_type": task.subagent_type,
-        "is_human": task.executor_role == "human",
+        "is_human": is_human,
         "depends_on": task.depends_on,
         "files_to_modify": task.files_to_modify,
         "files_to_create": task.files_to_create,

@@ -707,6 +707,11 @@ class WriteBatchScheduler:
         verified one-line summary of what each batch actually did already exists in
         ``prior_changes.jsonl``, so implement prompts now carry the token too and
         get the same binding, refusal included, as every other kind.
+
+        The render is scoped to ``self.phase`` (N8, 2026-09-16): the log is one
+        file shared by every write phase this plan has ever run, and an
+        unscoped tail let another phase's older batches crowd out this
+        phase's own recent ones.
         """
         prompt = str(task.get("prompt") or "")
         if PRIOR_CHANGES_TOKEN not in prompt:
@@ -719,7 +724,7 @@ class WriteBatchScheduler:
                 f"prompts/implementation_task.txt). Nothing was dispatched.",
                 STATUS_REJECTED,
             )
-        context = _prior_changes.render(self.output_dir)
+        context = _prior_changes.render(self.output_dir, phase=self.phase)
         return prompt.replace(PRIOR_CHANGES_TOKEN, context)
 
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
