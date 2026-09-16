@@ -507,6 +507,7 @@ class ResultContext:
         self.state: Optional[str] = None
         self.artifacts: List[str] = []
         self.next: Optional[str] = None
+        self.consolidation_recommended: Optional[Dict[str, Any]] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -525,9 +526,24 @@ class ResultContext:
             return
         self.next = command or None
 
+    def set_consolidation_recommended(
+        self, recommendation: Optional[Dict[str, Any]]
+    ) -> None:
+        """Record the optional consolidation recommendation.
+
+        Deliberately **not** a ``next``: ``--consolidate`` is one of the
+        dispatcher's mechanical continuations, which a host such as the opencode
+        plugin auto-follows without asking — a recommendation would become an
+        unrequested extra phase. It is a *fact about the finished phase*, and it
+        rides the result line so a host reads it where it reads everything else.
+        """
+        self.consolidation_recommended = (
+            dict(recommendation) if recommendation else None
+        )
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "mode": self.mode,
             "phase": self.phase,
             "state": self.state or _STATE_BY_EXIT.get(exit_code, "error"),
@@ -535,6 +551,15 @@ class ResultContext:
             "artifacts": list(self.artifacts),
             "next": self.next,
         }
+        # Present only when there is something to recommend, so every other
+        # invocation's line is byte-for-byte what it was — and so "absent" and
+        # "not recommended" cannot be told apart by a reader that should treat
+        # them the same.
+        if self.consolidation_recommended:
+            payload["consolidation_recommended"] = dict(
+                self.consolidation_recommended
+            )
+        return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
         """Write the terminal line. Idempotent: exactly one line per invocation."""
@@ -588,6 +613,14 @@ def record_next(command: Optional[str]) -> None:
     """Record the single follow-up command, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_next(command)
+
+
+def record_consolidation_recommended(
+    recommendation: Optional[Dict[str, Any]]
+) -> None:
+    """Record the consolidation recommendation, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_consolidation_recommended(recommendation)
 
 
 # ---------------------------------------------------------------------------

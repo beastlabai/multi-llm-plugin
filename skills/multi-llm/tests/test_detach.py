@@ -1151,6 +1151,40 @@ class TestStatusSurface:
         out = capsys.readouterr().out
         assert str(report) in out
 
+    def test_a_consolidation_recommendation_survives_the_detach_boundary(
+        self, tmp_path, capsys
+    ):
+        """The `[CONSOLIDATION_RECOMMENDED]` marker is a log line, and the
+        caller of a detached run never reads the log — so `classify_run` carries
+        the checkpoint's copy and `status` is where a host learns of it. It is
+        never handed back as `next`: `--consolidate` is a mechanical
+        continuation a host may follow unasked, and a recommendation is not an
+        instruction.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "consolidation_recommended": {
+                "valid_groups": 29, "threshold": 15, "command": "--consolidate",
+            },
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-consol-001", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
+            assert ctx.consolidation_recommended == {
+                "valid_groups": 29, "threshold": 15, "command": "--consolidate",
+            }
+            assert ctx.payload(0)["next"] is None
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        assert "consolidation recommended: 29 valid groups >= 15 — run --consolidate" in out
+
     def test_sweep_closes_out_orphans_across_the_plan(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)

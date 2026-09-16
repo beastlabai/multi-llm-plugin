@@ -17,7 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import review_plan_orchestrator as rpo  # noqa: E402
-from utils import review_orchestrator_base as base  # noqa: E402
+from utils import cli_common, review_orchestrator_base as base  # noqa: E402
 from utils import run_status, status_file  # noqa: E402
 
 
@@ -135,3 +135,155 @@ class TestPhaseStateReachesComplete:
         # phase's own state, read from the same .status.json, must still say
         # the phase finished rather than naming an intermediate step.
         assert "phase state:    complete" in out
+
+
+# ===========================================================================
+# The consolidation recommendation leaves the log
+# ===========================================================================
+
+def _three_findings(model_spec: str) -> dict:
+    """Three deliberately unrelated findings, so grouping yields three groups."""
+    provider, _, model = model_spec.partition(":")
+    return {
+        "success": True,
+        "data": [
+            {
+                "title": "Add email input validation",
+                "desc": "The plan never says the email field is validated.",
+                "importance": "HIGH",
+                "reference": "Overview",
+                "type": "addition",
+            },
+            {
+                "title": "Pin the database migration order",
+                "desc": "Migrations run in an unspecified sequence at deploy.",
+                "importance": "MEDIUM",
+                "reference": "Rollout",
+                "type": "clarification",
+            },
+            {
+                "title": "Name the session expiry window",
+                "desc": "Logout timing is left entirely to the implementer.",
+                "importance": "LOW",
+                "reference": "Security",
+                "type": "clarification",
+            },
+        ],
+        "source": "file",
+        "output_file": "unused.json",
+        "details": {"provider": provider, "model": model or "auto"},
+    }
+
+
+def _run_with_validation(tmp_path: Path, threshold: int):
+    """A run whose groups all validate, with the recommendation threshold given.
+
+    Two more seams than the runs above, both standing in for work a provider
+    would do: ``validate_groups`` (the LLM call) and
+    ``apply_validation_to_groups`` (which joins its verdicts back). Everything
+    the recommendation itself depends on — the fan-out, the grouping, the
+    count — is still the real thing.
+    """
+    plan = _plan(tmp_path)
+    argv = [
+        "--plan-file", str(plan),
+        "--models", "cursor-agent:auto",
+        "--internal-validation",
+        "--consolidation-threshold", str(threshold),
+        "--timeout", "5",
+    ]
+
+    async def _validate(groups, **kwargs):
+        return []
+
+    def _apply(groups, results):
+        return [dict(group, validation_status="valid") for group in groups]
+
+    context = cli_common.activate_result(cli_common.ResultContext())
+    try:
+        with patch.object(
+            base, "invoke_with_file_output",
+            side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
+        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+                patch.object(base, "validate_groups", _validate), \
+                patch.object(base, "apply_validation_to_groups", _apply):
+            exit_code = asyncio.run(rpo.main(argv))
+    finally:
+        cli_common.deactivate_result()
+    phase_dir = base.get_phase_dir(plan, "review-plan")
+    return plan, phase_dir, exit_code, context
+
+
+def _group_count(phase_dir) -> int:
+    """The run's own count, as it recorded it at ``grouping_complete``."""
+    return status_file.read_status(str(phase_dir))["total_groups"]
+
+
+class TestConsolidationRecommendationLeavesTheLog:
+    """The `[CONSOLIDATION_RECOMMENDED]` marker was a bare ``print``.
+
+    A detached caller never reads the log, so the recommendation reached no
+    host: not `.status.json`, not `output_files`, not the result line — and
+    deliberately still not `next`. Measured 2026-09-16, a 29-group run printed
+    the marker and the session model told the user no consolidation had been
+    recommended.
+    """
+
+    def test_the_recommendation_reaches_the_checkpoint_and_the_result_line(
+        self, tmp_path
+    ):
+        plan, phase_dir, exit_code, context = _run_with_validation(
+            tmp_path, threshold=2
+        )
+        assert exit_code == 0
+        assert _group_count(phase_dir) >= 2, "fewer groups than the threshold"
+
+        expected = {
+            "valid_groups": _group_count(phase_dir),
+            "threshold": 2,
+            "command": "--consolidate",
+        }
+        status = status_file.read_status(str(phase_dir))
+        assert status.get("consolidation_recommended") == expected
+        assert context.payload(0)["consolidation_recommended"] == expected
+        # Never `next`: `--consolidate` is one of the dispatcher's mechanical
+        # continuations, which a host may follow without asking, and following a
+        # recommendation would run a phase nobody requested.
+        assert context.payload(0)["next"] is None
+
+    def test_a_run_below_the_threshold_records_nothing(self, tmp_path):
+        """Absent, not ``null``: every other run's result line is unchanged."""
+        _, phase_dir, exit_code, context = _run_with_validation(
+            tmp_path, threshold=99
+        )
+        assert exit_code == 0
+        status = status_file.read_status(str(phase_dir))
+        assert "consolidation_recommended" not in status
+        assert "consolidation_recommended" not in context.payload(0)
+
+    def test_status_prints_the_recommendation_and_hands_it_back(
+        self, tmp_path, capsys
+    ):
+        """The route a detached host really reads: `status --view run`."""
+        plan, phase_dir, exit_code, _ = _run_with_validation(tmp_path, threshold=2)
+        assert exit_code == 0
+        capsys.readouterr()
+        groups = _group_count(phase_dir)
+
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            # 2: a foreground run claims no `run` record, so the run view has no
+            # liveness to report — the phase's own checkpoint is still read.
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+            assert context.consolidation_recommended == {
+                "valid_groups": groups,
+                "threshold": 2,
+                "command": "--consolidate",
+            }
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        assert (
+            f"consolidation recommended: {groups} valid groups >= 2 "
+            "— run --consolidate"
+        ) in out

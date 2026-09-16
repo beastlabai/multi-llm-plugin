@@ -264,7 +264,8 @@ function buildArgs(surface) {
       description:
         `The plan path, as exactly one argv element — never split, never ` +
         `shell-quoted, never escaped. Strip at most one layer of matching ` +
-        `quotes from what the user typed and send the value. A path ` +
+        `quotes, and one leading "@" (this host's file-attachment sigil), ` +
+        `from what the user typed and send the value. A path ` +
         `containing spaces needs no escaping. Empty ("") when and only when ` +
         `the mode declares no plan positional. Modes taking a plan: ` +
         `${planModes.join(", ")}. Relative paths resolve against the ` +
@@ -736,10 +737,24 @@ async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_
   }
 }
 
-/** A plan path normalized against the anchor. Resolving is not quoting. */
+/**
+ * A plan path normalized against the anchor. Resolving is not quoting.
+ *
+ * One leading `@` comes off first: it is this host's file-attachment sigil, so
+ * `--review-plan @plans/x.md` is the ordinary way a user names a file here and
+ * the text reaches the model with the sigil still on it. Left in place it
+ * resolves to `<workspace>/@plans/x.md` and the run dies on "Plan file not
+ * found", with nothing in the error naming the character at fault. Exactly one,
+ * and only at the front: a path may legitimately contain `@` anywhere else, and
+ * `@@x` is not a doubled sigil. A bare `"@"` keeps its sigil rather than
+ * becoming the empty string, so the positional still reaches the dispatcher and
+ * the refusal names what the user typed instead of a missing argument.
+ */
 function normalizePlan(plan, anchor) {
   if (!plan) return ""
-  const expanded = expandHome(plan)
+  const sigilless =
+    plan.startsWith("@") && plan.length > 1 ? plan.slice(1) : plan
+  const expanded = expandHome(sigilless)
   return path.isAbsolute(expanded) ? expanded : path.resolve(anchor, expanded)
 }
 
@@ -2359,9 +2374,10 @@ async function execute(args, ctx, surface, client) {
       row, values, surface, ctx, env, uv, anchor,
     })
 
-    // The core instructions and the three resolved verb sentences, for any mode
-    // where the model still has work after the dispatcher returns.
-    if (outcome.ok && rowNeedsInstructions(row)) {
+    // The core instructions and the three resolved verb sentences, for a call
+    // whose mode *and* whose outcome leave the model work after the dispatcher
+    // returns — the predicate below implements both halves of that sentence.
+    if (outcome.ok && rowNeedsInstructions(row, outcome, surface)) {
       const instructions = await fetchInstructions({
         row, surface, ctx, env, uv, anchor,
       })
@@ -2383,9 +2399,23 @@ async function execute(args, ctx, surface, client) {
   }
 }
 
-/** Modes whose work continues after the dispatcher returns. */
-function rowNeedsInstructions(row) {
-  return row.supports_detach
+/**
+ * Whether this call's *outcome* leaves the model work the instructions describe.
+ *
+ * The mode is only half the question, and reading it alone is what put 22 KB of
+ * "run this in bash" into the result of a finished run: measured 2026-09-16, a
+ * `review-plan` the plugin had driven to completion with `--exec-subagents`
+ * returned `next: null`, `state: "done"` — provably nothing left to do — beside
+ * the full rendered runbook, whose fifteen `uv run …` lines the same result's
+ * own message forbids running. So the mode has to support detach *and* the
+ * outcome has to be unfinished: a `next` the model is expected to send back, or
+ * any state that is not the finished one — which is the generated surface's,
+ * never a word spelled here.
+ */
+function rowNeedsInstructions(row, outcome, surface) {
+  if (!row.supports_detach) return false
+  const done = surface.dispatcher.states.ok
+  return (outcome?.next ?? null) !== null || outcome?.state !== done
 }
 
 // Exported for the test suite, which grades this file against its Python owners
@@ -2409,6 +2439,7 @@ const __testing = {
   reservedHit,
   resolveAnchor,
   resolveSessionModel,
+  rowNeedsInstructions,
   runChild,
   resolveMode,
   splitFrontmatter,

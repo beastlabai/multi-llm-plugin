@@ -578,6 +578,11 @@ def classify_run(
         "updated_at": status.get("updated_at"),
         "output_files": status.get("output_files") or {},
         "progress": status.get("progress") or {},
+        # Optional, and absent on every phase that has nothing to recommend:
+        # `{valid_groups, threshold, command}`, written by the review base's
+        # `[CONSOLIDATION_RECOMMENDED]` site. A detached run's caller never saw
+        # that stdout, so this view is the only route it reaches a host by.
+        "consolidation_recommended": status.get("consolidation_recommended"),
         "run": dict(run),
         "run_state": run.get("state") if isinstance(run, dict) else None,
         # D4's refusal close-out: `{"state": "runner_rejected", "reason_code"}`

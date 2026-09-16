@@ -3169,9 +3169,15 @@ class TestInstructionsSurface:
         command body is one line, so the place a model used to read the workflow
         and the resolved verbs is gone — and if the tool did not surface them,
         shrinking the prose would simply have deleted them.
+
+        The terminal poll hands back a ``next`` — a **non**-mechanical one, so
+        it is reported rather than auto-followed — because that is what "the
+        model still has work" means, and it is the only condition under which
+        the instructions are attached at all (see the sibling row below).
         """
         from utils import host_capabilities as caps
 
+        follow = "uv run -- python multi_llm.py generate-tasks p.md"
         launch = {
             "exit": 0,
             "stdout": ["run_id: R", "log: /l",
@@ -3179,7 +3185,7 @@ class TestInstructionsSurface:
         }
         done = {"exit": 0, "stdout": [
             'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
-            '"next":null}']}
+            '"next":' + json.dumps(follow) + '}']}
         # `util instructions` must reach the REAL dispatcher, or this row would
         # be grading the stub's own echo.
         instructions = {
@@ -3221,6 +3227,140 @@ class TestInstructionsSurface:
         text = SRC_MJS.read_text(encoding="utf-8")
         for sentence in caps.verb_sentences("opencode"):
             assert sentence not in text
+
+    def test_a_finished_run_is_not_sent_the_manual_run_instructions(
+        self, built_package, uv_stub
+    ):
+        """`next: null` and `state: "done"` means there is provably no work left.
+
+        Measured 2026-09-16: the tool result for a completed `review-plan` was
+        25 829 chars, 22 860 of them the rendered runbook — including fifteen
+        `uv run …` command lines the same result's own message forbids the model
+        to run — attached because the predicate read only `row.supports_detach`
+        and so fired for every detachable mode, finished or not. The step that
+        consumed it billed 16 205 input tokens for a run with nothing to do.
+        """
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":null}']}
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "",
+             "extra_flags": []},
+            [launch, done, {"exit": 0, "stdout": ["instructions would go here"]}],
+        )
+        assert result["ok"] is True and result["next"] is None
+        assert "instructions" not in result
+        # Not fetched either: the cost is the dispatch as well as the payload.
+        assert not [
+            call for call in calls if "instructions" in _dispatcher_argv(call)
+        ]
+
+        # The predicate itself, over the four combinations of the two questions
+        # it asks — the mode's, and this call's outcome.
+        verdicts = node_json(
+            """
+            const row = surface.modes.find((m) => m.supports_detach)
+            const flat = surface.modes.find((m) => !m.supports_detach)
+            // The state words come from the surface, as they do in the file
+            // under test: no state name is spelled in JS, here or there.
+            const done = surface.dispatcher.states.ok
+            const stuck = surface.dispatcher.states.needs_human
+            emit({
+              finished: T.rowNeedsInstructions(
+                row, {state: done, next: null}, surface),
+              owesNext: T.rowNeedsInstructions(
+                row, {state: done, next: {tool: "multi_llm"}}, surface),
+              unfinished: T.rowNeedsInstructions(
+                row, {state: stuck, next: null}, surface),
+              notDetachable: T.rowNeedsInstructions(
+                flat, {state: stuck, next: null}, surface),
+            })
+            """,
+            built_package,
+        )
+        assert verdicts == {
+            "finished": False, "owesNext": True,
+            "unfinished": True, "notDetachable": False,
+        }
+
+
+# ===========================================================================
+# The host's own file sigil
+# ===========================================================================
+
+class TestPlanSigil:
+    def test_one_leading_at_sigil_is_stripped_from_the_plan_path(
+        self, built_package, tmp_path
+    ):
+        """`@` is how a user names a file on this host, and it reaches the model.
+
+        Measured 2026-09-16, the argument text was `--review-plan
+        @plans/simple-3d-racing-game.md --quick`; that run's model stripped the
+        sigil on its own initiative and nothing made it. Left on, the path
+        resolves to `<workspace>/@plans/…` and the dispatcher exits 1 with "Plan
+        file not found", naming a path whose leading character nothing explains.
+
+        One, and only at the front: `@` is legal anywhere else in a path, and a
+        bare `"@"` keeps its sigil so the positional still reaches the
+        dispatcher and the refusal names what was typed.
+        """
+        anchor = json.dumps(str(tmp_path))
+        paths = node_json(
+            f"""
+            const anchor = {anchor}
+            emit({{
+              sigil: T.normalizePlan("@plans/x.md", anchor),
+              plain: T.normalizePlan("plans/x.md", anchor),
+              doubled: T.normalizePlan("@@plans/x.md", anchor),
+              absolute: T.normalizePlan("@/abs/x.md", anchor),
+              home: T.normalizePlan("@~/x.md", anchor),
+              inner: T.normalizePlan("plans/@team/x.md", anchor),
+              bare: T.normalizePlan("@", anchor),
+              empty: T.normalizePlan("", anchor),
+            }})
+            """,
+            built_package,
+        )
+        assert paths["sigil"] == paths["plain"] == str(tmp_path / "plans" / "x.md")
+        assert paths["doubled"] == str(tmp_path / "@plans" / "x.md")
+        assert paths["absolute"] == "/abs/x.md"
+        assert paths["home"] == str(Path.home() / "x.md")
+        assert paths["inner"] == str(tmp_path / "plans" / "@team" / "x.md")
+        assert paths["bare"] == str(tmp_path / "@")
+        assert paths["empty"] == ""
+
+    def test_the_plan_property_says_so(self, built_package):
+        """A model reading only the schema has to know, or it sends the sigil."""
+        described = node_json(
+            "emit(T.buildArgs(surface).plan.description)", built_package
+        )
+        assert "@" in described
+
+    def test_the_sigil_never_reaches_the_dispatcher(self, built_package, uv_stub):
+        """End to end: what `execute` composes carries the stripped path."""
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],'
+            '"next":null}']}
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "@plans/x.md", "question": "",
+             "extra_flags": []},
+            [launch, done],
+        )
+        argv = _dispatcher_argv(calls[0])
+        assert argv[1] == str(Path(result["anchor"]) / "plans" / "x.md")
+        assert not any(token.startswith("@") for token in argv)
 
 
 # ===========================================================================
