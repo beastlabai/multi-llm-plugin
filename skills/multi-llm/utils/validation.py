@@ -77,10 +77,30 @@ except ImportError:
     )
 
 
-#: The shared-context ceiling for a validation prompt. Excerpted **once per
-#: phase** and the identical excerpt reused across every batch: per-batch
-#: re-truncation would both bloat the file and break prompt determinism.
-VALIDATION_CONTEXT_LIMIT = 30000
+#: The shared-context ceiling for a validation prompt, applied **per context
+#: block**. Excerpted **once per phase** and the identical excerpt reused across
+#: every batch: per-batch re-truncation would both bloat the file and break
+#: prompt determinism.
+#:
+#: 60 000 rather than the original 30 000, because 30 000 was under the size of
+#: a real plan and the prompt asks the validator to judge against it. Measured
+#: on a review-code run over a 44 374-char plan: the excerpt ended mid-§4.6, so
+#: §4.7–§11 — the acceptance criteria and the single source of truth for every
+#: tunable — reached no validator, and four of the nine verdicts cited exactly
+#: those sections (they were right only because that runner could open the file
+#: itself, which ``context_mode: inline`` does not promise).
+#:
+#: What the raise costs, checked both ways. The **runner**: a prompt never
+#: reaches a command line on a ``stdin``/``file`` transport and is unbounded on
+#: POSIX (``subagent_tasks.prompt_budget_utf16``); the one bounded case is a
+#: Windows ``argv`` runner at 32 511 units (7 935 through a cmd.exe shim), which
+#: a single 30 000-char context already overran — so this moves no runner from
+#: working to not working, and `PromptBudget` still splits or fails loudly
+#: rather than truncating. The **file**: two full blocks put 120 000 chars in
+#: every batch, so :data:`VALIDATION_TASKS_TOTAL_CHARS_CEILING` is only reached
+#: at ~16 batches, and it is reported rather than enforced, with the same lever
+#: (a larger ``max_per_batch``) still available.
+VALIDATION_CONTEXT_LIMIT = 60000
 
 #: The documented per-file ceiling on a phase's **materialized total** (D2f).
 #: Embedding prompts reverses the reference-based design at a stated cost: the
@@ -1235,6 +1255,7 @@ def prepare_batched_validation_tasks(
     context_label: str = "Plan content",
     secondary_context: str = "",
     secondary_context_label: str = "",
+    reviewed_code: Optional[str] = None,
     extra_instructions: str = "",
     prompt_budget: Optional[PromptBudget] = None,
 ) -> Dict[str, Any]:
@@ -1279,6 +1300,11 @@ def prepare_batched_validation_tasks(
             Excerpted **separately**, against the same per-context limit, so a
             long plan cannot squeeze the artifact under review out of the prompt
         secondary_context_label: What that second document is; required with it
+        reviewed_code: The code-under-review excerpt to hash into
+            ``inputs.reviewed_code_sha256`` (code-review). Passed rather than
+            derived from ``secondary_context`` because a phase is free to embed
+            more than the code in its second block, and the hash has to name
+            the code alone
         extra_instructions: Optional capability-neutral phase guidance appended
             to every batch prompt (e.g. the code-review issue-location guidance)
         prompt_budget: Optional D2d budget. Over-budget batches are split; a
@@ -1302,6 +1328,7 @@ def prepare_batched_validation_tasks(
         grouped_file=grouped_file,
         tasks_file=tasks_file,
         diff_base=base_ref,
+        reviewed_code=reviewed_code,
     )
 
     if not groups:

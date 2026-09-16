@@ -73,6 +73,10 @@
           "type": "string",
           "description": "Content hash of the diff text — code-review and apply phases only."
         },
+        "reviewed_code_sha256": {
+          "type": "string",
+          "description": "Content hash of the code excerpt the prompts embed — code-review only. Moves when a reviewed file is edited between fan-out and validation, which diff_base alone cannot see."
+        },
         "salvage_request_sha256": {
           "type": "string",
           "description": "Content hash of the salvage request record — salvage only."

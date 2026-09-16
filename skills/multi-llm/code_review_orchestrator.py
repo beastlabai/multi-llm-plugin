@@ -52,6 +52,7 @@ from utils import (
 )
 from utils.stream_bootstrap import bootstrap_streams
 from utils import cli_common
+from utils import prior_changes
 from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     EXIT_OK,
@@ -67,7 +68,7 @@ from utils.state_manager import (
     stamp_stable_ids,
     CURRENT_FORMAT_VERSION,
 )
-from utils.output_handler import get_phase_dir
+from utils.output_handler import get_phase_dir, output_dir_path, phase_dir_path
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
@@ -123,7 +124,13 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.llm_client import describe_output_file, invoke_with_provider, invoke_with_file_output
-from utils.git_utils import get_project_root, validate_git_ref, _run_git
+from utils.git_utils import (
+    capture_file_context,
+    capture_file_snapshots,
+    get_project_root,
+    validate_git_ref,
+    _run_git,
+)
 from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
 
@@ -428,6 +435,231 @@ def format_tracked_files_for_prompt(tracked_files: List[Dict], max_chars: int = 
         return "\n".join(truncated_lines) + notice
 
     return full_text
+
+
+# ---------------------------------------------------------------------------
+# What the reviewers and the validators are shown, beyond the plan
+# ---------------------------------------------------------------------------
+
+#: The implement phase's own change log, as rendered into the code-review
+#: prompts. Far above :data:`utils.prior_changes.MAX_CHARS` (the write-batch
+#: budget, which keeps 15 entries and 2 000 chars) because this is a *summary of
+#: a whole phase*, not the tail a single write batch needs: at the write budget
+#: the phase measured here showed ten of its thirteen entries and dropped the
+#: one that mattered. 200 entries and 20 000 chars still leave the plan and the
+#: code their own blocks under `VALIDATION_CONTEXT_LIMIT`.
+IMPLEMENTATION_RECORD_TAIL = 200
+IMPLEMENTATION_RECORD_CHARS = 20000
+
+#: Lines of surrounding file content carried either side of an issue's cited
+#: ``line_range`` in the validation prompt's second context block. Wide enough
+#: to hold the enclosing function of a typical finding, narrow enough that the
+#: whole excerpt scales with the number of findings rather than with file size.
+REVIEWED_CODE_CONTEXT_LINES = 30
+
+#: What the second context block is called in a code-review validation prompt.
+#: Named for both halves it carries, because ``build_validation_prompt`` renders
+#: one heading per block and an unlabelled half reads as part of the other.
+REVIEWED_CODE_CONTEXT_LABEL = (
+    "The implementation under review — what it recorded about itself, and the "
+    "code at the lines these issues cite"
+)
+
+
+def _issue_line_windows(
+    groups: List[Any],
+    context_lines: int,
+) -> Dict[str, List[Tuple[int, int]]]:
+    """Merged ``[start, end]`` windows per file, from every issue's own citation.
+
+    One window per issue would repeat the same lines for the several issues a
+    group collects about one function, so overlapping (and touching) windows are
+    merged: the excerpt is the *union* of what the phase asks about.
+    """
+    raw: Dict[str, List[Tuple[int, int]]] = {}
+    for group in groups:
+        group_dict = group.to_dict() if hasattr(group, "to_dict") else group
+        for suggestion in (group_dict.get("suggestions") or []):
+            path = str(suggestion.get("file") or "").strip()
+            line_range = suggestion.get("line_range")
+            if not path or not isinstance(line_range, (list, tuple)) or not line_range:
+                continue
+            try:
+                start = int(line_range[0])
+                end = int(line_range[1]) if len(line_range) > 1 else start
+            except (TypeError, ValueError):
+                continue
+            if end < start:
+                start, end = end, start
+            raw.setdefault(path, []).append(
+                (max(1, start - context_lines), end + context_lines)
+            )
+
+    merged: Dict[str, List[Tuple[int, int]]] = {}
+    for path, windows in raw.items():
+        out: List[Tuple[int, int]] = []
+        for start, end in sorted(windows):
+            if out and start <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], end))
+            else:
+                out.append((start, end))
+        merged[path] = out
+    return merged
+
+
+def build_reviewed_code_excerpt(
+    groups: List[Any],
+    *,
+    project_root: Optional[str] = None,
+    context_lines: int = REVIEWED_CODE_CONTEXT_LINES,
+) -> str:
+    """The code these issues are about, as the line windows they cite.
+
+    The validation prompt declares ``context_mode: inline``, so whatever a
+    validator is not shown it cannot check. Before this it was shown the plan
+    and the issue records and nothing of the code — every "index.html:98 sets
+    accel: 32" verdict was right only because the runner happened to be able to
+    open the file.
+
+    **Windows, not the diff**, and deliberately: the second context block is
+    excerpted once per phase and reused by every batch
+    (``utils.validation.excerpt_context``, ``VALIDATION_CONTEXT_LIMIT``), so
+    what goes in it has to fit that budget for the whole phase. A review of a
+    file the implementation *created* has a diff the size of the file — the run
+    this was measured on reviewed a 1 393-line, 61 KB ``index.html``, twice the
+    budget — and truncating that would put the same hole back one block over.
+    Windows scale with the number of findings instead, and they carry the real
+    line numbers the issue records cite, which a unified diff only implies.
+    """
+    windows = _issue_line_windows(groups, context_lines)
+    if not windows:
+        return ""
+
+    root = Path(project_root) if project_root else None
+    resolved = {
+        path: str(root / path) if root and not os.path.isabs(path) else path
+        for path in windows
+    }
+    snapshots = capture_file_snapshots(sorted(set(resolved.values())))
+
+    sections: List[str] = []
+    for path in sorted(windows):
+        on_disk = resolved[path]
+        if on_disk not in snapshots:
+            sections.append(f"### {path}\n\n(not readable at review time)")
+            continue
+        blocks: List[str] = []
+        for start, end in windows[path]:
+            lines = capture_file_context(
+                on_disk, [start, end], context_lines=0, file_snapshots=snapshots
+            )
+            if not lines:
+                continue
+            body = "\n".join(
+                f"{entry['line_number']}: {entry['content']}" for entry in lines
+            )
+            blocks.append(f"```\n{body}\n```")
+        if blocks:
+            sections.append(f"### {path}\n\n" + "\n\n".join(blocks))
+
+    if not sections:
+        return ""
+    return (
+        "Lines are numbered as they are in the file. Only the windows these "
+        "issues cite are shown; nothing between them is.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def build_implementation_record(plan_path: Path) -> str:
+    """What the implement phase recorded about its own work.
+
+    A reviewer shown only the plan and the diff reads every *deliberate* logged
+    deviation as an unexplained one. Measured on a real run: the implement phase
+    recorded ``accel tuned 28->32 for <4s`` in ``prior_changes.jsonl`` — the tune
+    that satisfies the plan's own milestone — a reviewer filed "CONFIG accel
+    deviates from plan", the validator upheld it, and the next phase would have
+    reverted it. The same sources also say which tasks were never implemented, so
+    a task the user deferred cannot be reported as missing work.
+    """
+    output_dir = output_dir_path(plan_path)
+    implement_dir = phase_dir_path(plan_path, "implement")
+
+    lines: List[str] = []
+
+    summary_path = implement_dir / "summary.md"
+    if summary_path.exists():
+        lines.append(f"- Implementation summary: `{summary_path}`")
+
+    # Only when state.json is already there. `StateManager` *creates* one
+    # otherwise, and `_create_initial_state` shells out to git for
+    # `head_at_start` — a reader summarizing a phase that may never have run
+    # must not be the thing that writes the run's state, nor fail where git
+    # cannot answer.
+    if (output_dir / "state.json").exists():
+        state = get_or_create_state(plan_path)
+        unfinished = sorted(
+            (task_id, status)
+            for task_id, status in state.implementation_task_statuses().items()
+            if status != "completed"
+        )
+        if unfinished:
+            rendered = []
+            for task_id, status in unfinished:
+                reason = state.get_task_status_reason(task_id)
+                rendered.append(f"{task_id} ({status}{f': {reason}' if reason else ''})")
+            lines.append(
+                "- Tasks the implement phase did not complete, and whose work "
+                "must not be reported as missing: " + "; ".join(rendered)
+            )
+
+    changes = prior_changes.render(
+        str(output_dir),
+        phase="implement",
+        tail=IMPLEMENTATION_RECORD_TAIL,
+        max_chars=IMPLEMENTATION_RECORD_CHARS,
+    )
+    if changes and changes != prior_changes.DEFAULT_TEXT:
+        lines.append(
+            "- Changes the implementation recorded as it made them "
+            "(`prior_changes.jsonl`):\n" + changes
+        )
+
+    if not lines:
+        return (
+            "(Nothing on record — this plan's implement phase left no summary, "
+            "task status or change log. Judge the code against the plan alone.)"
+        )
+    return (
+        "The implement phase recorded the following about its own work. A "
+        "deviation from the plan that appears here was a deliberate, logged "
+        "decision: say so and weigh it against the plan's intent rather than "
+        "reporting it as an unexplained divergence.\n\n" + "\n".join(lines)
+    )
+
+
+def build_validation_secondary_context(
+    groups: List[Any],
+    plan_path: Path,
+    *,
+    project_root: Optional[str] = None,
+) -> Tuple[str, str]:
+    """``(secondary_context, reviewed_code)`` for a code-review validation batch.
+
+    The two halves travel in one block because ``build_validation_prompt``
+    renders exactly two, and the record is the shorter and the more load-bearing
+    of them — so it goes first, where the shared per-context excerpt cannot drop
+    it. Only the code half comes back separately, to be hashed into
+    ``inputs.reviewed_code_sha256``: the record is regenerated on every read and
+    hashing it would refuse a stored task file over a summary line rather than
+    over the code a verdict was reached about.
+    """
+    reviewed_code = build_reviewed_code_excerpt(groups, project_root=project_root)
+    record = build_implementation_record(plan_path)
+    parts = [f"#### Implementation record\n\n{record}"]
+    if reviewed_code:
+        parts.append(f"#### Code at the cited lines\n\n{reviewed_code}")
+    return "\n\n".join(parts), reviewed_code
 
 
 def prepare_fixes_for_subagents(
@@ -764,12 +996,16 @@ async def run_single_review(
     # Derive prefix from plan path (same as in main())
     prefix = derive_prefix(plan_path)
 
-    # Build prompt context for invoke_with_file_output
+    # Build prompt context for invoke_with_file_output. The implementation
+    # record is read here, per slot, rather than threaded down from main(): it
+    # is three small files, and `run_all_reviews` hands this function every
+    # other input it needs from the plan path alone.
     prompt_context = {
         "plan_path": str(plan_path.absolute()),
         "tracked_files_list": tracked_files_list,
         "base_ref": base_ref,
         "prefix": prefix,
+        "implementation_record": build_implementation_record(plan_path),
     }
 
     # Determine timeout: use provided override, or get provider-specific default
@@ -1597,6 +1833,10 @@ async def reaggregate_from_existing_files(
     # Get changed files from state (or empty list if not available)
     state = get_or_create_state(plan_path)
 
+    # The root an issue's relative `file` is resolved against when the
+    # validation prompt embeds the code at the lines it cites.
+    project_root = get_project_root(str(plan_path))
+
     # Resolve base_ref for validation context.
     # Priority: explicit parameter > args.base_ref > state head_before_implement > head_at_start > fallback
     if base_ref is None:
@@ -1732,6 +1972,14 @@ async def reaggregate_from_existing_files(
                     current_inputs=build_inputs(
                         plan_file=str(plan_path),
                         grouped_file=str(grouped_path),
+                        # Recut from the same groups and the files as they are
+                        # now: a reviewed file edited between fan-out and this
+                        # merge moves this hash, and only this hash — `diff_base`
+                        # names the ref the diff was taken against and sits
+                        # still for any edit on the near side of it.
+                        reviewed_code=build_reviewed_code_excerpt(
+                            grouped, project_root=project_root
+                        ),
                     ),
                 )
             except TaskFileError as task_file_error:
@@ -1772,14 +2020,23 @@ async def reaggregate_from_existing_files(
             print("\nPreparing batched validation for subagent execution...")
             plan_content = plan_path.read_text(encoding="utf-8")
 
+            # Same two contexts and the same single budget owner as the
+            # fan-out's own prep above; the two sites must materialize the same
+            # prompt or a reaggregate re-validates against a different one.
+            secondary, reviewed_code = build_validation_secondary_context(
+                grouped, plan_path, project_root=project_root
+            )
             batched_tasks = prepare_batched_validation_tasks(
                 groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content[:30000]}",
+                context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content}",
                 output_dir=str(phase_dir),
                 plan_file=str(plan_path),
                 model=args.validation_model,
                 orchestrator="code_review_orchestrator.py",
                 base_ref=base_ref,
+                secondary_context=secondary,
+                secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
+                reviewed_code=reviewed_code,
                 extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
             )
 
@@ -2041,6 +2298,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # Get tracked files and base ref from state (if available from implementation phase)
     state = get_or_create_state(plan_path)
     tracked_files = state.get("tracked_files", [])
+
+    # The root an issue's relative `file` is resolved against when the
+    # validation prompt embeds the code at the lines it cites.
+    project_root = get_project_root(str(plan_path))
 
     # Get the git base reference - this is the commit when implementation started
     # Used by agents to run: git diff <base_ref> -- <file>
@@ -2376,14 +2637,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # Read plan for validation context
                 plan_content = plan_path.read_text(encoding="utf-8")
 
+                # No `[:30000]` here: `excerpt_context` owns the per-context
+                # budget, and slicing first could only lose more. The plan this
+                # was measured on is 44 374 chars, so the caller's slice ended
+                # mid-§4.6 and §4.7–§11 — the acceptance criteria and the whole
+                # tunable-config table — reached no validator, while four of the
+                # nine verdicts cited exactly those sections.
+                secondary, reviewed_code = build_validation_secondary_context(
+                    grouped_list, plan_path, project_root=project_root
+                )
                 batched_tasks = prepare_batched_validation_tasks(
                     groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content[:30000]}",
+                    context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content}",
                     output_dir=str(phase_dir),
                     plan_file=str(plan_path),
                     model=args.validation_model,
                     orchestrator="code_review_orchestrator.py",
                     base_ref=base_ref,
+                    secondary_context=secondary,
+                    secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
+                    reviewed_code=reviewed_code,
                     extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
                 )
 
