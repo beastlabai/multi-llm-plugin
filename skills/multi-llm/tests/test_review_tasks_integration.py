@@ -405,6 +405,122 @@ class TestReaggregateFromExisting:
         assert report_html.exists(), f"report.html not found in {review_tasks_dir}"
 
 
+class TestTheArtifactUnderReviewReachesDiskAndPrompt:
+    """review-tasks reviews `tasks/tasks.md` and never touches the plan, so both
+    the snapshot it leaves behind and the context its validators judge against
+    have to be the task list, not the plan."""
+
+    def _model_result(self):
+        return [
+            {
+                "title": "T003 missing dependency on T001",
+                "desc": "T003 uses the schema created by T001 but does not list it.",
+                "importance": "HIGH",
+                "reference": "T003",
+                "type": "modification",
+            },
+            {
+                "title": "T005 description lacks detail",
+                "desc": "T005 says 'Create API endpoints' with no request format.",
+                "importance": "MEDIUM",
+                "reference": "T005",
+                "type": "clarification",
+            },
+        ]
+
+    def _reaggregate_with_validation(self, plan_path: Path) -> Path:
+        """Run far enough to materialize validation_tasks.json, then stop.
+
+        Without `--exec-subagents` the phase prints its `[VALIDATION_*_PENDING]`
+        marker and returns, which is exactly the document this asserts on.
+        """
+        prefix = sanitize_prefix(plan_path.stem)
+        phase_dir = plan_path.parent / prefix / "review-tasks"
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self._model_result(), indent=2), encoding="utf-8"
+        )
+        result = run_orchestrator(plan_path, "--reaggregate")
+        assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+        return phase_dir
+
+    def test_the_snapshot_holds_the_tasks_file_not_a_copy_of_the_plan(
+        self, plan_with_tasks
+    ):
+        """`review-tasks/backup.md` was a byte-identical copy of the plan — a
+        file named "backup" that backed up nothing this phase can change, and
+        which nothing reads (`output_handler` pins the `backup` output type to
+        review-plan). The snapshot is now named after what it holds."""
+        plan_path = plan_with_tasks
+        prefix = sanitize_prefix(plan_path.stem)
+        # A model spec with no adapter fails every slot fast, which is enough:
+        # the snapshot is taken in pre-flight, before any provider runs.
+        run_orchestrator(plan_path, "--models", "nosuchprovider:m", "--yes")
+
+        phase_dir = plan_path.parent / prefix / "review-tasks"
+        tasks_backup = phase_dir / "tasks-backup.md"
+        assert tasks_backup.is_file(), f"no tasks-backup.md in {phase_dir}"
+        assert tasks_backup.read_text(encoding="utf-8") == (
+            plan_path.parent / prefix / "tasks" / "tasks.md"
+        ).read_text(encoding="utf-8")
+        assert not (phase_dir / "backup.md").exists(), (
+            "review-tasks must not leave a 'backup' of the plan it never edits"
+        )
+
+    def test_the_loaded_plan_line_names_the_unit_it_counted(self, plan_with_tasks):
+        """`len(plan_content)` is characters; the line said "bytes" and was off
+        by 293 on a 44,389-byte plan (measured 2026-09-16)."""
+        result = run_orchestrator(
+            plan_with_tasks, "--models", "nosuchprovider:m", "--yes"
+        )
+        combined = result.stdout + result.stderr
+        assert "Loaded plan:" in combined
+        loaded = [ln for ln in combined.splitlines() if ln.startswith("Loaded plan:")]
+        assert loaded and loaded[0].endswith("chars)"), loaded
+
+    def test_validation_prompts_carry_the_tasks_text_the_claims_name(
+        self, plan_with_tasks
+    ):
+        """28 of 30 suggestions on the measured run named a bare `T###` and the
+        prompt contained none of the task list — the validators were judging
+        task-level claims against the plan alone."""
+        phase_dir = self._reaggregate_with_validation(plan_with_tasks)
+        document = json.loads(
+            (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+        )
+        assert document["batches"], "no validation batches materialized"
+        for batch in document["batches"]:
+            prompt = batch["prompt"]
+            assert "T003: Add email channel adapter" in prompt
+            assert "## Context (Tasks file" in prompt
+            assert "## Context (Plan" in prompt
+            # Inline context, so the path is provenance and never an instruction.
+            assert document["tasks_file"] not in prompt
+
+    def test_an_edited_tasks_file_invalidates_the_validation_document(
+        self, plan_with_tasks
+    ):
+        """The tasks text is embedded, so a tasks.md edited between
+        materialization and resume is as stale as an edited plan."""
+        phase_dir = self._reaggregate_with_validation(plan_with_tasks)
+        document = json.loads(
+            (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+        )
+        assert document["inputs"]["tasks_sha256"]
+        assert document["batches"][0]["inputs"]["tasks_sha256"] == (
+            document["inputs"]["tasks_sha256"]
+        )
+
+    def test_the_phase_state_agrees_with_the_progress_step(self, plan_with_tasks):
+        """`status` printed `phase state: grouping_complete` beside
+        `progress: validating` for the whole validation stretch, because
+        `validation_pending` — documented in utils/status_file.py — was never
+        written by anything."""
+        phase_dir = self._reaggregate_with_validation(plan_with_tasks)
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status.get("state") == "validation_pending"
+
+
 class TestPhaseCompletionMarking:
     """Verify that successful runs mark the phase completed in state.json."""
 

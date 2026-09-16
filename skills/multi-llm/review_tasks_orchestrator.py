@@ -209,6 +209,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # resolved tasks_path for the prompt context factory.
     # In reaggregate mode, we don't need the tasks file (just reprocessing results).
     tasks_path = None
+    # Reaggregation re-materializes the same `validation_tasks.json`, whose
+    # prompts now *embed* the task list, so this path needs the tasks file after
+    # all — but non-fatally, unlike the fan-out: a reaggregate whose tasks file
+    # has since moved still has model results worth aggregating, and it ran with
+    # no tasks file at all before the text was embedded.
+    reaggregate_tasks_path = None
     if not args.reaggregate:
         try:
             tasks_path = find_tasks_file(plan_path_abs)
@@ -231,6 +237,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 site_id="no-tasks-to-review",
                 mode="review-tasks",
             )
+    else:
+        try:
+            reaggregate_tasks_path = find_tasks_file(plan_path_abs)
+        except (FileNotFoundError, ValueError) as e:
+            print(
+                f"Warning: {e}; validation will be prepared against the plan alone.",
+                file=sys.stderr,
+            )
 
     effective_prefix = derive_prefix(plan_path_abs)
 
@@ -241,11 +255,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
             "prefix": effective_prefix,
         }
 
-    # Pass tasks_file as extra validation metadata so validation subagents
-    # can access the tasks file for coverage analysis
+    # Pass tasks_file as extra validation metadata: it is the artifact under
+    # review, so the base embeds its text in every validation prompt (and hashes
+    # it into the task file's `inputs`) rather than only recording the path.
     extra_validation_metadata = {}
-    if tasks_path:
-        extra_validation_metadata["tasks_file"] = tasks_path
+    validation_tasks_file = tasks_path or reaggregate_tasks_path
+    if validation_tasks_file:
+        extra_validation_metadata["tasks_file"] = validation_tasks_file
 
     await run_review_orchestration(
         args=args,

@@ -4703,6 +4703,7 @@ def _mirror_status(
 _INPUT_SOURCE_KEYS = {
     "plan_file": "plan_sha256",
     "grouped_file": "grouped_sha256",
+    "tasks_file": "tasks_sha256",
     "salvage_request_path": "salvage_request_sha256",
 }
 

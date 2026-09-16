@@ -50,6 +50,8 @@ UPDATE_GOLDEN = os.environ.get("MULTI_LLM_UPDATE_GOLDEN") == "1"
 
 PLAN_EXCERPT = "# Fixture plan\n\n## Step 1\nDo the thing.\n"
 
+TASKS_EXCERPT = "# Implementation Tasks\n\n## T001: Do the thing\nWrite the code.\n"
+
 SUGGESTION_RECORDS = [
     {
         "index": 0,
@@ -152,6 +154,15 @@ def _prompts():
             suggestion_records=SUGGESTION_RECORDS,
             context_label="Plan content",
             extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+        ),
+        # review-tasks' two-context shape: the plan its suggestions are measured
+        # against, plus the task list they actually name.
+        "validation_review_tasks": build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT,
+            suggestion_records=SUGGESTION_RECORDS,
+            context_label="Plan \u2014 the requirements the tasks must cover",
+            secondary_excerpt=TASKS_EXCERPT,
+            secondary_label="Tasks file \u2014 the artifact under review",
         ),
         "consolidation": build_consolidation_prompt(
             template=(SKILL_ROOT / "prompts" / "consolidate_suggestions.txt").read_text(
@@ -472,6 +483,50 @@ class TestEmbeddedContextAndReply:
         ))
         assert "open it and check the claim before answering" in prompt
         assert "A claim that the plan or the tasks omit something" in prompt
+
+    def test_a_second_context_is_its_own_labelled_section(self):
+        """review-tasks judges claims about a task list, so the task list has to
+        be in the prompt — and distinguishable from the plan beside it.
+
+        Measured 2026-09-16 on a real review-tasks run: 28 of 30 suggestions
+        named a bare `T###`, `'T001' in prompt` was False for every batch, and
+        the prompt still told the validator to judge those claims "against the
+        plan or tasks text above".
+        """
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT,
+            suggestion_records=SUGGESTION_RECORDS,
+            context_label="Plan \u2014 the requirements the tasks must cover",
+            secondary_excerpt=TASKS_EXCERPT,
+            secondary_label="Tasks file \u2014 the artifact under review",
+        )
+        assert PLAN_EXCERPT in prompt
+        assert TASKS_EXCERPT in prompt
+        assert "## Context (Plan \u2014 the requirements the tasks must cover)" in prompt
+        assert "## Context (Tasks file \u2014 the artifact under review)" in prompt
+        # Plan first, tasks second, suggestion records after both.
+        assert prompt.index(PLAN_EXCERPT) < prompt.index(TASKS_EXCERPT)
+        assert prompt.index(TASKS_EXCERPT) < prompt.index("aaaa000000000000")
+
+    def test_one_context_renders_exactly_the_prompt_it_always_did(self):
+        """The second block is opt-in: with no secondary excerpt the text is
+        byte-identical to the single-context prompt every other phase sends."""
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        assert prompt.count("## Context (") == 1
+        # No stray blank line where the second block would have gone.
+        assert f"{PLAN_EXCERPT}\n\n## Suggestion groups to validate" in prompt
+
+    def test_a_second_context_without_a_label_is_refused(self):
+        """An unlabelled `## Context ()` block is the ambiguity two sections
+        exist to remove, so it fails at render time rather than shipping."""
+        with pytest.raises(ValueError, match="secondary_label"):
+            build_validation_prompt(
+                plan_excerpt=PLAN_EXCERPT,
+                suggestion_records=SUGGESTION_RECORDS,
+                secondary_excerpt=TASKS_EXCERPT,
+            )
 
     def test_the_omission_rule_does_not_misstate_the_code_review_case(self):
         """Code review reuses this generator with CODE_REVIEW_VALIDATION_GUIDANCE

@@ -61,6 +61,10 @@
           "type": "string",
           "description": "Content hash of grouped.json."
         },
+        "tasks_sha256": {
+          "type": "string",
+          "description": "Content hash of the task list under review \u2014 review-tasks only, whose validation prompts embed the tasks text beside the plan."
+        },
         "diff_base": {
           "type": "string",
           "description": "Git ref the diff was taken against (state.head_at_start) — code-review and apply phases only."

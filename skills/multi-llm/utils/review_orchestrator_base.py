@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -390,6 +391,56 @@ _DISPATCH_STEPS = {
     "revalidation": "revalidating",
     "consolidation": "consolidating",
 }
+
+#: The two labels review-tasks' validation prompt carries, spelled once. They say
+#: which document is which, because the adjudication rule the prompt states ("a
+#: claim that the plan or the tasks omit something is judged against the plan or
+#: tasks text above") is unanswerable when both arrive as one unnamed blob.
+_REVIEW_TASKS_PLAN_LABEL = "Plan — the requirements the tasks must cover"
+_REVIEW_TASKS_TASKS_LABEL = "Tasks file — the artifact under review"
+
+
+def validation_context_kwargs(
+    phase_name: str,
+    plan_content: str,
+    extra_validation_metadata: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    """The inline context kwargs this phase's validation batches embed.
+
+    Every phase but ``review-tasks`` embeds the plan alone, which is what the
+    shared defaults already say. ``review-tasks`` validates claims **about a
+    task list** — 28 of 30 suggestions on the measured 2026-09-16 run named a
+    bare ``T###`` — and it was handed the plan and nothing else, so `'T001' in
+    prompt` was `False` for every batch while the prompt told the validator to
+    judge those claims "against the plan or tasks text above". Two verdicts came
+    back citing text no validator had been given: one quoting a phrase that
+    exists only in `tasks.md`, one citing `plan_preamble`, a `state.json`
+    bookkeeping field. So this phase embeds both documents, each labelled.
+
+    The tasks text is read here rather than threaded through as content because
+    ``extra_validation_metadata`` already carries its path for the file
+    envelope; an unreadable file degrades to the plan-only context (the batch
+    still validates) rather than failing a completed fan-out.
+    """
+    kwargs: Dict[str, str] = {"context": plan_content}
+    if phase_name != "review-tasks":
+        return kwargs
+    tasks_file = (extra_validation_metadata or {}).get("tasks_file") or ""
+    if not tasks_file:
+        return kwargs
+    try:
+        tasks_content = Path(tasks_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(
+            f"Warning: could not read {tasks_file} for validation context "
+            f"({exc}); validating against the plan alone.",
+            file=sys.stderr,
+        )
+        return kwargs
+    kwargs["context_label"] = _REVIEW_TASKS_PLAN_LABEL
+    kwargs["secondary_context"] = tasks_content
+    kwargs["secondary_context_label"] = _REVIEW_TASKS_TASKS_LABEL
+    return kwargs
 
 
 def dispatch_subagent_tasks(
@@ -2446,11 +2497,20 @@ def aggregate_results(
     # is what keeps a non-detached .status.json byte-for-byte what it was.
     report_html_path = os.path.join(phase_dir, "report.html")
     grouped_path_out = os.path.join(phase_dir, "grouped.json")
+    validation_path_out = os.path.join(phase_dir, "validation.json")
+    # validation.json is named on BOTH channels or on neither. The host reads the
+    # poll result, whose artifacts are rebuilt from `output_files`, and
+    # `apply_task_suggestions_orchestrator.load_data` hard-fails without this
+    # file — so a run that recorded it only in the terminal `MULTI_LLM_RESULT`
+    # (which a detached run prints into a log nobody reads) left the next phase
+    # with no way to learn the file exists. `record_output_files` records only
+    # paths that exist, which is the same guard the artifact list uses below.
     _detach.record_output_files(
         phase_dir,
         report=report_path,
         report_html=report_html_path,
         grouped=grouped_path_out,
+        validation=validation_path_out,
     )
 
     # `record_output_files` above only feeds `.status.json` (a channel `status`
@@ -2461,7 +2521,6 @@ def aggregate_results(
     # validation.json is included when it exists: it is the only
     # machine-readable record of the validation verdicts the report describes.
     artifacts_to_record = [report_path, report_html_path, grouped_path_out]
-    validation_path_out = os.path.join(phase_dir, "validation.json")
     if os.path.exists(validation_path_out):
         artifacts_to_record.append(validation_path_out)
     record_artifacts(artifacts_to_record)
@@ -2944,6 +3003,11 @@ async def reaggregate_from_existing_files(
                 current_inputs=build_inputs(
                     plan_file=str(plan_path),
                     grouped_file=grouped_path,
+                    # review-tasks embeds the task list in every prompt, so an
+                    # edit to it between materialization and resume is as stale
+                    # as an edited plan. Absent for every other phase, and
+                    # unrecorded hashes are simply not compared.
+                    tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
                 ),
             )
         except TaskFileError as task_file_error:
@@ -3024,17 +3088,26 @@ async def reaggregate_from_existing_files(
                                 if k in ("tasks_file",)}
             batched_tasks = prepare_batched_validation_tasks(
                 groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                context=plan_content,
                 output_dir=phase_dir,
                 plan_file=str(plan_path),
                 model=args.validation_model,
                 orchestrator=orchestrator_script,
+                **validation_context_kwargs(
+                    phase_name, plan_content, extra_validation_metadata
+                ),
                 **extra_kwargs,
             )
             batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
             with open(validation_tasks_path, 'w', encoding='utf-8') as f:
                 json.dump(batched_tasks, f, indent=2)
+
+            # The phase machine's own word for this stretch. `status` printed
+            # `phase state: grouping_complete` beside `progress: validating` for
+            # the whole validation run (measured 2026-09-16) because
+            # `validation_pending` — documented in utils/status_file.py since D4
+            # — was never written by anything.
+            update_status(phase_dir, {"state": "validation_pending"})
 
             total_batches = batched_tasks["total_batches"]
             stats = batched_tasks.get("batching_stats", {})
@@ -3330,17 +3403,35 @@ async def run_review_orchestration(
 
     # Read plan content
     plan_content = read_plan(plan_path)
-    print(f"Loaded plan: {plan_path} ({len(plan_content)} bytes)")
+    # `chars`, not `bytes`: this is `len(str)`, and on the measured 2026-09-16
+    # run it reported 44096 for a 44389-byte file. Counting the encoded bytes
+    # would be the other honest fix; the number a reader wants here is the one
+    # the excerpt limits are expressed in, which is characters.
+    print(f"Loaded plan: {plan_path} ({len(plan_content)} chars)")
 
     # Ensure output directories exist
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(phase_dir, exist_ok=True)
 
-    # Create backup
-    backup_path = os.path.join(phase_dir, "backup.md")
-    with open(backup_path, 'w', encoding='utf-8') as f:
-        f.write(plan_content)
-    print(f"Backup saved: {backup_path}")
+    # Snapshot the artifact THIS phase reviewed, named after what it holds.
+    # review-plan reviews the plan; review-tasks reviews `tasks/tasks.md` and
+    # never touches the plan, so its `backup.md` was a 44 KB copy of a file the
+    # phase does not own — the same "the file named backup was not a backup of
+    # what got overwritten" confusion `apply_orchestrator_base.write_target_backup`
+    # documents. Neither review phase overwrites anything, so this is a record of
+    # what was reviewed rather than a rollback point; `apply-task-suggestions`
+    # writes its own pre-modification `tasks-backup.md` under its own phase dir.
+    backup_source = str(tasks_path) if tasks_path else plan_path
+    backup_path = os.path.join(
+        phase_dir, "tasks-backup.md" if tasks_path else "backup.md"
+    )
+    try:
+        # copyfile, not a re-write of the decoded text: a snapshot should be the
+        # source's bytes, not what universal newlines made of them.
+        shutil.copyfile(backup_source, backup_path)
+        print(f"Backup saved: {backup_path}")
+    except OSError as exc:  # a snapshot must not fail the phase
+        print(f"Warning: could not write {backup_path}: {exc}", file=sys.stderr)
 
     print(f"Output prefix: {prefix}")
     print(f"Output directory: {out_dir}")
@@ -3573,7 +3664,6 @@ async def run_review_orchestration(
                                     if k in ("tasks_file",)}
                 batched_tasks = prepare_batched_validation_tasks(
                     groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    context=plan_content,
                     output_dir=phase_dir,
                     plan_file=str(plan_path),
                     model=args.validation_model,
@@ -3585,6 +3675,9 @@ async def run_review_orchestration(
                     # block told the session model to re-invoke `review-plan
                     # --reaggregate` for a review-tasks run.
                     orchestrator=orchestrator_script,
+                    **validation_context_kwargs(
+                        phase_name, plan_content, extra_validation_metadata
+                    ),
                     **extra_kwargs,
                 )
                 batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
@@ -3592,6 +3685,10 @@ async def run_review_orchestration(
                 validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
                 with open(validation_tasks_path, 'w', encoding='utf-8') as f:
                     json.dump(batched_tasks, f, indent=2)
+
+                # The phase machine's own word for this stretch — see the
+                # matching write on the reaggregate path.
+                update_status(phase_dir, {"state": "validation_pending"})
 
                 total_batches = batched_tasks["total_batches"]
                 stats = batched_tasks.get("batching_stats", {})

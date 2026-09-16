@@ -124,6 +124,8 @@ def build_validation_prompt(
     suggestion_records: Sequence[Dict[str, Any]],
     kind: str = "validation",
     context_label: str = "Plan content",
+    secondary_excerpt: str = "",
+    secondary_label: str = "",
     extra_instructions: str = "",
 ) -> str:
     """Render the prompt for one validation or revalidation batch.
@@ -140,6 +142,13 @@ def build_validation_prompt(
             differs.
         context_label: What the embedded context is (``"Plan content"``,
             ``"Tasks file"``, ``"Diff"``, …).
+        secondary_excerpt: An optional **second** context block, for a phase
+            whose suggestions are about one document but are judged against two
+            — review-tasks embeds the plan *and* the task list the suggestions
+            name. Excerpted by the caller like the first, and rendered as its
+            own ``## Context (…)`` section so the two are never read as one.
+        secondary_label: What that second block is; required whenever
+            ``secondary_excerpt`` is given.
         extra_instructions: Optional phase-specific guidance appended before the
             reply contract (e.g. :data:`CODE_REVIEW_VALIDATION_GUIDANCE`). Must be
             capability-neutral and must not name a task's path fields.
@@ -155,6 +164,17 @@ def build_validation_prompt(
     else:
         opening = "You are validating review suggestions for accuracy."
 
+    if secondary_excerpt and not secondary_label:
+        raise ValueError(
+            "secondary_excerpt needs a secondary_label: an unlabelled second "
+            "'## Context ()' block is exactly the ambiguity two context "
+            "sections exist to remove."
+        )
+    secondary = (
+        f"\n## Context ({secondary_label})\n\n{secondary_excerpt}\n"
+        if secondary_excerpt
+        else ""
+    )
     count = len(suggestion_records)
     guidance = f"\n{extra_instructions.strip()}\n" if extra_instructions.strip() else ""
     return f'''{opening}
@@ -162,7 +182,7 @@ def build_validation_prompt(
 ## Context ({context_label})
 
 {plan_excerpt}
-
+{secondary}
 ## Suggestion groups to validate ({count})
 
 {_json_block(list(suggestion_records))}

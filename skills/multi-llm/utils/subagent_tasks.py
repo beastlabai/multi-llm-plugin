@@ -211,6 +211,7 @@ def build_inputs(
     *,
     plan_file: Optional[str] = None,
     grouped_file: Optional[str] = None,
+    tasks_file: Optional[str] = None,
     diff_base: Optional[str] = None,
     diff_text: Optional[str] = None,
     salvage_request_file: Optional[str] = None,
@@ -223,10 +224,18 @@ def build_inputs(
     phase dir outlives the run that wrote it, so these hashes are what stop a
     stale prompt from producing a confidently wrong result against text nobody is
     reviewing any more.
+
+    ``tasks_sha256`` is added only when a phase really has a task list under
+    review (review-tasks), so review-plan's block is unchanged. It is what makes
+    an edited ``tasks/tasks.md`` invalidate a review-tasks validation file the
+    way an edited plan already does — that phase's prompts embed the task text,
+    so a stale one is as wrong as a stale plan excerpt.
     """
     inputs: Dict[str, str] = {"plan_sha256": file_content_hash(plan_file)}
     if grouped_file is not None:
         inputs["grouped_sha256"] = file_content_hash(grouped_file)
+    if tasks_file:
+        inputs["tasks_sha256"] = file_content_hash(tasks_file)
     if diff_base:
         inputs["diff_base"] = diff_base
     if diff_text is not None:

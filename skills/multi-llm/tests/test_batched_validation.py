@@ -493,6 +493,76 @@ class TestPrepareBatchedValidationTasks:
             assert result["batches"] == []
             assert result["total_batches"] == 0
 
+    def test_a_review_tasks_batch_embeds_the_task_list_beside_the_plan(
+        self, sample_groups, sample_context, tmp_path
+    ):
+        """The artifact under review travels inside the prompt, labelled.
+
+        `context_mode: inline` means no subagent has to open a file, so a
+        review-tasks batch handed only the plan had nothing to judge its own
+        `T###` claims against (measured 2026-09-16: `'T001' in prompt` was False
+        for all eight batches of a run whose suggestions were 93% task-level).
+        """
+        tasks_file = tmp_path / "tasks.md"
+        tasks_file.write_text(
+            "# Implementation Tasks\n\n## T001: Set up the database\n",
+            encoding="utf-8",
+        )
+        result = prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+            tasks_file=str(tasks_file),
+            context_label="Plan",
+            secondary_context=tasks_file.read_text(encoding="utf-8"),
+            secondary_context_label="Tasks file",
+        )
+        for batch in result["batches"]:
+            assert "## Context (Plan)" in batch["prompt"]
+            assert "## Context (Tasks file)" in batch["prompt"]
+            assert "T001: Set up the database" in batch["prompt"]
+            # Provenance only: the path itself never reaches the prompt.
+            assert str(tasks_file) not in batch["prompt"]
+
+    def test_the_task_list_is_hashed_into_inputs_so_an_edit_invalidates_the_file(
+        self, sample_groups, sample_context, tmp_path
+    ):
+        """A tasks.md edited between materialization and resume leaves prompts
+        that still validate cleanly against text nobody is reviewing any more —
+        the same staleness `plan_sha256` has always guarded."""
+        tasks_file = tmp_path / "tasks.md"
+        tasks_file.write_text("## T001: First\n", encoding="utf-8")
+
+        def materialize():
+            return prepare_batched_validation_tasks(
+                groups=sample_groups,
+                context=sample_context,
+                output_dir=str(tmp_path),
+                plan_file="/path/to/plan.md",
+                tasks_file=str(tasks_file),
+            )
+
+        before = materialize()
+        assert before["inputs"]["tasks_sha256"]
+        tasks_file.write_text("## T001: First, amended\n", encoding="utf-8")
+        after = materialize()
+        assert after["inputs"]["tasks_sha256"] != before["inputs"]["tasks_sha256"]
+
+    def test_a_phase_with_no_task_list_records_no_tasks_hash(
+        self, sample_groups, sample_context, tmp_path
+    ):
+        """review-plan's `inputs` block is unchanged: the key is present only
+        for a phase that really has a task list under review."""
+        result = prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+        assert "tasks_sha256" not in result["inputs"]
+        assert result["batches"][0]["prompt"].count("## Context (") == 1
+
     def test_validation_tasks_file_size_is_bounded_and_stated(self, sample_context):
         """Embedding duplicates the shared excerpt per batch — bounded, not free.
 
