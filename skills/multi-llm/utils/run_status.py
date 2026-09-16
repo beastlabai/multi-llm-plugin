@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import cli_common, detach, process_control, status_file
+from . import cli_common, detach, metrics, process_control, status_file
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -474,6 +474,22 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         ]
     else:
         parts = [f"{kind} {ok}/{total} ok"]
+    # F10: `in_flight` (`write_batch_scheduler._mirror_status`/`_begin_sweep`)
+    # is what turns "0 dispatched, heartbeat Ns ago" — indistinguishable from
+    # a stall — into naming the task that is still running and for how long.
+    in_flight = mirror.get("in_flight") if isinstance(mirror.get("in_flight"), list) else []
+    entries = []
+    for row in in_flight:
+        if not isinstance(row, dict) or not row.get("task_id"):
+            continue
+        elapsed = detach._elapsed_since(row.get("dispatched_at"))
+        since = (
+            f" (since {metrics.format_duration(int(elapsed * 1000))})"
+            if elapsed is not None else ""
+        )
+        entries.append(f"{row['task_id']}{since}")
+    if entries:
+        parts.append(f"in flight: {', '.join(entries)}")
     for status, count in sorted(counts.items()):
         if status != "ok" and count:
             parts.append(f"{status} {count}")
@@ -487,6 +503,15 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     failed = mirror.get("failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
+    # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
+    # `write_batch_scheduler._mirror_status`) were on `.status.json` already
+    # but rendered nowhere, so the one task `--yes`'s default strategy defers
+    # to a human was invisible in the finished run's own progress line.
+    skipped_ids = mirror.get("skipped_task_ids") if isinstance(mirror.get("skipped_task_ids"), list) else []
+    if skipped_ids:
+        strategy = mirror.get("human_task_strategy")
+        suffix = f" ({strategy})" if strategy else ""
+        parts.append(f"deferred manual: {', '.join(map(str, skipped_ids))}{suffix}")
     return parts
 
 
