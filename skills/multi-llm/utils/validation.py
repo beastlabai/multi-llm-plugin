@@ -1233,6 +1233,8 @@ def prepare_batched_validation_tasks(
     tasks_file: str = "",
     kind: str = "validation",
     context_label: str = "Plan content",
+    secondary_context: str = "",
+    secondary_context_label: str = "",
     extra_instructions: str = "",
     prompt_budget: Optional[PromptBudget] = None,
 ) -> Dict[str, Any]:
@@ -1268,9 +1270,15 @@ def prepare_batched_validation_tasks(
         orchestrator: Name of the orchestrator script for reaggregate command
         base_ref: Git ref for code diff context (empty string for plan reviews);
             recorded as ``inputs.diff_base``
-        tasks_file: Path to the tasks file for review-tasks validation context
+        tasks_file: Path to the tasks file for review-tasks validation context;
+            recorded as provenance *and* hashed into ``inputs.tasks_sha256``
         kind: ``"validation"`` or ``"revalidation"`` — the task ``kind``
         context_label: What the embedded context is (``"Plan content"``, …)
+        secondary_context: An optional second document to embed beside
+            ``context`` (review-tasks: the task list its suggestions are about).
+            Excerpted **separately**, against the same per-context limit, so a
+            long plan cannot squeeze the artifact under review out of the prompt
+        secondary_context_label: What that second document is; required with it
         extra_instructions: Optional capability-neutral phase guidance appended
             to every batch prompt (e.g. the code-review issue-location guidance)
         prompt_budget: Optional D2d budget. Over-budget batches are split; a
@@ -1292,6 +1300,7 @@ def prepare_batched_validation_tasks(
     inputs = build_inputs(
         plan_file=plan_file,
         grouped_file=grouped_file,
+        tasks_file=tasks_file,
         diff_base=base_ref,
     )
 
@@ -1323,8 +1332,12 @@ def prepare_batched_validation_tasks(
             group_dict = group
         group_ids.append(generate_group_id(group_dict))
 
-    # The one shared excerpt, reused verbatim by every batch below.
+    # The one shared excerpt, reused verbatim by every batch below. A second
+    # document is excerpted on its own budget rather than appended to the first:
+    # concatenating would let a plan at the limit truncate the artifact under
+    # review down to nothing, which is the failure two contexts exist to fix.
     shared_context = excerpt_context(context)
+    shared_secondary = excerpt_context(secondary_context) if secondary_context else ""
     budget = prompt_budget or PromptBudget(None)
 
     # Work list of (group_indices, is_high_priority). A batch whose materialized
@@ -1345,6 +1358,8 @@ def prepare_batched_validation_tasks(
             suggestion_records=records,
             kind=kind,
             context_label=context_label,
+            secondary_excerpt=shared_secondary,
+            secondary_label=secondary_context_label,
             extra_instructions=extra_instructions,
         )
         if not budget.fits(prompt):

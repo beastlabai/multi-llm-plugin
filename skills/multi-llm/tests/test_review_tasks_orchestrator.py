@@ -1143,5 +1143,128 @@ class TestLoadPromptTemplate:
         assert "{tasks_path}" in template
 
 
+# ---------------------------------------------------------------------------
+# The inline context the phase's validators are handed
+# ---------------------------------------------------------------------------
+
+class TestValidationContextKwargs:
+    """`review-tasks` validates claims *about a task list*, so the task list has
+    to be in the prompt. Measured 2026-09-16 on a real run: 28 of 30 suggestions
+    named a bare `T###`, `'T001' in prompt` was False for all eight batches, and
+    two verdicts came back quoting text no validator had been given."""
+
+    def test_review_tasks_embeds_both_documents_each_labelled(self, plan_with_tasks):
+        from utils.review_orchestrator_base import validation_context_kwargs
+
+        _plan_path, tasks_path = plan_with_tasks
+        kwargs = validation_context_kwargs(
+            "review-tasks", "PLAN TEXT", {"tasks_file": str(tasks_path)}
+        )
+        assert kwargs["context"] == "PLAN TEXT"
+        assert "T001: Create database schema" in kwargs["secondary_context"]
+        assert "Plan" in kwargs["context_label"]
+        assert "artifact under review" in kwargs["secondary_context_label"]
+
+    def test_every_other_phase_keeps_the_single_context_default(self):
+        """review-plan's prompts must not move: the defaults are the contract."""
+        from utils.review_orchestrator_base import validation_context_kwargs
+
+        assert validation_context_kwargs("review-plan", "PLAN TEXT", None) == {
+            "context": "PLAN TEXT"
+        }
+        assert validation_context_kwargs(
+            "review-plan", "PLAN TEXT", {"tasks_file": "/somewhere/tasks.md"}
+        ) == {"context": "PLAN TEXT"}
+
+    def test_an_unreadable_tasks_file_degrades_to_the_plan_and_says_so(
+        self, capsys, temp_dir
+    ):
+        """A completed fan-out is not thrown away over a missing scratch file;
+        the batch still validates, against less."""
+        from utils.review_orchestrator_base import validation_context_kwargs
+
+        kwargs = validation_context_kwargs(
+            "review-tasks", "PLAN TEXT", {"tasks_file": str(temp_dir / "gone.md")}
+        )
+        assert kwargs == {"context": "PLAN TEXT"}
+        assert "validating against the plan alone" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# What a detached run hands back
+# ---------------------------------------------------------------------------
+
+class _FakeRunHandle:
+    """Enough of ``detach.RunHandle`` for the detached-only writes to fire."""
+
+    def __init__(self, phase_dir):
+        self.phase_dir = str(phase_dir)
+
+
+class TestValidationJsonIsNamedOnBothChannels:
+    """The host reads the *poll* result, whose artifacts are rebuilt from
+    `.status.json.output_files`. validation.json was recorded only in the
+    terminal `MULTI_LLM_RESULT` a detached run prints into a log nobody reads —
+    and `apply_task_suggestions_orchestrator.load_data` hard-fails without it."""
+
+    def _aggregate(self, phase_dir, temp_dir, with_validation: bool):
+        from utils import detach, status_file
+        from utils.json_extractor import sanitize_model_name
+
+        suggestions = [{
+            "title": "T003 missing dependency",
+            "desc": "T003 uses T001's schema but does not list it.",
+            "importance": "HIGH",
+            "reference": "T003",
+            "type": "modification",
+            "source_model": "model-a",
+        }]
+        path = os.path.join(phase_dir, f"{sanitize_model_name('model-a')}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(suggestions, handle)
+        # Written upstream by the phase, not by aggregate_results; the recorder
+        # only ever names paths that exist, so it has to be on disk here.
+        with open(os.path.join(phase_dir, "grouped.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"groups": []}, handle)
+        if with_validation:
+            with open(os.path.join(phase_dir, "validation.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump({"results": []}, handle)
+
+        plan_path = temp_dir / "test-plan.md"
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
+
+        saved = detach._ACTIVE
+        detach._ACTIVE = _FakeRunHandle(phase_dir)
+        try:
+            aggregate_results(
+                prefix="test-plan",
+                out_dir=str(temp_dir),
+                phase_dir=phase_dir,
+                phase_name="review-tasks",
+                models=["model-a"],
+                failed_models={},
+                plan_path=str(plan_path),
+            )
+        finally:
+            detach._ACTIVE = saved
+        return status_file.read_status(phase_dir).get("output_files") or {}
+
+    def test_validation_json_is_recorded_as_an_output_file(self, phase_dir, temp_dir):
+        output_files = self._aggregate(phase_dir, temp_dir, with_validation=True)
+        assert output_files.get("validation") == os.path.join(
+            phase_dir, "validation.json"
+        )
+        assert set(output_files) >= {"report", "report_html", "grouped", "validation"}
+
+    def test_a_run_that_wrote_none_names_none(self, phase_dir, temp_dir):
+        """`--skip-validation` writes no validation.json, and the recorder only
+        ever names paths that exist."""
+        output_files = self._aggregate(phase_dir, temp_dir, with_validation=False)
+        assert "validation" not in output_files
+        assert set(output_files) >= {"report", "report_html", "grouped"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

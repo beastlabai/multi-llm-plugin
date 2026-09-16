@@ -165,8 +165,10 @@ After the background task completes, check the log file `{plan}/review-tasks/orc
 `validation_tasks.json` carries `tasks_schema_version: 2` and one complete task
 per batch under `batches` — each with `prompt`, `output_name`, the derived
 `output_path`, `result_channel: file`, `context_mode: inline`,
-`capability_tier`, `executor_role` and `task_id`. The context excerpt and this
-batch's records travel **inside** `prompt`, so no subagent has to open a file.
+`capability_tier`, `executor_role` and `task_id`. This batch's records and
+**both** context excerpts — the plan, and the task list under review — travel
+inside `prompt`, each under its own `## Context (…)` heading, so no subagent has
+to open a file to judge a claim about a `T###`.
 
 **For each task in the file, run `task.prompt` as a subagent, then write the JSON
 it returns to `task.output_path`.** That is the whole contract — do not assemble
