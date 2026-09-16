@@ -51,6 +51,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         parse_model_spec,
     )
     from .subagent_executor import (
+        OUTPUT_NAME_PATTERN_BY_KIND,
         STATUS_BATCH_FAILED,
         STATUS_OK,
         STATUS_PARTIAL,
@@ -86,6 +87,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         declared_file_set,
         snapshot_file_set,
     )
+    from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -109,6 +111,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         parse_model_spec,
     )
     from utils.subagent_executor import (
+        OUTPUT_NAME_PATTERN_BY_KIND,
         STATUS_BATCH_FAILED,
         STATUS_OK,
         STATUS_PARTIAL,
@@ -144,6 +147,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         declared_file_set,
         snapshot_file_set,
     )
+    from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -184,6 +188,13 @@ STRATEGIES = (STRATEGY_PAUSE, STRATEGY_SKIP_CONTINUE, STRATEGY_SKIP_DEPENDENTS)
 #: file because it records the *loop*: batch order, the stopping batch, the skip
 #: set, the override records and whether finalization ran.
 WRITE_BATCH_REPORT_FILENAME = "write_batch_report.json"
+
+#: Write kinds whose ``output_name`` is keyed by the task id
+#: (``subagent_tasks.implement_output_name``) rather than a batch position.
+#: ``_warn_stale_result_files`` (N6) scopes its stale-file sweep to this set:
+#: a positional kind's result filenames have never been renamed, so there is
+#: no earlier naming to be stale relative to.
+_ID_KEYED_WRITE_KINDS = frozenset({"implement"})
 
 #: The D2g inputs binding for the results already on disk, kept beside them.
 #: A **leading dot** on purpose: reaggregation globs ``{phase_dir}/*.json`` and
@@ -542,6 +553,14 @@ class WriteBatchScheduler:
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.audit = AuditLog(self.phase_dir)
         self.snapshots: Dict[str, TaskSnapshot] = {}
+        #: Task ids whose pre-batch snapshot was REUSED from an earlier
+        #: dispatch of this same batch (`_snapshot`/`_reusable_snapshot`),
+        #: rather than taken fresh at the top of this dispatch. `_classify`
+        #: reads this to tell "the diff is a killed attempt's, not this
+        #: dispatch's" apart from "this dispatch's own snapshot disagrees
+        #: with its no-op claim" (N2, 2026-09-16) — the two read identically
+        #: from the bytes alone.
+        self._snapshot_reused: set = set()
         self.invoker = "native-simulated" if respond is not None else "executor"
         #: Serializes the per-dispatch bookkeeping (`_record_batch_effects`).
         #: With `driver.max_concurrent_write_subagents` > 1 a disjoint group runs
@@ -851,9 +870,64 @@ class WriteBatchScheduler:
             self._retained.clear()
             self._retained_bytes = 0
 
+    def _warn_stale_result_files(self) -> None:
+        """Name — never delete — result files an earlier naming scheme left.
+
+        ``implement``'s rename from the positional ``implement_batch_N.json``
+        to the task-id-keyed ``implement_batch_T006.json`` (F1) left the old
+        files on disk: nothing reads them any more
+        (``resolve_output_target`` derives the name from ``output_name``), but
+        a human opening the phase dir sees both namings side by side with no
+        way to tell which are live (N6, 2026-09-16). Scoped to ``implement``,
+        the one write kind whose ``output_name`` is keyed by the task id
+        rather than a batch position: a positional kind's filenames have
+        never been renamed, and without an id to key on there is no way to
+        tell "an earlier run's now-completed batch" apart from "orphaned by a
+        renumbering" — flagging those would be noise, not a finding.
+        """
+        if self.kind not in _ID_KEYED_WRITE_KINDS:
+            return
+        pattern = OUTPUT_NAME_PATTERN_BY_KIND.get(self.kind)
+        if pattern is None:
+            return
+        current_names = {
+            str(task.get("output_name") or "") for task in self.tasks
+        }
+        # "any task id" (D3n's own resume contract): every id this phase has
+        # EVER recorded a status for, completed or not — `task_status` is one
+        # flat map never trimmed across runs sharing `state.json` — union the
+        # ids this run still has materialized, for a state-less caller (e.g.
+        # a dry run with no `state=`).
+        known_ids = {str(task.get("task_id") or "") for task in self.tasks}
+        if self.state is not None and hasattr(self.state, "get_all_task_statuses"):
+            try:
+                known_ids |= set(self.state.get_all_task_statuses())
+            except Exception:  # noqa: BLE001 - advisory only, never fatal
+                pass
+        known_ids.discard("")
+        try:
+            candidates = sorted(os.listdir(self.phase_dir))
+        except OSError:
+            return
+        stale = [
+            name for name in candidates
+            if pattern.match(name)
+            and name not in current_names
+            and not any(task_id in name for task_id in known_ids)
+        ]
+        if stale:
+            self.log(
+                f"[write-subagents] stale result files from an earlier "
+                f"naming, ignored: {', '.join(stale)}"
+            )
+
     def _run(self) -> SchedulerResult:
         result = SchedulerResult(kind=self.kind, phase=self.phase)
         ordered = self.batches()
+
+        # 0. Advisory only, never a mutation: name any result file left behind
+        # by an earlier naming scheme before the batches that matter start.
+        self._warn_stale_result_files()
 
         # 1. Human tasks: resolve once, apply as a graph walk, persist.
         result.human_plan = resolve_human_task_plan(
@@ -896,7 +970,7 @@ class WriteBatchScheduler:
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
         # and a long first batch is exactly when the step matters (F4).
-        self._metrics_start()
+        self._metrics_start(result)
         self._mirror_status(result)
         for batch_index, batch_tasks in ordered:
             runnable = [
@@ -997,7 +1071,7 @@ class WriteBatchScheduler:
         mirror_lock = threading.Lock()
 
         def dispatch_and_mirror(task: Dict[str, Any]) -> TaskOutcome:
-            outcome = self._dispatch_one(task, batch_index)
+            outcome = self._dispatch_one(task, batch_index, result)
             with mirror_lock:
                 outcomes_so_far.append(outcome)
                 self._mirror_status(result, finished_in_batch=outcomes_so_far)
@@ -1019,7 +1093,9 @@ class WriteBatchScheduler:
                 break
         return outcomes
 
-    def _dispatch_one(self, task: Dict[str, Any], batch_index: int) -> TaskOutcome:
+    def _dispatch_one(
+        self, task: Dict[str, Any], batch_index: int, result: SchedulerResult
+    ) -> TaskOutcome:
         task_id = str(task.get("task_id", ""))
         profile = profile_for_kind(self.kind)
 
@@ -1114,7 +1190,7 @@ class WriteBatchScheduler:
             with self._sweep_lock:
                 self._census_before.pop(task_id, None)
                 self._retained_before.pop(task_id, None)
-        self._record_batch_effects(task, outcome, batch_index)
+        self._record_batch_effects(task, outcome, batch_index, result)
         return outcome
 
     def _audit_resume_skip(
@@ -1704,6 +1780,20 @@ class WriteBatchScheduler:
           agree, so it is recorded under its own name (``(no-op — …, verified
           no file changes)``) and the loop continues. Labelling it a clean
           failure told the next batch the work had failed.
+        * ``no-op`` claimed + non-empty diff (and every expected id came back,
+          so this is NOT the partial-application row below) → still
+          **applied** — that is the verdict ``util restore-batch`` needs — but
+          the claim and the bytes disagree, and `_classify` used to fall
+          straight through to the plain applied branch with no ``reason`` at
+          all (N2, 2026-09-16: T006 read `applied` beside a summary saying
+          "already implemented", self-contradicting). ``reason`` now names
+          which of two things happened: the pre-batch snapshot was **reused**
+          from an earlier dispatch of this same batch (`_snapshot_reused`), so
+          the diff is that attempt's and not this one's — or this dispatch
+          took its own fresh snapshot and the bytes still moved, which is the
+          foreign-or-undeclared-write signature the undeclared-writes sweep
+          catches OUTSIDE the declared set, just landing inside it instead;
+          that second case also warns on the log.
         * ``failed`` claimed (or a non-zero exit) + empty diff → the batch
           **failed cleanly**: nothing to roll back, but not ``ok`` either — the
           loop stops at the boundary and ``--resume`` re-dispatches it. A runner
@@ -1866,6 +1956,43 @@ class WriteBatchScheduler:
                                    observed, duration)
             return
 
+        if changed and claimed == "no-op":
+            # N2: reachable only past the partial-application guard above, so
+            # every expected id came back (or none were expected) and the
+            # runner did not crash — the only thing left unexplained is a
+            # 'no-op' claim next to bytes that moved. The verdict stays
+            # APPLIED (`util restore-batch` needs exactly this outcome), but
+            # the two ways a 'no-op' claim can disagree with the bytes are
+            # different events and the reason says which one happened here.
+            outcome.write_outcome = WRITE_APPLIED
+            outcome.status = STATUS_OK
+            changed_names = ", ".join(changed)
+            if outcome.task_id in self._snapshot_reused:
+                outcome.reason = (
+                    f"APPLIED (no-op claimed, bytes moved): {changed_names} "
+                    f"differ from the pre-batch snapshot, but that snapshot "
+                    f"was reused from an earlier dispatch of this batch — "
+                    f"the diff is that attempt's work, not this dispatch's. "
+                    f"Recorded as applied."
+                )
+            else:
+                outcome.reason = (
+                    f"APPLIED (no-op claimed, bytes moved): {changed_names} "
+                    f"differ from the snapshot taken at the start of THIS "
+                    f"dispatch — a foreign-or-undeclared-write signature, not "
+                    f"an artifact of resume. Recorded as applied because the "
+                    f"bytes are real; the 'no-op' claim should not be trusted."
+                )
+                self.log(
+                    f"[write-subagents] warning: {outcome.task_id} claimed "
+                    f"'no-op' but {changed_names} changed against a snapshot "
+                    f"taken this dispatch — treating the bytes as "
+                    f"authoritative."
+                )
+            self._audit_completion(outcome, runner, profile, attempt, exit_code,
+                                   observed, duration)
+            return
+
         if not changed:
             declared_names = (
                 ", ".join(e.relative for e in snapshot.declared_entries())
@@ -1945,7 +2072,11 @@ class WriteBatchScheduler:
     # -- per-batch bookkeeping (D3n: append BEFORE the next substitution) ---
 
     def _record_batch_effects(
-        self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int
+        self,
+        task: Dict[str, Any],
+        outcome: TaskOutcome,
+        batch_index: int,
+        result: SchedulerResult,
     ) -> None:
         """Append prior-changes, record metrics, update task status — in that order.
 
@@ -1988,7 +2119,7 @@ class WriteBatchScheduler:
                     self.output_dir, entry_id, self.phase, summary[:400]
                 )
 
-            self._record_metrics(task, outcome, batch_index)
+            self._record_metrics(task, outcome, result)
 
             if self.state is not None:
                 status = "completed" if outcome.ok else "failed"
@@ -2016,7 +2147,7 @@ class WriteBatchScheduler:
                 self._record_fingerprint(task)
 
     def _record_metrics(
-        self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int
+        self, task: Dict[str, Any], outcome: TaskOutcome, result: SchedulerResult
     ) -> None:
         """The metric for one batch, with the values the runner reported (D3g).
 
@@ -2031,6 +2162,19 @@ class WriteBatchScheduler:
         immediately and dumps this object's dict wholesale, so a second writer's
         entry was erased the moment it landed — three audited runs finished with
         no ``metrics`` key at all after every batch had recorded one (F4).
+
+        The ``[ETA]`` line's own ``batch_index``/``total_batches`` are this run's
+        own dispatch order and dispatchable count — never ``task["batch_index"]``
+        (the plan's global decomposition index, which starts wherever a resumed
+        run's first undone task sits) and never bare ``len(self.tasks)`` (which
+        still counts a deferred human task). Passing those two straight through
+        made every line on a resumed run read `batch 7/6 done in 0m 51s ...
+        WARNING: batch_index > total_batches` (N1, 2026-09-16):
+        ``len(result.batches_dispatched)`` is exactly "batches this run has
+        already finished" at the moment a batch starts, so ``+1`` is this
+        batch's 1-based position in the run, and ``len(self.tasks) -
+        len(result.human_plan.skipped)`` is the same denominator
+        ``_mirror_status`` already uses.
         """
         if self.state is None or not hasattr(self.state, "record_metric"):
             return
@@ -2040,6 +2184,8 @@ class WriteBatchScheduler:
             f"{task.get('task_title') or self.kind} "
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
+        total_batches = len(self.tasks) - len(result.human_plan.skipped)
+        run_batch_index = len(result.batches_dispatched) + 1
         try:
             eta_line = self.state.record_metric(
                 self.phase,
@@ -2056,8 +2202,8 @@ class WriteBatchScheduler:
                     ) else None
                 ),
                 duration_ms=int(outcome.duration_seconds * 1000),
-                total_batches=len(self.tasks) or None,
-                batch_index=batch_index + 1,
+                total_batches=total_batches or None,
+                batch_index=run_batch_index,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
@@ -2095,6 +2241,7 @@ class WriteBatchScheduler:
                 f"stays the bytes from before this batch's FIRST dispatch"
             )
             self.snapshots[task_id] = reused
+            self._snapshot_reused.add(task_id)
             return reused
         snapshot = TaskSnapshot.take(
             phase_dir=self.phase_dir, task_id=task_id, files=files,
@@ -2441,17 +2588,26 @@ class WriteBatchScheduler:
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self.log(f"[write-subagents] warning: state reload failed: {exc}")
 
-    def _metrics_start(self) -> None:
+    def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
 
         Only the `util metrics start` CLI leg ever called `start_phase`, so on
         the executor path `metrics_progress` never existed and neither did the
         `[ETA]` line `instructions/implement.md` step 5 describes (F4).
+
+        The baseline is the number of batches this run will actually dispatch —
+        ``len(self.tasks) - len(result.human_plan.skipped)``, the same total
+        ``_record_metrics``/``_mirror_status`` use — never the bare materialized
+        count, which still counts a deferred human task that is never dispatched
+        (N1, 2026-09-16: with the bare count, the stored
+        ``metrics_progress.total_batches`` disagreed with every ``[ETA]`` line
+        the run went on to print).
         """
         if self.state is None or not hasattr(self.state, "start_metrics_phase"):
             return
+        total_batches = len(self.tasks) - len(result.human_plan.skipped)
         try:
-            self.state.start_metrics_phase(self.phase, len(self.tasks))
+            self.state.start_metrics_phase(self.phase, total_batches)
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
@@ -2526,10 +2682,18 @@ class WriteBatchScheduler:
             "|------|---------|---------------|-------|",
         ]
         for outcome in result.outcomes:
+            # `reason` first: it is `_classify`'s own diagnostic (why a
+            # partial/clean-failure/no-op-with-bytes-moved outcome landed
+            # where it did) and, unlike `summary`, is only ever set when there
+            # is something worth explaining beyond the runner's own claim — a
+            # plain applied batch has none, so `summary` still carries the
+            # row. Before this a self-contradicting `no-op` claim printed its
+            # own rosy summary ("T006 already implemented: …") with no sign
+            # the bytes disagreed (N2, 2026-09-16).
             lines.append(
                 f"| {outcome.task_id} | {outcome.write_outcome or outcome.status} | "
                 f"{', '.join(outcome.files_touched) or '—'} | "
-                f"{(outcome.summary or outcome.reason or '').replace('|', '/')[:160]} |"
+                f"{(outcome.reason or outcome.summary or '').replace('|', '/')[:160]} |"
             )
         touched: List[str] = []
         for outcome in result.outcomes:
@@ -2605,6 +2769,13 @@ class WriteBatchScheduler:
         # accounting look identical on both halves of the executor.
         report = BatchReport(
             phase=self.phase, kind=self.kind, phase_dir=self.phase_dir,
+            # N9: the read path fills this from the `task_file` argument
+            # `run_task_file` was handed; the write path never takes one —
+            # `WriteBatchScheduler` is constructed from an already-materialized
+            # task LIST — but `write_task_file_for_phase` always persists that
+            # same list at exactly this path (every write orchestrator passes
+            # it the identical `phase_dir`), so it is not a guess.
+            task_file=os.path.join(self.phase_dir, WRITE_TASK_FILENAME),
             outcomes=list(result.outcomes), invoker=self.invoker,
             # F12: filled the same way the read path fills it
             # (`_preflight_batch_runners`) — every distinct runner this run
