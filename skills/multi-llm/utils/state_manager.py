@@ -22,6 +22,20 @@ ID_ALGO_VERSION = 1
 CURRENT_FORMAT_VERSION = 2
 
 
+def compute_plan_hash(plan_path: Path) -> str:
+    """Hash a plan's content the way ``state.json``'s ``plan_hash`` records it.
+
+    Module-level so a *file-level* state writer — `finalize_tracking`, which
+    edits the plan on the native leg — can re-stamp the field after its own
+    edit without building a `StateManager` (which would read that edit as a
+    human editing the plan and set `plan_changed`).
+    """
+    if plan_path.exists():
+        content = plan_path.read_text(encoding="utf-8")
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    return ""
+
+
 # --- Canonicalization & ID Generation ---
 
 def canonicalize_hash_input(value) -> str:
@@ -342,10 +356,7 @@ class StateManager:
 
     def _compute_plan_hash(self) -> str:
         """Compute hash of plan content for change detection."""
-        if self.plan_path.exists():
-            content = self.plan_path.read_text(encoding="utf-8")
-            return hashlib.sha256(content.encode()).hexdigest()[:16]
-        return ""
+        return compute_plan_hash(self.plan_path)
 
     def _create_initial_state(self) -> Dict[str, Any]:
         """Create initial state structure."""
@@ -371,20 +382,22 @@ class StateManager:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     self.state = json.load(f)
 
-                # Check for plan changes
+                # Check for plan changes. Deliberately set-only: the flag is
+                # cleared by whoever CONSUMES it, never by a bare load.
+                # Setting it also re-stamps `plan_hash`, so the very next load
+                # finds the hash agreeing — and a clear-on-agreement branch
+                # therefore erased a genuine human edit as soon as any
+                # intermediate process loaded and saved between the edit and
+                # `implement --resume` (`full`'s `_record_progress` does
+                # exactly that before every step; so do `review-tasks` and
+                # `check_workflow_prerequisites`). Stale residue is kept out
+                # at the other end instead, by every plugin-made plan edit
+                # re-stamping the hash through `refresh_plan_hash()` (F1,
+                # audited 2026-09-16).
                 current_hash = self._compute_plan_hash()
                 if self.state.get("plan_hash") != current_hash:
                     self.state["plan_hash"] = current_hash
                     self.state["plan_changed"] = True
-                else:
-                    # The stored hash still matches what's on disk, so any
-                    # earlier `plan_changed` is stale residue — nothing here
-                    # sets the flag when the hash agrees, but nothing used to
-                    # clear it either, so it survived every read-only phase
-                    # after the run that set it and `implement --resume` kept
-                    # warning about a change that was not there (F8, audited
-                    # 2026-09-16).
-                    self.state.pop("plan_changed", None)
 
             except json.JSONDecodeError:
                 self.state = self._create_initial_state()

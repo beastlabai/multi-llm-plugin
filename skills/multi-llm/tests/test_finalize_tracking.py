@@ -668,6 +668,68 @@ class TestADirectoryBaselineCoversThePathsUnderIt:
         assert [e["path"] for e in updated["tracked_files"]] == ["plans/game.md"]
 
 
+class TestADirectoryThePhaseCreatedIsExpandedToItsFiles:
+    """F2: the census reports a new directory as one ``newdir/`` entry. Stored
+    as-is, `capture_diff_hunks` finds no per-file diff for it and `review-code`
+    silently reviews none of the new module — which is what the native leg
+    (no ``--touched``) always gets."""
+
+    @patch("finalize_tracking.list_untracked_files")
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_an_uncovered_directory_becomes_the_files_inside_it(
+        self, mock_get_files, mock_list, empty_pre_existing_state
+    ):
+        mock_get_files.return_value = {"src/physics/", "index.html"}
+        mock_list.return_value = [
+            "src/physics/body.js", "src/physics/world.js",
+        ]
+
+        assert main(["--state-file", str(empty_pre_existing_state)]) == 0
+
+        state = json.loads(empty_pre_existing_state.read_text(encoding="utf-8"))
+        assert [e["path"] for e in state["tracked_files"]] == [
+            "index.html", "src/physics/body.js", "src/physics/world.js",
+        ]
+        mock_list.assert_called_once_with("src/physics/")
+
+    @patch("finalize_tracking.list_untracked_files")
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_baseline_covered_directory_is_never_expanded(
+        self, mock_get_files, mock_list, temp_dir
+    ):
+        """The regression 4b3d14c reverted: expanding the baseline's own
+        directories wrote all 1 511 untracked files in the repo into
+        `tracked_files`. Only what SURVIVES the subtraction is expanded, so
+        git is never even asked about `plans/`."""
+        state = {
+            "pre_existing_changes": [".claude/", "plans/", "saved/"],
+            "created_at": "2025-01-01T00:00:00",
+        }
+        state_path = temp_dir / "state.json"
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        mock_get_files.return_value = {"plans/", "saved/", "index.html"}
+
+        assert main(["--state-file", str(state_path)]) == 0
+
+        mock_list.assert_not_called()
+        updated = json.loads(state_path.read_text(encoding="utf-8"))
+        assert [e["path"] for e in updated["tracked_files"]] == ["index.html"]
+
+    @patch("finalize_tracking.list_untracked_files")
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_directory_git_cannot_list_is_kept_rather_than_dropped(
+        self, mock_get_files, mock_list, empty_pre_existing_state
+    ):
+        """Losing the evidence entirely is worse than an unusable entry."""
+        mock_get_files.return_value = {"vanished/"}
+        mock_list.return_value = []
+
+        assert main(["--state-file", str(empty_pre_existing_state)]) == 0
+
+        state = json.loads(empty_pre_existing_state.read_text(encoding="utf-8"))
+        assert [e["path"] for e in state["tracked_files"]] == ["vanished/"]
+
+
 class TestTheTrackedFileDumpIsTruncated:
     """The run log is the only durable record of a detached run; a 1 500-line
     path dump buries everything else in it (state.json keeps the full list)."""
@@ -712,3 +774,72 @@ class TestTheTrackedFileDumpIsTruncated:
         out = capsys.readouterr().out
         assert "  - a.py" in out and "  - b.py" in out
         assert "more (see state.json.tracked_files)" not in out
+
+
+class TestTheSummaryBackReferenceIsNotReadAsAHumanEdit:
+    """``--plan-file`` makes this command a *plan* writer, and it is the
+    native leg's counterpart of `WriteBatchScheduler._finalize`'s re-stamp.
+    Without it the next `StateManager` hashes the plugin's own back-reference
+    insertion as drift and `implement --resume` warns about a change nobody
+    made (F1, 2026-09-16)."""
+
+    @pytest.fixture
+    def plan_and_state(self, temp_dir):
+        from utils.state_manager import compute_plan_hash
+
+        plan = temp_dir / "plan.md"
+        plan.write_text("# Plan\n\nSome content.\n", encoding="utf-8")
+        state_path = temp_dir / "state.json"
+        state_path.write_text(
+            json.dumps({
+                "pre_existing_changes": [],
+                "plan_hash": compute_plan_hash(plan),
+                "created_at": "2025-01-01T00:00:00",
+            }),
+            encoding="utf-8",
+        )
+        return plan, state_path
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_the_stamped_hash_matches_the_plan_as_written(
+        self, mock_get_files, plan_and_state
+    ):
+        from utils.state_manager import StateManager
+
+        plan, state_path = plan_and_state
+        mock_get_files.return_value = {"index.html"}
+
+        code = main([
+            "--state-file", str(state_path),
+            "--plan-file", str(plan),
+            "--summary-file-relative", "plan/implement/summary.md",
+        ])
+
+        assert code == 0
+        assert "summary.md" in plan.read_text(encoding="utf-8")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["plan_hash"] == StateManager(plan)._compute_plan_hash()
+        # The census this command exists for survives the second write.
+        assert [e["path"] for e in state["tracked_files"]] == ["index.html"]
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_state_file_that_records_no_hash_does_not_gain_one(
+        self, mock_get_files, temp_dir
+    ):
+        """Nothing reads a field this state file never had; do not invent it."""
+        plan = temp_dir / "plan.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        state_path = temp_dir / "state.json"
+        state_path.write_text(
+            json.dumps({"pre_existing_changes": []}), encoding="utf-8"
+        )
+        mock_get_files.return_value = set()
+
+        code = main([
+            "--state-file", str(state_path),
+            "--plan-file", str(plan),
+            "--summary-file-relative", "plan/implement/summary.md",
+        ])
+
+        assert code == 0
+        assert "plan_hash" not in json.loads(state_path.read_text(encoding="utf-8"))

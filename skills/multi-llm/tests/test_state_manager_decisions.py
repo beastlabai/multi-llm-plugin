@@ -876,11 +876,13 @@ class TestReviewPhaseCompletedFlag:
         assert reloaded.is_review_phase_completed() is False
 
 
-class TestPlanChangedFlagIsNotSticky:
-    """F8: `_load_or_create` only ever SET `plan_changed` on a hash mismatch;
-    nothing cleared it when a later load found the hash agreeing again, so
-    the flag survived every read-only phase after the run that set it and
-    `implement --resume` kept warning about a change that was not there."""
+class TestPlanChangedSurvivesUntilItsConsumerReadsIt:
+    """F1: setting `plan_changed` also re-stamps `plan_hash`, so from the very
+    next load the hash agrees. A load that cleared the flag on agreement
+    therefore erased a REAL human edit as soon as any intermediate process
+    loaded and saved in between — `full`'s `_record_progress` does exactly
+    that before every step — and `implement --resume`, the only consumer,
+    never warned."""
 
     def test_a_real_edit_sets_the_flag(self, sample_plan_file):
         """Sanity check: editing the plan between loads still sets it."""
@@ -892,39 +894,54 @@ class TestPlanChangedFlagIsNotSticky:
         sm2 = StateManager(sample_plan_file)
         assert sm2.has_plan_changed() is True
 
-    def test_the_flag_clears_once_the_hash_agrees_again(self, sample_plan_file):
-        """The residue case: a stale `plan_changed: True` sits in state.json
-        (e.g. left over from a run that predates a hash re-stamp) while the
-        stored `plan_hash` already matches the plan on disk. A fresh load
-        must not keep repeating a change that is not there."""
-        sm1 = StateManager(sample_plan_file)
-        sm1.save()
-
-        # Hand-craft the residue: the stored hash matches the plan, but a
-        # previous (buggy or interrupted) run left `plan_changed: True`
-        # sitting beside it.
-        state_data = json.loads(sm1.state_file.read_text(encoding="utf-8"))
-        assert state_data["plan_hash"] == sm1._compute_plan_hash()
-        state_data["plan_changed"] = True
-        sm1.state_file.write_text(json.dumps(state_data), encoding="utf-8")
-
-        sm2 = StateManager(sample_plan_file)
-        assert sm2.has_plan_changed() is False
-        assert "plan_changed" not in sm2.state
-
-    def test_the_cleared_flag_stays_clear_on_the_next_save_reload(
+    def test_an_intermediate_load_and_save_does_not_clear_a_human_edit(
         self, sample_plan_file
     ):
-        """The clear happens at load, not only in memory — it has to survive
-        a save so the next session (e.g. `implement --resume`) reads it too."""
+        """The masking case: implement stops at a batch boundary, the human
+        edits the plan, `full --resume` records its progress (a fresh manager,
+        loaded and saved), and only then does `implement --resume` build its
+        own manager. The warning has to survive that middle step."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.mark_phase_completed("generate-tasks")
+        sm1.save()
+
+        sample_plan_file.write_text("# Plan\n\n## Task 1 (edited)\n", encoding="utf-8")
+
+        intermediate = StateManager(sample_plan_file)
+        assert intermediate.has_plan_changed() is True
+        intermediate.set("full_workflow", {"current_phase": "implement"})
+        intermediate.save()
+
+        consumer = StateManager(sample_plan_file)
+        assert consumer.has_plan_changed() is True
+
+    def test_only_the_consumer_clears_the_flag(self, sample_plan_file):
+        """`implement --resume` prints the warning and clears; the cleared
+        state has to survive a save so the next session does not re-warn."""
         sm1 = StateManager(sample_plan_file)
         sm1.save()
-        state_data = json.loads(sm1.state_file.read_text(encoding="utf-8"))
-        state_data["plan_changed"] = True
-        sm1.state_file.write_text(json.dumps(state_data), encoding="utf-8")
+        sample_plan_file.write_text("# Edited\n", encoding="utf-8")
 
-        sm2 = StateManager(sample_plan_file)
-        sm2.save()
+        consumer = StateManager(sample_plan_file)
+        assert consumer.has_plan_changed() is True
+        consumer.clear_plan_changed_flag()
+        consumer.save()
 
-        sm3 = StateManager(sample_plan_file)
-        assert sm3.has_plan_changed() is False
+        assert StateManager(sample_plan_file).has_plan_changed() is False
+
+    def test_a_plugin_self_edit_leaves_no_flag_when_the_writer_restamps(
+        self, sample_plan_file
+    ):
+        """The residue F8 was chasing, closed at the writing end instead: a
+        phase that edits the plan itself calls `refresh_plan_hash()` before
+        saving, so the next manager sees no change to report."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.save()
+
+        # The plugin's own edit (a summary back-reference, a TASKS_FILE
+        # marker), followed by the re-stamp every such writer owes.
+        sample_plan_file.write_text("# Plan\n\n<!-- inserted -->\n", encoding="utf-8")
+        sm1.refresh_plan_hash()
+        sm1.save()
+
+        assert StateManager(sample_plan_file).has_plan_changed() is False

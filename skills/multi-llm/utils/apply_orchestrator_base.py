@@ -499,6 +499,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ``file_key`` — its declared set is per batch and it has no single target —
     # so it sets this False and does neither.
     has_single_write_target: bool = True
+    # Whether this phase's batches rewrite the PLAN itself. Only
+    # apply-suggestions does; apply-task-suggestions edits the tasks file and
+    # apply-code-fixes edits source. It gates exactly one thing — the
+    # ``plan_hash`` re-stamp in the ``--mark-completed`` branch below — because
+    # for a phase that never opens the plan, drift there is a HUMAN's edit and
+    # clearing `plan_changed` would swallow the warning `implement --resume`
+    # exists to print (F1, 2026-09-16). Cannot be derived from
+    # ``write_phase_artifact()``: that early exit runs before `_load_inputs`
+    # has resolved the tasks file.
+    edits_the_plan: bool = False
 
     # ------------------------------------------------------------------
     # Subclass validation
@@ -791,6 +801,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             state.mark_phase_completed(
                 self.confirmation_phase_name or self.phase_name
             )
+            # This command runs AFTER the host applied the batches, so for a
+            # phase whose write target IS the plan the file on disk no longer
+            # matches the hash the pre-run state recorded. Re-stamping here is
+            # the native leg's counterpart of
+            # `WriteBatchScheduler._finalize`'s own re-stamp: without it the
+            # next `StateManager` reads the plugin's own edit as a human
+            # editing the plan mid-workflow and `implement --resume` reports
+            # "Plan has changed since last session" for a change the plugin
+            # made (F1, 2026-09-16). Gated, because for the two phases that
+            # never open the plan the same drift is a human's edit.
+            if self.edits_the_plan:
+                state.refresh_plan_hash()
             state.save()
             print(
                 json.dumps(

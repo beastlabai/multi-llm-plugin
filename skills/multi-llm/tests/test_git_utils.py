@@ -32,6 +32,7 @@ from utils.git_utils import (
     get_staged_files,
     intent_to_add_untracked,
     is_clean_working_tree,
+    list_untracked_files,
     stage_files,
     subtract_baseline,
     unstage_files,
@@ -328,13 +329,13 @@ class TestGetModifiedFiles:
         mock_run_git.return_value = (
             'R  "src/old name.py" -> "src/new name.py"\n', "", 0
         )
-        assert get_modified_files() == ['"src/new name.py"']
+        assert get_modified_files() == ["src/new name.py"]
 
         mock_run_git.return_value = ('R  "src/a -> b.py" -> src/c.py\n', "", 0)
         assert get_modified_files() == ["src/c.py"]
 
         mock_run_git.return_value = ('R  src/a.py -> "src/b -> c.py"\n', "", 0)
-        assert get_modified_files() == ['"src/b -> c.py"']
+        assert get_modified_files() == ["src/b -> c.py"]
 
     @patch("utils.git_utils._run_git")
     def test_truncated_lines_are_skipped(self, mock_run_git):
@@ -361,6 +362,52 @@ class TestGetModifiedFiles:
         files = get_modified_files()
 
         assert files == ["plans/"]
+
+    @patch("utils.git_utils._run_git")
+    def test_a_path_with_a_space_is_censused_without_its_quotes(self, mock_run_git):
+        """F6: the census is what gets STORED, so a quoted entry would reach
+        `tracked_files` with its quotes and `review-code` would diff a path
+        that does not exist."""
+        mock_run_git.return_value = ('?? "sp ace.txt"\n M plain.txt\n', "", 0)
+
+        assert get_modified_files() == ["sp ace.txt", "plain.txt"]
+
+    @patch("utils.git_utils._run_git")
+    def test_a_c_escaped_path_is_decoded_back_to_its_real_name(self, mock_run_git):
+        """Git escapes a non-printable byte as three-digit octal, one per UTF-8
+        byte, and the control characters by name."""
+        mock_run_git.return_value = ('?? "caf\\303\\251.md"\n?? "a\\tb.txt"\n', "", 0)
+
+        assert get_modified_files() == ["café.md", "a\tb.txt"]
+
+    @patch("utils.git_utils._run_git")
+    def test_a_bare_backslash_path_is_left_alone(self, mock_run_git):
+        """Only a *quoted* field is escaped; an unquoted backslash is literal."""
+        mock_run_git.return_value = (" M src\\weird.py\n", "", 0)
+
+        assert get_modified_files() == ["src\\weird.py"]
+
+
+class TestListUntrackedFiles:
+    """The expansion `finalize_tracking` applies to a directory the phase
+    created — the one entry the compact census cannot hand to a consumer."""
+
+    def test_it_names_the_files_under_an_untracked_directory(self, temp_git_repo):
+        (temp_git_repo / "src").mkdir()
+        (temp_git_repo / "src" / "a.js").write_text("a\n", encoding="utf-8")
+        (temp_git_repo / "src" / "b.js").write_text("b\n", encoding="utf-8")
+
+        assert sorted(list_untracked_files("src/")) == ["src/a.js", "src/b.js"]
+
+    def test_a_path_with_a_space_comes_back_raw(self, temp_git_repo):
+        """``-z`` output carries no quoting to undo."""
+        (temp_git_repo / "we ird").mkdir()
+        (temp_git_repo / "we ird" / "g h.md").write_text("g\n", encoding="utf-8")
+
+        assert list_untracked_files("we ird/") == ["we ird/g h.md"]
+
+    def test_a_directory_that_is_not_there_yields_nothing(self, temp_git_repo):
+        assert list_untracked_files("gone/") == []
 
 
 class TestSubtractBaseline:
