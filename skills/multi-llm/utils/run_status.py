@@ -63,6 +63,7 @@ from .cli_common import (
     dispatcher_command,
     record_artifact,
     record_consolidation_recommended,
+    record_mode_phase,
     record_next,
     record_notice,
     record_state,
@@ -293,12 +294,27 @@ def render_run_text(
         if workflow is not None:
             phase_name = view.get("phase") or name
             wf = (workflow.get("phases") or {}).get(phase_name, {})
-            lines.append(
-                f"      workflow phase: {wf.get('status', 'not tracked')}"
+            wf_status = wf.get("status", "not tracked")
+            # N7, 2026-09-16: `phases_completed` records that a phase finished
+            # once — a `--resume` can reopen it (implement picking up tasks a
+            # later review sent back), and a live run under an already-
+            # `completed` phase is the resulting, entirely valid state. Printed
+            # bare, "completed" sits beside `run.state: running` and is the one
+            # word on screen a reader is likely to take at face value and stop
+            # watching, so a live run under a completed phase says so rather
+            # than reading like a stale cache.
+            live_verdict = view["verdict"] in (
+                detach.VERDICT_STARTING, detach.VERDICT_RUNNING, detach.VERDICT_STALE,
             )
+            if wf_status == "completed" and live_verdict:
+                started = run.get("started_at")
+                suffix = f" (re-running since {started})" if started else " (re-running)"
+                lines.append(f"      workflow phase: completed{suffix}")
+            else:
+                lines.append(f"      workflow phase: {wf_status}")
             if (
                 view["verdict"] == detach.VERDICT_DONE
-                and wf.get("status") == "pending"
+                and wf_status == "pending"
             ):
                 lines.append(
                     "      note: run complete; workflow phase not yet marked "
@@ -996,6 +1012,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     views = _collect(plan_path, args)
     if args.wait:
         views = _wait_for_terminal(plan_path, args, views)
+        # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
+        # `ctx.phase = None` before this ever ran (`status` is a command, not a
+        # phase) — right for a plain multi-run listing, but the opencode
+        # plugin's supervised poll pins one run (`--run-id`, sometimes also
+        # `--phase`) and reads this leg's own MULTI_LLM_RESULT verbatim. That
+        # payload said `{"mode": "status", "phase": null, …}` for a finished
+        # `implement` run, and a weaker model than the one that hit this had to
+        # infer its phase had finished from `state: done` alone. The watched
+        # run already knows both — `.status.json.run.mode`, falling back to the
+        # phase dir it lives in — so a `--wait` poll pinned to exactly one run
+        # carries them into its own result. Ambiguous (more than one view, or
+        # no selector at all) keeps `status`/`None`: no single run is "the"
+        # answer there.
+        if len(views) == 1 and (args.phase or args.run_id):
+            watched = views[0]
+            watched_run = watched.get("run") or {}
+            watched_mode = str(
+                watched_run.get("mode") or watched.get("phase") or ""
+            ) or None
+            watched_phase = str(watched.get("phase") or "") or None
+            record_mode_phase(watched_mode, watched_phase)
 
     exit_code = exit_code_for(views)
 
