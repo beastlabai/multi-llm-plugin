@@ -1036,6 +1036,25 @@ class TestScheduler:
         )
         assert batch_report["runner_versions"] == {"codex:gpt-5.5": "0.146.0"}
 
+    def test_the_batch_report_names_write_tasks_json(self, env):
+        """N9: the write path never takes a `task_file` argument the way
+        `run_task_file` does on the read path — `WriteBatchScheduler` is
+        constructed from an already-materialized task list — but every write
+        orchestrator persists that same list via `write_task_file_for_phase`
+        at `{phase_dir}/write_tasks.json` before building the scheduler, so
+        `subagent_batch_report.json` should name it rather than `null`, the
+        one field the report otherwise got right (ceilings, runner_versions,
+        counts, usage all resolved)."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        assert result.exit_code == 0
+        batch_report = json.loads(
+            (env.phase_dir / "subagent_batch_report.json").read_text()
+        )
+        assert batch_report["task_file"] == str(env.phase_dir / "write_tasks.json")
+
     def test_a_run_that_dispatched_every_batch_but_skipped_finalization_fails(
         self, env
     ):
@@ -1213,6 +1232,59 @@ class TestScheduler:
         text = Path(result.summary_file).read_text()
         assert "## Manual Tasks (Deferred)" in text
         assert "| T014 |" in text
+
+    def test_a_stale_result_file_from_an_earlier_naming_is_named_not_deleted(
+        self, env
+    ):
+        """N6: the F1 rename left old positional `implement_batch_N.json`
+        files beside the new task-id-keyed ones. Nothing reads them any more,
+        but a resumed run should say so once rather than leave a human to
+        notice thirteen result files for five batches on their own."""
+        (env.phase_dir / "implement_batch_0.json").write_text("{}", encoding="utf-8")
+        (env.phase_dir / "implement_batch_5.json").write_text("{}", encoding="utf-8")
+
+        env.edits([_patch_edit(env.plan, "ok\n")],
+                  result={"status": "applied", "ids": ["T006"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        messages = []
+        task = env.apply_task(0, kind="implement", task_id="T006",
+                              expected_ids=["T006"])
+        result = env.scheduler(
+            [task], kind="implement", resume=True, finalize=False,
+            log=messages.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+
+        stale_lines = [
+            m for m in messages
+            if "stale result files from an earlier naming" in m
+        ]
+        assert len(stale_lines) == 1, "one warning, not one per file"
+        assert "implement_batch_0.json" in stale_lines[0]
+        assert "implement_batch_5.json" in stale_lines[0]
+        # The task's OWN result file must never be named as stale.
+        assert "implement_batch_T006.json" not in stale_lines[0]
+        # Advisory only: both old files are still on disk afterwards.
+        assert (env.phase_dir / "implement_batch_0.json").is_file()
+        assert (env.phase_dir / "implement_batch_5.json").is_file()
+
+    def test_no_stale_warning_for_a_positional_write_kind(self, env):
+        """Scoped to `implement`: apply-suggestions' filenames have never been
+        renamed, and with no id to key on, flagging an earlier run's already-
+        completed batch would be noise rather than a finding."""
+        (env.phase_dir / "apply_batch_0.json").write_text("{}", encoding="utf-8")
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s1"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        messages = []
+        result = env.scheduler(
+            [env.apply_task(1)], resume=True, finalize=False,
+            log=messages.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        assert not any(
+            "stale result files" in m for m in messages
+        )
 
 
 # ===========================================================================
@@ -2381,6 +2453,68 @@ class TestTheEmptyDiffBranch:
 
 
 # ===========================================================================
+# N2: a `no-op` claim with a NON-empty diff is still applied, but why the
+# claim and the bytes disagree is not one thing (measured 2026-09-16)
+# ===========================================================================
+
+class TestANoOpClaimWithBytesMoved:
+    """T006 (the audit's own case) claimed `no-op` while its pre-batch
+    snapshot had been reused from an earlier, killed dispatch of the same
+    batch — the diff was that attempt's work, not this one's, and `applied`
+    is the right verdict. The DIFFERENT case — this dispatch's own fresh
+    snapshot disagreeing with a `no-op` claim — is a foreign-write signature
+    and should not read identically."""
+
+    def test_a_fresh_snapshot_disagreeing_with_no_op_is_applied_and_warns(
+        self, env
+    ):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "no-op", "ids": ["s0"],
+                          "files_touched": [], "summary": "already present"})
+        lines = []
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.status == executor.STATUS_OK
+        assert result.exit_code == 0
+        assert "no-op claimed, bytes moved" in outcome.reason
+        assert "reused" not in outcome.reason
+        warnings = [l for l in lines if "claimed 'no-op'" in l]
+        assert len(warnings) == 1, lines
+        assert "plans/p.md" in warnings[0]
+
+    def test_a_reused_snapshot_disagreeing_with_no_op_is_applied_and_attributed(
+        self, env
+    ):
+        """The audit's exact T006 shape: round 1 fails (rung 5) leaving its
+        edit on disk and its pre-batch snapshot intact; round 2 makes no
+        further edit and reports `no-op` — the diff round 2 sees is entirely
+        round 1's, because round 2 reused round 1's snapshot rather than
+        retaking one over round 1's half-applied bytes."""
+        original = env.plan.read_bytes()
+        env.edits([_patch_edit(env.plan, "half\n")], prose=True)
+        first = env.scheduler([env.apply_task(0)]).run()
+        assert first.exit_code == 3
+        assert env.plan.read_bytes() != original
+
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "already there"})
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(0)], log=lines.append
+        ).run()  # resume is the default
+        outcome = second.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.status == executor.STATUS_OK
+        assert second.exit_code == 0
+        assert "no-op claimed, bytes moved" in outcome.reason
+        assert "reused from an earlier dispatch" in outcome.reason
+        # This is the documented, expected shape of a resume — no foreign-
+        # write warning belongs on the log for it.
+        assert not any("claimed 'no-op'" in l for l in lines)
+
+
+# ===========================================================================
 # Finalization hands the verified touched set to finalize_tracking
 # ===========================================================================
 
@@ -2527,6 +2661,60 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         env.scheduler([env.apply_task(0)]).run()
         status = json.loads((env.phase_dir / ".status.json").read_text())
         assert status["state"] == "subagents_failed"
+
+
+# ===========================================================================
+# N1: the `[ETA]` line is this run's own dispatch order and dispatchable
+# count, never the plan's global decomposition index (measured 2026-09-16)
+# ===========================================================================
+
+class TestTheEtaLineUsesThisRunsOwnBatchCount:
+    """A resumed run's materialized tasks carry `batch_index` wherever the
+    plan's decomposition put them (5..9 here) and still include a deferred
+    human task never dispatched — `_record_metrics`/`_metrics_start` used to
+    pass both straight through, so every line read `batch 6/6` ...
+    `batch 10/6 ... WARNING: batch_index > total_batches`."""
+
+    def test_batch_and_total_are_this_runs_own_not_the_plans(self, env):
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [
+            env.apply_task(
+                i, kind="implement", task_id=f"T{6 + i:03d}",
+                expected_ids=[f"T{6 + i:03d}"], batch_index=5 + i,
+            )
+            for i in range(5)
+        ]
+        tasks.append(env.apply_task(
+            5, kind="implement", task_id="T014", executor_role="human",
+            batch_index=13,
+        ))
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied",
+                          "ids": [f"T{6 + i:03d}" for i in range(5)],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler(
+            tasks, state=state, kind="implement", resume=True,
+            human_task_strategy=STRATEGY_SKIP_DEPENDENTS, finalize=False,
+            log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+
+        eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
+        assert len(eta_lines) == 5, lines
+        for position, line in enumerate(eta_lines, start=1):
+            assert f"batch {position}/5" in line, line
+            if position < 5:
+                assert "ALL BATCHES COMPLETE" not in line, line
+            else:
+                assert "ALL BATCHES COMPLETE" in line, line
+            assert "WARNING" not in line, line
+
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        # `_metrics_finish` (via `_finalize`, skipped here by `finalize=False`)
+        # is what pops `metrics_progress`; with it off the baseline this run
+        # started with is still on disk to assert against directly.
+        assert on_disk["metrics_progress"]["implement"]["total_batches"] == 5
 
 
 class TestTheRollbackStoreWarningNamesItsFiles:
