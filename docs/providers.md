@@ -35,6 +35,8 @@ A model is referenced as `provider:model` (e.g. `codex:gpt-5.5`). A bare model n
 
 Model selection priority (highest first): `--models`, then `--interactive`, then `--quick`, then `defaults.models` (from YAML), then interactive fallback.
 
+> **`models:` is a menu, not a gate:** a provider's `models:` list only populates the `--interactive` picker's choices, so a model named directly in `defaults.models`, `defaults.quick_models`, `defaults.modes.<mode>`, or `--models provider:model` is dispatched whether or not it appears there.
+
 ## Pointing a provider CLI at a different endpoint (GLM / Z.ai, and the general case)
 
 **No config layer sets environment for a provider** - `providers.yaml`, the per-project override and `MULTI_LLM_PROVIDERS_CONFIG` carry `default_timeout`, `max_concurrent` and `models` and nothing else, and a key the base does not declare merges and is then ignored, so there is no `env:` block to write. Endpoint and credential wiring is **shell configuration this plugin neither owns nor validates**: export the variables in your shell, your `.envrc`, or per invocation (`env VAR=... multi-llm ...`). They reach the CLI because each spawn hands the child the inherited environment plus the adapter's own delta, and no adapter touches the `ANTHROPIC_*` namespace below.

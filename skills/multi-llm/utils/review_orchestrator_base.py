@@ -33,6 +33,7 @@ from .cli_common import (
     durable_reaggregate_fields,
     invocation,
     modes_table as _modes,
+    record_artifacts,
     record_next,
 )
 from .output_handler import sanitize_prefix, get_phase_dir
@@ -246,8 +247,10 @@ def merge_validation_batches(
         batch_metadata=batch_metadata,
         total_groups=len(grouped),
     )
+    # `save_validation_results` already announces this write
+    # ("[validation] Saved validation results to: ..."); a second line here
+    # under a different name announced the same file twice in the run log.
     save_validation_results(validation_results, Path(validation_path))
-    print(f"Merged validation saved to: {validation_path}")
     return apply_validation_to_groups(
         [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
         validation_results,
@@ -2325,12 +2328,27 @@ def aggregate_results(
     # paths rather than a search: `status` on a `done` run prints these and
     # repeats them in MULTI_LLM_RESULT.artifacts. A no-op in the foreground, which
     # is what keeps a non-detached .status.json byte-for-byte what it was.
+    report_html_path = os.path.join(phase_dir, "report.html")
+    grouped_path_out = os.path.join(phase_dir, "grouped.json")
     _detach.record_output_files(
         phase_dir,
         report=report_path,
-        report_html=os.path.join(phase_dir, "report.html"),
-        grouped=os.path.join(phase_dir, "grouped.json"),
+        report_html=report_html_path,
+        grouped=grouped_path_out,
     )
+
+    # `record_output_files` above only feeds `.status.json` (a channel `status`
+    # reads); the terminal `MULTI_LLM_RESULT.artifacts` line every host is told
+    # to trust instead ("read state/artifacts/next rather than mining the
+    # transcript") is populated from `record_artifact(s)`, which nothing on this
+    # path called — so a fully successful run reported `artifacts: []`.
+    # validation.json is included when it exists: it is the only
+    # machine-readable record of the validation verdicts the report describes.
+    artifacts_to_record = [report_path, report_html_path, grouped_path_out]
+    validation_path_out = os.path.join(phase_dir, "validation.json")
+    if os.path.exists(validation_path_out):
+        artifacts_to_record.append(validation_path_out)
+    record_artifacts(artifacts_to_record)
 
     return report_path
 
@@ -2878,7 +2896,12 @@ async def reaggregate_from_existing_files(
             save_validation_results(validation_results, Path(validation_path))
             print(f"Validation results saved to: {validation_path}")
         else:
-            print("\nPreparing batched validation for Claude Code subagent...")
+            # Host-neutral: this print runs on every host that dispatches
+            # subagent validation (opencode, codex, claude-code, ...), and
+            # naming Claude Code here contradicted the runner the log names a
+            # few lines later (measured 2026-09-16: an opencode-driven run
+            # printed this beside 11 lines correctly naming opencode).
+            print("\nPreparing batched validation for subagent execution...")
             extra_kwargs = {}
             if extra_validation_metadata:
                 extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
@@ -2906,7 +2929,7 @@ async def reaggregate_from_existing_files(
                 print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
                 print(f"Batches: {total_batches}")
 
-            print(f"\nValidation prepared for Claude Code subagent.")
+            print(f"\nValidation prepared for subagent execution.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
 
             # Resolved here, from the running skill dir, because the task file
@@ -3417,7 +3440,13 @@ async def run_review_orchestration(
                 validation_path = os.path.join(phase_dir, "validation.json")
                 save_validation_results(validation_results, Path(validation_path))
             else:
-                print("\nPreparing batched validation for Claude Code subagent...")
+                # Host-neutral: this print runs on every host that dispatches
+                # subagent validation (opencode, codex, claude-code, ...), and
+                # naming Claude Code here contradicted the runner the log
+                # names a few lines later (measured 2026-09-16: an
+                # opencode-driven run printed this beside 11 lines correctly
+                # naming opencode).
+                print("\nPreparing batched validation for subagent execution...")
                 extra_kwargs = {}
                 if extra_validation_metadata:
                     extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
@@ -3455,7 +3484,7 @@ async def run_review_orchestration(
                     if stats.get("efficiency_gain_percent", 0) > 0:
                         print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
 
-                print(f"\nValidation prepared for Claude Code subagent.")
+                print(f"\nValidation prepared for subagent execution.")
                 print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")

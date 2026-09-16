@@ -550,6 +550,13 @@ class StateManager:
         if "phases_completed" not in self.state:
             self.state["phases_completed"] = {}
         self.state["phases_completed"][phase] = datetime.now().isoformat()
+        # `review_phase_completed` predates this general map and nothing ever
+        # set it (F11): a fully completed review-plan phase left it `False`
+        # forever, contradicting `phases_completed["review-plan"]` in the same
+        # file. `mark_review_phase_completed()`'s own docstring is "the *plan*
+        # review phase", so this is the one phase name that flips it.
+        if phase == "review-plan":
+            self.mark_review_phase_completed()
 
     def is_phase_completed(self, phase: str) -> bool:
         """

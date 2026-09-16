@@ -266,6 +266,63 @@ class TestOneFilePerLogicalModel:
         assert "WARN" not in out
 
 
+class TestBatchedValidationAnnouncementIsHostNeutral:
+    """F9: this handover used to hardcode "Claude Code subagent" even though
+    the run driving it (opencode, codex, ...) is named correctly a few lines
+    later in the same log — measured on an opencode-driven run whose log
+    printed this beside 11 lines correctly naming opencode."""
+
+    def test_the_batched_validation_prints_name_no_host(self, tmp_path, capsys):
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"model-a": _suggestions(["Finding 0"])},
+            models_requested=["model-a"],
+        )
+
+        _reaggregate(plan, out_dir, phase_dir)
+        out = capsys.readouterr().out
+
+        assert "Claude Code subagent" not in out
+        assert "Preparing batched validation for subagent execution" in out
+        assert "Validation prepared for subagent execution" in out
+
+
+class TestMergedValidationIsAnnouncedOnce:
+    """F10: ``save_validation_results`` already prints
+    "[validation] Saved validation results to: ..." for every write it makes;
+    ``merge_validation_batches`` used to print a second line
+    ("Merged validation saved to: ...") for the very same file."""
+
+    def test_merge_validation_batches_prints_the_write_exactly_once(
+        self, tmp_path, capsys
+    ):
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        (phase_dir / "validation_batch_0.json").write_text(
+            json.dumps({
+                "groups": [
+                    {"group_index": 0, "status": "valid", "reason": "ok",
+                     "confidence": 0.9},
+                ],
+                "metadata": {"model": "model-a"},
+            }),
+            encoding="utf-8",
+        )
+        batch_metadata = {"batches": [{"batch_index": 0, "group_indices": [0]}]}
+        grouped = [{"theme": "Theme", "suggestions": []}]
+        validation_path = phase_dir / "validation.json"
+
+        rob.merge_validation_batches(
+            str(phase_dir), batch_metadata, grouped, str(validation_path)
+        )
+        out = capsys.readouterr().out
+
+        assert validation_path.exists()
+        assert out.count(str(validation_path)) == 1
+        assert "[validation] Saved validation results to:" in out
+        assert "Merged validation saved to:" not in out
+
+
 # ---------------------------------------------------------------------------
 # The code-review copy
 # ---------------------------------------------------------------------------
