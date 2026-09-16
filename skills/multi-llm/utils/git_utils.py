@@ -390,6 +390,30 @@ _MAX_LINES_PER_FILE = 200
 _MAX_TOTAL_BYTES = 500 * 1024  # 500KB
 _GIT_TIMEOUT_SECONDS = 10
 
+# Rough amortized width of one diff line (prefix char + content + newline),
+# used only to convert a byte budget into a line-count cap — see
+# _per_file_line_cap.
+_ASSUMED_BYTES_PER_DIFF_LINE = 80
+
+
+def _per_file_line_cap(file_count: int) -> int:
+    """Per-file line budget for ``_parse_unified_diff``, scaled by how many
+    files share ``_MAX_TOTAL_BYTES``.
+
+    ``_MAX_LINES_PER_FILE`` used to be a flat cap applied to every file
+    regardless of how many were being reviewed, so a single ~1,400-line file
+    (the common case for a whole-file review) got the same 200-line cap as
+    one file among fifty — 86% of it silently dropped — while the byte
+    budget that actually bounds total output sat almost unused. Scale the
+    cap with the remaining budget split across the files being diffed, so a
+    lone file is allowed most of the budget and a large fan-out still gets a
+    floor of ``_MAX_LINES_PER_FILE``.
+    """
+    if file_count <= 0:
+        return _MAX_LINES_PER_FILE
+    per_file_bytes = _MAX_TOTAL_BYTES / file_count
+    return max(_MAX_LINES_PER_FILE, int(per_file_bytes / _ASSUMED_BYTES_PER_DIFF_LINE))
+
 
 def _is_binary_file(path: str) -> bool:
     """Heuristic check for binary file content.
@@ -404,8 +428,13 @@ def _is_binary_file(path: str) -> bool:
         return False
 
 
-def _parse_unified_diff(diff_text: str) -> Dict[str, Any]:
+def _parse_unified_diff(diff_text: str, max_lines: int = _MAX_LINES_PER_FILE) -> Dict[str, Any]:
     """Parse unified diff text for a single file into structured hunk data.
+
+    Args:
+        diff_text: unified diff for one file.
+        max_lines: cap on captured add/remove/context lines (see
+            ``_per_file_line_cap`` for how callers scale this).
 
     Returns a dict with keys:
       - hunks: list of hunk objects (header + lines)
@@ -413,6 +442,9 @@ def _parse_unified_diff(diff_text: str) -> Dict[str, Any]:
       - binary: True if the diff indicates a binary file
       - deleted: True if the file was deleted
       - truncated_at: int if lines were capped
+      - total_lines: int, present only alongside truncated_at — the full
+        count of add/remove/context lines the diff actually has, so a
+        reader can say "showing first N of <total_lines>" instead of "?"
 
     Each hunk contains:
       - header: the @@ line
@@ -428,6 +460,7 @@ def _parse_unified_diff(diff_text: str) -> Dict[str, Any]:
     }
 
     total_content_lines = 0
+    total_lines = 0
     truncated = False
 
     i = 0
@@ -486,13 +519,19 @@ def _parse_unified_diff(diff_text: str) -> Dict[str, Any]:
                 ):
                     break
 
+                # Count every real content line up front (even once
+                # truncated) so a truncated result can still report how
+                # many lines it dropped.
+                if hline.startswith("+") or hline.startswith("-") or hline.startswith(" "):
+                    total_lines += 1
+
                 if truncated:
                     i += 1
                     continue
 
-                if total_content_lines >= _MAX_LINES_PER_FILE:
+                if total_content_lines >= max_lines:
                     truncated = True
-                    result["truncated_at"] = _MAX_LINES_PER_FILE
+                    result["truncated_at"] = max_lines
                     i += 1
                     continue
 
@@ -537,6 +576,9 @@ def _parse_unified_diff(diff_text: str) -> Dict[str, Any]:
             continue  # Don't increment i again – already positioned
 
         i += 1
+
+    if truncated:
+        result["total_lines"] = total_lines
 
     return result
 
@@ -598,7 +640,9 @@ def capture_diff_hunks(
       - Invalid base_ref → empty dict with warning
       - Git not available → empty dict with notice
       - 10-second timeout enforced
-      - 200-line per-file cap
+      - Per-file line cap, scaled by file count (floor 200 lines; see
+        ``_per_file_line_cap``) so a single-file review is not held to the
+        same cap as a large fan-out
       - 500KB total budget
     """
     if not file_paths:
@@ -680,6 +724,9 @@ def capture_diff_hunks(
     # --- Split and parse per-file diffs ---
     per_file_diffs = _split_diff_by_file(raw_diff)
     total_bytes = 0
+    # Scaled once per call: a review of one file should not be held to the
+    # same flat 200-line cap as a review of fifty (see _per_file_line_cap).
+    line_cap = _per_file_line_cap(len(file_paths))
 
     start_time = time.monotonic()
 
@@ -705,7 +752,7 @@ def capture_diff_hunks(
 
         total_bytes += diff_bytes
 
-        parsed = _parse_unified_diff(file_diff_text)
+        parsed = _parse_unified_diff(file_diff_text, max_lines=line_cap)
         result[fpath] = parsed
 
     # --- Handle deleted files: retrieve last-known content ---

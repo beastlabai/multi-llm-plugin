@@ -16,6 +16,7 @@ from utils.git_utils import (
     GitError,
     _is_binary_file,
     _parse_unified_diff,
+    _per_file_line_cap,
     _run_git,
     _split_diff_by_file,
     baseline_covers,
@@ -1101,6 +1102,53 @@ index 1111111..2222222 100644
         total_lines = sum(len(h["lines"]) for h in result["hunks"])
         assert total_lines == 200
 
+    def test_truncation_reports_the_real_total_line_count(self):
+        """truncated_at is accompanied by total_lines, so a reader can show
+        'first N of total_lines' instead of 'first N of ?'."""
+        diff_lines = [
+            "diff --git a/big.py b/big.py",
+            "index aaa..bbb 100644",
+            "--- a/big.py",
+            "+++ b/big.py",
+            "@@ -1,250 +1,260 @@",
+        ]
+        for i in range(1, 251):
+            diff_lines.append(f"+line {i}")
+        diff_text = "\n".join(diff_lines)
+
+        result = _parse_unified_diff(diff_text, max_lines=200)
+
+        assert result.get("truncated_at") == 200
+        assert result.get("total_lines") == 250
+
+    def test_respects_a_custom_max_lines(self):
+        """max_lines is the cap _parse_unified_diff actually enforces, not
+        the module's flat default — capture_diff_hunks scales it per call."""
+        diff_lines = [
+            "diff --git a/big.py b/big.py",
+            "index aaa..bbb 100644",
+            "--- a/big.py",
+            "+++ b/big.py",
+            "@@ -1,50 +1,50 @@",
+        ]
+        for i in range(1, 51):
+            diff_lines.append(f"+line {i}")
+        diff_text = "\n".join(diff_lines)
+
+        result = _parse_unified_diff(diff_text, max_lines=1000)
+
+        assert "truncated_at" not in result
+        assert "total_lines" not in result
+        total_captured = sum(len(h["lines"]) for h in result["hunks"])
+        assert total_captured == 50
+
+    def test_untruncated_result_has_no_total_lines_key(self):
+        """total_lines is only meaningful (and only present) alongside
+        truncated_at — an untruncated diff has nothing to reconcile."""
+        result = _parse_unified_diff(SAMPLE_SINGLE_FILE_DIFF)
+        assert "truncated_at" not in result
+        assert "total_lines" not in result
+
     def test_old_new_paths_from_headers(self):
         """Old/new paths extracted from --- a/ and +++ b/ headers."""
         result = _parse_unified_diff(SAMPLE_SINGLE_FILE_DIFF)
@@ -1137,6 +1185,34 @@ index abc..def 100644
         # The marker line should not be included as content
         for line_obj in hunk["lines"]:
             assert "No newline at end of file" not in line_obj["content"]
+
+
+class TestPerFileLineCap:
+    """Tests for _per_file_line_cap — scales the per-file diff cap by how
+    many files share the total byte budget, instead of a flat 200 lines."""
+
+    def test_single_file_gets_far_more_than_the_old_flat_cap(self):
+        """A lone file (the common whole-file-review case) is allowed most
+        of _MAX_TOTAL_BYTES, not the 200-line floor."""
+        cap = _per_file_line_cap(1)
+        assert cap > 200
+        # 1393 lines (the racing-game index.html diff that motivated this)
+        # must fit comfortably under a single-file cap.
+        assert cap > 1393
+
+    def test_many_files_fall_back_to_the_floor(self):
+        """A large fan-out still gets at least the historical 200-line
+        floor per file, however many files are being diffed."""
+        assert _per_file_line_cap(500) == 200
+
+    def test_cap_shrinks_as_file_count_grows(self):
+        """More files sharing the same byte budget means a smaller
+        per-file share."""
+        assert _per_file_line_cap(2) > _per_file_line_cap(10)
+
+    def test_zero_files_falls_back_to_the_flat_default(self):
+        """Degenerate input (no files) must not divide by zero."""
+        assert _per_file_line_cap(0) == 200
 
 
 class TestSplitDiffByFile:
@@ -1344,6 +1420,34 @@ class TestCaptureDiffHunks:
             budget_notices = [n for n in result["_notices"] if "budget" in n.lower()]
             if "second.py" in result and result["second.py"].get("truncated"):
                 assert len(budget_notices) > 0
+
+    @patch("utils.git_utils.subprocess.run")
+    def test_single_file_review_is_not_capped_at_200_lines(self, mock_run):
+        """A whole-file review of one file (well under the byte budget)
+        gets its full diff, not the old flat 200-line cap — this is the
+        1,393-insertion index.html case the per-file cap used to gut."""
+        diff_lines = [
+            "diff --git a/index.html b/index.html",
+            "index aaa..bbb 100644",
+            "--- a/index.html",
+            "+++ b/index.html",
+            "@@ -1,1 +1,1393 @@",
+        ]
+        for i in range(1, 1394):
+            diff_lines.append(f"+line {i}")
+        diff_text = "\n".join(diff_lines)
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout=diff_text, stderr=""),
+        ]
+
+        result = capture_diff_hunks("HEAD~1", ["index.html"])
+
+        file_data = result["index.html"]
+        assert "truncated_at" not in file_data
+        captured = sum(len(h["lines"]) for h in file_data["hunks"])
+        assert captured == 1393
 
     @patch("utils.git_utils.subprocess.run")
     def test_deleted_file_with_last_known_content(self, mock_run):

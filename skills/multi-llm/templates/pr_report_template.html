@@ -2005,6 +2005,11 @@
   <div id="report-notices"></div>
 
   <!-- ================================================================
+       PROVIDER LOGS (collapsed per-model log tail; empty when none)
+       ================================================================ -->
+  <div id="provider-logs-panel"></div>
+
+  <!-- ================================================================
        BATCH ACTIONS BAR
        ================================================================ -->
   <div class="batch-actions-bar" id="batch-actions-bar">
@@ -2354,6 +2359,29 @@
         else if (n.type === 'warning') cls += ' warning';
         html += '<div class="' + cls + '">' + escapeHtml(n.message) + '</div>';
       });
+      container.innerHTML = html;
+    }
+
+    // ================================================================
+    // Provider logs (collapsed per-model tail; empty when none captured)
+    // ================================================================
+    function renderProviderLogs() {
+      if (!reportData) return;
+      var container = document.getElementById('provider-logs-panel');
+      if (!container) return;
+      var snippets = reportData.logSnippets || {};
+      var models = Object.keys(snippets);
+      if (models.length === 0) { container.innerHTML = ''; return; }
+      var html = '<details class="inline-validation-section" id="provider-logs-section">' +
+        '<summary>Provider logs (' + models.length + ')</summary>' +
+        '<div class="inline-validation-content">';
+      models.forEach(function(model) {
+        html += '<div style="margin-bottom:0.75rem;">' +
+          '<div style="font-weight:600;margin-bottom:0.25rem;">' + escapeHtml(model) + '</div>' +
+          '<pre style="white-space:pre-wrap;font-family:\'SF Mono\',Monaco,\'Cascadia Code\',monospace;font-size:0.75rem;margin:0;">' +
+          escapeHtml(snippets[model]) + '</pre></div>';
+      });
+      html += '</div></details>';
       container.innerHTML = html;
     }
 
@@ -5005,6 +5033,7 @@
       renderSummary();
       renderSidebar();
       renderNotices();
+      renderProviderLogs();
 
       // Set context-appropriate label on the "natural order" button
       var phase = reportData.phase || '';
