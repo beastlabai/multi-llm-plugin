@@ -6382,6 +6382,39 @@ class TestTheFilesChangedFallback:
         recorded = set(context.artifacts)
         assert any(path.endswith("index.html") for path in recorded)
 
+    def test_record_write_artifacts_names_the_judge_report_the_executor_wrote(
+        self, tmp_path
+    ):
+        """F6, 2026-09-17: the judge report's filename is the executor's rule
+        (`KINDS_SHARING_A_WRITE_PHASE_DIR`), and this leg spelled a copy of it
+        by hand. Every path here is dropped when it does not exist, so a rename
+        on the executor's side would have dropped
+        `human_decision_judge_report` from `output_files` in silence."""
+        from utils import cli_common
+        from utils import subagent_executor as executor
+
+        orch = self._orchestrator_with_no_single_target(tmp_path, [], [])
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = phase_dir / "orchestrator_output.json"
+        output_path.write_text("{}", encoding="utf-8")
+        judge_report = Path(
+            executor.batch_report_path(str(phase_dir), "human_decision_judge")
+        )
+        judge_report.write_text("{}", encoding="utf-8")
+        # The whole point of the kind-qualified name: it is NOT the bare one a
+        # later write dispatch into this same phase dir would claim.
+        assert judge_report.name != executor.BATCH_REPORT_FILENAME
+
+        context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
+        cli_common.activate_result(context)
+        try:
+            orch._record_write_artifacts(str(output_path))
+        finally:
+            cli_common.deactivate_result()
+
+        assert str(judge_report) in set(context.artifacts)
+
 
 class TestPerFixDetailInTheSummary:
     """F10: summary.md listed batch ids/durations and no fix titles, files, or

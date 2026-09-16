@@ -1164,6 +1164,56 @@ class TestStatusSurface:
         capsys.readouterr()
         assert context2.payload(2)["state"] == "nothing-to-do"
 
+        # F1, 2026-09-17: and so does the case the pin above missed — a phase
+        # dir holding a checkpoint but NO run record. That is every foreground
+        # phase (only `--internal-worker` claims a run), so the Claude Code
+        # host's normal mode was reading `state: running` for a plan where
+        # nothing had ever been launched, with `next` pointed at the phase that
+        # never had a run.
+        fg_plan = _plan(tmp_path, "foreground plan")
+        fg_phase = _phase_dir(fg_plan, "apply-suggestions")
+        status_file.write_status(
+            str(fg_phase), {"phase": "apply-suggestions", "state": "complete"}
+        )
+        context3 = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(fg_plan)]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context3.payload(2)["state"] == "nothing-to-do"
+
+    def test_the_next_poll_skips_a_phase_that_never_had_a_run(
+        self, tmp_path, capsys
+    ):
+        """F1, 2026-09-17: `no_run` is non-terminal only because there is
+        nothing to be terminal about. Counted as live, a foreground-run phase
+        outranked a genuinely finished detached run as the `next` poll target,
+        and the poll it handed back can never leave exit 2."""
+        plan = _plan(tmp_path)
+        done = _phase_dir(plan, "review-plan")
+        status_file.write_status(
+            str(done), {"phase": "review-plan", "state": "complete"}
+        )
+        status_file.claim_run(str(done), {
+            "run_id": "run-detached-0001", "mode": "review-plan", "state": "done",
+            "exit_code": 0, "detached": True, "host": "opencode",
+        })
+        # Sorts after `review-plan`, so it cannot win on ordering alone.
+        foreground = _phase_dir(plan, "tasks")
+        status_file.write_status(
+            str(foreground), {"phase": "tasks", "state": "complete"}
+        )
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.next and "run-detached-0001" in context.next
+        assert "--phase tasks" not in context.next
+
     def test_a_run_whose_pid_is_gone_is_rendered_died_not_running(
         self, tmp_path, capsys
     ):
@@ -1968,6 +2018,35 @@ class TestStatusSurface:
         assert payload["mode"] == "review-plan"
         assert payload["phase"] == "review-plan"
 
+    def test_a_pinned_poll_carries_mode_and_phase_without_wait_too(
+        self, tmp_path, capsys
+    ):
+        """F3, 2026-09-17: what makes a poll "the watched run's" is the
+        selector, not `--wait`. The carry-over lived inside `if args.wait:`, so
+        a host (or a human) polling one pinned run once still got the N5
+        payload this was meant to retire — `{"mode": "status", "phase": null}`
+        for a finished `implement` run."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        status_file.write_status(str(phase), {"phase": "implement", "state": "complete"})
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mode-0000004", "mode": "implement", "state": "done",
+            "exit_code": 0, "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext(mode="status", phase=None))
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--phase", "implement",
+            ])
+            assert code == 0
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["mode"] == "implement"
+        assert payload["phase"] == "implement"
+
     def test_wait_falls_back_to_the_phase_dir_when_the_run_record_has_no_mode(
         self, tmp_path, capsys
     ):
@@ -2088,6 +2167,41 @@ class TestStatusSurface:
         out = capsys.readouterr().out
         assert "workflow phase: completed" in out
         assert "re-running" not in out
+
+    def test_a_dead_run_under_a_completed_phase_does_not_read_re_running(
+        self, tmp_path, capsys
+    ):
+        """F4, 2026-09-17: `stale` covers two conditions — a worker slow to
+        beat, and one the identity probe can already prove is gone. Only the
+        first is live, so a SIGKILLed worker printed `completed (re-running
+        since …)` two lines under its own `died (pid N gone, …)`, which is the
+        opposite of what N7's wording exists to say."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        implement = _phase_dir(plan, "implement")
+
+        state = StateManager(plan)
+        state.mark_phase_completed("implement")
+        state.save()
+
+        dead = _dead_pid()
+        status_file.claim_run(str(implement), {
+            "run_id": "run-rerun-0003", "mode": "implement", "pid": dead,
+            # Not the same process even if the pid is recycled under us.
+            "process_start_time": "0",
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True,
+            "started_at": "2026-09-16T19:54:19.649547",
+        })
+
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "all", "--phase", "implement"]
+        ) == 2
+        out = capsys.readouterr().out
+        assert f"died (pid {dead} gone, last beat " in out, out
+        assert "workflow phase: completed" in out, out
+        assert "re-running" not in out, out
 
     def test_sweep_closes_out_orphans_across_the_plan(self, tmp_path, capsys):
         plan = _plan(tmp_path)

@@ -4467,8 +4467,6 @@ class TestSandboxUnavailable:
         assert write_argv[:6] == expected_head
         assert generate_argv == write_argv
         assert ".multi-llm/tmp" in write_argv[-1]
-        # A read-only dispatch is never asked to write, and this probe writes.
-        assert provider.sandbox_probe_command(PROFILE_AGENT_READONLY) is None
         # muse turned its sandbox off (step 2), so it has nothing to probe.
         assert registry.get_provider("muse").sandbox_probe_command(PROFILE_AGENT_WRITE) is None
         assert registry.get_provider("muse").sandbox_probe_command(PROFILE_GENERATE) is None
@@ -4479,6 +4477,59 @@ class TestSandboxUnavailable:
             if adapter.sandbox_probe_command(PROFILE_GENERATE)
         }
         assert answering == {"codex"}
+
+    def test_codex_also_declares_a_probe_for_the_read_only_profile(self):
+        """F2, 2026-09-17: `codex exec --sandbox read-only` is the same
+        bubblewrap, so every read kind — validation, revalidation,
+        consolidation, salvage, task generation, the human-decision judge —
+        dispatched codex unprobed on a machine where bwrap cannot start. The
+        probe's byte was never the point: the read-only row asks the one
+        question a read dispatch needs answered (does the sandbox come up?)
+        with a command that writes nothing."""
+        provider = registry.get_provider("codex")
+        argv = provider.sandbox_probe_command(PROFILE_AGENT_READONLY)
+        assert argv[:6] == [
+            "codex", "sandbox", "-c", 'sandbox_mode="read-only"', "--", "sh",
+        ]
+        assert argv[-1] == "exit 0"
+        # Nothing in it touches the repo — a read-only dispatch never writes,
+        # and neither may the probe that stands in for it.
+        assert ".multi-llm" not in argv[-1]
+        assert "mkdir" not in argv[-1]
+        # Still nobody else: a probe nobody declared is a probe nobody spawns.
+        answering = {
+            name for name, adapter in registry._PROVIDERS.items()
+            if adapter.sandbox_probe_command(PROFILE_AGENT_READONLY)
+        }
+        assert answering == {"codex"}
+
+    def test_a_read_only_batch_is_refused_when_the_sandbox_cannot_start(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """The gate the read-only row exists for: an `agent-readonly` preflight
+        whose probe fails is exit 3 before the batch dispatches, instead of
+        eleven validation batches whose bwrap failure surfaces inside the
+        model's tool results — where the D3k classifier never sees `bwrap:` and
+        the JSON the model still returns is scored a valid batch."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+
+        def readonly_probe(self, profile):
+            if profile != PROFILE_AGENT_READONLY:
+                return None
+            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command", readonly_probe
+        )
+        self._no_dispatch(monkeypatch)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        rejected = excinfo.value
+        assert rejected.reason_code == "sandbox_unavailable"
+        assert rejected.exit_code == 3
+        assert _BWRAP_BROKEN_LINE in rejected.detail
 
     def test_a_failing_self_test_refuses_before_dispatch(
         self, tmp_path, runner_env, monkeypatch, capsys
@@ -4716,6 +4767,58 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         second = self._run_slot(fanout, tmp_path, "fakebwrap:m2")
         assert len(runs) == 1
         assert first["error"] == second["error"]
+
+    def test_one_providers_probe_does_not_hold_up_another_providers_slot(
+        self, monkeypatch
+    ):
+        """F5, 2026-09-17: the cache lock was held for the whole probe, so a
+        slot whose own answer is `not-required` (no spawn at all) still waited
+        out codex's — up to `SANDBOX_PROBE_TIMEOUT_S` (10 s) of dead time at
+        the head of every fan-out on a host where the probe hangs. The lock
+        guards the cache; the probe runs under a per-key lock of its own."""
+        import threading
+
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_PROBE_LOCKS", {})
+        monkeypatch.setattr(rob, "get_provider", lambda name: name)
+        probing = threading.Event()
+        release = threading.Event()
+
+        def verdict(provider, profile, *, cwd=None, timeout=None):
+            if provider == "slowbwrap":
+                probing.set()
+                assert release.wait(10), "the slow probe was never released"
+                return ("ok", "")
+            return ("not-required", "")
+
+        monkeypatch.setattr(executor, "sandbox_verdict", verdict)
+
+        slow = threading.Thread(
+            target=rob._fanout_sandbox_verdict, args=("slowbwrap", None)
+        )
+        slow.start()
+        assert probing.wait(10), "the slow probe never started"
+
+        answered = threading.Event()
+        answers = []
+
+        def ask_fast():
+            answers.append(rob._fanout_sandbox_verdict("fastplain", None))
+            answered.set()
+
+        fast = threading.Thread(target=ask_fast)
+        fast.start()
+        # Bounded rather than asserted inline: on the old shape this thread is
+        # blocked on the cache lock, and the assertion has to come after the
+        # release or the suite deadlocks instead of failing.
+        blocked = not answered.wait(2.0)
+        release.set()
+        fast.join(10)
+        slow.join(10)
+        assert not blocked, "a second provider's slot waited out the first's probe"
+        assert answers == [("not-required", "")]
 
     def test_a_provider_that_declares_no_probe_costs_the_fanout_nothing(
         self, tmp_path, monkeypatch

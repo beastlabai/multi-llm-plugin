@@ -2051,10 +2051,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # The judge's own dispatch report, kind-qualified because a judge
         # dispatch can share this phase dir with the later write dispatch
         # (KINDS_SHARING_A_WRITE_PHASE_DIR) — otherwise invisible to a host
-        # that only reads this run's `output_files`.
-        judge_report = os.path.join(
-            phase_dir, "subagent_batch_report_human_decision_judge.json"
-        )
+        # that only reads this run's `output_files`. Asked of the executor
+        # rather than spelled out here (F6, 2026-09-17): it owns the naming
+        # rule, and a hand-typed copy would drop this key on the day it moves.
+        try:
+            from .subagent_executor import batch_report_path
+        except ImportError:  # pragma: no cover - direct script runs
+            from subagent_executor import batch_report_path  # type: ignore
+
+        judge_report = batch_report_path(phase_dir, "human_decision_judge")
         if os.path.exists(judge_report):
             paths["human_decision_judge_report"] = judge_report
 

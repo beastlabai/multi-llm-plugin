@@ -2341,15 +2341,18 @@ class LLMProvider(ABC):
 
         ``None`` — the default, and the answer for every adapter without an OS
         sandbox or with one turned off — means "nothing to probe". An adapter
-        that returns an argv promises it writes one byte under
-        ``.multi-llm/tmp`` of the current directory through the *same* sandbox a
-        ``profile`` dispatch would use, deletes it, and exits 0 on success;
-        anything non-zero is read as the sandbox refusing. The executor's
-        preflight runs it once per host/spec/profile with a 10 s timeout before
-        the first edit-capable dispatch, the review fan-out runs it once per
-        provider for ``generate`` before its first slot, and ``doctor`` runs the
-        same command. A read-only profile is never asked to write, so adapters
-        answer ``None`` for it.
+        that returns an argv promises it exercises the *same* sandbox a
+        ``profile`` dispatch would run under, with no model and no prompt, and
+        exits 0 on success; anything non-zero is read as the sandbox refusing.
+        A write-capable profile's probe writes one byte under
+        ``.multi-llm/tmp`` of the current directory and deletes it; a read-only
+        profile's writes nothing and asks only whether the sandbox starts,
+        which is the question a dispatch under it needs answered — it reads the
+        repository, and a sandbox that cannot come up denies it that too. The
+        executor's preflight runs it once per host/spec/profile with a 10 s
+        timeout before the first dispatch of that profile, the review fan-out
+        runs it once per provider for ``generate`` before its first slot, and
+        ``doctor`` runs the same command.
         """
         return None
 

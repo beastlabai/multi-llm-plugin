@@ -366,7 +366,7 @@ class CodexProvider(LLMProvider):
         return [OUTPUT_SCHEMA_FLAG, schema.path]
 
     def sandbox_probe_command(self, profile: str) -> Optional[List[str]]:
-        """codex's own runner, asked to write one byte where a dispatch would (D6).
+        """codex's own runner, asked to start where a dispatch would (D6).
 
         ``codex sandbox -c 'sandbox_mode="<policy>"' -- <cmd>`` runs ``<cmd>``
         under exactly the bubblewrap policy ``codex exec --sandbox <policy>``
@@ -374,35 +374,54 @@ class CodexProvider(LLMProvider):
         stock Ubuntu 24.04 it dies on ``bwrap: loopback: Failed RTM_NEWADDR:
         Operation not permitted`` before the shell starts.
 
-        Both ``workspace-write`` profiles answer: ``agent-write``, and
-        ``generate`` — the review fan-out's, which dispatches ``codex exec
-        --sandbox workspace-write`` (``_SANDBOX_BY_PROFILE``). ``generate`` used
-        to return ``None`` on the premise that "the review fan-out stopped
-        needing the sandbox when ``supports_file_output`` went ``False``". That
-        premise is wrong: the fan-out stopped needing the sandbox to *write*,
-        and a bwrap that cannot start denies the child every file operation —
+        **Every** profile this adapter declares answers, because every one of
+        them is bubblewrap. The two ``workspace-write`` profiles —
+        ``agent-write`` and ``generate``, the review fan-out's — write and
+        delete one byte under ``.multi-llm/tmp`` of the current directory (the
+        executor and the fan-out both run this with ``cwd`` at the repo root),
+        and the shell leaves nothing behind it created. ``generate`` used to
+        return ``None`` on the premise that "the review fan-out stopped needing
+        the sandbox when ``supports_file_output`` went ``False``". That premise
+        is wrong: the fan-out stopped needing the sandbox to *write*, and a
+        bwrap that cannot start denies the child every file operation —
         including the READ of the plan file, which is the whole input to the
         phase. Measured 2026-09-16, `codex:gpt-5.6-terra` on a review-plan
         fan-out: 27.9 s, 61k input tokens, and a one-item "review" whose only
         suggestion was that the plan file could not be read — scored a success,
         because nothing had asked the sandbox whether it could start.
-        ``agent-readonly`` stays ``None``: this probe writes a byte, and a
-        read-only dispatch is never asked to. The policy comes from
-        ``_SANDBOX_BY_PROFILE`` so the probe cannot answer for a policy the
-        dispatch does not use (M5). The byte lands under ``.multi-llm/tmp`` of
-        the current directory — the executor and the fan-out both run this with
-        ``cwd`` at the repo root — and the shell leaves nothing behind it
-        created.
+
+        ``agent-readonly`` runs the same probe with **no** write in it: an
+        empty command under ``sandbox_mode="read-only"``, which is enough,
+        because what fails on this machine is bwrap *starting* and nothing
+        inside the sandbox gets to run at all. It used to answer ``None`` on
+        the premise that "this probe writes a byte, and a read-only dispatch is
+        never asked to" — true of the byte, irrelevant to the failure: every
+        read kind (validation, revalidation, consolidation, salvage, task
+        generation, the human-decision judge) dispatched codex unprobed, and
+        the bwrap failure then surfaces inside the model's own tool results
+        rather than on the stream, so the D3k classifier never sees ``bwrap:``
+        and the JSON the model still returns is scored a valid batch — the same
+        "the file could not be read" shape the ``generate`` row above fixed.
+
+        The policy comes from ``_SANDBOX_BY_PROFILE`` so the probe cannot answer
+        for a policy the dispatch does not use (M5).
         """
-        if profile not in (PROFILE_GENERATE, PROFILE_AGENT_WRITE):
+        try:
+            policy = _sandbox_for(profile)
+        except ValueError:
             return None
-        script = (
-            'd=.multi-llm/tmp; f="$d/sandbox-probe-$$"; '
-            'mkdir -p "$d" && : > "$f" && rm -f "$f"; rc=$?; '
-            'rmdir "$d" .multi-llm 2>/dev/null; exit $rc'
-        )
+        if profile == PROFILE_AGENT_READONLY:
+            # Nothing to clean up, so nothing to clean up *as*: the question is
+            # only whether the sandbox comes up.
+            script = "exit 0"
+        else:
+            script = (
+                'd=.multi-llm/tmp; f="$d/sandbox-probe-$$"; '
+                'mkdir -p "$d" && : > "$f" && rm -f "$f"; rc=$?; '
+                'rmdir "$d" .multi-llm 2>/dev/null; exit $rc'
+            )
         return [
-            "codex", "sandbox", "-c", f'sandbox_mode="{_sandbox_for(profile)}"',
+            "codex", "sandbox", "-c", f'sandbox_mode="{policy}"',
             "--", "sh", "-c", script,
         ]
 
