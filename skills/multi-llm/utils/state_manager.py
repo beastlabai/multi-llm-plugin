@@ -643,6 +643,23 @@ class StateManager:
         """Clear the plan changed flag."""
         self.state.pop("plan_changed", None)
 
+    def refresh_plan_hash(self) -> None:
+        """Re-stamp ``plan_hash`` to the plan's current on-disk content.
+
+        `_load_or_create` hashes the plan once, at construction — before an
+        apply-suggestions/apply-task-suggestions/apply-code-fixes/implement run
+        makes its own edits. Without this, a run's `save()` persists that stale
+        hash, and the *next* `StateManager` built on this plan sees its own
+        edit as a human editing the plan mid-workflow (F5, audited 2026-09-16):
+        `plan_changed` goes `True` and `implement_orchestrator.py` prints
+        "Plan has changed since last session" for a change the plugin made.
+        Call this once, after the run's writes are done, so the stamped hash
+        matches what is actually on disk and `plan_changed` has nothing left
+        to report.
+        """
+        self.state["plan_hash"] = self._compute_plan_hash()
+        self.clear_plan_changed_flag()
+
     def get_session_summary(self) -> Dict[str, Any]:
         """Get a summary of the current session state."""
         task_statuses = self.state.get("task_status", {})

@@ -3910,6 +3910,30 @@ class TestModelCatalogPreflight:
             f"{spec}  (recorded by this run's own dispatches)"
         )
 
+    def test_the_write_mirror_also_beats_a_fresh_resolution(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F7: a write phase (`write_batch_scheduler._mirror_status`) records
+        its runner under `progress.write_subagents`, not `progress.subagents`
+        — the mirror the read path uses. Without also reading that key here,
+        `status` polled on a write-phase run outside the launching session
+        fell through to a fresh resolution and named the polling session's
+        model instead of what the batches actually dispatched to."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        spec = "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        lines = run_status.render_runner_text(plan, views=[{
+            "run": {"host": "opencode"},
+            "progress": {"write_subagents": {"runner_versions": {spec: "1.18.31"}}},
+        }])
+        assert lines[1].strip() == (
+            f"{spec}  (recorded by this run's own dispatches)"
+        )
+
 
 class TestCredentialFreeModels:
     """D3 step 2: a declared credential-free model passes the auth leg; a

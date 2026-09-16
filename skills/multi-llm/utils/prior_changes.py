@@ -10,7 +10,7 @@ import hashlib
 import json
 import sys
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -175,7 +175,11 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
         "id": entry_id,
         "phase": phase,
         "summary": summary,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        # Local naive clock, matching `state_manager.py`'s `updated_at` — a
+        # UTC stamp here (F13, audited 2026-09-16) read two hours off from
+        # `state.json` and `subagent_audit.jsonl` for the same instant, both
+        # of which use `datetime.now()`.
+        "timestamp": datetime.now().isoformat(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -236,7 +240,8 @@ def cmd_append(args: argparse.Namespace) -> None:
         "id": args.id,
         "phase": args.phase,
         "summary": summary,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        # See the in-process `append`'s matching comment (F13).
+        "timestamp": datetime.now().isoformat(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:

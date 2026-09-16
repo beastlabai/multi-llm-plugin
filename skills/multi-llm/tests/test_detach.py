@@ -1162,6 +1162,45 @@ class TestStatusSurface:
         assert "phase state:    complete" in out
         assert "progress:       implement 9/9 ok, applied 7, no-op 2" in out
 
+    def test_the_write_mirror_reports_item_counts_when_the_scheduler_recorded_them(
+        self, tmp_path, capsys
+    ):
+        """F9: `ok`/`total` on the write mirror count BATCHES, not the
+        suggestions or fixes inside them. A 15-batch, 29-suggestion
+        apply-suggestions run mirrored (and the model then reported)
+        "15/15 ok, applied 15" — 14 suggestions short. When the scheduler
+        recorded `items_total`/`items_applied` (`write_batch_scheduler.
+        _mirror_status`), the line says so explicitly, and the write-outcome
+        breakdown the previous test pins still follows it unchanged."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "apply-suggestions")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-write-002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "apply-suggestions",
+        })
+        rows = [
+            {"task_id": f"apply-batch-{i}", "batch_index": i, "status": "ok",
+             "write_outcome": "applied", "files_touched": ["plan.md"]}
+            for i in range(15)
+        ]
+        status_file.update_status(str(phase), {
+            "phase": "apply-suggestions", "state": "complete",
+            "progress": {"write_subagents": {
+                "kind": "apply_suggestions", "invoker": "executor", "total": 15,
+                "dispatched": 15, "finalized": True, "tasks": rows,
+                "failed_task_ids": [], "items_total": 29, "items_applied": 29,
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "phase state:    complete" in out
+        assert (
+            "progress:       apply_suggestions 15/15 batches ok, "
+            "29/29 items applied, applied 15"
+        ) in out
+
     def test_phase_selector_reports_exactly_the_named_one(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         for phase in ("review-plan", "code-review"):
