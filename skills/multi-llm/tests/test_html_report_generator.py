@@ -874,6 +874,110 @@ Second step details.
 
         assert '"phase": "code-review"' in html
 
+    def test_task_backfill_keys_every_task_once_by_bare_id(self, sample_plan, tmp_path):
+        """A tasks.md with real ``### Task T001: ...`` headers backfills
+        every untouched task exactly once, keyed by its bare ID.
+
+        ``_parse_tasks_markdown`` keys each task under both spellings
+        (bare ``"T001"`` and the full header text) so it can be looked up
+        either way; the backfill loop used to iterate both keys with an
+        anchored ``re.match``, which only recognizes the bare spelling and
+        let the header-keyed half through as a second, empty task —
+        reproduced here with the same 14-task shape (and one coverage-gap
+        finding filed under a plan section heading rather than the
+        literal "Plan Coverage") that a real review-tasks report shipped
+        with 29 "tasks" for 14 real ones.
+        """
+        task_titles = [
+            "Create index.html skeleton and renderer",
+            "Add Input module and key mapping",
+            "Implement kinematic Car step and tuning",
+            "Add chase camera section",
+            "Build Track spline sampling and queries",
+            "Generate road, kerbs, start line and finish",
+            "Wire surface penalty and out-of-bounds handling",
+            "Implement Timing checkpoints and persistence",
+            "Build HUD and lap-time formatter",
+            "Add Game state machine and fixed-timestep loop",
+            "Add full car model, fog and shadows",
+            "Add ?test=1 self-test hook",
+            "Polish pass and dead-code review",
+            "Manual browser verification checklist",
+        ]
+        tasks_md = "# Implementation Tasks\n\n"
+        for i, title in enumerate(task_titles, start=1):
+            tasks_md += (
+                f"### Task T{i:03d}: {title}\n"
+                "**Dependencies**: None\n"
+                "**Files to create**: none\n"
+                "**Complexity**: medium\n\n"
+                f"Body text for T{i:03d}.\n\n---\n\n"
+            )
+        tasks_path = tmp_path / "tasks.md"
+        tasks_path.write_text(tasks_md, encoding="utf-8")
+
+        groups = [
+            {
+                "theme": "T005 finding",
+                "category": "improvement",
+                "models": ["m"],
+                "priority_score": 50,
+                "validation_status": "valid",
+                "validation_reason": "",
+                "validation_confidence": 0.8,
+                "suggestions": [{
+                    "title": "T005 issue",
+                    "desc": "desc",
+                    "importance": "HIGH",
+                    "type": "modification",
+                    "reference": "T005",
+                    "source_model": "m",
+                }],
+            },
+            {
+                "theme": "Coverage gap",
+                "category": "improvement",
+                "models": ["m"],
+                "priority_score": 50,
+                "validation_status": "valid",
+                "validation_reason": "",
+                "validation_confidence": 0.8,
+                "suggestions": [{
+                    "title": "Timing checkpoints omit a requirement",
+                    "desc": "desc",
+                    "importance": "HIGH",
+                    "type": "addition",
+                    "reference": "## 4.6 Timing & Checkpoints",
+                    "source_model": "m",
+                }],
+            },
+        ]
+
+        phase_dir = tmp_path / "review-tasks"
+        phase_dir.mkdir()
+        generate_html_report(
+            groups=groups,
+            plan_path=sample_plan,
+            phase_dir=phase_dir,
+            phase_type="review-tasks",
+            models=["m"],
+            tasks_path=tasks_path,
+        )
+
+        report_data = json.loads((phase_dir / "report_data.json").read_text())
+        task_view = report_data["taskView"]
+        real_task_keys = [k for k in task_view if not k.startswith("_")]
+
+        assert sorted(real_task_keys) == [f"T{i:03d}" for i in range(1, 15)]
+        assert len(real_task_keys) == 14
+        assert task_view["T005"]["hasSuggestions"] is True
+        assert task_view["T001"]["hasSuggestions"] is False
+        assert task_view["T001"]["taskMetadata"]["title"] == task_titles[0]
+
+        # The section-heading coverage gap is not its own phantom task.
+        assert "## 4.6 Timing & Checkpoints" not in task_view
+        assert len(task_view["_coverageGaps"]["suggestions"]) == 1
+
 
 class TestLoadHtmlSelections:
     """Tests for load_html_selections function."""
@@ -1805,6 +1909,38 @@ class TestBuildTaskView:
         assert len(result["T002"]["suggestions"]) == 1
         assert len(result["_coverageGaps"]["suggestions"]) == 1
         assert result["_unanchored"]["suggestions"] == []
+
+    def test_a_plan_section_heading_reference_is_a_coverage_gap_not_a_phantom_task(self):
+        """``prompts/task_review.txt`` invites a plan section heading (e.g.
+        ``"## 4.6 Timing & Checkpoints"``) as an alternative spelling of a
+        coverage-gap finding, not just the literal "Plan Coverage" string.
+        Routing only the literal string filed the heading as its own
+        one-off task bucket instead of a coverage gap."""
+        groups = [
+            _make_group(1, [_make_suggestion("S1", section_ref="## 4.6 Timing & Checkpoints")]),
+        ]
+
+        result = build_task_view(groups)
+
+        assert "## 4.6 Timing & Checkpoints" not in result
+        assert len(result["_coverageGaps"]["suggestions"]) == 1
+        assert result["_unanchored"]["suggestions"] == []
+
+    def test_composite_naming_a_section_heading_lands_in_both(self):
+        """A composite reference naming a real task and a section heading
+        files the group under the task AND the coverage gaps, same as the
+        literal "Plan Coverage" composite case above."""
+        groups = [
+            _make_group(1, [_make_suggestion(
+                "S1", section_ref="T002 / ## 4.6 Timing & Checkpoints",
+            )]),
+        ]
+
+        result = build_task_view(groups)
+
+        assert len(result["T002"]["suggestions"]) == 1
+        assert len(result["_coverageGaps"]["suggestions"]) == 1
+        assert "## 4.6 Timing & Checkpoints" not in result
 
     def test_empty_groups(self):
         """Handles empty groups list."""

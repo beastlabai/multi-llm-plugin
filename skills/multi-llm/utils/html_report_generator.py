@@ -1527,10 +1527,17 @@ def generate_html_report(
                 existing_task_ids.add(tk)
 
         for task_id, meta in tasks_metadata.items():
-            # Extract bare ID
-            bare_id_match = re.match(r'(T\d+)', task_id)
-            bare_id = bare_id_match.group(1) if bare_id_match else task_id
-            if bare_id not in existing_task_ids:
+            # _parse_tasks_markdown keys every task under BOTH the bare ID
+            # and the full header text ("### Task T001: ...") pointing at
+            # the identical meta dict, so the bare-ID key alone already
+            # covers every task. Skip the header-text key here: a bare
+            # `re.match(r'(T\d+)', task_id)` never matches it (the string
+            # doesn't start with "T"), which used to fall through to the
+            # `else` branch and back-fill a second, empty entry keyed by
+            # the whole header.
+            if not re.fullmatch(r'T\d+', task_id):
+                continue
+            if task_id not in existing_task_ids:
                 task_view[task_id] = {
                     "taskMetadata": meta,
                     "suggestions": [],
@@ -1538,7 +1545,7 @@ def generate_html_report(
                     "maxImportance": "",
                     "hasSuggestions": False,
                 }
-                existing_task_ids.add(bare_id)
+                existing_task_ids.add(task_id)
 
     # Ensure hasSuggestions is set on ALL task entries
     for key in task_view:
@@ -1931,10 +1938,13 @@ def build_task_view(
     Groups suggestions by task ID (from the ``sectionRef`` / ``reference``
     field) for task-review PR view.  A composite reference naming more than
     one task (``"T003 / T004"``, ``"T003, T004"``) is split and the group is
-    counted under each task it names.  Suggestions whose reference is
-    ``"Plan Coverage"`` are routed to the ``_coverageGaps`` bucket — a
-    composite naming ``"Plan Coverage"`` alongside a task lands in both.
-    Groups with no reference at all go to the ``_unanchored`` bucket.
+    counted under each task it names.  A reference that isn't a bare task
+    ID (``"Plan Coverage"``, or a plan section heading like
+    ``"## 4.6 Timing & Checkpoints"`` — ``prompts/task_review.txt`` invites
+    either spelling for a coverage-gap finding) is routed to the
+    ``_coverageGaps`` bucket instead of becoming its own phantom task — a
+    composite naming a non-task reference alongside a real task lands in
+    both. Groups with no reference at all go to the ``_unanchored`` bucket.
 
     Args:
         groups: List of processed group dicts (post ``_build_group_data()``).
@@ -1952,9 +1962,9 @@ def build_task_view(
                 "maxImportance": str,
             }
 
-        The ``_coverageGaps`` entry contains groups whose reference is
-        ``"Plan Coverage"``.  The ``_unanchored`` entry contains groups
-        with no reference.
+        The ``_coverageGaps`` entry contains groups whose reference is not
+        a bare task ID (``"Plan Coverage"`` or a plan section heading).
+        The ``_unanchored`` entry contains groups with no reference.
     """
     task_buckets: Dict[str, List[Dict[str, Any]]] = {}
     coverage_gaps: List[Dict[str, Any]] = []
@@ -1967,7 +1977,13 @@ def build_task_view(
             unanchored.append(group)
             continue
         for task_ref in task_refs:
-            if task_ref == "Plan Coverage":
+            # Anything that isn't a bare "T###" id is a coverage-gap
+            # reference, not a task — the prompt spells those either as
+            # the literal "Plan Coverage" or as a plan section heading
+            # (e.g. "## 4.6 Timing & Checkpoints"), and treating the
+            # literal string as the only such spelling turned every
+            # heading-style coverage gap into its own phantom task.
+            if not re.fullmatch(r'T\d+', task_ref):
                 coverage_gaps.append(group)
             else:
                 task_buckets.setdefault(task_ref, []).append(group)
