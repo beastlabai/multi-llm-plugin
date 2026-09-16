@@ -909,6 +909,84 @@ class TestFormatBatchesForOutput:
 
         assert len(result) == 0
 
+    def test_a_resume_keeps_the_deferred_human_task(self):
+        """A human task is `skipped`, not `pending`, and must survive `--resume`.
+
+        Dropping it is how a resumed phase reported `skipped_tasks: {}` and lost
+        its `## Manual Tasks (Deferred)` section: the scheduler never saw a human
+        id to resolve.
+        """
+        from implement_orchestrator import format_batches_for_output
+
+        done = Task(id="T001", title="Task 1", description="d",
+                    status=TaskStatus.COMPLETED)
+        pending = Task(id="T002", title="Task 2", description="d",
+                       status=TaskStatus.PENDING)
+        human = Task(id="T014", title="Manual check", description="d",
+                     status=TaskStatus.SKIPPED, executor_role="human")
+        result = format_batches_for_output([[done, pending, human]],
+                                           skip_completed=True)
+
+        assert [t["id"] for t in result[0]["tasks"]] == ["T002", "T014"]
+
+    def test_a_resume_drops_a_human_task_that_is_already_done(self):
+        """`--human-task <id>=done` is an answer, not deferred work."""
+        from implement_orchestrator import format_batches_for_output
+
+        human = Task(id="T014", title="Manual check", description="d",
+                     status=TaskStatus.COMPLETED, executor_role="human")
+        assert format_batches_for_output([[human]], skip_completed=True) == []
+
+
+class TestResumeMaterializationNamesResultsByTaskId:
+    """The `--resume` re-materialization must not rename anyone's result file.
+
+    `implement_orchestrator` materializes from
+    `format_batches_for_output(skip_completed=args.resume)`, so on a resume the
+    list is SHORTER than the one the killed run wrote results from. A positional
+    result name therefore re-points every survivor at a predecessor's file —
+    measured 2026-09-16, five never-dispatched tasks were read as complete.
+    """
+
+    def _batches(self, task_ids):
+        from implement_orchestrator import format_batches_for_output
+
+        tasks = [
+            Task(id=task_id, title=f"Task {task_id}", description="d",
+                 status=TaskStatus.COMPLETED if done else TaskStatus.PENDING,
+                 files_to_modify=["src/main.py"])
+            for task_id, done in task_ids
+        ]
+        return format_batches_for_output([[t] for t in tasks], skip_completed=True)
+
+    def test_the_shorter_resumed_list_reuses_each_tasks_own_result_name(
+        self, temp_dir
+    ):
+        from utils.write_phase_bridge import materialize_write_tasks
+
+        plan = Path(temp_dir) / "plan.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+
+        def materialize(rows):
+            return materialize_write_tasks(
+                kind="implement", batches=self._batches(rows),
+                phase_dir=str(temp_dir), plan_file=str(plan),
+            )
+
+        first = materialize([(f"T00{i}", False) for i in range(1, 6)])
+        # The resume: T001-T003 finished, so only T004/T005 are re-materialized.
+        resumed = materialize(
+            [("T001", True), ("T002", True), ("T003", True),
+             ("T004", False), ("T005", False)]
+        )
+
+        by_id = {t["task_id"]: t["output_name"] for t in first}
+        assert by_id["T004"] == "implement_batch_T004.json"
+        assert [t["task_id"] for t in resumed] == ["T004", "T005"]
+        assert [t["output_name"] for t in resumed] == [
+            by_id["T004"], by_id["T005"]
+        ], "a resumed task must keep its own result file, not inherit T001's"
+
 
 class TestTaskProcessing:
     """Tests for task processing logic."""

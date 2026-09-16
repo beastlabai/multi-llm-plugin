@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "write_batch_result.schema.json",
   "title": "Write-batch result (D3g)",
-  "description": "The JSON a write subagent prints on stdout for an apply-* or implement batch. It is the batch's `output_path` (apply_batch_N.json / implement_batch_N.json), validated exactly like a validation result before anything is written — a runner that returns prose fails the task instead of being counted as applied (D3f). It is NOT the verdict: the executor's own pre-batch snapshot / post-run byte comparison decides applied vs. clean failure vs. partial application, and `summary` is the field `prior_changes.py append` takes its one-liner from, which is why it is part of the contract rather than a nicety.",
+  "description": "The JSON a write subagent prints on stdout for an apply-* or implement batch. It is the batch's `output_path` (apply_batch_N.json / implement_batch_<task id>.json), validated exactly like a validation result before anything is written — a runner that returns prose fails the task instead of being counted as applied (D3f). It is NOT the verdict: the executor's own pre-batch snapshot / post-run byte comparison decides applied vs. clean failure vs. partial application, and `summary` is the field `prior_changes.py append` takes its one-liner from, which is why it is part of the contract rather than a nicety.",
   "type": "object",
   "required": ["status", "summary"],
   "additionalProperties": true,

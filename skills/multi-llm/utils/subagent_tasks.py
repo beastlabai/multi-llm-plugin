@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -71,6 +72,7 @@ __all__ = [
     "is_write_kind",
     "make_write_task",
     "write_output_name",
+    "implement_output_name",
     "WRITE_OUTPUT_NAME_TEMPLATE",
     "declared_file_set",
     "snapshot_file_set",
@@ -426,8 +428,16 @@ WRITE_OUTPUT_NAME_TEMPLATE = {
     "apply_suggestions": "apply_batch_{index}.json",
     "apply_task_suggestions": "apply_task_batch_{index}.json",
     "apply_code_fixes": "apply_fix_batch_{index}.json",
+    # `implement` is the one write kind whose token is the plan task's own id
+    # rather than a position — see `implement_output_name`. The `{index}`
+    # spelling stays here because a bare index is still a legal token (the regex
+    # admits both), which keeps the template/regex cross-check covering the kind.
     "implement": "implement_batch_{index}.json",
 }
+
+#: The basename charset ``schemas/subagent_tasks.schema.json`` admits for an
+#: ``output_name`` token. Mirrors ``human_decisions._SAFE_VERDICT_TOKEN``.
+_SAFE_OUTPUT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def write_output_name(kind: str, batch_index: int) -> str:
@@ -440,6 +450,42 @@ def write_output_name(kind: str, batch_index: int) -> str:
             f"are {', '.join(WRITE_KINDS)}."
         ) from None
     return template.format(index=int(batch_index))
+
+
+def implement_output_name(task_id: str) -> str:
+    """The result basename for one implement task, keyed by the *task id*.
+
+    **Never its position** in the materialized list.
+    ``implement_orchestrator`` re-materializes from
+    ``format_batches_for_output(skip_completed=--resume)``, so the list a counter
+    would run over *shrinks* on a resume and every survivor is renamed: measured
+    2026-09-16, a resumed run re-pointed T006 at T001's ``implement_batch_0.json``,
+    ``_already_done`` found an ``applied`` file with no fingerprint under T006 and
+    declared five never-dispatched tasks complete — the phase exited 0 having
+    implemented four of the fourteen tasks it reported. The judging phase hit the
+    identical defect and fixed it the identical way
+    (``human_decisions.verdict_output_name``); keying by the task id is what makes
+    "resume by id" true of the filenames too.
+
+    A token outside the task schema's basename charset is hashed rather than
+    rejected, so an exotic id still names exactly one stable file.
+    """
+    token = str(task_id or "")
+    if not _SAFE_OUTPUT_TOKEN.match(token):
+        token = content_hash(token)
+    return f"implement_batch_{token}.json"
+
+
+def _default_write_output_name(kind: str, task_id: str, batch_index: int) -> str:
+    """The ``output_name`` a write task gets when its producer names none.
+
+    Split out so ``implement``'s id-keyed name is the *default*, not something a
+    producer has to remember to pass: the one materializer that forgot is how
+    five unrun tasks were declared complete on a resume.
+    """
+    if kind == "implement":
+        return implement_output_name(task_id)
+    return write_output_name(kind, batch_index)
 
 
 def make_write_task(
@@ -521,7 +567,9 @@ def make_write_task(
         kind=kind,
         task_id=task_id,
         prompt=prompt,
-        output_name=output_name or write_output_name(kind, batch_index),
+        output_name=output_name or _default_write_output_name(
+            kind, task_id, batch_index
+        ),
         inputs=inputs,
         phase_dir=phase_dir,
         context_mode="workspace-read",

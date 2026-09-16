@@ -607,14 +607,31 @@ def format_batches_for_output(
     plan_path: str = "",
     all_tasks: Optional[Dict[str, Task]] = None,
 ) -> List[Dict[str, Any]]:
-    """Format task batches for JSON output."""
+    """Format task batches for JSON output.
+
+    ``skip_completed`` (i.e. ``--resume``) keeps only work that is still
+    outstanding — **plus every human task that is not itself done**. A deferred
+    human task is recorded ``skipped``, not ``pending``, so a plain PENDING
+    filter dropped it from the resumed run entirely: the scheduler never saw it,
+    ``resolve_human_task_plan`` had no human id to resolve, and the resumed
+    phase's ``write_batch_report.json`` reported ``skipped_tasks: {}`` while its
+    ``summary.md`` lost the ``## Manual Tasks (Deferred)`` section that is the
+    only place the finished run tells the reader what is still owed by hand
+    (measured 2026-09-16). A human task is never dispatched by either invoker,
+    so carrying it through costs the resume nothing.
+    """
     output_batches = []
 
     for batch_idx, batch in enumerate(batches):
         # Filter tasks if skipping completed
         tasks_to_include = batch
         if skip_completed:
-            tasks_to_include = [t for t in batch if t.status == TaskStatus.PENDING]
+            tasks_to_include = [
+                t for t in batch
+                if t.status == TaskStatus.PENDING
+                or (t.executor_role == "human"
+                    and t.status != TaskStatus.COMPLETED)
+            ]
 
         if not tasks_to_include:
             continue

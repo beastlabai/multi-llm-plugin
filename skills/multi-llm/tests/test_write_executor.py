@@ -1042,6 +1042,102 @@ class TestScheduler:
         # saw batch 0's summary even though this process never ran batch 0.
         assert any("first" in p for p in dispatched_prompts)
 
+    def test_resume_refuses_a_result_file_that_attests_to_another_task(self, env):
+        """The file exists, parses, validates and says `applied` — for someone else.
+
+        A resumed implement phase that re-materializes a SHORTER task list used to
+        re-point each survivor at a predecessor's result file; the survivor had no
+        recorded fingerprint (it never finished), so every earlier clause passed
+        and five never-dispatched tasks were declared complete (2026-09-16). The
+        file's own `ids` were the evidence, and nothing read them.
+        """
+        state = FakeState(env.tmp_path / "state.json")
+        done = env.apply_task(0, kind="implement", task_id="T001",
+                              expected_ids=["T001"])
+        env.edits([_patch_edit(env.plan, "ok-0\n")],
+                  result={"status": "applied", "ids": ["T001"],
+                          "files_touched": ["plans/p.md"], "summary": "first"})
+        env.scheduler([done], state=state, kind="implement",
+                      finalize=False).run()
+        assert (env.phase_dir / "implement_batch_T001.json").is_file()
+
+        # The corruption, written out by hand: a never-run task pointed at the
+        # finished task's result file, exactly as the old counter named it.
+        stolen = env.apply_task(1, kind="implement", task_id="T006",
+                                expected_ids=["T006"],
+                                output_name="implement_batch_T001.json")
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan, "ok-6\n")],
+                  result={"status": "applied", "ids": ["T006"],
+                          "files_touched": ["plans/p.md"], "summary": "sixth"})
+        messages = []
+        result = env.scheduler(
+            [stolen], state=state, kind="implement", resume=True,
+            finalize=False, log=messages.append,
+        ).run()
+
+        assert result.exit_code == 0, result.messages
+        assert [o.skipped for o in result.outcomes] == [False], (
+            "a result attesting to T001 is not T006's completed work"
+        )
+        assert any("another task's result" in line for line in messages)
+        assert [
+            json.loads(line)["prompt"]
+            for line in log.read_text().splitlines() if line
+        ], "the re-dispatch really started a runner"
+
+    def test_a_resume_skip_leaves_a_line_in_the_audit_log(self, env):
+        """The audit log is the record of what the phase did — skips included."""
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = self._three(env)
+        env.edits([_patch_edit(env.plan, "ok-0\n")],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "first"})
+        env.scheduler([tasks[0]], state=state, finalize=False).run()
+
+        env.edits([_patch_edit(env.plan, "ok-rest\n")],
+                  result={"status": "applied", "ids": ["s1"],
+                          "files_touched": ["plans/p.md"], "summary": "rest"})
+        env.scheduler(tasks[:2], state=state, resume=True, finalize=False).run()
+
+        records = write_safety.AuditLog(str(env.phase_dir)).records()
+        skips = [r for r in records if r["event"] == "skipped"]
+        assert [r["task_id"] for r in skips] == ["apply-batch-0"]
+        assert skips[0]["result_ids"] == ["s0"], "name what the skip trusted"
+        assert skips[0]["output_path"].endswith("apply_batch_0.json")
+        assert skips[0]["files_touched"] == ["plans/p.md"]
+
+    def test_a_carried_human_task_keeps_the_deferred_section_on_a_resume(self, env):
+        """What the resumed materialization's human task buys downstream.
+
+        `format_batches_for_output(skip_completed=True)` now keeps a deferred
+        human task; this is the consequence — `skipped_tasks` in the report and
+        the `## Manual Tasks (Deferred)` section in the summary, which a resumed
+        run lost entirely when the task was filtered out (2026-09-16).
+        """
+        state = FakeState(env.tmp_path / "state.json")
+        summary = env.out_dir / "implement" / "implementation_summary.md"
+        env.edits([_patch_edit(env.plan, "ok\n")],
+                  result={"status": "applied", "ids": ["T002"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        tasks = [
+            env.apply_task(0, kind="implement", task_id="T002",
+                           expected_ids=["T002"]),
+            env.apply_task(1, kind="implement", task_id="T014",
+                           expected_ids=["T014"], executor_role="human"),
+        ]
+        result = env.scheduler(
+            tasks, state=state, kind="implement", resume=True,
+            summary_file=str(summary),
+            human_task_strategy=STRATEGY_SKIP_DEPENDENTS,
+        ).run()
+
+        assert result.exit_code == 0, result.messages
+        assert list(result.to_dict()["skipped_tasks"]) == ["T014"]
+        text = Path(result.summary_file).read_text()
+        assert "## Manual Tasks (Deferred)" in text
+        assert "| T014 |" in text
+
 
 # ===========================================================================
 # D3n — the three human-task strategies

@@ -465,7 +465,14 @@ OUTPUT_NAME_PATTERN_BY_KIND = {
     "apply_suggestions": re.compile(r"^apply_batch_\d+\.json$"),
     "apply_task_suggestions": re.compile(r"^apply_task_batch_\d+\.json$"),
     "apply_code_fixes": re.compile(r"^apply_fix_batch_\d+\.json$"),
-    "implement": re.compile(r"^implement_batch_\d+\.json$"),
+    # An implement result is keyed by the plan task's stable id
+    # (``subagent_tasks.implement_output_name``), not by a batch index, for the
+    # same reason the judge verdict above is: a resumed implement phase
+    # materializes only the *remaining* tasks, so a positional token would let
+    # one task adopt a predecessor's already-written result as its own
+    # completed output. The token is therefore any basename-safe id; older
+    # ``_<n>`` names still match.
+    "implement": re.compile(r"^implement_batch_[A-Za-z0-9][A-Za-z0-9._-]*\.json$"),
 }
 
 #: Orchestrator-owned artifacts an executor write may never land on (D3f).
