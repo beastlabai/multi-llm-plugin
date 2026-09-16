@@ -2019,3 +2019,22 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         env.scheduler([env.apply_task(0)]).run()
         status = json.loads((env.phase_dir / ".status.json").read_text())
         assert status["state"] == "subagents_failed"
+
+
+class TestTheRollbackStoreWarningNamesItsFiles:
+    """A count alone left the reader guessing which files, and whether the gap
+    was a problem (measured 2026-09-16: three under `.multi-llm/`, denied by
+    design)."""
+
+    def test_a_denied_file_is_named_with_its_reason(self, env):
+        (env.root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        assert result.exit_code == 0, result.messages
+        warning = [l for l in lines if "no rollback point" in l]
+        assert len(warning) == 1, lines
+        assert ".env (denied by driver.write_paths)" in warning[0]
+        assert "1 file(s)" in warning[0]
