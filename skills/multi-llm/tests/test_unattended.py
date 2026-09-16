@@ -1236,8 +1236,8 @@ class _StubApplyOrchestrator(ApplyOrchestratorBase):
         return None
 
 
-def _stub_apply_run(tmp_path, **flags):
-    """Run the stub phase against a real plan dir; returns the orchestrator."""
+def _stub_apply_args(tmp_path, **flags):
+    """The flags the stub phase takes, over a real plan dir."""
     plan = tmp_path / "p.md"
     plan.write_text("# P\n", encoding="utf-8")
     (tmp_path / "p" / "review-plan").mkdir(parents=True, exist_ok=True)
@@ -1251,7 +1251,12 @@ def _stub_apply_run(tmp_path, **flags):
         claude_decide=False,
     )
     defaults.update(flags)
-    orch = _StubApplyOrchestrator(argparse.Namespace(**defaults))
+    return argparse.Namespace(**defaults)
+
+
+def _stub_apply_run(tmp_path, **flags):
+    """Run the stub phase against a real plan dir; returns the orchestrator."""
+    orch = _StubApplyOrchestrator(_stub_apply_args(tmp_path, **flags))
     assert orch.run() == 0
     return orch
 
@@ -1308,6 +1313,50 @@ class TestApplyPhaseRowsAreRecorded:
             un.row(10).site_id, un.row(11).site_id
         ]
         assert all(r["decision"] and r["at"] for r in run["resolutions"])
+
+    def test_a_detach_launch_announces_a_row_once_on_the_worker_leg(
+        self, tmp_path, capsys
+    ):
+        """Both sites fire before the boundary, so both legs reach them.
+
+        The invoker prints the line and then re-executes itself with
+        `--internal-worker`, which reaches the same site and prints it again —
+        one decision, read as two. The worker is the leg that keeps it: it is
+        the leg that writes the entry to `run.resolutions`.
+        """
+        _StubApplyOrchestrator(_stub_apply_args(tmp_path, yes=True, detach=True))
+        assert "[AUTO_RESOLVED]" not in capsys.readouterr().out
+
+        _StubApplyOrchestrator(
+            _stub_apply_args(
+                tmp_path, yes=True, detach=True, internal_worker=True
+            )
+        )
+        assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in capsys.readouterr().out
+
+    def test_a_detached_dry_run_still_announces_it(self, tmp_path, capsys):
+        """`--detach --dry-run` forks nothing, so its only leg is the invoker's."""
+        _StubApplyOrchestrator(
+            _stub_apply_args(tmp_path, yes=True, detach=True, dry_run=True)
+        )
+        assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in capsys.readouterr().out
+
+    def test_a_dry_run_does_not_record_applying_everything(self, tmp_path, capsys):
+        """Row 11 names a decision `--dry-run` never takes: it applies nothing.
+
+        `--dry-run` is itself one of the nine flags that bypass the no-selection
+        confirmation, so the site is reached — and the run then exits at step 30
+        with nothing applied.
+        """
+        orch = _StubApplyOrchestrator(
+            _stub_apply_args(tmp_path, yes=True, dry_run=True)
+        )
+        with pytest.raises(SystemExit):
+            orch.run()
+        out = capsys.readouterr().out
+        assert f"[AUTO_RESOLVED] {un.row(11).site_id}:" not in out
+        # Row 10 is untouched: its claim (judged, never prompted) holds.
+        assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in out
 
     def test_both_sites_are_where_the_table_says_they_are(self):
         """Rows 10/11 declare `utils/apply_orchestrator_base.py`; check it calls."""

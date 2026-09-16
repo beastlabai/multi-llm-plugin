@@ -48,10 +48,12 @@ from utils.git_utils import validate_git_ref
 from utils.importance import get_highest_importance
 from utils.output_handler import derive_prefix, find_output_dir
 from utils.report_parser import (
+    issue_numbering_digest,
     load_html_selections,
     merge_selections,
     normalize_description,
     parse_issue_descriptions,
+    parse_issue_numbering_digest,
     parse_skipped_issues,
     parse_validation_overrides_issues,
 )
@@ -651,6 +653,41 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         issues_json_path = os.path.join(code_review_dir, "issues.json")
         self.issue_to_group_map = build_issue_to_group_map(
             issues_json_path, self.groups
+        )
+        self._warn_if_report_numbering_is_stale(
+            os.path.join(code_review_dir, "report.md"), issues_json_path
+        )
+
+    def _warn_if_report_numbering_is_stale(
+        self, report_path: str, issues_json_path: str
+    ) -> None:
+        """Say so when report.md's numbers index a different issues.json.
+
+        Every `### N.` checkbox is resolved as a POSITION in issues.json, so a
+        report.md kept by hand across a re-aggregation resolves each mark to
+        whatever finding now sits at that number — a wrong group, with no
+        warning, because the number IS in the map. The review stamps the
+        ordering it numbered (`report_parser.issue_numbering_footer`); this
+        compares it and warns.
+
+        Warns only on a mismatch. A report written before the stamp existed
+        carries no digest at all, and "unstamped" is not "stale".
+        """
+        stamped = parse_issue_numbering_digest(report_path)
+        if not stamped:
+            return
+        issues = load_json_file(issues_json_path)
+        if not issues or not isinstance(issues, list):
+            return
+        if issue_numbering_digest(issues) == stamped:
+            return
+        print(
+            f"WARNING: {report_path} was numbered against a different "
+            f"issues.json than the one now in {os.path.dirname(issues_json_path)} "
+            f"— its issue numbers may resolve to the wrong findings. Re-run the "
+            f"code review, or make selections in report.html instead (those name "
+            f"group hashes, not positions).",
+            file=sys.stderr,
         )
 
     def handle_no_items_early_exit(self) -> None:

@@ -5673,9 +5673,41 @@ class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
             orch.plan_path
         ).read_text(encoding="utf-8")
 
-    def test_an_existing_backup_is_kept_not_overwritten(self, tmp_path):
+    def test_a_backup_is_kept_when_the_phase_recorded_progress(self, tmp_path):
         """A resumed run's target is part-applied; re-stamping would destroy it."""
         orch = _orchestrator_on(tmp_path)
+        orch.write_target_backup()
+        backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
+        pre_run_bytes = backup.read_text(encoding="utf-8")
+
+        # The scheduler got as far as writing its report, so the plan on disk
+        # is the half-applied one and the backup is the only pre-run copy.
+        (Path(orch.out_dir) / orch.phase_name / "write_batch_report.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        Path(orch.plan_path).write_text("# Half applied\n", encoding="utf-8")
+        assert orch.write_target_backup() is None
+        assert backup.read_text(encoding="utf-8") == pre_run_bytes
+
+    def test_a_batch_result_of_this_kind_counts_as_progress(self, tmp_path):
+        """A stopped loop leaves results but no report; those count too."""
+        orch = _orchestrator_on(tmp_path)
+        # The mock declares no write kind; a phase that reaches the executor
+        # does, and the result basename is that kind's (D3g).
+        orch.write_kind = "apply_suggestions"
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is False
+        (phase_dir / "apply_batch_0.json").write_text("{}", encoding="utf-8")
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is True
+        # Another phase's result in the same dir is not this phase's progress.
+        (phase_dir / "apply_fix_batch_0.json").write_text("{}", encoding="utf-8")
+        (phase_dir / "apply_batch_0.json").unlink()
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is False
+
+    def test_a_backup_is_kept_across_an_explicit_resume(self, tmp_path):
+        """The native leg records nothing; `--resume` is what says "part-applied"."""
+        orch = _orchestrator_on(tmp_path, resume=True)
         orch.write_target_backup()
         backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
         pre_run_bytes = backup.read_text(encoding="utf-8")
@@ -5683,6 +5715,22 @@ class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
         Path(orch.plan_path).write_text("# Half applied\n", encoding="utf-8")
         assert orch.write_target_backup() is None
         assert backup.read_text(encoding="utf-8") == pre_run_bytes
+
+    def test_a_new_cycle_re_stamps_the_backup_it_found(self, tmp_path):
+        """Cycle 2 is not a resume: the stale snapshot must not claim to be one.
+
+        review-plan → apply-suggestions (backup = v1, plan → v2, human edits →
+        v3), then `review-plan --force` → apply-suggestions with no `--fresh`.
+        Nothing in the phase dir records progress, so v3 — the bytes actually
+        about to be overwritten — is what the backup must hold.
+        """
+        orch = _orchestrator_on(tmp_path)
+        orch.write_target_backup()
+        backup = Path(orch.out_dir) / orch.phase_name / "backup.md"
+
+        Path(orch.plan_path).write_text("# Cycle 2, edited\n", encoding="utf-8")
+        assert orch.write_target_backup() == str(backup)
+        assert backup.read_text(encoding="utf-8") == "# Cycle 2, edited\n"
 
     def test_fresh_re_stamps_it(self, tmp_path):
         """`--fresh` declares prior progress void, so the backup goes with it."""
@@ -5902,6 +5950,53 @@ class TestTheExecutorLegReportsItsOutcome:
         )
         assert orch.plan_path in context.artifacts
 
+    def test_the_json_contract_keeps_stdout_to_itself(self, tmp_path, capsys):
+        """`--output-format json` means stdout parses as JSON, whole.
+
+        The executor leg emits the machine payload *and* the human RESULT
+        block, and both went to stdout — so a consumer that does what the flag
+        promises (`json.loads(stdout)`) chokes on the block appended after it.
+        The block still prints, on stderr.
+        """
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(
+            plan_file=str(plan_path), yes=True, output_format="json"
+        )
+
+        class JsonExecutorOrch(MockApplyOrchestrator):
+            phase_name = "apply-json-leg"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                self.write_tasks = [
+                    {"task_id": "apply-batch-0", "expected_ids": ["a"]}
+                ]
+                self.write_result = _FakeSchedulerResult(
+                    [_FakeOutcome("apply-batch-0")]
+                )
+                return 0
+
+            def print_text_summary(self, batches, output_path):
+                # What every concrete phase does under `--output-format json`.
+                with open(output_path, "r", encoding="utf-8") as handle:
+                    print(json.dumps(json.load(handle), indent=2))
+
+        assert JsonExecutorOrch(args).run() == 0
+        captured = capsys.readouterr()
+
+        # From the payload to the end of stdout, nothing but the payload. (The
+        # `[AUTO_RESOLVED]` markers D6 requires precede it; they are the one
+        # thing this run prints to stdout that is not the contract.)
+        payload = captured.out[captured.out.index("{"):]
+        assert json.loads(payload)["phase"] == "apply-json-leg"
+        assert "APPLY-JSON-LEG: RESULT" not in captured.out
+        assert "APPLY-JSON-LEG: RESULT" in captured.err
+        assert "Batches: 1/1 ok" in captured.err
+
     def test_a_dry_run_subagents_preflight_keeps_the_plan_of_work(
         self, tmp_path, capsys
     ):
@@ -6023,6 +6118,29 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
         assert entry["reason"] == (
             "Claude auto-decide: not decidable from the text"
         )
+
+    def test_an_unjudged_skip_reports_the_skip_reason_not_the_validation_one(
+        self, tmp_path
+    ):
+        """`--yes` with no verdict back: the skip is the decision, so is its reason.
+
+        The group still carries the needs-human `validation_reason` that sent it
+        to the judge in the first place; publishing that beside `status:
+        skipped` tells `util decisions`, `summary.md` and the RESULT block the
+        run is waiting on a human it has already stopped waiting for.
+        """
+        orch, group = self._judged_orchestrator(tmp_path)
+        orch.needs_human.append(group)
+        orch._skip_unjudged([group])
+        assert orch.needs_human == []
+
+        orch._rebuild_formatted_skipped()
+        entry = orch.formatted_skipped[0]
+        assert entry["status"] == "skipped"
+        assert entry["reason"] == "No Claude decision returned for this group"
+        # Still sourceless: nobody decided it, so no `decision_source` is
+        # invented for it.
+        assert "decision_source" not in entry
 
     def test_a_validation_skip_keeps_its_status_and_gains_no_source_key(
         self, tmp_path

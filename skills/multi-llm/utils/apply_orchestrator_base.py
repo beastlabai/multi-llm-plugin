@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -642,8 +643,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         unset a run stays byte-for-byte what it was, and a bypass that came from
         ``--no-confirm`` or a bulk-approval flag alone is a flag the caller typed
         rather than a question the run answered for them.
+
+        Announced on exactly one leg of a ``--detach`` launch, too. Both sites
+        fire before the boundary, so the invoker reaches them and then
+        re-executes itself as the worker, which reaches them again: one decision,
+        printed twice, once on the caller's terminal and once into the log. The
+        worker is the leg that keeps it — it is the leg that writes the entry to
+        ``run.resolutions``, so the line and the record stay together.
         """
         if not getattr(self.args, "yes", False):
+            return
+        if self._is_detach_invoker():
             return
         _unattended.record_resolution(None, site_id, decision)
         self._pending_resolutions.append((site_id, decision))
@@ -1228,12 +1238,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # it" — and until now it left no trace at all: not in the log (the
             # notice above is printed before the detach boundary), not in
             # `run.resolutions`, not in the terminal payload.
-            self._record_resolution(
-                _unattended.row(11).site_id,
-                f"apply all valid items of {len(self.groups)} loaded "
-                f"{self.item_noun} group(s); bypassed by "
-                f"{self._no_selection_bypass_flags()}",
-            )
+            #
+            # Except under `--dry-run`, which is itself one of the nine bypass
+            # flags: that run exits at step 30 having applied nothing, so
+            # recording "apply all valid items" would put a decision the run
+            # never took into `run.resolutions` and the log.
+            if not getattr(self.args, "dry_run", False):
+                self._record_resolution(
+                    _unattended.row(11).site_id,
+                    f"apply all valid items of {len(self.groups)} loaded "
+                    f"{self.item_noun} group(s); bypassed by "
+                    f"{self._no_selection_bypass_flags()}",
+                )
 
         # Step 21: Handle revalidation (if supports_revalidation)
         self.handle_revalidation()
@@ -1453,6 +1469,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             decision_source = str(g.get("decision_source") or "")
             if decision_source.startswith("claude_auto_decide"):
                 skip_status = "claude_skipped"
+                reason = g.get("reason") or reason
+            elif status == "skipped":
+                # A skip with no `decision_source`: `_skip_unjudged`'s groups,
+                # which `--yes` skipped because no verdict came back. The skip
+                # is the decision, so the reason it recorded — on `reason`, the
+                # same key a judge-sourced skip uses — is what every surface
+                # must show. `validation_reason` still holds the needs-human
+                # text the skip superseded, and showing *that* said the run had
+                # asked for a human while reporting it had skipped.
+                skip_status = status
                 reason = g.get("reason") or reason
             elif status == "invalid":
                 skip_status = "invalid"
@@ -1838,11 +1864,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # native path below, and `--dry-run-subagents`, which dispatches
                 # nothing. Under `--output-format json` the machine payload is
                 # emitted regardless, because that flag is a contract.
-                if (not dispatched
-                        or getattr(self.args, "output_format", "text") == "json"):
+                as_json = getattr(self.args, "output_format", "text") == "json"
+                if not dispatched or as_json:
                     self.print_text_summary(self.batches, output_path)
                 if dispatched:
-                    self.print_write_outcome_summary()
+                    # On stderr when the payload above claimed stdout: a
+                    # contract with a human-readable block printed after it is
+                    # not a contract, and a consumer that parses stdout as JSON
+                    # gets the outcome block in its teeth. It is still printed —
+                    # to the stream the scheduler's own progress lines already
+                    # use, which is the same log either way under `--detach`.
+                    with contextlib.redirect_stdout(
+                        sys.stderr if as_json else sys.stdout
+                    ):
+                        self.print_write_outcome_summary()
             except Exception as e:  # noqa: BLE001 - summary is non-fatal
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
@@ -1869,6 +1904,22 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # The write executor (D3f/D3g/D3h/D3l/D3n)
     # ==================================================================
 
+    def _is_detach_invoker(self) -> bool:
+        """True on the leg that will fork a worker and return the handshake.
+
+        The three conditions :meth:`maybe_detach_write_phase` forks under, asked
+        as one question so a step *before* the boundary can tell which leg it is
+        on. ``--dry-run`` is one of them: a dry run prints its report and exits
+        before any child exists, so the invoker has nothing to daemonize and
+        stays in the foreground (the worker leg is untouched — it must still
+        claim the phase dir).
+        """
+        return (
+            getattr(self.args, "detach", False)
+            and not getattr(self.args, "internal_worker", False)
+            and not getattr(self.args, "dry_run", False)
+        )
+
     def maybe_detach_write_phase(self) -> Optional[int]:
         """The one detach boundary a write phase crosses (D4), or ``None``.
 
@@ -1885,17 +1936,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         step that can start a child — and therefore before batching and output
         assembly, which the worker does.
         """
-        if not (getattr(self.args, "detach", False)
+        # The invoker's three conditions (`_is_detach_invoker`, which the D6
+        # sites above the boundary ask too), or the worker leg — which forks
+        # nothing and only has to claim the phase dir.
+        if not (self._is_detach_invoker()
                 or getattr(self.args, "internal_worker", False)):
-            return None
-        # A dry run prints its report and exits before any child exists, so the
-        # invoker has nothing to daemonize: keep that report on the caller's
-        # terminal rather than forking a worker whose entire run is one report
-        # written to a log. The worker leg is untouched (it must still claim the
-        # phase dir) because the invoker never launches one for a dry run.
-        if getattr(self.args, "dry_run", False) and not getattr(
-            self.args, "internal_worker", False
-        ):
             return None
         from .review_orchestrator_base import maybe_detach
 
@@ -1942,10 +1987,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         got overwritten. Recovery did exist (batch 0's ``pre_batch/`` snapshot),
         just nowhere a user would look.
 
-        An existing backup is **kept**, because a re-invoked or resumed phase's
-        target is already part-applied and overwriting the backup with
-        part-applied bytes would destroy the only copy of the pre-run file;
-        ``--fresh`` declares prior progress void and therefore re-stamps it.
+        An existing backup is **kept** when this phase already moved bytes —
+        a resume's target is part-applied and overwriting the backup with
+        part-applied bytes would destroy the only copy of the pre-run file.
+        It is *not* kept merely because the file is there: an apply phase may be
+        re-run freely after a new review cycle, with the same phase dir and no
+        progress in it, and keeping cycle 1's snapshot there would leave the
+        cycle-2 bytes the phase is about to overwrite saved nowhere while the
+        line below told the user they were backed up. ``--fresh`` declares prior
+        progress void and re-stamps for the same reason.
         Returns the path written, or ``None`` when nothing was.
 
         Neither dry run writes one: ``--dry-run`` reports and stops, and
@@ -1962,7 +2012,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
         backup_path = os.path.join(phase_dir, "backup.md")
-        if os.path.exists(backup_path) and not getattr(self.args, "fresh", False):
+        if (
+            os.path.exists(backup_path)
+            and not getattr(self.args, "fresh", False)
+            and self._phase_has_recorded_progress(phase_dir)
+        ):
             print(
                 f"Backup kept: {backup_path} (pre-run bytes from an earlier "
                 f"attempt at this phase)",
@@ -1976,6 +2030,41 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         print(f"Backup saved: {backup_path}", file=sys.stderr)
         return backup_path
+
+    def _phase_has_recorded_progress(self, phase_dir: str) -> bool:
+        """Whether this phase has already applied something in this attempt.
+
+        Three signals, any one of which means the target file on disk is no
+        longer the pre-run file: an item recorded as processed, the scheduler's
+        own report, or one of this write kind's batch results in the phase dir.
+        ``--resume`` counts as well, because the native leg leaves none of the
+        three — the host applies the edits and the orchestrator never sees them
+        — and that flag is how the instructions tell a user to re-enter a
+        half-applied phase (`apply_task_suggestions_orchestrator` keys its own
+        `tasks-backup.md` on the same flag).
+
+        What is deliberately NOT a signal is the backup file's existence: a new
+        review cycle re-runs the phase in the same dir, so that question answers
+        "resume" for a run that is nothing of the kind.
+        """
+        if getattr(self.args, "resume", False):
+            return True
+        if self.state is not None and self.state.get_processed_items(self.phase_name):
+            return True
+        from .subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
+        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
+
+        try:
+            names = os.listdir(phase_dir)
+        except OSError:
+            return False
+        if WRITE_BATCH_REPORT_FILENAME in names:
+            return True
+        # The kind's own result pattern, never a glob typed here: it is the same
+        # table the executor admits a result filename against, so a new write
+        # kind cannot leave this check silently blind.
+        pattern = OUTPUT_NAME_PATTERN_BY_KIND.get(self.write_kind)
+        return pattern is not None and any(pattern.match(name) for name in names)
 
     def _touched_files(self) -> List[str]:
         """The files the write batches actually verified changed (F7).

@@ -2424,14 +2424,23 @@ async function execute(args, ctx, surface, client) {
  * returned `next: null`, `state: "done"` — provably nothing left to do — beside
  * the full rendered runbook, whose fifteen `uv run …` lines the same result's
  * own message forbids running. So the mode has to support detach *and* the
- * outcome has to be unfinished: a `next` the model is expected to send back, or
- * any state that is not the finished one — which is the generated surface's,
- * never a word spelled here.
+ * outcome has to be unfinished.
+ *
+ * "Unfinished" is enumerated positively — a `next` the model is expected to
+ * send back, or the needs-human state — rather than as "any state that is not
+ * the finished one", because that negation leaks the same 22 KB back through
+ * every *other* word an `ok: true` result can carry, and exit 2 carries three
+ * of them: "this phase has already been completed, use --force" comes back
+ * `ok: true`, `state: "nothing-to-do"`, `next: null` and owes the model
+ * nothing, as do the poll vocabulary's `running` and `died`. The words that do
+ * mean work are the generated surface's, never spelled here.
  */
 function rowNeedsInstructions(row, outcome, surface) {
   if (!row.supports_detach) return false
-  const done = surface.dispatcher.states.ok
-  return (outcome?.next ?? null) !== null || outcome?.state !== done
+  const states = surface.dispatcher.states
+  return (
+    (outcome?.next ?? null) !== null || outcome?.state === states.needs_human
+  )
 }
 
 // Exported for the test suite, which grades this file against its Python owners

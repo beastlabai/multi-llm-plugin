@@ -130,6 +130,26 @@ class TestOverlayHumanDecisions:
             "total": 3,
         }
 
+    def test_a_second_round_clears_the_badges_the_first_one_left(self):
+        """One round of judging per report, not every round it has ever had.
+
+        The sidecar is rewritten with whatever the overlay produced, so a stamp
+        on a group the new decision map does not name outlives the decisions it
+        came from: after `--fresh` (which clears `human_decisions_{phase}`) and
+        a judge round over a different subset, the report showed both rounds'
+        badges under a summary that counted only the new one.
+        """
+        report_data = {"groups": [{"groupHash": "aaa"}, {"groupHash": "bbb"}]}
+        _overlay_human_decisions(
+            report_data, {"aaa": SKIP_REC, "bbb": APPROVE_REC}
+        )
+
+        matched = _overlay_human_decisions(report_data, {"bbb": SALVAGE_REC})
+        assert matched == 1
+        assert "humanDecision" not in report_data["groups"][0]
+        assert report_data["groups"][1]["humanDecision"]["outcome"] == "salvaged"
+        assert report_data["humanDecisionsSummary"]["total"] == 1
+
     def test_empty_decisions_stamps_zero_summary(self):
         report_data = {"groups": [{"groupHash": "a"}]}
         matched = _overlay_human_decisions(report_data, {})

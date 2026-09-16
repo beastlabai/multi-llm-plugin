@@ -62,6 +62,7 @@ from utils.cli_common import (
     record_artifacts,
     record_next,
 )
+from utils.report_parser import issue_numbering_footer
 from utils.state_manager import (
     generate_suggestion_id,
     load_groups_payload,
@@ -1769,6 +1770,14 @@ def generate_review_report(
                 reason = g.get("validation_reason", "No reason provided")
                 lines.append(f"- **{theme}**: {reason}")
             lines.append("")
+
+    # The binding between the `### N.` numbers above and the issues.json the
+    # apply phase resolves them against (`build_issue_to_group_map` reads a
+    # number as a POSITION in that file). A footer comment, so it renders as
+    # nothing and leaves every parser of this report reading what it read
+    # before; `apply-code-fixes` warns when it no longer matches.
+    lines.append(issue_numbering_footer(all_issues))
+    lines.append("")
 
     # Generate HTML report if phase_dir provided
     if phase_dir:
