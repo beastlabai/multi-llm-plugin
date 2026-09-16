@@ -1779,6 +1779,186 @@ class TestStatusSurface:
         assert "workflow suggested next:" not in out
         assert "notice" not in payload
 
+    def test_wait_pinned_to_one_run_carries_its_mode_and_phase_into_the_result(
+        self, tmp_path, capsys
+    ):
+        """N5: `multi_llm.py`'s dispatcher stamps `ctx.mode = "status"`,
+        `ctx.phase = None` before `run_status.main` ever runs — `status` is a
+        command word, not a phase. Right for a plain multi-run listing, but
+        the opencode plugin's supervised poll pins one run with `--run-id` and
+        hands this leg's own `MULTI_LLM_RESULT` to the model verbatim: before
+        this it read `{"mode": "status", "phase": null, "state": "done", …}`
+        for a finished `implement` run (measured 2026-09-16), and a weaker
+        model than the one that hit this would have to infer its phase from
+        `state` alone. The watched run already knows both from its own
+        `.status.json`, so they travel into this leg's result."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        status_file.write_status(str(phase), {"phase": "implement", "state": "complete"})
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mode-0000001", "mode": "implement", "state": "done",
+            "exit_code": 0, "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext(mode="status", phase=None))
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--wait",
+                "--run-id", "run-mode-0000001",
+            ])
+            assert code == 0
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["mode"] == "implement"
+        assert payload["phase"] == "implement"
+
+    def test_wait_pinned_by_phase_alone_also_carries_mode_and_phase(
+        self, tmp_path, capsys
+    ):
+        """The carry-over fires off `--phase` alone too, with no `--run-id`."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "review-plan")
+        status_file.write_status(str(phase), {"phase": "review-plan", "state": "complete"})
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mode-0000002", "mode": "review-plan", "state": "done",
+            "exit_code": 0, "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext(mode="status", phase=None))
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--wait",
+                "--phase", "review-plan",
+            ])
+            assert code == 0
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["mode"] == "review-plan"
+        assert payload["phase"] == "review-plan"
+
+    def test_wait_falls_back_to_the_phase_dir_when_the_run_record_has_no_mode(
+        self, tmp_path, capsys
+    ):
+        """A run record with no `mode` field (predates it, or never recorded
+        one) still answers from the phase dir it lives in."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "review-tasks")
+        status_file.write_status(str(phase), {"phase": "review-tasks", "state": "complete"})
+        status_file.claim_run(str(phase), {
+            "run_id": "run-mode-0000003", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext(mode="status", phase=None))
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--wait",
+                "--run-id", "run-mode-0000003",
+            ])
+            assert code == 0
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["mode"] == "review-tasks"
+        assert payload["phase"] == "review-tasks"
+
+    def test_a_plain_multi_run_wait_listing_keeps_mode_status(self, tmp_path, capsys):
+        """No selector, several runs in view: no single run is "the" answer, so
+        this leg's own mode/phase stay whatever the dispatcher stamped."""
+        plan = _plan(tmp_path)
+        first = _phase_dir(plan, "review-plan")
+        second = _phase_dir(plan, "review-tasks")
+        for phase_dir, run_id in (
+            (first, "run-multi-0000001"), (second, "run-multi-0000002"),
+        ):
+            phase_name = os.path.basename(str(phase_dir))
+            status_file.write_status(
+                str(phase_dir), {"phase": phase_name, "state": "complete"}
+            )
+            status_file.claim_run(str(phase_dir), {
+                "run_id": run_id, "mode": phase_name, "state": "done",
+                "exit_code": 0, "detached": True,
+            })
+        ctx = cli_common.activate_result(cli_common.ResultContext(mode="status", phase=None))
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--wait", "--all",
+            ])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["mode"] == "status"
+        assert payload["phase"] is None
+
+    def test_a_completed_phase_with_a_live_run_reads_re_running_not_bare_completed(
+        self, tmp_path, capsys
+    ):
+        """N7: `phases_completed` records that a phase finished once, not that
+        it stays finished — `implement --resume` can reopen a completed phase
+        (a later review sends tasks back), and the bare word "completed"
+        printed beside `run.state: running` is the one line a reader is most
+        likely to take at face value and stop watching (measured 2026-09-16,
+        mid-run `implement`, `run.state: running` beside `workflow phase:
+        completed`)."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        implement = _phase_dir(plan, "implement")
+
+        state = StateManager(plan)
+        state.mark_phase_completed("implement")
+        state.save()
+
+        status_file.claim_run(str(implement), {
+            "run_id": "run-rerun-0001", "mode": "implement",
+            "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True,
+            "started_at": "2026-09-16T19:54:19.649547",
+        })
+
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "all", "--phase", "implement"]
+        ) == 2
+        out = capsys.readouterr().out
+        assert (
+            "workflow phase: completed (re-running since "
+            "2026-09-16T19:54:19.649547)" in out
+        )
+
+    def test_a_finished_run_under_a_completed_phase_reads_plain_completed(
+        self, tmp_path, capsys
+    ):
+        """The re-running qualifier is for a LIVE run only: a terminal run
+        under a completed phase is the ordinary finished condition and must
+        not carry a stale "(re-running since ...)" suffix off a `started_at`
+        left over from the run that finished it."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        implement = _phase_dir(plan, "implement")
+
+        state = StateManager(plan)
+        state.mark_phase_completed("implement")
+        state.save()
+
+        status_file.claim_run(str(implement), {
+            "run_id": "run-rerun-0002", "mode": "implement", "state": "done",
+            "exit_code": 0, "detached": True,
+            "started_at": "2026-09-16T19:54:19.649547",
+        })
+
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "all", "--phase", "implement"]
+        ) == 0
+        out = capsys.readouterr().out
+        assert "workflow phase: completed" in out
+        assert "re-running" not in out
+
     def test_sweep_closes_out_orphans_across_the_plan(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)

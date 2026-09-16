@@ -657,6 +657,28 @@ def record_next(command: Optional[str]) -> None:
         _ACTIVE.set_next(command)
 
 
+def record_mode_phase(mode: Optional[str], phase: Optional[str]) -> None:
+    """Override ``MULTI_LLM_RESULT.mode``/``.phase``, if a dispatcher run is active.
+
+    A no-op under direct invocation, same as every other ``record_*`` helper.
+    ``status``'s own dispatcher mode stamps ``ctx.mode = "status"``,
+    ``ctx.phase = None`` before ``run_status.main`` ever runs (``multi_llm.py``
+    sets both from the mode table, and ``status`` is not a phase) — right for a
+    plain multi-run listing, but a ``--wait`` poll pinned to one run already
+    knows that run's own mode/phase from its ``.status.json`` and reports them
+    literally to a host that reads the result verbatim without opening the
+    rendered text (N5, 2026-09-16: the opencode plugin handed a model
+    ``{"mode": "status", "phase": null, "state": "done", …}`` for a finished
+    ``implement`` run, which a weaker model than the one that hit this would
+    have to infer its phase from state alone).
+    """
+    if _ACTIVE is not None:
+        if mode:
+            _ACTIVE.mode = mode
+        if phase:
+            _ACTIVE.phase = phase
+
+
 def record_state(word: Optional[str]) -> None:
     """Override ``MULTI_LLM_RESULT.state``, if a dispatcher run is active.
 
