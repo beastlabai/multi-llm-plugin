@@ -165,7 +165,7 @@ class TestGetModifiedFiles:
         files = get_modified_files()
 
         assert files == []
-        mock_run_git.assert_called_once_with("status", "--porcelain")
+        mock_run_git.assert_called_once_with("status", "--porcelain", "-uall")
 
     @patch("utils.git_utils._run_git")
     def test_modified_file_returns_in_list(self, mock_run_git):
@@ -341,6 +341,25 @@ class TestGetModifiedFiles:
         files = get_modified_files()
 
         assert files == ["kept.py"]
+
+    def test_untracked_directory_expands_to_its_files(self, temp_git_repo):
+        """An untracked *directory* must not collapse into one porcelain line.
+
+        Plain ``--porcelain`` reports an untracked directory as a single
+        ``?? some_dir/`` entry, which is what let a dirty-tree baseline built
+        from this function declare a whole untracked tree — including a plan a
+        run was about to edit — pre-existing (F6). ``-uall`` expands it: every
+        file under the directory gets its own entry.
+        """
+        untracked_dir = temp_git_repo / "plans"
+        untracked_dir.mkdir()
+        (untracked_dir / "one.md").write_text("one\n", encoding="utf-8")
+        (untracked_dir / "two.md").write_text("two\n", encoding="utf-8")
+
+        files = get_modified_files()
+
+        assert "plans/" not in files
+        assert sorted(files) == ["plans/one.md", "plans/two.md"]
 
 
 class TestGetStagedFiles:
@@ -1854,7 +1873,11 @@ class TestGetModifiedFilesAgainstRealGit:
 
         files = get_modified_files()
 
-        assert files == ["src/auth.py", ".multi-llm/", "src/security.py"], files
+        # F6: `get_modified_files` runs with `-uall`, so the untracked
+        # `.multi-llm/` directory is expanded to the file inside it rather
+        # than collapsed to one `.multi-llm/` entry — a plain `--porcelain`
+        # (asserted above) would still collapse it.
+        assert files == ["src/auth.py", ".multi-llm/state.json", "src/security.py"], files
         assert all(
             (temp_git_repo / path.rstrip("/")).exists() for path in files
         ), files

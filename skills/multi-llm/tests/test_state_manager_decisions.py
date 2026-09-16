@@ -714,6 +714,62 @@ class TestTaskStatusReason:
         assert state_manager.get_task_status_reason("T003") is None
 
 
+class TestImplementationTaskStatuses:
+    """Tests for `implementation_task_statuses` (F4): `task_status` is one flat
+    map shared by implement's own decomposed tasks AND the write-batch ids the
+    apply-suggestions / apply-code-fixes / apply-task-suggestions phases assign
+    (`apply-batch-N`, `apply-fix-batch-N`, `apply-task-batch-N`) — only the
+    former should ever count as implement task progress.
+    """
+
+    @pytest.fixture
+    def state_manager(self, sample_plan_file):
+        return StateManager(sample_plan_file)
+
+    def test_an_apply_batch_only_map_yields_no_implement_tasks(self, state_manager):
+        """A run that only ever executed apply-* write batches reports zero
+        implement tasks, never `len(task_status)` of them."""
+        state_manager.update_task_status("apply-batch-0", "completed")
+        state_manager.update_task_status("apply-fix-batch-3", "completed")
+        state_manager.update_task_status("apply-task-batch-1", "failed")
+
+        assert state_manager.implementation_task_statuses() == {}
+
+    def test_t000_style_ids_still_count(self, state_manager):
+        """The decomposer's own `T###` ids pass through untouched."""
+        state_manager.update_task_status("T001", "completed")
+        state_manager.update_task_status("T002", "failed")
+
+        assert state_manager.implementation_task_statuses() == {
+            "T001": "completed",
+            "T002": "failed",
+        }
+
+    def test_a_mixed_map_reports_only_the_implement_half(self, state_manager):
+        """The exact failure mode from the audit: apply-suggestions batches and
+        implement tasks share one state.json after both phases have run."""
+        state_manager.update_task_status("apply-batch-0", "completed")
+        state_manager.update_task_status("T001", "completed")
+        state_manager.update_task_status("T002", "in_progress")
+
+        assert state_manager.implementation_task_statuses() == {
+            "T001": "completed",
+            "T002": "in_progress",
+        }
+
+    def test_get_all_task_statuses_is_unchanged(self, state_manager):
+        """The existing unfiltered accessor keeps serving its other callers
+        (e.g. implement_orchestrator's own resume loop, which already guards
+        with `if task_id in decomposer.tasks`)."""
+        state_manager.update_task_status("apply-batch-0", "completed")
+        state_manager.update_task_status("T001", "completed")
+
+        assert state_manager.get_all_task_statuses() == {
+            "apply-batch-0": "completed",
+            "T001": "completed",
+        }
+
+
 class TestDependencyOverrides:
     """Tests for dependency override tracking."""
 

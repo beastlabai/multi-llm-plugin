@@ -695,9 +695,13 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
                 phases["apply-task-suggestions"]["status"] = "skipped"
                 phases["apply-task-suggestions"]["reason"] = "skipped (no findings)"
 
-    # For implement phase, add task progress
+    # For implement phase, add task progress. `implementation_task_statuses`
+    # (not `get_all_task_statuses`) filters `task_status` to the T### ids the
+    # task decomposer owns — the same flat map also carries apply-suggestions/
+    # apply-code-fixes/apply-task-suggestions write-batch ids, which are not
+    # implement tasks and must never inflate this count.
     if phases["implement"]["status"] in ["pending", "in_progress"]:
-        task_status = state.get_all_task_statuses()
+        task_status = state.implementation_task_statuses()
         if task_status:
             tasks_done = sum(1 for s in task_status.values() if s == "completed")
             tasks_total = len(task_status)

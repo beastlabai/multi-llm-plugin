@@ -492,6 +492,31 @@ class StateManager:
         """Get all task statuses."""
         return self.state.get("task_status", {}).copy()
 
+    #: The id shape every task the task decomposer generates carries — mirrors
+    #: ``utils.task_decomposer.TASK_ID_PATTERN``. Restated here rather than
+    #: imported so this low-level module stays free of a dependency on the
+    #: (much heavier) decomposer; if that pattern ever changes, this one has to
+    #: follow. ``task_status`` is one flat map shared by every write-batch
+    #: scheduler: implement's own decomposed tasks AND the batch ids the
+    #: apply-suggestions / apply-code-fixes / apply-task-suggestions phases
+    #: assign their write batches (``apply-batch-N``, ``apply-fix-batch-N``,
+    #: ``apply-task-batch-N`` — see ``utils.write_phase_bridge``). Only the
+    #: decomposer's own ids look like ``T###``.
+    _IMPLEMENT_TASK_ID_PATTERN = re.compile(r"^T[0-9]{3}$")
+
+    def implementation_task_statuses(self) -> Dict[str, str]:
+        """Task statuses that belong to the implement phase's own task graph.
+
+        A caller reporting implement's progress (``check_workflow_prerequisites``,
+        or anything else) must not count another phase's write-batch ids as
+        implement tasks — see :attr:`_IMPLEMENT_TASK_ID_PATTERN`.
+        """
+        return {
+            task_id: status
+            for task_id, status in self.state.get("task_status", {}).items()
+            if self._IMPLEMENT_TASK_ID_PATTERN.match(task_id)
+        }
+
     def track_file(self, path: str, action: str, task_id: str) -> None:
         """
         Track a file modification.
