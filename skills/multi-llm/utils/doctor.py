@@ -73,7 +73,7 @@ APPARMOR_LOAD_COMMAND = "sudo apparmor_parser -r /etc/apparmor.d/bwrap"
 SYSCTL_ALTERNATIVE = "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
 
 SANDBOX_FIX_SENTENCE = (
-    "the runner's own sandbox cannot write under this repo; on Ubuntu 24.04 this "
+    "the runner's own sandbox cannot start under this repo; on Ubuntu 24.04 this "
     "is the AppArmor user-namespace restriction, see `multi_llm.py doctor`"
 )
 
