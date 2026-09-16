@@ -226,6 +226,66 @@ def _pin_opencode_model_catalog(request, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _pin_real_sandbox_probes(request, monkeypatch):
+    """Keep the default suite from probing a developer's real provider CLI (D6).
+
+    The review fan-out now asks each slot's adapter for its ``generate`` sandbox
+    self-test before dispatching, and codex answers with its own
+    ``codex sandbox …`` argv. A test that names ``codex:gpt-5.5`` with a mocked
+    invoker never installs a launcher, so the probe would resolve to whatever
+    ``codex`` the developer has on PATH — and its verdict would then decide the
+    test (refused on a machine whose bubblewrap cannot start, dispatched on one
+    where it can). ``runner_env`` already guarantees "this suite must never be
+    able to reach a real provider CLI"; this extends that guarantee to the
+    probe. A probe whose argv names a registered provider command that resolves
+    OUTSIDE the temp dir (i.e. not a mock launcher) is answered ``None``, which
+    ``sandbox_verdict`` reads as ``unknown`` — dispatch exactly as before the
+    gate existed. Mock launchers under ``tmp_path`` and the fake ``sh`` probes
+    the gate's own tests build run for real. The fan-out's per-process verdict
+    cache is reset around every test so one verdict never leaks into the next.
+    Opt out with ``@pytest.mark.sandbox_probe``.
+    """
+    try:
+        import utils.subagent_executor as executor
+        import utils.review_orchestrator_base as rob
+        from utils.llm_client import _resolve_executable
+        from utils import provider_registry as registry
+    except Exception:
+        yield
+        return
+    if hasattr(rob, "_FANOUT_SANDBOX_CACHE"):
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+    if "sandbox_probe" in request.keywords:
+        yield
+        return
+    real = executor._run_sandbox_probe
+    temp_root = os.path.abspath(tempfile.gettempdir())
+
+    def _provider_commands() -> Set[str]:
+        names: Set[str] = set()
+        for provider in list(getattr(registry, "_PROVIDERS", {}).values()):
+            command = getattr(provider, "command", "")
+            if command:
+                names.add(os.path.basename(str(command)))
+        return names or {"codex"}
+
+    def guarded(argv, **kwargs):
+        head = os.path.basename(str(argv[0])) if argv else ""
+        if head in _provider_commands():
+            launcher, _ = _resolve_executable(str(argv[0]))
+            # `abspath`, not `realpath`: a mock launcher is often a symlink
+            # from `tmp_path/bin` into the harness, and the PATH entry is the
+            # fact that matters.
+            resolved = os.path.abspath(str(launcher[0])) if launcher else ""
+            if not resolved.startswith(temp_root + os.sep):
+                return None
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(executor, "_run_sandbox_probe", guarded)
+    yield
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""
