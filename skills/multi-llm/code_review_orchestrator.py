@@ -69,6 +69,7 @@ from utils.output_handler import get_phase_dir
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
+    _authoritative_validator_runner,
     dispatch_salvage_tasks,
     dispatch_subagent_tasks,
     exec_subagents_requested,
@@ -119,7 +120,7 @@ from utils.json_extractor import (
     read_json_from_file,
     sanitize_model_name,
 )
-from utils.llm_client import invoke_with_provider, invoke_with_file_output
+from utils.llm_client import describe_output_file, invoke_with_provider, invoke_with_file_output
 from utils.git_utils import get_project_root, validate_git_ref, _run_git
 from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
@@ -809,7 +810,7 @@ async def run_single_review(
 
     print(f"[{display_name}] Log saved to: {log_file}")
     if output_file:
-        print(f"[{display_name}] Output file: {output_file} (source: {source})")
+        print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
     if not result["success"]:
         error_msg = result.get("error", "Unknown error")
@@ -1665,8 +1666,16 @@ async def reaggregate_from_existing_files(
             )
             validated_groups_for_report = validated_groups
 
-            # Save merged validation results
-            save_validation_results(validation_results, validation_path)
+            # Save merged validation results. F3: this branch merges batches
+            # already found on disk rather than calling the shared
+            # `merge_validation_batches`, so it owes itself the same runner
+            # attribution — the executor's own dispatch record (when
+            # `--exec-subagents` produced this batch) outranks each batch
+            # file's free-hand self-report.
+            runner = _authoritative_validator_runner(str(phase_dir), batch_metadata)
+            save_validation_results(
+                validation_results, validation_path, model=runner, runner=runner
+            )
             print(f"Validation results saved to: {validation_path}")
         elif not args.skip_validation:
             # No validation batches exist - need to prepare them

@@ -60,6 +60,7 @@ from .json_extractor import (
 )
 from .llm_client import (
     STDOUT_OUTPUT_LOCATION,
+    describe_output_file,
     invoke_with_provider,
     invoke_with_file_output,
     render_output_location,
@@ -228,6 +229,41 @@ def read_plan(plan_path: str) -> str:
         return f.read()
 
 
+def _authoritative_validator_runner(
+    phase_dir: str, batch_metadata: Dict[str, Any]
+) -> Optional[str]:
+    """The runner the executor actually dispatched this batch's tasks to (F3).
+
+    A validation batch's own ``metadata.model`` is the subagent's free-hand
+    self-report — in one captured run, five different spellings across 11
+    batches, one of them another model's name copied out of the suggestions
+    it was validating (``_derive_model_from_results`` joins whatever it is
+    told, honestly, which is the problem). ``subagent_batch_report.json`` is
+    the executor's own record of what it dispatched, keyed by the same
+    ``task_id`` each batch carries (``f"{kind}-batch-{batch_index}"``), so
+    reading it back beats trusting the subagent. Returns ``None`` when the
+    report is absent or names no row for this batch's task ids — the
+    host-native (Claude Code Task tool) path, whose batches this process
+    never dispatched, leaves no such report to read.
+    """
+    try:
+        from .subagent_executor import _recorded_runners
+    except ImportError:  # pragma: no cover - direct script runs
+        from subagent_executor import _recorded_runners  # type: ignore
+    recorded = _recorded_runners(phase_dir)
+    if not recorded:
+        return None
+    kind = batch_metadata.get("kind") or "validation"
+    expected_ids = {
+        f"{kind}-batch-{batch.get('batch_index')}"
+        for batch in batch_metadata.get("batches", [])
+    }
+    specs = {recorded[task_id] for task_id in expected_ids if task_id in recorded}
+    if not specs:
+        return None
+    return ",".join(sorted(specs))
+
+
 def merge_validation_batches(
     phase_dir: str,
     batch_metadata: Dict[str, Any],
@@ -250,7 +286,16 @@ def merge_validation_batches(
     # `save_validation_results` already announces this write
     # ("[validation] Saved validation results to: ..."); a second line here
     # under a different name announced the same file twice in the run log.
-    save_validation_results(validation_results, Path(validation_path))
+    # F3: when the executor dispatched this batch itself, its own record of
+    # who ran it outranks what the batches said about themselves — `model`
+    # stays a plain string (compatibility) but is now the authoritative spec
+    # rather than a best-effort join of self-reports; `runner` carries the
+    # same value explicitly. `None` (host-native path) leaves both to
+    # `save_validation_results`'s existing derivation.
+    runner = _authoritative_validator_runner(phase_dir, batch_metadata)
+    save_validation_results(
+        validation_results, Path(validation_path), model=runner, runner=runner
+    )
     return apply_validation_to_groups(
         [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
         validation_results,
@@ -1330,7 +1375,7 @@ async def run_single_model(
             )
 
             if output_file:
-                print(f"[{display_name}] Output file: {output_file} (source: {source})")
+                print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
             # §7.1.a/§7.2: ONE classification per failed slot, read off the
             # shared classifier, replacing the three raw-substring tests that

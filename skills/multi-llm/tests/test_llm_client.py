@@ -54,6 +54,7 @@ from utils.llm_client import (
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
     render_output_location,
+    describe_output_file,
     invoke_subagent,
     parse_subagent_response,
     _extract_json_from_text,
@@ -1321,13 +1322,16 @@ class TestInvokeWithFileOutputLogFinalization:
         # channel got a chance to speak.
         assert "Success: False" not in content
 
-    def test_log_untouched_when_stdout_already_parsed_cleanly(
+    def test_log_gets_result_source_even_when_stdout_parsed_cleanly(
         self, mock_subprocess, mock_provider_available, tmp_path
     ):
-        """A clean stdout parse never defers: the immediate write already
-        said ``Success: True`` and stays the log's one entry, whichever
-        channel (`invoke_with_file_output` here takes the stdout_fallback
-        branch, since the file read is mocked to fail) the caller preferred.
+        """F13: a clean stdout parse now defers too, so the log still names
+        ``Result source:`` — previously (before F13) a clean parse's log was
+        written by ``invoke_with_provider``'s own immediate call, before the
+        file-vs-stdout choice existed to report, and ``Result source:`` was
+        silently absent for exactly the runs that used the stdout fallback.
+        ``invoke_with_file_output`` here takes the stdout_fallback branch,
+        since the file read is mocked to fail.
         """
         mock_result = MagicMock()
         mock_result.returncode = 0
@@ -1352,11 +1356,48 @@ class TestInvokeWithFileOutputLogFinalization:
 
         assert result["success"] is True
         assert result["source"] == "stdout_fallback"
-        # Written once, by invoke_with_provider's own immediate call — nothing
-        # deferred, so invoke_with_file_output never calls _save_log itself.
+        # Still written exactly once — now via the deferred path instead of
+        # invoke_with_provider's immediate call — so there is no double write.
         assert spy.call_count == 1
         content = log_file.read_text(encoding="utf-8")
         assert "Success: True" in content
+        assert "Result source: stdout_fallback" in content
+
+    def test_log_gets_result_source_file_when_stdout_and_file_both_resolve(
+        self, mock_subprocess, mock_provider_available, tmp_path
+    ):
+        """F13's other clean-parse case: the file channel wins over a stdout
+        parse that also succeeded, and the log names ``file``, not silence.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"type": "result", "result": "[1, 2]"})
+        mock_result.stderr = ""
+        mock_subprocess.return_value = mock_result
+
+        log_file = tmp_path / "log.txt"
+
+        with patch("utils.json_extractor.read_json_from_file") as mock_read, \
+             patch("utils.llm_client._save_log", wraps=llm_client._save_log) as spy:
+            mock_read.return_value = {
+                "success": True, "data": [{"a": 1}], "source": "file",
+            }
+
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="test_phase",
+                log_file=log_file,
+            )
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert spy.call_count == 1
+        content = log_file.read_text(encoding="utf-8")
+        assert "Success: True" in content
+        assert "Result source: file" in content
 
     def test_log_reflects_total_failure_when_neither_channel_resolves(
         self, mock_subprocess, mock_provider_available, tmp_path
@@ -1568,6 +1609,43 @@ class TestOutputLocationBlock:
         prompt = call_args.kwargs.get("prompt") or call_args[0][0]
         assert "Write your JSON output to this file" in prompt
         assert str(tmp_path / "code-review" / "claude-code_sonnet.json") in prompt
+
+
+class TestDescribeOutputFile:
+    """F14: the fan-out's summary line must not claim a model wrote a file it
+    only answered on stdout — ``[model] Output file: … (source: stdout_fallback)``
+    reads as "the model wrote this" when it did not.
+    """
+
+    def test_file_source_says_output_file(self):
+        line = describe_output_file("/tmp/out/claude-code_sonnet.json", "file")
+
+        assert line == "Output file: /tmp/out/claude-code_sonnet.json (source: file)"
+
+    def test_file_extracted_source_also_says_output_file(self):
+        """A file the model wrote, just wrapped in a code fence, is still a
+        file the model wrote."""
+        line = describe_output_file("/tmp/out/result.json", "file_extracted")
+
+        assert line.startswith("Output file:")
+
+    def test_stdout_fallback_source_says_result_will_be_saved(self):
+        line = describe_output_file(
+            "/tmp/out/codex_gpt-5_6-terra.json", "stdout_fallback"
+        )
+
+        assert line == (
+            "Result will be saved to: /tmp/out/codex_gpt-5_6-terra.json "
+            "(source: stdout_fallback)"
+        )
+        assert "Output file:" not in line
+
+    def test_unknown_source_also_says_result_will_be_saved(self):
+        """`source` defaults to `"unknown"` when a caller omits it entirely —
+        that is not a claim the model wrote anything either."""
+        line = describe_output_file("/tmp/out/result.json", "unknown")
+
+        assert line.startswith("Result will be saved to:")
 
 
 class TestInvokeSubagent:

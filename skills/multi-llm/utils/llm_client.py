@@ -677,16 +677,22 @@ def invoke_with_provider(
             ``--json-schema``. **Re-read date:** 2027-02-20. Until one of those
             fires, wiring a production caller here is a regression, not
             progress. See ``plans/harness-residual-work.md`` §3, W1.
-        _defer_parse_failure_log: Internal (§Fix1). When ``log_file`` is set
-            and the exit-0 stdout extractor fails, writing the log here would
-            freeze ``Success: False`` on a run that :func:`invoke_with_file_output`
-            goes on to resolve successfully through the file channel. Set by
-            that caller only: skips the immediate ``_save_log`` write for
-            exactly that case and hands the raw capture back on
+        _defer_parse_failure_log: Internal (§Fix1/F13). When ``log_file`` is
+            set and the child exited 0, writing the log here — before
+            :func:`invoke_with_file_output` has chosen between the file
+            channel and the stdout fallback — would either freeze
+            ``Success: False`` on a run the file channel goes on to resolve
+            (§Fix1's original bug), or, on a clean parse, write a log with no
+            ``Result source:`` line at all because this function does not yet
+            know which channel will end up answering (F13). Set by that
+            caller only: skips the immediate ``_save_log`` write for every
+            exit-0 outcome and hands the raw capture back on
             ``details["_deferred_log"]`` instead, so the one log entry gets
             written once the final outcome — file, stdout fallback, or both
-            failed — is known. Every other outcome (a clean parse, or a hard
-            failure) still logs immediately, unaffected by this flag.
+            failed — is known, and always carries `Result source:`. A hard
+            failure (binary not found, timeout, non-zero exit) still logs
+            immediately, unaffected by this flag — there is no channel choice
+            to wait for.
 
     Returns:
         Dict with 'success' key and either:
@@ -1098,12 +1104,19 @@ def invoke_with_provider(
         if not parsed.get("success", False):
             _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
 
-        # Save log if requested. §Fix1: a deferring caller (invoke_with_file_output)
-        # gets the raw capture on `details` instead of an immediate write when the
-        # stdout extractor just failed — it may still salvage this run through the
-        # file channel, and only it knows the outcome that write should describe.
+        # Save log if requested. §Fix1/F13: a deferring caller (invoke_with_file_output)
+        # gets the raw capture on `details` instead of an immediate write, on
+        # EVERY exit-0 outcome — not only a failed stdout parse — because this
+        # function does not yet know which channel (file, stdout fallback, or
+        # neither) will end up answering for the run, and that is exactly what
+        # `Result source:` in the log is supposed to name. Writing here
+        # unconditionally on a clean parse used to freeze a log with no
+        # `Result source:` line at all: the caller's file-vs-stdout decision
+        # came later and had nothing left to add to. Only the deferring caller
+        # actually reads `_deferred_log`, so a plain `invoke_with_provider`
+        # call (no defer requested) still gets one immediate write.
         if log_file:
-            if _defer_parse_failure_log and not parsed.get("success", False):
+            if _defer_parse_failure_log:
                 parsed.setdefault("details", {})["_deferred_log"] = {
                     "stdout": result.stdout,
                     "stderr": result.stderr,
@@ -1323,6 +1336,29 @@ def render_output_location(
     return FILE_OUTPUT_LOCATION.format(path=output_json_path)
 
 
+#: `result["source"]` values where the file on disk is what the model itself
+#: produced. Anything else (chiefly `stdout_fallback`) means the answer came
+#: over stdout and `output_file` is only where THIS PROCESS intends to persist
+#: it later (`save_model_result`, run after the whole fan-out finishes) — see
+#: `describe_output_file` (F14).
+FILE_WRITTEN_SOURCES = frozenset({"file", "file_extracted"})
+
+
+def describe_output_file(output_file: Union[str, Path], source: str) -> str:
+    """The one line a fan-out prints about where a slot's answer lives (F14).
+
+    ``[model] Output file: <path> (source: stdout_fallback)`` reads as "the
+    model wrote this" — and for a provider with ``supports_file_output =
+    False`` (or one that simply didn't write this time), it did not: the path
+    is a promise this process is making to itself, not a fact about the
+    child. Wording is picked from the *observed* ``source`` rather than the
+    provider's declared capability, so a file-capable provider that happened
+    to fall back to stdout this attempt still gets the accurate line.
+    """
+    verb = "Output file" if source in FILE_WRITTEN_SOURCES else "Result will be saved to"
+    return f"{verb}: {output_file} (source: {source})"
+
+
 def _finalize_file_output_log(
     log_file: Optional[Union[str, Path]],
     deferred_log: Optional[Dict[str, Any]],
@@ -1334,16 +1370,19 @@ def _finalize_file_output_log(
     error: Optional[str],
     result_source: Optional[str],
 ) -> None:
-    """Write the one log entry :func:`invoke_with_file_output` owes (§Fix1).
+    """Write the one log entry :func:`invoke_with_file_output` owes (§Fix1/F13).
 
-    A no-op when no log was requested, or when nothing was deferred — either
-    the stdout extractor already succeeded (``invoke_with_provider``'s own
-    immediate write already says ``Success: True``, correctly) or the run
-    hard-failed before this function got far enough to reconsider it. Only
-    the exit-0-but-unparseable case defers, so this is the single place that
-    settles what that case's log ultimately says: the FINAL outcome — after
-    the file channel and the stdout fallback both had their turn — never the
-    stdout extractor's own opinion of a run it did not get the last word on.
+    A no-op when no log was requested, or when the run hard-failed before
+    reaching the exit-0 branch that defers (there is no channel choice to
+    report on those). Every exit-0 outcome defers now — a clean stdout parse
+    included — so this is the single place that settles what the log
+    ultimately says: the FINAL outcome — after the file channel and the
+    stdout fallback both had their turn — never the stdout extractor's own
+    opinion of a run it did not get the last word on, and always carrying
+    ``Result source:`` (``file`` / ``file_extracted`` / ``stdout_fallback`` /
+    absent on a double failure), which a clean-parse run used to lack
+    entirely (F13): the immediate write inside ``invoke_with_provider`` ran
+    before the file-vs-stdout choice existed to name.
     """
     if not log_file or deferred_log is None:
         return

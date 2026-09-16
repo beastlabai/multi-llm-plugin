@@ -10,6 +10,7 @@ that would otherwise spawn a provider CLI) is replaced with a canned reply.
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import review_plan_orchestrator as rpo  # noqa: E402
 from utils import cli_common, review_orchestrator_base as base  # noqa: E402
 from utils import run_status, status_file  # noqa: E402
+from utils.validation import prepare_batched_validation_tasks  # noqa: E402
 
 
 def _plan(tmp_path: Path) -> Path:
@@ -343,3 +345,104 @@ class TestTheFanOutReportsProgressWhileItRuns:
             if "models_done" in c
         ]
         assert counted == [0, 1, 2, 2]
+def _validation_group(index: int) -> dict:
+    return {
+        "theme": f"Group {index}",
+        "category": "test",
+        "models": ["m"],
+        "suggestions": [{
+            "title": "t", "desc": "d", "importance": "MEDIUM", "type": "modification",
+        }],
+    }
+
+
+class TestMergeValidationBatchesRunnerAttribution:
+    """F3: ``validation.json``'s ``metadata.model`` must name who actually
+    validated, not a subagent's free-hand self-report about itself — a
+    captured run spelled the same runner five different ways across 11
+    batches, one of them another model's name copied out of the suggestions
+    it was validating.
+    """
+
+    def test_the_executors_own_dispatch_record_outranks_the_batchs_self_report(
+        self, tmp_path
+    ):
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        groups = [_validation_group(i) for i in range(2)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups, context="ctx", output_dir=str(phase_dir),
+            plan_file="/path/to/plan.md", max_per_batch=4,
+        )
+        batch = batch_metadata["batches"][0]
+        # The self-report — deliberately wrong, to prove it loses to the
+        # executor's own record below.
+        batch_results = {
+            "groups": [
+                {"group_index": i, "status": "valid", "reason": "ok", "confidence": 0.9}
+                for i in range(2)
+            ],
+            "metadata": {"model": "some-other-models-name", "schema_version": "2.1"},
+        }
+        with open(batch["output_path"], "w", encoding="utf-8") as f:
+            json.dump(batch_results, f)
+
+        # `--exec-subagents` dispatched this batch itself, so
+        # `subagent_batch_report.json` carries the executor's own record of
+        # what it ran — the authoritative spec `merge_validation_batches`
+        # must prefer.
+        (phase_dir / "subagent_batch_report.json").write_text(json.dumps({
+            "report_version": 1, "invoker": "executor", "phase": "review-plan",
+            "kind": "validation", "task_file": None,
+            "tasks": [{
+                "task_id": batch["task_id"], "status": "ok",
+                "runner": "opencode:openrouter/~deepseek/deepseek-flash-latest",
+            }],
+        }), encoding="utf-8")
+
+        validation_path = phase_dir / "validation.json"
+        validated = base.merge_validation_batches(
+            str(phase_dir), batch_metadata, groups, str(validation_path)
+        )
+
+        assert len(validated) == 2
+        saved = json.loads(validation_path.read_text(encoding="utf-8"))
+        assert saved["metadata"]["model"] == (
+            "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        )
+        assert saved["metadata"]["runner"] == (
+            "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        )
+
+    def test_falls_back_to_the_self_report_with_no_executor_record(self, tmp_path):
+        """The host-native (Claude Code Task tool) path never runs the
+        executor, so there is no ``subagent_batch_report.json`` to read — the
+        best-effort derivation from the batch's own ``metadata.model`` is the
+        only provenance available, and must still be used."""
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        groups = [_validation_group(i) for i in range(2)]
+        batch_metadata = prepare_batched_validation_tasks(
+            groups=groups, context="ctx", output_dir=str(phase_dir),
+            plan_file="/path/to/plan.md", max_per_batch=4,
+        )
+        batch = batch_metadata["batches"][0]
+        batch_results = {
+            "groups": [
+                {"group_index": i, "status": "valid", "reason": "ok", "confidence": 0.9}
+                for i in range(2)
+            ],
+            "metadata": {"model": "claude-code:sonnet", "schema_version": "2.1"},
+        }
+        with open(batch["output_path"], "w", encoding="utf-8") as f:
+            json.dump(batch_results, f)
+        # No subagent_batch_report.json written — nothing was executor-dispatched.
+
+        validation_path = phase_dir / "validation.json"
+        base.merge_validation_batches(
+            str(phase_dir), batch_metadata, groups, str(validation_path)
+        )
+
+        saved = json.loads(validation_path.read_text(encoding="utf-8"))
+        assert saved["metadata"]["model"] == "claude-code:sonnet"
+        assert "runner" not in saved["metadata"]
