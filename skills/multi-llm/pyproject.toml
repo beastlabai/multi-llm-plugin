@@ -15,6 +15,7 @@ markers = [
     "timeout: marks tests with a timeout limit (requires pytest-timeout)",
     "config_override: opts out of the autouse per-project config isolation fixture (tests that exercise override discovery/env themselves)",
     "model_catalog: opts out of the autouse stub that pins OpenCodeProvider.describe_unlisted_model to known=None (tests that drive the real `opencode models` read, or patch it themselves)",
+    "sandbox_probe: opts out of the autouse guard that answers a real provider CLI's sandbox probe with `unknown` (tests that deliberately drive the developer's own `codex sandbox`)",
     "slow: marks tests that drive several real orchestrator invocations end to end (the instruction-refactor golden guard); runs in CI, not deselected by default",
     "container: marks tests that build and drive the E2E container image (needs a Docker daemon; opt in with -m container). Deselected by default via addopts below",
     "package: marks rows that need a packaging artifact plain CI does not build (an `npm pack` tarball, a staged tree). Named for what it *needs*, not for npm specifically, so a second host's packaging plan can reuse it. Deselected by default via addopts below and run by the Linux-only PR package job with `-m \"package and not container\"`; note `pytest -m package` with zero matches exits 5, so a per-host leg must not run it for a host that declares no such rows",

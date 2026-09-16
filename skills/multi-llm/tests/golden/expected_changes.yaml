@@ -389,6 +389,28 @@ changes:
     rationale: >
       The batch now serializes its own prior-changes `--id` (apply-suggestions); the key
       is added, nothing existing changed. See the block comment above.
+  # ---------------------------------------------------------------------------
+  # 2026-09-16, the review-plan audit of the opencode-host pipeline: the phase's
+  # own result line now hands back the artifacts it wrote (`record_artifacts`
+  # beside `record_output_files`; it used to say `artifacts: []` on a run that
+  # wrote four files), and `state.json.review_phase_completed` is finally set by
+  # `mark_phase_completed("review-plan")` instead of staying False forever.
+  # Keys added / a flag that now reflects the phase; nothing else moved.
+  # ---------------------------------------------------------------------------
+  - pointer: /result_lines/review-plan/artifacts/0
+    rationale: >
+      review-plan's result line now names report.md (it recorded no artifacts
+      before); the file itself is unchanged.
+  - pointer: /result_lines/review-plan/artifacts/1
+    rationale: >
+      review-plan's result line now names report.html; the file itself is unchanged.
+  - pointer: /result_lines/review-plan/artifacts/2
+    rationale: >
+      review-plan's result line now names grouped.json; the file itself is unchanged.
+  - pointer: /state/review_phase_completed
+    rationale: >
+      The flag is now set when the review-plan phase completes; it was seeded
+      False and never written by any code path.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

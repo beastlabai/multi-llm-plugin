@@ -1679,7 +1679,7 @@ async def reaggregate_from_existing_files(
             print(f"Validation results saved to: {validation_path}")
         elif not args.skip_validation:
             # No validation batches exist - need to prepare them
-            print("\nPreparing batched validation for Claude Code subagent...")
+            print("\nPreparing batched validation for subagent execution...")
             plan_content = plan_path.read_text(encoding="utf-8")
 
             batched_tasks = prepare_batched_validation_tasks(
@@ -1706,7 +1706,7 @@ async def reaggregate_from_existing_files(
                 print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
                 print(f"Batches: {total_batches}")
 
-            print(f"\nValidation prepared for Claude Code subagent.")
+            print(f"\nValidation prepared for subagent execution.")
             print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
 
             # Resolved here, from the running skill dir, because the task file
@@ -2280,7 +2280,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
             # Validate grouped issues (unless skipped)
             if not args.skip_validation:
-                print("\nPreparing batched validation for Claude Code subagent...")
+                print("\nPreparing batched validation for subagent execution...")
                 # Read plan for validation context
                 plan_content = plan_path.read_text(encoding="utf-8")
 
@@ -2309,7 +2309,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
                     print(f"Batches: {total_batches}")
 
-                print(f"\nValidation prepared for Claude Code subagent.")
+                print(f"\nValidation prepared for subagent execution.")
                 print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
                 print(f"HIGH priority: {stats.get('high_count', 0)}")
                 print(f"Normal priority: {stats.get('normal_count', 0)}")
