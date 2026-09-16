@@ -910,6 +910,59 @@ class TestStatusSurface:
         legacy = capsys.readouterr().out
         assert through_status == legacy
 
+    def test_suggested_next_names_the_optional_phases_it_skipped(
+        self, tmp_path, capsys
+    ):
+        """F8: `suggested next: implement` reads as "nothing else is
+        outstanding" on its own — and paired with the tool's `next: null` for a
+        finished phase, a weak model asserted exactly that instead of naming
+        `review-tasks`/`apply-task-suggestions` (measured 2026-09-16). The
+        machine-readable `suggested_next` is unchanged; only the rendered line
+        gains the optional phases still pending."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_completed("review-plan")
+        state.mark_phase_completed("apply-suggestions")
+        state.mark_phase_completed("generate-tasks")
+        state.save()
+
+        # `--view workflow` alone stays raw JSON (byte-identical to the
+        # retired `--status` mode); the rendered text lives in the default
+        # `--view all`, which prints the workflow section first.
+        assert run_status.main(["--plan-file", str(plan)]) == 2
+        out = capsys.readouterr().out
+        assert (
+            "suggested next: implement  (review-tasks / apply-task-suggestions "
+            "optional, not run)"
+        ) in out
+
+        # The JSON view carries the plain word only — the parenthetical is a
+        # text-rendering fact, not a change to what a host parses.
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "workflow", "--json"]
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["suggested_next"] == "implement"
+
+    def test_suggested_next_names_nothing_optional_when_none_are_pending(
+        self, tmp_path, capsys
+    ):
+        """The bare word stays bare once an optional phase is actually
+        skipped/completed rather than merely pending — nothing to flag."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+
+        assert run_status.main(["--plan-file", str(plan)]) == 2
+        out = capsys.readouterr().out
+        assert "suggested next: apply-suggestions" in out
+        assert "optional, not run" not in out
+
     def test_no_status_json_anywhere_exits_two_not_zero(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         assert run_status.main(["--plan-file", str(plan)]) == 2
@@ -1036,6 +1089,80 @@ class TestStatusSurface:
             cli_common.deactivate_result()
         capsys.readouterr()
         assert context.next and "--host opencode" in context.next
+
+    def test_the_next_poll_targets_the_live_run_not_the_alphabetically_first(
+        self, tmp_path, capsys
+    ):
+        """F3: with a finished `apply-suggestions` and a live `generate-tasks`
+        both listed, `apply-suggestions` sorts first — but it is not why the
+        exit code is 2, and polling it back reports a terminal run as done
+        while the real one is still dispatching (measured 2026-09-16)."""
+        plan = _plan(tmp_path)
+        finished = _phase_dir(plan, "apply-suggestions")
+        status_file.claim_run(str(finished), {
+            "run_id": "run-finished-0001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "host": "opencode", "mode": "apply-suggestions",
+        })
+        status_file.update_status(str(finished), {
+            "phase": "apply-suggestions", "state": "complete",
+        })
+        live = _phase_dir(plan, "generate-tasks")
+        status_file.claim_run(str(live), {
+            "run_id": "run-live-0002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True,
+            "host": "opencode", "mode": "generate-tasks",
+        })
+        status_file.update_status(str(live), {
+            "phase": "generate-tasks", "state": "dispatching",
+        })
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan)]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.next and "generate-tasks" in context.next
+        assert "run-live-0002" in context.next
+        assert "apply-suggestions" not in context.next
+
+    def test_state_word_says_running_not_nothing_to_do_while_a_run_is_live(
+        self, tmp_path, capsys
+    ):
+        """F11: exit 2 genuinely means "poll again", but the payload word
+        `nothing-to-do` contradicted the text one line above it — `generate-tasks
+        run … running (last beat 10s ago)` (measured 2026-09-16). The exit code
+        stays 2 (the poll loops key off it); only the word changes, and only
+        when the exit-2 reason is a run still in flight."""
+        plan = _plan(tmp_path)
+        live = _phase_dir(plan, "generate-tasks")
+        status_file.claim_run(str(live), {
+            "run_id": "run-live-0003", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "generate-tasks",
+        })
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan)]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.payload(2)["state"] == "running"
+
+        # The genuinely empty case — no run recorded at all — keeps the old
+        # word: exit 2 there means "no such run", not "come back later".
+        empty_plan = _plan(tmp_path, "empty plan")
+        context2 = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(empty_plan)]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context2.payload(2)["state"] == "nothing-to-do"
 
     def test_progress_renders_the_counts_a_run_is_still_accumulating(
         self, tmp_path, capsys
