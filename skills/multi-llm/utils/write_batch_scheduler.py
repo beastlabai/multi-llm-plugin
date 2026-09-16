@@ -764,6 +764,13 @@ class WriteBatchScheduler:
             )
         return (
             f"{prompt.rstrip()}\n\n"
+            "## Process safety (required)\n\n"
+            "Never run `kill`, `pkill`, `killall` or any process-wide signal: "
+            "the orchestrator that dispatched you is a sibling process, and a "
+            "write subagent's `killall -9 python3` ended a whole phase "
+            "(measured 2026-09-16). Do not start background servers or "
+            "browsers, and leave no process running when you finish; verify "
+            "with static checks only.\n\n"
             "## Result (required — this is how the batch is verified)\n\n"
             "Do the work above, then end your reply with ONE JSON object (a "
             "fenced ```json block is fine) of exactly this shape:\n\n"

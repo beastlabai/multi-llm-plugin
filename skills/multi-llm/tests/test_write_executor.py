@@ -2816,3 +2816,26 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
         # (legitimate, declared) edit must not read as T-A's undeclared write.
         undeclared_a = scheduler._undeclared_writes("T-A", snap_a)
         assert "src/b.py" not in undeclared_a.paths
+
+
+class TestTheContractCarriesTheProcessSafetyRule:
+    """Every write kind's dispatched prompt forbids process-wide signals.
+
+    The implement template carries the rule in its own ``## Constraints``; the
+    apply batchers build their prompts inline and never had one, so the shared
+    result-contract seam is where all four kinds pick it up.
+    """
+
+    def test_every_write_kind_is_told_never_to_kill(self, tmp_path):
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        for kind in ("apply_suggestions", "apply_task_suggestions",
+                     "apply_code_fixes", "implement"):
+            scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
+            scheduler.kind = kind
+            text = scheduler._with_result_contract(
+                {"expected_ids": ["X1"]}, "do the thing"
+            )
+            assert "## Process safety (required)" in text, kind
+            assert "`killall`" in text and "background servers" in text, kind
+            assert text.index("## Process safety") < text.index("## Result"), kind
