@@ -1598,6 +1598,21 @@ class WriteBatchScheduler:
         undeclared = self._undeclared_writes(outcome.task_id, snapshot)
         observed = self._observed_with_undeclared(snapshot, undeclared)
 
+        # F9: recorded on the outcome itself — every branch below shares this
+        # object, so both `write_batch_report.json` (`result.to_dict()`) and
+        # this run's own `subagent_batch_report.json` (`BatchReport` built from
+        # the same `result.outcomes` in `_write_report`) carry the same
+        # verification evidence that used to live only in `subagent_audit.jsonl`
+        # and the per-batch result file.
+        outcome.expected_ids = expected_ids
+        outcome.returned_ids = reported_ids
+        outcome.sha256_before = {
+            relative: row.get("sha256_before") for relative, row in observed.items()
+        }
+        outcome.sha256_after = {
+            relative: row.get("sha256_after") for relative, row in observed.items()
+        }
+
         # `changed` stays the DECLARED verdict — it is what the four outcomes are
         # decided on below. `files_touched` is the ROLLBACK set, so it also
         # carries the undeclared writes the sweep retained bytes for; an

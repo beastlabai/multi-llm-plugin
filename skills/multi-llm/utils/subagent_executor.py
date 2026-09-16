@@ -267,6 +267,33 @@ __all__ = [
 #: The task file stays a hash-bound snapshot, so attempt counts live here.
 BATCH_REPORT_FILENAME = "subagent_batch_report.json"
 
+#: The one READ_KINDS member whose dispatch can land in a phase dir a WRITE_KINDS
+#: dispatch also writes to (F6, 2026-09-16): every apply phase's unattended
+#: judging pass runs on this, the read-path executor, *before* the same phase's
+#: own write batches ever touch the dir. Every other read kind (validation,
+#: revalidation, consolidation, salvage, task_generation) owns its phase dir
+#: alone, so the bare name below is unambiguous for them and stays their
+#: report's name. Without this, a judged decision — the one subagent output a
+#: human is most likely to want to re-examine — had its report silently
+#: overwritten the moment the write phase ran (both write to the identical
+#: path), and its argv/duration/usage survived nowhere.
+KINDS_SHARING_A_WRITE_PHASE_DIR = frozenset({"human_decision_judge"})
+
+
+def _batch_report_filename(kind: str) -> str:
+    """Which filename this ``kind``'s :class:`BatchReport` writes to (F6).
+
+    Every kind but the one in :data:`KINDS_SHARING_A_WRITE_PHASE_DIR` keeps the
+    bare :data:`BATCH_REPORT_FILENAME` — byte-identical for every existing
+    reader (``run_status``, ``_authoritative_validator_runner``, the
+    reaggregation-glob exclude lists, every test that opens the file by name).
+    Only a kind that can share a phase dir with a different dispatch's report
+    gets a name that says which report it is.
+    """
+    if kind in KINDS_SHARING_A_WRITE_PHASE_DIR:
+        return f"subagent_batch_report_{kind}.json"
+    return BATCH_REPORT_FILENAME
+
 #: Per-attempt diagnostic captures (D3k). A directory, so the reaggregation glob
 #: (``{phase_dir}/*.json``) never sees them.
 FAILED_CAPTURE_DIRNAME = "failed"
@@ -607,6 +634,21 @@ class TaskOutcome:
     #: Where this task's pre-batch snapshot lives, so an exit-3 message can name
     #: the restore command instead of describing it.
     snapshot_dir: Optional[str] = None
+    #: F9: write kinds only, alongside `write_outcome` — the batch's own
+    #: declared item ids and the ids the runner's reply actually returned, so
+    #: `write_batch_report.json` and this row's own `subagent_batch_report.json`
+    #: (they serialize the same `TaskOutcome`) can answer "did every item come
+    #: back?" without re-deriving it from `subagent_audit.jsonl` or the
+    #: per-batch result file.
+    expected_ids: List[str] = field(default_factory=list)
+    returned_ids: List[str] = field(default_factory=list)
+    #: F9: the pre-batch snapshot's own before/after hashes for every file the
+    #: post-run sweep observed (declared or not), keyed by repo-relative path —
+    #: the same evidence `subagent_audit.jsonl`'s `observed.<file>.sha256_*`
+    #: carries, so the hash chain's contiguity is checkable from this report
+    #: alone.
+    sha256_before: Dict[str, Optional[str]] = field(default_factory=dict)
+    sha256_after: Dict[str, Optional[str]] = field(default_factory=dict)
     #: §4.2.1's marker for a schema-carrying dispatch: ``native`` (the CLI's own
     #: ``structured_output`` key, conformant), ``recovered`` (the document came
     #: out of the prose answer and validated against the same schema file) or
@@ -659,6 +701,13 @@ class TaskOutcome:
                 out["summary"] = self.summary
             if self.snapshot_dir:
                 out["snapshot_dir"] = self.snapshot_dir
+            # F9: verification evidence, present on every write outcome
+            # (`expected_ids`/`sha256_*` even when empty — an empty pair is
+            # itself evidence, e.g. an `implement` task with no declared file).
+            out["expected_ids"] = list(self.expected_ids)
+            out["returned_ids"] = list(self.returned_ids)
+            out["sha256_before"] = dict(self.sha256_before)
+            out["sha256_after"] = dict(self.sha256_after)
         if self.usage_reported:
             out["usage"] = dict(self.usage or {})
         else:
@@ -739,7 +788,8 @@ class BatchReport:
         }
 
     def write(self, phase_dir: Optional[str] = None) -> str:
-        """Write ``subagent_batch_report.json`` atomically; return its path.
+        """Write this report atomically (F6: :func:`_batch_report_filename`
+        picks the name); return its path.
 
         The third of §4.5.3's four sinks — six planted shapes × fifteen rows,
         carried in the ``reason`` and per-attempt ``error`` strings that quote a
@@ -748,7 +798,7 @@ class BatchReport:
         a per-field list to keep in step.
         """
         target_dir = phase_dir or self.phase_dir
-        path = os.path.join(target_dir, BATCH_REPORT_FILENAME)
+        path = os.path.join(target_dir, _batch_report_filename(self.kind))
         _atomic_write_json(path, _redact_json(self.to_dict()))
         return path
 
@@ -4287,7 +4337,7 @@ def run_tasks(
             report.write()
         return report
 
-    recorded = _recorded_runners(phase_dir)
+    recorded = _recorded_runners(phase_dir, kind)
     task_by_id: Dict[str, Dict[str, Any]] = {
         str(task.get("task_id", index)): task
         for index, task in enumerate(selected)
@@ -4466,6 +4516,94 @@ def _saw_rate_limit(outcome: TaskOutcome) -> bool:
     return any(attempt.status == STATUS_RATE_LIMITED for attempt in outcome.attempts)
 
 
+def _judge_dispatch_argv_preview(
+    runner: str, prompt: str, profile: str, anchor: Optional[str]
+) -> List[str]:
+    """A best-effort argv for the F6 audit line — never the real dispatch's own.
+
+    Mirrors ``write_batch_scheduler._render_argv``: the provider's own command
+    builder, called directly and never executed. Deliberately not
+    :func:`_preview_argv` (the ``--dry-run-subagents`` renderer), which enters
+    the full dispatch context and materializes a schema sidecar per call — a
+    judge task carries no schema, so that machinery would only double the
+    per-attempt setup this hook runs beside for no more accurate an argv. A
+    render failure falls back to naming the runner: an audit hook must never
+    fail the dispatch it is watching.
+    """
+    provider_name, model = parse_model_spec(runner, anchor=anchor)
+    provider = get_provider(provider_name)
+    if provider is None:
+        return [runner]
+    try:
+        return list(provider.build_agent_command(prompt, model, profile))
+    except Exception:  # noqa: BLE001 - an audit preview must never fail a dispatch
+        return [provider_name, "<profile unsupported>"]
+
+
+def _judge_audit_before_attempt(
+    phase_dir: str, anchor: Optional[str]
+) -> Callable[[Dict[str, Any]], None]:
+    """F6: give the judging dispatch the same ``subagent_audit.jsonl`` trail
+    the write executor gives every write dispatch.
+
+    Built only for ``human_decision_judge`` (see :func:`_gather`'s call site),
+    never for the other read kinds: ``AuditLog`` is this repo's write-safety
+    control (D3l) — reversibility for a dispatch that edits a file — and a
+    validation or consolidation batch touches nothing to roll back. A judged
+    human decision is different: it is the one subagent output a human is most
+    likely to want to re-examine, and until now its dispatch left no argv, no
+    prompt hash and no duration anywhere durable — ``subagent_batch_report.json``
+    was the only record, and (before the filename split above) the write phase
+    that follows it in the same phase dir promptly overwrote that file.
+    """
+    try:
+        from .write_safety import AuditLog
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import AuditLog
+    audit = AuditLog(phase_dir)
+
+    def before_attempt(context: Dict[str, Any]) -> None:
+        audit.dispatched(
+            task_id=context["task_id"], kind=context["kind"],
+            attempt=context["attempt"], runner=context["runner"],
+            profile=context["profile"], cwd=context["cwd"],
+            sandbox_root=str(context["cwd"] or ""),
+            argv=_judge_dispatch_argv_preview(
+                context["runner"], context["prompt"], context["profile"], anchor,
+            ),
+            prompt=context["prompt"], declared_files=[],
+        )
+
+    return before_attempt
+
+
+def _judge_audit_completed(phase_dir: str, outcome: TaskOutcome) -> None:
+    """The judging dispatch's terminal audit line, written once ``dispatch_task``
+    returns — success or failure alike, unlike ``dispatch_task``'s own
+    ``after_result`` hook, which only fires on the schema-valid success path.
+
+    Skipped when no attempt was ever made (a pre-dispatch refusal): a
+    ``completed`` line with no matching ``dispatched`` line would claim a run
+    that never started, the same guard ``write_batch_scheduler._audit_terminal``
+    applies.
+    """
+    if not outcome.attempts:
+        return
+    try:
+        from .write_safety import AuditLog
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import AuditLog
+    last = outcome.attempts[-1]
+    AuditLog(phase_dir).completed(
+        task_id=outcome.task_id, kind=outcome.kind, attempt=last.index,
+        runner=outcome.runner, profile=outcome.profile, status=outcome.status,
+        write_outcome=None, exit_code=last.exit_code, files_touched=[],
+        observed={}, duration_seconds=outcome.duration_seconds,
+        reason=outcome.reason,
+        usage=outcome.usage if outcome.usage_reported else None,
+    )
+
+
 async def _gather(
     tasks: Sequence[Dict[str, Any]],
     *,
@@ -4566,6 +4704,17 @@ async def _gather(
             ))
         provider_name, _ = parse_model_spec(runner, anchor=anchor)
         await backpressure.acquire(provider_name)
+        # F6: route the judging dispatch through `subagent_audit.jsonl` too —
+        # see `_judge_audit_before_attempt`. Every other kind passes `None` and
+        # dispatches exactly as it always has — and the call stays the exact
+        # kwargs it always took, `before_attempt` included, for every non-judge
+        # dispatch (a test double patched in for `dispatch_task` need not accept
+        # a keyword it never receives).
+        is_judge = str(task.get("kind", "")) == "human_decision_judge"
+        judge_kwargs: Dict[str, Any] = (
+            {"before_attempt": _judge_audit_before_attempt(phase_dir, anchor)}
+            if is_judge else {}
+        )
         try:
             outcome = await asyncio.to_thread(
                 dispatch_task,
@@ -4574,9 +4723,12 @@ async def _gather(
                 runner=runner,
                 anchor=anchor,
                 cwd=cwd,
+                **judge_kwargs,
             )
         finally:
             await backpressure.release(provider_name)
+        if is_judge:
+            _judge_audit_completed(phase_dir, outcome)
         if outcome.fatal and not fatal["hit"]:
             fatal["hit"] = True
             fatal["spec"] = runner
@@ -4618,7 +4770,7 @@ async def _gather(
     )
 
 
-def _recorded_runners(phase_dir: str) -> Dict[str, str]:
+def _recorded_runners(phase_dir: str, kind: str = "") -> Dict[str, str]:
     """Runners pinned by a previous batch report, for a re-dispatch (D3o).
 
     **A recorded runner whose recorded status is fatal is not a pin, it is a
@@ -4634,8 +4786,14 @@ def _recorded_runners(phase_dir: str) -> Dict[str, str]:
     spec they were about to use, and preflight runs once per *distinct* spec —
     so one surviving pin would re-refuse the whole batch, repaired config and
     all.
+
+    ``kind`` (F6): a re-dispatch must read *this* dispatch's own report back,
+    not whichever kind's report happens to sit at the bare filename — see
+    :func:`_batch_report_filename`. Omitted by the one caller that can never
+    collide (``_authoritative_validator_runner``, always a validation-family
+    kind), where it defaults to the bare name exactly as before.
     """
-    path = Path(phase_dir) / BATCH_REPORT_FILENAME
+    path = Path(phase_dir) / _batch_report_filename(kind)
     if not path.exists():
         return {}
     try:
@@ -5239,7 +5397,10 @@ def continue_past_marker(
         f"short set. Under --yes this is still exit 3: an unattended run may not "
         f"decide that a missing batch is acceptable.",
         *report.failure_summary(),
-        f"Report: {os.path.join(phase_dir, BATCH_REPORT_FILENAME)}",
+        # F6: names the file this dispatch's own kind actually wrote, not
+        # always the bare name — a failed judging dispatch would otherwise
+        # point at a report a later write dispatch may go on to overwrite.
+        f"Report: {os.path.join(phase_dir, _batch_report_filename(report.kind))}",
         f"Diagnostics: {os.path.join(phase_dir, FAILED_CAPTURE_DIRNAME)}/",
         # Resume IS the retry-only-the-failures path: a task counts as done iff
         # its result file exists, parses and validates, so re-invoking the phase
