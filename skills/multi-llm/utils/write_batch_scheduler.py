@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -46,8 +47,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from .provider_registry import (
+        get_driver_provenance,
         get_max_concurrent_write_subagents,
         get_provider_max_concurrent,
+        get_verify_command,
+        get_verify_timeout_s,
         parse_model_spec,
     )
     from .subagent_executor import (
@@ -106,8 +110,11 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import prior_changes as _prior_changes
     from utils.provider_registry import (
+        get_driver_provenance,
         get_max_concurrent_write_subagents,
         get_provider_max_concurrent,
+        get_verify_command,
+        get_verify_timeout_s,
         parse_model_spec,
     )
     from utils.subagent_executor import (
@@ -176,6 +183,7 @@ __all__ = [
     "WriteBatchScheduler",
     "resolve_human_task_plan",
     "run_write_phase",
+    "verification_line",
 ]
 
 
@@ -236,6 +244,23 @@ SWEEP_RETAIN_MAX_BYTES = 64 * 1024 * 1024
 #: policy-checked; only the rollback points are capped.
 SWEEP_ADOPT_MAX_FILES = 1000
 
+#: Write kinds whose deliverable is **source code**, so the repository's own
+#: `driver.verify_command` has something to say about them (F4). The other two
+#: write kinds edit the plan and the tasks file — markdown a typecheck cannot
+#: read — so they skip verification silently rather than logging a notice about a
+#: command that was never going to apply to them.
+CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
+
+#: How much of the verification command's output travels in the result payload,
+#: the summary and `.status.json`. A tail rather than the whole capture: a failing
+#: build prints megabytes and what names the failure is the end of it.
+VERIFY_TAIL_CHARS = 2000
+
+#: Recorded when the command produced no exit status of its own, in the shell's
+#: own vocabulary so a reader of `verification.exit_code` learns nothing private.
+VERIFY_EXIT_TIMEOUT = 124
+VERIFY_EXIT_NOT_RUN = 127
+
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 3
 
@@ -272,6 +297,49 @@ class HumanTaskPlan:
 _DEFERRED_REASON = (
     "deferred — user chose to complete manually after implementation"
 )
+
+
+def verification_line(result: Any) -> str:
+    """One line describing what `driver.verify_command` did, for a report (F4).
+
+    Shared by the scheduler's own summary and
+    ``apply_orchestrator_base.write_apply_summary_report`` so the two documents a
+    code-fix run leaves behind cannot describe the same check differently. Takes
+    anything carrying a ``verification`` attribute, so a caller holding only the
+    orchestrator's ``write_result`` needs no import of its own.
+    """
+    record = getattr(result, "verification", None)
+    if not isinstance(record, dict):
+        return "not configured (`driver.verify_command` is unset)"
+    verdict = "pass" if record.get("exit_code") == 0 else (
+        f"FAIL (exit {record.get('exit_code')})"
+    )
+    return (
+        f"`{record.get('command', '')}` — {verdict}, "
+        f"{record.get('duration_seconds')}s"
+    )
+
+
+def _redacted_text(text: str) -> str:
+    """``write_safety.redact_text``, through the module's usual import shim."""
+    try:
+        from .write_safety import redact_text
+    except ImportError:  # pragma: no cover
+        from utils.write_safety import redact_text
+    return redact_text(text)
+
+
+def _decoded(chunk: Any) -> str:
+    """Whatever a killed child left behind, as text (F4).
+
+    ``TimeoutExpired`` carries the bytes ``communicate`` had buffered when the
+    deadline fired, joined *before* text-mode decoding runs — so a `text=True`
+    call still gets `bytes` here, and the tail of a build that hung is exactly
+    what the operator needs to read.
+    """
+    if isinstance(chunk, bytes):
+        return chunk.decode("utf-8", errors="replace")
+    return chunk or ""
 
 
 def _under_any(path: str, roots: Sequence[str]) -> bool:
@@ -401,6 +469,11 @@ class SchedulerResult:
     outcomes: List[TaskOutcome] = field(default_factory=list)
     batches_dispatched: List[int] = field(default_factory=list)
     stopped_at_batch: Optional[int] = None
+    #: F4: what `driver.verify_command` did, or ``None`` when it never ran (no
+    #: command configured, a markdown phase, or no batch applied). Present with a
+    #: non-zero ``exit_code`` is the one shape that costs a fully applied run its
+    #: completion, so it is a field on the result rather than a log line.
+    verification: Optional[Dict[str, Any]] = None
     human_plan: HumanTaskPlan = field(default_factory=HumanTaskPlan)
     finalized: bool = False
     summary_file: Optional[str] = None
@@ -424,6 +497,7 @@ class SchedulerResult:
             "exit": self.exit_code,
             "batches_dispatched": list(self.batches_dispatched),
             "stopped_at_batch": self.stopped_at_batch,
+            "verification": self.verification,
             "finalized": self.finalized,
             "summary_file": self.summary_file,
             "human_task_strategy": self.human_plan.strategy,
@@ -2542,13 +2616,139 @@ class WriteBatchScheduler:
             )
         return lines
 
+    # -- verification ---------------------------------------------------
+
+    def _run_verification(self, result: SchedulerResult) -> bool:
+        """Run ``driver.verify_command`` once, after the last batch (F4).
+
+        Returns whether the phase may complete. Three ways that is ``True``
+        without a command ever running, and only the first is announced:
+
+        * **No command configured.** Logged, because "this repo declares no
+          check" and "the check passed" are different facts and a silent skip
+          spells them the same way. `instructions/apply-code-fixes.md` used to
+          hard-code `pnpm typecheck && pnpm lint:fix`, which is right for one
+          repo shape and wrong for the rest — the audited run's target had no
+          `package.json` at all.
+        * **A markdown phase.** `apply_suggestions`/`apply_task_suggestions`
+          edit the plan and the tasks file; a typecheck has nothing to say about
+          them, so they skip silently rather than nagging about a command that
+          was never going to apply.
+        * **Nothing applied.** No batch dispatched means no edit to check.
+
+        The command is a **shell string** (`&&` is in its documented shape), run
+        with `cwd` at the pinned repo root — the same root every containment
+        check resolves against — and bounded by `driver.verify_timeout_s`.
+        """
+        if self.kind not in CODE_WRITE_KINDS or not result.batches_dispatched:
+            return True
+        command = get_verify_command(anchor=self.anchor)
+        if not command:
+            self.log(
+                "[write-subagents] no driver.verify_command configured — "
+                f"{len(result.batches_dispatched)} batch(es) were verified "
+                "against their own snapshots, but nothing checked the "
+                "repository as a whole."
+            )
+            return True
+        timeout = get_verify_timeout_s(anchor=self.anchor)
+        source = get_driver_provenance("verify_command", anchor=self.anchor)
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(  # noqa: S602 - a shell string is the contract
+                command, shell=True, cwd=self.repo_root,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            exit_code = int(proc.returncode)
+            output = (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired as exc:
+            exit_code = VERIFY_EXIT_TIMEOUT
+            output = _decoded(exc.stdout) + _decoded(exc.stderr) + (
+                f"\n(no output for {timeout}s — killed)"
+            )
+        except OSError as exc:  # pragma: no cover - the shell itself is missing
+            exit_code = VERIFY_EXIT_NOT_RUN
+            output = f"verification command could not be started: {exc}"
+        duration = time.monotonic() - started
+        # Redact BEFORE the tail cap, the same order the audit log uses: a build
+        # that echoes a token into its log would otherwise put it in
+        # `.status.json`, `write_batch_report.json` and `summary.md` at once.
+        result.verification = {
+            "command": _redacted_text(command),
+            "source": source,
+            "exit_code": exit_code,
+            "duration_seconds": round(duration, 1),
+            "output_tail": _redacted_text(output).strip()[-VERIFY_TAIL_CHARS:],
+        }
+        self.log(
+            f"[write-subagents] verification ({source}): "
+            f"`{result.verification['command']}` exited {exit_code} "
+            f"in {duration:.1f}s"
+        )
+        if exit_code == 0:
+            return True
+        result.exit_code = EXIT_NEEDS_HUMAN
+        result.messages.extend(self._verification_message(result))
+        return False
+
+    def _verification_message(self, result: SchedulerResult) -> List[str]:
+        """The exit-3 block for a failed `driver.verify_command` (F4).
+
+        Worded like :meth:`_stop_message`: what happened, what was NOT undone,
+        and the one command that moves it forward. Deliberately *not* a rollback
+        — every batch was verified against its own snapshot and the half-applied
+        state a revert would destroy is exactly what a human needs to read.
+        """
+        record = result.verification or {}
+        lines = [
+            "",
+            f"ERROR: every batch applied and verified, but the repository's own "
+            f"check failed, so the {self.phase} phase is NOT marked completed.",
+            f"  - driver.verify_command ({record.get('source', 'unknown')}): "
+            f"`{record.get('command', '')}` exited {record.get('exit_code')} "
+            f"after {record.get('duration_seconds')}s",
+        ]
+        tail = str(record.get("output_tail") or "").strip()
+        if tail:
+            lines.append("Last output:")
+            lines += [f"  {line}" for line in tail.splitlines()[-20:]]
+        lines += [
+            f"Nothing was rolled back: batches "
+            f"{', '.join(str(i) for i in result.batches_dispatched)} are applied "
+            f"and their pre-batch snapshots are intact under "
+            f"{os.path.join(self.phase_dir, 'pre_batch')}/.",
+            "Fix the repository (or the fix the batches applied), then re-invoke "
+            "with --resume: every batch is already done, so nothing is "
+            "re-dispatched and only the check runs again.",
+        ]
+        return lines
+
     def _finalize(self, result: SchedulerResult) -> None:
         """``mark_phase_completed`` + tracking + summary + plan reference (D3n).
 
         Called only after every batch verified. A run that dispatched every batch
         and skipped this is a **failed** run, which is why the flag lands on the
         result rather than being left implicit.
+
+        F4: the repository's own check runs *before* `mark_phase_completed`, and a
+        non-zero exit costs the phase its completion. Per-batch verification is a
+        byte comparison against a snapshot — it says the runner edited what it
+        declared, never that the result still builds — so a phase that applied
+        seven code fixes and marked itself completed without once asking the repo
+        was reporting on a property it had not checked (measured 2026-09-16).
         """
+        if not self._run_verification(result):
+            # The stop path's shape, for the same reason: the summary is this
+            # run's own account and `--resume` has no other record of what was
+            # applied. Nothing is rolled back and nothing is completed — the
+            # plan reference, the tracking census and the phase marker all wait
+            # for a run whose check passes.
+            if self.summary_file:
+                result.summary_file = self._write_summary(result)
+                result.messages.append(
+                    f"Implementation summary: {result.summary_file}"
+                )
+            return
         if self.state is not None:
             self._metrics_finish()
             self.state.mark_phase_completed(self.phase)
@@ -2669,6 +2869,13 @@ class WriteBatchScheduler:
             f"**Plan**: {plan_name}",
             f"**Phase**: {self.phase}",
             f"**Invoker**: {self.invoker}",
+        ]
+        # F4: the template the instructions publish has always promised a
+        # `Typecheck status` line, and on this leg nothing filled it. Only for
+        # the code-editing kinds — a plan-text phase has no check to report.
+        if self.kind in CODE_WRITE_KINDS:
+            lines.append(f"**Verification**: {verification_line(result)}")
+        lines += [
             "",
             "## Summary",
             "",
@@ -2899,6 +3106,14 @@ class WriteBatchScheduler:
                         "runner_versions": dict(self._runner_versions),
                         "batches_dispatched": list(result.batches_dispatched),
                         "stopped_at_batch": result.stopped_at_batch,
+                        # F4: written only once the command really ran, so the
+                        # key's presence means "a check happened" rather than
+                        # "this version knows about checks". The mirror is
+                        # rewritten on every advance and verification is the
+                        # last thing a run does, so an absent key on a finished
+                        # run is the "not configured" notice in the log.
+                        **({"verification": result.verification}
+                           if result.verification else {}),
                         "finalized": result.finalized,
                         "human_task_strategy": result.human_plan.strategy,
                         "skipped_task_ids": sorted(result.human_plan.skipped),

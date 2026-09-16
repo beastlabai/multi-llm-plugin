@@ -59,12 +59,25 @@ prints the path), so you can port any custom settings into the regenerated file.
   use `MULTI_LLM_PROVIDERS_CONFIG` instead.
 - **Commit or ignore?** Commit it for a team-wide standard; ignore it (`--gitignore`)
   or use the env override for personal preferences.
+- **`driver.verify_command` is this repo's own check**, and the one `driver.*` key
+  worth setting per project: a shell string (`pnpm typecheck && pnpm lint:fix`,
+  `cargo check`, `make test`) that the code-editing phases — `implement` and
+  `apply-code-fixes` — run **once**, from the repository root, after their last
+  batch applied. Left unset, those phases say so in one line rather than completing
+  unchecked; a non-zero exit reverts nothing (every batch was already verified
+  against its own snapshot) but ends the phase at exit 3 with the command and the
+  tail of its output. `driver.verify_timeout_s` bounds it (default 600 s). The
+  markdown apply phases never run it.
 
 ## Safety
 
 A repo's override is auto-loaded, so a cloned repo can change which models a run
-selects — but never *what executes*: provider binaries are hardcoded and the config
-`command` field is never run, in any layer. The override now deep-merges its full
+selects — but never *what executes* on the model path: provider binaries are
+hardcoded and the config `command` field is never run, in any layer. The one key
+that *is* executed is `driver.verify_command`, and only by a write phase you asked
+for, after it edited that same repo with an agent CLI — the run prints the command
+and the config layer it came from before running it. Treat an untrusted repo's
+override the way you would its `Makefile`. The override now deep-merges its full
 contents (including a `providers:` block) over base, exactly like the
 `MULTI_LLM_PROVIDERS_CONFIG` env layer — but since `command` is documentation-only,
 a merged block can only retune metadata (timeouts, model lists), and a provider

@@ -5501,10 +5501,12 @@ class _FakeOutcome:
 
 
 class _FakeSchedulerResult:
-    def __init__(self, outcomes, report_path=None, stopped_at_batch=None):
+    def __init__(self, outcomes, report_path=None, stopped_at_batch=None,
+                 verification=None):
         self.outcomes = outcomes
         self.report_path = report_path
         self.stopped_at_batch = stopped_at_batch
+        self.verification = verification
 
 
 def _orchestrator_on(tmp_path, **arg_overrides):
@@ -5983,6 +5985,37 @@ class TestTheExecutorLegRunsStepSeven:
         assert "## Decided by Claude" in text
         assert "Raise T001 to high (LOW) — Skipped" in text
         assert "claude_auto_decide" in text
+
+    def test_the_report_names_the_verification_the_template_promised(
+        self, tmp_path
+    ):
+        """F4: `Typecheck status` was in the template and in no report.
+
+        The apply-code-fixes run this came from applied seven code fixes and its
+        `summary.md` said nothing at all about a check, so a reader could not
+        tell it from a run whose check passed.
+        """
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.write_kind = "apply_code_fixes"
+        orch.write_result.verification = {
+            "command": "pnpm typecheck", "source": "project",
+            "exit_code": 1, "duration_seconds": 4.2, "output_tail": "boom",
+        }
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "- Verification: `pnpm typecheck` — FAIL (exit 1), 4.2s" in text
+
+    def test_an_unconfigured_check_is_reported_as_unconfigured(self, tmp_path):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.write_kind = "apply_code_fixes"
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "- Verification: not configured" in text
+
+    def test_a_plan_text_phase_reports_no_verification_line_at_all(self, tmp_path):
+        """`apply_suggestions` edits markdown — there is nothing to typecheck."""
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.write_kind = "apply_suggestions"
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "Verification" not in text
 
     def test_the_report_omits_the_decision_section_when_nothing_was_judged(
         self, tmp_path

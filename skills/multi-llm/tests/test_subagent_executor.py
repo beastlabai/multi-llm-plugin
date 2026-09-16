@@ -3132,6 +3132,53 @@ class TestDriverConfig:
         assert "write_paths" in registry.DRIVER_KEYS
         assert set(registry.DRIVER_FALLBACKS) == set(registry.DRIVER_KEYS)
 
+    # -- the verification command (F4) -----------------------------------
+
+    def test_no_verify_command_ships_by_default(self):
+        """Unset is the shipped state: no command is right for every repo."""
+        base = registry.load_base_config()
+        assert base["driver"]["verify_command"] is None
+        assert base["driver"]["verify_timeout_s"] == 600
+        assert registry.get_verify_command() is None
+        assert registry.get_verify_timeout_s() == 600
+        assert "verify_command" in registry.DRIVER_KEYS
+        assert "verify_timeout_s" in registry.DRIVER_KEYS
+
+    def test_a_configured_verify_command_is_read_back_whole(
+        self, tmp_path, monkeypatch
+    ):
+        """Including the `&&` — it is a shell string, not an argv."""
+        self._write(tmp_path, """
+            driver:
+              verify_command: pnpm typecheck && pnpm lint:fix
+              verify_timeout_s: 90
+        """, monkeypatch)
+        assert registry.get_verify_command() == "pnpm typecheck && pnpm lint:fix"
+        assert registry.get_verify_timeout_s() == 90
+        assert registry.get_driver_provenance("verify_command") == "env"
+        # ...and it inherits the rest of the block, like any other key.
+        assert registry.get_driver_config()["subagent_runner"] == "claude-code:sonnet"
+
+    @pytest.mark.parametrize("body,needle", [
+        ("driver:\n  verify_command: '   '\n", "non-empty shell command"),
+        ("driver:\n  verify_command: 7\n", "non-empty shell command"),
+        ("driver:\n  verify_timeout_s: 0\n", "positive integer"),
+    ])
+    def test_a_bad_verify_value_fails_fast_at_load_time(
+        self, tmp_path, monkeypatch, body, needle
+    ):
+        self._write(tmp_path, body, monkeypatch)
+        with pytest.raises(registry.ConfigError) as excinfo:
+            registry.load_config()
+        assert needle in str(excinfo.value)
+
+    def test_an_explicit_null_verify_command_reads_as_unset(
+        self, tmp_path, monkeypatch
+    ):
+        """Spelling "no check" out loud must not be a load-time error."""
+        self._write(tmp_path, "driver:\n  verify_command: null\n", monkeypatch)
+        assert registry.get_verify_command() is None
+
     def test_provenance_names_the_layer_that_supplied_the_value(
         self, tmp_path, monkeypatch
     ):

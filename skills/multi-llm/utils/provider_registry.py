@@ -776,8 +776,16 @@ DRIVER_POSITIVE_INT_KEYS = (
     # *permits* parallelism; the dispatch-time disjointness check still admits it.
     "max_concurrent_write_subagents",
     "subagent_retries",
+    "verify_timeout_s",
 )
 DRIVER_OPTIONAL_INT_KEYS = ("subagent_timeout_s",)
+#: F4: the repository's OWN post-write check, run once by the write scheduler
+#: after a code-editing phase applied at least one batch. Optional because no
+#: command is right for every repo — and because "unset" has to be distinguishable
+#: from "not run", which is why the scheduler says so out loud rather than
+#: skipping silently. `verify_timeout_s` is a positive int with a real default
+#: (600 s) rather than an optional one: there is no provider default to inherit.
+DRIVER_OPTIONAL_STR_KEYS = ("verify_command",)
 #: D3l: `allow`/`deny` glob lists resolved against the pinned repo root, enforced
 #: pre-dispatch (against the batch's declared file set) and post-run (against the
 #: set the snapshot diff actually observed).
@@ -786,6 +794,7 @@ DRIVER_KEYS = (
     DRIVER_RUNNER_KEYS
     + DRIVER_POSITIVE_INT_KEYS
     + DRIVER_OPTIONAL_INT_KEYS
+    + DRIVER_OPTIONAL_STR_KEYS
     + DRIVER_PATH_POLICY_KEYS
 )
 
@@ -820,6 +829,8 @@ DRIVER_FALLBACKS: Dict[str, object] = {
     "max_concurrent_write_subagents": 1,
     "subagent_timeout_s": None,
     "subagent_retries": 1,
+    "verify_command": None,
+    "verify_timeout_s": 600,
     "write_paths": DEFAULT_WRITE_PATHS,
 }
 
@@ -924,6 +935,20 @@ def validate_driver_block(driver: object) -> None:
                 f"multi-llm config error: driver.{key} is {value!r} — expected a "
                 f"positive integer or null (null = the runner provider's "
                 f"default_timeout)."
+            )
+
+    for key in DRIVER_OPTIONAL_STR_KEYS:
+        if key not in driver:
+            continue
+        value = driver[key]
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"multi-llm config error: driver.{key} is {value!r} — expected a "
+                f"non-empty shell command string (e.g. \"pnpm typecheck && pnpm "
+                f"lint\"), or null/omitted to declare no command. A blank string "
+                f"would run the shell for nothing and report a pass."
             )
 
     for key in DRIVER_PATH_POLICY_KEYS:
@@ -1326,6 +1351,26 @@ def get_max_concurrent_write_subagents(
     still have to agree, and a shared-artifact phase is pinned to 1 regardless.
     """
     return max(1, int(get_driver_config(anchor=anchor)["max_concurrent_write_subagents"]))
+
+
+def get_verify_command(anchor: Optional[Union[str, Path]] = None) -> Optional[str]:
+    """``driver.verify_command`` — the repository's own post-write check (F4).
+
+    ``None`` when the repo declares none, which is a different fact from "it
+    passed": the write scheduler logs the difference rather than letting a phase
+    that never checked anything read like one that did. The value is a **shell
+    command string** (the documented shape is `pnpm typecheck && pnpm lint:fix`),
+    run once with `cwd` at the pinned repo root after the last batch applied.
+    """
+    value = get_driver_config(anchor=anchor).get("verify_command")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def get_verify_timeout_s(anchor: Optional[Union[str, Path]] = None) -> int:
+    """``driver.verify_timeout_s`` — the wall-clock ceiling for the command above."""
+    return max(1, int(get_driver_config(anchor=anchor)["verify_timeout_s"]))
 
 
 def get_write_paths(anchor: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:

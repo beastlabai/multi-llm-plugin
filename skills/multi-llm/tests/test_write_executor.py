@@ -3034,3 +3034,145 @@ class TestTheContractCarriesTheProcessSafetyRule:
             assert "## Process safety (required)" in text, kind
             assert "`killall`" in text and "background servers" in text, kind
             assert text.index("## Process safety") < text.index("## Result"), kind
+
+
+class TestThePhaseRunsTheRepositorysOwnCheck:
+    """F4 (2026-09-16): the executor leg ran **no** phase-level verification.
+
+    Seven code fixes went into one file and ``apply-code-fixes`` marked itself
+    completed without once asking whether the result still parses — the two write
+    subagents *volunteered* a `node --check`, which is their initiative and not
+    the phase's guarantee. The instructions' own step named a hard-coded
+    ``pnpm typecheck && pnpm lint:fix`` for a repository that has no
+    ``package.json``.
+
+    The check is now ``driver.verify_command``: the repo's own, run once, with
+    nothing rolled back when it fails and no completion either.
+    """
+
+    def _script(self, env, body: str) -> Path:
+        """A tiny shell script standing in for a repo's typecheck."""
+        path = env.tmp_path / "verify.sh"
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return path
+
+    def _fix_task(self, env):
+        return make_write_task(
+            kind="apply_code_fixes",
+            task_id="apply-fix-batch-0",
+            prompt=f"Apply the fix to {env.root / 'src' / 'a.py'}\n\n"
+                   f"{PRIOR_CHANGES_TOKEN}\n",
+            inputs=build_inputs(plan_file=str(env.plan)),
+            batch_index=0,
+            prior_changes_id="src/a.py#abcd1234",
+            phase_dir=str(env.phase_dir),
+            declared_files=[str(env.root / "src" / "a.py")],
+            expected_ids=["f0"],
+            output_name=write_output_name("apply_code_fixes", 0),
+        )
+
+    def _run(self, env, *, verify=None, log=None, state=None, summary=None):
+        driver = {"verify_command": str(verify)} if verify else {}
+        env.use(**driver)
+        env.edits([{"path": "src/a.py", "mode": "patch", "content": "a = 2\n"}],
+                  result={"status": "applied", "ids": ["f0"],
+                          "files_touched": ["src/a.py"], "summary": "fixed"})
+        return env.scheduler(
+            [self._fix_task(env)], kind="apply_code_fixes", state=state,
+            summary_file=summary, log=(log.append if log is not None else None),
+        ).run()
+
+    def test_a_passing_command_is_recorded_and_the_phase_completes(self, env):
+        verify = self._script(env, "echo 'all good'\nexit 0\n")
+        lines = []
+        state = FakeState(env.tmp_path / "state.json")
+        result = self._run(env, verify=verify, log=lines, state=state)
+
+        assert result.exit_code == 0, result.messages
+        assert result.finalized is True
+        assert result.verification["command"] == str(verify)
+        assert result.verification["exit_code"] == 0
+        assert "all good" in result.verification["output_tail"]
+        assert result.verification["duration_seconds"] >= 0
+        assert any("verification (env)" in l and "exited 0" in l for l in lines), lines
+        # The record travels on the scheduler's own report and in the mirror.
+        report = json.loads(
+            (env.phase_dir / "write_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert report["verification"]["exit_code"] == 0
+        mirror = json.loads(
+            (env.phase_dir / ".status.json").read_text(encoding="utf-8")
+        )
+        assert mirror["progress"]["write_subagents"]["verification"]["exit_code"] == 0
+
+    def test_a_failing_command_is_exit_three_and_reverts_nothing(self, env):
+        verify = self._script(env, "echo 'a.py:1: type error'\nexit 2\n")
+        state = FakeState(env.tmp_path / "state.json")
+        summary = env.phase_dir / "summary.md"
+        result = self._run(env, verify=verify, state=state, summary=str(summary))
+
+        assert result.exit_code == 3, result.messages
+        assert result.verification["exit_code"] == 2
+        # The edit stays on disk — a revert would destroy what a human must read.
+        assert "a = 2\n" in (env.root / "src" / "a.py").read_text()
+        # ...and the phase is NOT completed, so the workflow cannot walk past it.
+        assert result.finalized is False
+        assert "apply-code-fixes" not in (state.get("phases_completed") or [])
+        blob = "\n".join(result.messages)
+        assert str(verify) in blob and "a.py:1: type error" in blob
+        assert "--resume" in blob
+        # The summary is still written: it is this run's only account.
+        text = summary.read_text(encoding="utf-8")
+        assert "**Verification**:" in text and "FAIL (exit 2)" in text
+
+    def test_no_configured_command_is_a_notice_rather_than_silence(self, env):
+        lines = []
+        summary = env.phase_dir / "summary.md"
+        result = self._run(env, log=lines, state=FakeState(env.tmp_path / "s.json"),
+                           summary=str(summary))
+
+        assert result.exit_code == 0, result.messages
+        assert result.finalized is True
+        assert result.verification is None
+        notice = [l for l in lines if "no driver.verify_command configured" in l]
+        assert len(notice) == 1, lines
+        assert "not configured" in summary.read_text(encoding="utf-8")
+        # A key that means "a check happened" is absent when none did.
+        mirror = json.loads(
+            (env.phase_dir / ".status.json").read_text(encoding="utf-8")
+        )
+        assert "verification" not in mirror["progress"]["write_subagents"]
+
+    def test_a_secret_in_the_commands_output_is_redacted_before_it_is_stored(
+        self, env
+    ):
+        """The tail lands in three durable files at once, so it is redacted
+        first — the same rule, and the same order (redact, then cap), the
+        audit log already applies to a rendered argv."""
+        verify = self._script(
+            env, "echo 'connecting with api_key=sk-ant-0123456789abcdefghij'\nexit 1\n"
+        )
+        result = self._run(env, verify=verify,
+                           state=FakeState(env.tmp_path / "state.json"))
+        assert result.exit_code == 3
+        tail = result.verification["output_tail"]
+        assert "sk-ant-0123456789abcdefghij" not in tail
+        assert "<redacted:" in tail
+
+    def test_a_plan_text_phase_skips_the_check_silently(self, env):
+        """`apply_suggestions` edits markdown; a typecheck has nothing to say."""
+        verify = self._script(env, "exit 2\n")
+        env.use(verify_command=str(verify))
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler(
+            [env.apply_task(0)], state=FakeState(env.tmp_path / "state.json"),
+            log=lines.append,
+        ).run()
+
+        assert result.exit_code == 0, result.messages
+        assert result.verification is None
+        assert not [l for l in lines if "verif" in l.lower()], lines

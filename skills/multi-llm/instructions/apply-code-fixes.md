@@ -69,7 +69,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
    - Run the batch as a subagent (every batch is `executor_role: "agent"`)
    - Wait for completion before moving to the next batch
    - This prevents conflicts from concurrent edits
-6. **Run Verification**: Execute `pnpm typecheck` after all fixes
+6. **Run Verification**: Run the repository's `driver.verify_command`, if one is configured, after all fixes
 7. **Generate Report**: Create `{prefix}_applied_fixes.md` with results
 8. **Update Plan**: Add "Code Fixes Applied" section to plan file
 9. **Mark Phase Completed**: Record `apply-code-fixes` in `state.json` — **only** when every batch was applied and verified. See step 10.
@@ -363,16 +363,27 @@ Context line for individual review display: `File: {file}, Type: {type}`
 
 ### 7. Run Verification
 
-After all fixes are applied:
+After all fixes are applied, run **the repository's `driver.verify_command`, if one
+is configured** — the check this repo declares for itself in `.multi-llm/providers.yaml`
+(`pnpm typecheck && pnpm lint:fix` in a pnpm/TypeScript repo, `cargo check`, `make test`,
+whatever it says). Run it once, from the repository root, exactly as written. Do **not**
+substitute a command of your own: a repo that declares none has declared none, and a
+guessed `pnpm typecheck` in a repo with no `package.json` reports a failure the fixes did
+not cause.
 
-```bash
-pnpm typecheck && pnpm lint:fix
-```
+If no `verify_command` is configured, say so in the summary — "not configured" is the
+honest verification status, and it is not the same as "passed".
 
-If typecheck fails:
+If the command fails:
 - Report which fix may have caused the issue
-- Mark that fix as "failed" in the summary
-- Continue with remaining fixes if possible
+- Record the command, its exit code and the tail of its output in the summary
+- Do **not** revert anything — every batch was already verified against its own
+  pre-batch snapshot, and the half-applied state is what a human needs to read
+- The phase is **not** complete: stop and hand the failure to a human
+
+On the `--exec-subagents` leg the executor does all of this itself, from the same
+`driver.verify_command` — it runs the command once after the last batch, records the
+result in `summary.md` and `.status.json`, and ends the phase at exit 3 when it fails.
 
 ### 8. Generate Summary Report
 
@@ -391,7 +402,7 @@ After all batches are processed, create `{prefix}_applied_fixes.md`:
 - Fixes skipped: N
 - Human decisions made: N
 - Decided by the judge subagent: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
-- Typecheck status: pass/fail
+- Verification: `{driver.verify_command}` pass/fail, or `not configured`
 
 ## Batching Efficiency
 - Total fixes: N
@@ -608,7 +619,7 @@ For needs-human-decision items:
 - Asks the user for a decision
 - Applies or skips based on response
 
-4. Runs verification: pnpm typecheck && pnpm lint:fix
+4. Runs verification: the repository's `driver.verify_command`, if configured
 5. Generates summary report
 6. Updates plan file with results
 7. Marks the phase completed (every batch was applied and verified)
@@ -704,7 +715,7 @@ Fix 2: [What was changed]
 4. **NEVER IMPLEMENT MANUALLY**: always **spawn subagents** to do the work
 5. **TRACK EVERYTHING**: Log every applied/skipped fix for the report
 6. **SECURITY IS ISOLATED**: Security and HIGH importance fixes are always in their own batch
-7. **VERIFY AFTER FIXES**: Run typecheck after applying all fixes
+7. **VERIFY AFTER FIXES**: Run the repository's `driver.verify_command` after applying all fixes — never a command of your own, and never nothing: a repo that configured none gets `not configured` in the report, and a non-zero exit stops the phase for a human without reverting anything
 8. **UPDATE PLAN**: Always add the results section to the plan file
 
 ---
