@@ -337,6 +337,9 @@ def load_implementation_prompt() -> str:
 ### Files to Create/Modify
 {output_files}
 
+### Changes Applied in Prior Batches
+{{prior_changes_context}}
+
 ### Instructions
 1. Implement the task as described
 2. Follow existing code patterns and conventions

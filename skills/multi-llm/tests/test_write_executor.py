@@ -920,6 +920,59 @@ class TestScheduler:
         assert result.outcomes[0].status == executor.STATUS_REJECTED
         assert PRIOR_CHANGES_TOKEN in result.outcomes[0].reason
 
+    def test_an_implement_prompt_without_the_token_fails_the_dispatch(self, env):
+        """F6: implement prompts used to be exempted from the token contract
+        (their inter-task context was the dependency section alone) and a
+        missing token silently passed through as a no-op. Since
+        ``prompts/implementation_task.txt`` now carries the token too, a
+        producer that drops it fails the same way an apply producer's would."""
+        task = env.apply_task(
+            0, kind="implement", task_id="T001", expected_ids=["T001"],
+            output_name="implement_batch_0.json",
+            prompt="Implement T001, no token here.\n",
+        )
+        result = env.scheduler([task], kind="implement", finalize=False).run()
+        assert result.outcomes[0].status == executor.STATUS_REJECTED
+        assert PRIOR_CHANGES_TOKEN in result.outcomes[0].reason
+
+    def test_an_implement_batch_sees_the_prior_task_summary(self, env):
+        """F6: implement's inter-task context used to be the dependency
+        section's bare titles alone. With the token bound, a later task's
+        dispatched prompt now also carries the verified one-line summary
+        `prior_changes.jsonl` already records for each finished task."""
+        log = env.enable_call_log()
+
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["T001"],
+                          "files_touched": ["plans/p.md"],
+                          "summary": "T001-DONE-SUMMARY"})
+        first = env.apply_task(
+            0, kind="implement", task_id="T001", expected_ids=["T001"],
+            output_name="implement_batch_0.json",
+        )
+        env.scheduler([first], kind="implement", finalize=False).run()
+
+        env.edits([_patch_edit(env.plan, "edit-1\n")],
+                  result={"status": "applied", "ids": ["T002"],
+                          "files_touched": ["plans/p.md"],
+                          "summary": "T002-DONE-SUMMARY"})
+        second = env.apply_task(
+            1, kind="implement", task_id="T002", expected_ids=["T002"],
+            output_name="implement_batch_1.json", depends_on=["T001"],
+        )
+        result = env.scheduler([second], kind="implement", finalize=False).run()
+        assert result.exit_code == 0, result.messages
+
+        dispatched = [json.loads(l) for l in log.read_text().splitlines() if l]
+        second_prompt = [
+            r["prompt"] for r in dispatched
+            if "batch 1" in (r.get("prompt") or "")
+        ][-1]
+        assert "T001-DONE-SUMMARY" in second_prompt
+        assert PRIOR_CHANGES_TOKEN not in second_prompt
+        # The materialized task JSON is never rewritten.
+        assert PRIOR_CHANGES_TOKEN in second["prompt"]
+
     def test_finalization_runs_and_writes_the_summary_and_plan_reference(self, env):
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
@@ -1495,10 +1548,10 @@ class TestEveryWriteKindClosesTheLoop:
     }
 
     def _task(self, env, kind):
+        # Every write kind's prompt carries the token, implement included since
+        # F6 (2026-09-16) — it no longer gets the no-token exemption.
         artifact = env.root / self.KIND_ARTIFACT[kind]
-        prompt = f"Do the {kind} work on {artifact}\n"
-        if kind != "implement":
-            prompt += f"\n{PRIOR_CHANGES_TOKEN}\n"
+        prompt = f"Do the {kind} work on {artifact}\n\n{PRIOR_CHANGES_TOKEN}\n"
         return make_write_task(
             kind=kind,
             task_id=f"{kind}-0",

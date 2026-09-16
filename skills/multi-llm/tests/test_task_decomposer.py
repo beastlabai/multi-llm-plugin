@@ -386,6 +386,118 @@ It explains what needs to be done.
         assert "Files to create" not in result
         assert "Narrative text" in result
 
+    def test_removes_executor_section(self):
+        """F6: the D2h `**Executor**: agent` line update_plan_tasks.py renders
+        for every generated task used to survive into the description and become
+        every dependent task's only inter-task context."""
+        description = """Narrative text.
+
+**Executor**: agent
+"""
+        decomposer = TaskDecomposer()
+        result = decomposer._strip_metadata_sections(description)
+        assert "Executor" not in result
+        assert "agent" not in result
+        assert "Narrative text" in result
+
+    def test_removes_executor_role_section(self):
+        """The `Executor role` spelling a hand-written plan may carry."""
+        description = """Narrative text.
+
+**Executor role**: human
+"""
+        decomposer = TaskDecomposer()
+        result = decomposer._strip_metadata_sections(description)
+        assert "Executor" not in result
+        assert "Narrative text" in result
+
+    def test_generated_task_description_does_not_start_with_the_executor_line(self):
+        """The exact shape update_plan_tasks.py renders: Complexity, Executor,
+        blank line, narrative, Acceptance Criteria — this is what an implement
+        task's description looked like end to end before F6."""
+        description = (
+            "**Dependencies**: None\n"
+            "**Files to modify**: src/security.py\n"
+            "**Files to create**: none\n"
+            "**Complexity**: low\n"
+            "**Executor**: agent\n"
+            "\n"
+            "Replace the plain equality check with a constant-time comparison.\n"
+            "\n"
+            "**Acceptance Criteria**:\n"
+            "- [ ] compare_tokens uses hmac.compare_digest"
+        )
+        decomposer = TaskDecomposer()
+        result = decomposer._strip_metadata_sections(description)
+        assert result == (
+            "Replace the plain equality check with a constant-time comparison."
+        )
+        assert not result.lstrip().startswith("**Executor**")
+
+
+class TestExecutorRoleSurvivesStripping:
+    """F6, order safety net: `_extract_executor_role` reads the *raw* description
+    before `_strip_metadata_sections` runs (`parse_plan` calls them in that order),
+    so stripping the Executor line can never affect routing — but a future
+    reordering of those two calls would silently break it, and only an
+    end-to-end `parse_plan` catches that (a unit test on the stripper alone
+    wouldn't notice)."""
+
+    def test_agent_task_round_trips_through_parse_plan(self):
+        plan = """## Task T001: Do the thing
+
+**Dependencies**: None
+**Files to modify**: src/security.py
+**Files to create**: none
+**Complexity**: low
+**Executor**: agent
+
+Replace the plain equality check with a constant-time comparison.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.executor_role == "agent"
+        assert not task.description.lstrip().startswith("**Executor**")
+        assert task.description == (
+            "Replace the plain equality check with a constant-time comparison."
+        )
+
+    def test_human_task_round_trips_through_parse_plan(self):
+        """The rendered manual marker (`update_plan_tasks.py`'s human wording)
+        keeps routing to `human` — unaffected by the Executor-line fix, since
+        human tasks render `**Type**: Manual`, not `**Executor**:`."""
+        plan = """## Task T014: Verify in a browser
+
+**Dependencies**: None
+**Files to modify**: none
+**Files to create**: none
+**Complexity**: low
+**Type**: Manual (user action required)
+
+Open the page and confirm it renders.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert len(tasks) == 1
+        assert tasks[0].executor_role == "human"
+
+    def test_hand_written_executor_human_line_round_trips(self):
+        """A hand-written plan may spell the human marker as `**Executor**:
+        human` rather than the rendered `**Type**: Manual` wording; the role
+        still resolves to human even though the line is now stripped from the
+        narrative too."""
+        plan = """## Task T099: Rotate a credential
+
+**Executor**: human
+
+Rotate the signing key in the vault UI.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.executor_role == "human"
+        assert "Executor" not in task.description
+
 
 class TestFileOverlapDetection:
     """Tests for file-overlap detection in get_parallel_batches()."""

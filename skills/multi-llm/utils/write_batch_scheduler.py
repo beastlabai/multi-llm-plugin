@@ -671,26 +671,29 @@ class WriteBatchScheduler:
         task JSON is never rewritten: this produces the dispatched prompt only, and
         the audit record stores its hash and length rather than its bytes.
 
-        For the three **apply** kinds a prompt that never contained the token is a
-        contract error, not a convenience: all three batchers embed it
-        (``utils/suggestion_batcher.py:359``, ``utils/code_fix_batcher.py:307``,
-        ``apply_task_suggestions_orchestrator.py:543``), so its absence means the
-        producer changed and every later batch would run without prior-batch
-        context while looking fine. ``implement`` prompts legitimately carry no
-        token — their inter-task context is the dependency section
-        ``implement_orchestrator._build_dependency_section`` renders — so the
-        substitution is a no-op there rather than a refusal.
+        A prompt that never contained the token is a contract error, not a
+        convenience: every batcher embeds it (``utils/suggestion_batcher.py:359``,
+        ``utils/code_fix_batcher.py:307``, ``apply_task_suggestions_orchestrator.py:543``,
+        ``prompts/implementation_task.txt``), so its absence means the producer
+        changed and every later batch would run without prior-batch context while
+        looking fine. ``implement`` used to be the one kind exempted — its prompt
+        carried no token and this fell through as a no-op — on the theory that its
+        inter-task context is the dependency section
+        ``implement_orchestrator._build_dependency_section`` renders instead. That
+        section names only the *titles* of preceding tasks (F6, 2026-09-16): a
+        verified one-line summary of what each batch actually did already exists in
+        ``prior_changes.jsonl``, so implement prompts now carry the token too and
+        get the same binding, refusal included, as every other kind.
         """
         prompt = str(task.get("prompt") or "")
         if PRIOR_CHANGES_TOKEN not in prompt:
-            if self.kind == "implement":
-                return prompt
             raise ResultRejected(
                 f"Task {task.get('task_id')}: its prompt does not contain the "
                 f"{PRIOR_CHANGES_TOKEN} token, so there is nowhere to bind the "
                 f"prior-batch context. Every apply/implement prompt must carry it "
                 f"(utils/suggestion_batcher.py, utils/code_fix_batcher.py, "
-                f"apply_task_suggestions_orchestrator.py). Nothing was dispatched.",
+                f"apply_task_suggestions_orchestrator.py, "
+                f"prompts/implementation_task.txt). Nothing was dispatched.",
                 STATUS_REJECTED,
             )
         context = _prior_changes.render(self.output_dir)

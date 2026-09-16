@@ -468,7 +468,19 @@ class TaskDecomposer:
         - Dependencies
         - Complexity
         - Subagent
+        - Executor
         - Acceptance Criteria
+
+        ``**Executor**: {role}`` is what ``update_plan_tasks.py`` renders for every
+        non-human task (the D2h `subagent_type` -> `executor_role` rename was not
+        carried into this stripper), so every generated task's description used to
+        begin with that literal line. Cosmetic in the Task section a subagent reads
+        directly, but load-bearing in ``implement_orchestrator._build_dependency_section``,
+        which renders "title + first line of description" as a later task's *only*
+        inter-task context — so every dependency summary read `**Executor**: agent`
+        instead of the predecessor's actual work (F6, 2026-09-16). The role itself is
+        read off the *raw* description by :meth:`_extract_executor_role` before this
+        method ever runs, so stripping the line here cannot affect routing.
 
         Args:
             description: Raw task description markdown
@@ -483,6 +495,7 @@ class TaskDecomposer:
             r'depends?\s+on',
             r'complexity',
             r'subagent(?:\s+type)?',
+            r'executor(?:\s+role)?',
             r'acceptance\s+criteria',
         ]
 
