@@ -2821,9 +2821,12 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
 class TestTheContractCarriesTheProcessSafetyRule:
     """Every write kind's dispatched prompt forbids process-wide signals.
 
-    The implement template carries the rule in its own ``## Constraints``; the
-    apply batchers build their prompts inline and never had one, so the shared
-    result-contract seam is where all four kinds pick it up.
+    N3 (2026-09-16): the implement template used to carry the rule a second
+    time in its own ``## Constraints``, which duplicated this seam and
+    stranded the template's terminal "Proceed with the implementation." ahead
+    of two more required sections. It is gone from the template now — this
+    shared result-contract seam is the only place any of the four kinds picks
+    the rule up.
     """
 
     def test_every_write_kind_is_told_never_to_kill(self, tmp_path):

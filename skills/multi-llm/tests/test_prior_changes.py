@@ -20,6 +20,7 @@ from utils.prior_changes import (
     append,
     entries as read_entries,
     entry_id,
+    render,
     stable_key,
 )
 
@@ -576,3 +577,95 @@ class TestEntryId:
         assert append(out, eid, "apply-suggestions", "first") is True
         assert append(out, eid, "apply-suggestions", "again") is False
         assert len(read_entries(out)) == 1
+
+
+class TestRenderPhaseFiltering:
+    """`render(output_dir, phase=...)` prefers a phase's own entries (N8).
+
+    The log is one file shared by every write phase a plan ever runs; without
+    filtering, a phase's inter-task context competes for its budget with
+    however many batches earlier phases logged. `phase=None` stays today's
+    unfiltered tail.
+    """
+
+    def test_no_phase_argument_is_unfiltered(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        append(out, "s1", "apply-suggestions", "Applied A")
+        append(out, "s2", "implement", "Did B")
+
+        assert render(out) == render(out, phase=None)
+        output = render(out)
+        assert "Applied A" in output
+        assert "Did B" in output
+        assert "other phases" not in output
+
+    def test_prefers_same_phase_entries_over_other_phases(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        append(out, "s1", "apply-suggestions", "Applied A")
+        append(out, "s2", "apply-task-suggestions", "Applied B")
+        append(out, "t1", "implement", "T001: did the thing")
+        append(out, "t2", "implement", "T002: did another thing")
+
+        output = render(out, phase="implement")
+
+        assert "T001: did the thing" in output
+        assert "T002: did another thing" in output
+        assert "Applied A" not in output
+        assert "Applied B" not in output
+        assert "... and 2 earlier batches from other phases" in output
+
+    def test_no_same_phase_entries_falls_back_to_unfiltered(self, tmp_path: Path) -> None:
+        """A phase's first-ever dispatch has no entries of its own to prefer."""
+        out = str(tmp_path)
+        append(out, "s1", "apply-suggestions", "Applied A")
+        append(out, "s2", "apply-task-suggestions", "Applied B")
+
+        filtered = render(out, phase="implement")
+        assert filtered == render(out)
+        assert "Applied A" in filtered
+        assert "Applied B" in filtered
+        assert "other phases" not in filtered
+
+    def test_same_phase_numbering_is_scoped_to_that_phase(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        append(out, "s1", "apply-suggestions", "Applied A")
+        append(out, "s2", "apply-suggestions", "Applied B")
+        append(out, "t1", "implement", "T001 done")
+
+        output = render(out, phase="implement")
+        lines = output.splitlines()
+        assert lines[0] == "1. **Batch 1** (t1): T001 done"
+        assert lines[1] == "... and 2 earlier batches from other phases"
+
+    def test_phase_scoped_tail_respects_the_entry_cap(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        for i in range(7):
+            append(out, f"o{i}", "apply-suggestions", f"other {i}")
+        for i in range(20):
+            append(out, f"i{i}", "implement", f"T{i:03d} summary")
+
+        output = render(out, phase="implement")
+
+        # DEFAULT_TAIL (15) caps same-phase entries; the oldest 5 of the 20
+        # implement entries are summarized, independent of the 7 other-phase
+        # entries, which are reported separately.
+        assert "... and 5 earlier batches applied miscellaneous changes" in output
+        assert "... and 7 earlier batches from other phases" in output
+        assert "T004 summary" not in output
+        assert "T019 summary" in output
+
+    def test_phase_scoped_output_still_respects_max_chars(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        for i in range(5):
+            append(out, f"o{i}", "apply-suggestions", "x" * 300)
+        for i in range(20):
+            append(out, f"i{i}", "implement", "y" * 300)
+
+        output = render(out, phase="implement")
+
+        assert "... and 5 earlier batches from other phases" in output
+        assert "earlier batches applied miscellaneous changes" in output
+        # The trailer is appended after the MAX_CHARS trim, so only it may
+        # push the total past the budget.
+        trailer = "\n... and 5 earlier batches from other phases"
+        assert len(output) <= MAX_CHARS + len(trailer)

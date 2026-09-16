@@ -544,18 +544,44 @@ class TestBuildTaskPromptAcceptanceCriteria:
         assert result.index(ACCEPTANCE_CRITERIA_FRAMING) < result.index("- [ ] ")
         assert "do not attempt the browser or manual steps yourself" in result
 
-    def test_the_prompt_forbids_signals_and_background_processes(self):
+    def test_the_dispatched_prompt_forbids_signals_and_background_processes(self):
         """The other half of F2: the shipped `## Constraints` block said
         nothing about killing processes, so nothing told the subagent that
-        `killall` reaches the orchestrator that dispatched it."""
+        `killall` reaches the orchestrator that dispatched it.
+
+        N3, 2026-09-16: the rule moved out of this template's own
+        `## Constraints` (it now duplicated `_with_result_contract`'s shared
+        seam, and stranded the template's terminal "Proceed with the
+        implementation." in the middle of the prompt). Every write kind's
+        *dispatched* prompt still carries it — through the scheduler, not the
+        raw template — so the assertion moves with it.
+        """
+        from implement_orchestrator import build_task_prompt
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        task = Task(id="T001", title="Test Task", description="Test description")
+        prompt = build_task_prompt(task)
+
+        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
+        scheduler.kind = "implement"
+        dispatched = scheduler._with_result_contract({"expected_ids": ["T001"]}, prompt)
+
+        for forbidden in ("`kill`", "`pkill`", "`killall`"):
+            assert forbidden in dispatched, forbidden
+        assert "the orchestrator that dispatched you is a sibling process" in dispatched
+        assert "background servers" in dispatched
+        assert "verify with static checks only" in dispatched
+
+    def test_the_raw_template_no_longer_duplicates_the_shared_seam(self):
+        """The template itself should carry neither the process-safety rule
+        (it now lives once, in `_with_result_contract`) nor a stranded
+        "Proceed with the implementation." ahead of sections the scheduler
+        still has to append."""
         from utils.prompt_loader import load_prompt
 
-        constraints = load_prompt("implementation_task.txt").split("## Constraints", 1)[1]
-        for forbidden in ("`kill`", "`pkill`", "`killall`"):
-            assert forbidden in constraints, forbidden
-        assert "kills the orchestrator that dispatched you" in constraints
-        assert "background server" in constraints
-        assert "Verify with static checks only" in constraints
+        raw = load_prompt("implementation_task.txt")
+        for absent in ("`kill`", "`pkill`", "`killall`", "Proceed with the implementation."):
+            assert absent not in raw, absent
 
     def test_omits_criteria_section_when_empty(self):
         """Test build_task_prompt omits criteria section when acceptance_criteria is empty."""
@@ -608,6 +634,81 @@ class TestBuildTaskPromptAcceptanceCriteria:
             result = build_task_prompt(task)
 
         assert "Acceptance Criteria" not in result
+
+
+class TestBuildHumanTaskPrompt:
+    """`build_human_task_prompt` (N4): the checklist a human reads, and
+    nothing a runner would try to act on."""
+
+    def test_renders_title_description_and_checklist(self):
+        from implement_orchestrator import (
+            HUMAN_TASK_DEFERRAL_LINE,
+            build_human_task_prompt,
+        )
+
+        task = Task(
+            id="T014",
+            title="Manual browser verification checklist",
+            description="Walk the checklist end to end on real hardware.",
+            acceptance_criteria=["First check", "Second check"],
+        )
+
+        result = build_human_task_prompt(task)
+
+        assert "Title: Manual browser verification checklist" in result
+        assert "Description: Walk the checklist end to end on real hardware." in result
+        assert "## Checklist" in result
+        assert "- [ ] First check" in result
+        assert "- [ ] Second check" in result
+        assert result.rstrip().endswith(HUMAN_TASK_DEFERRAL_LINE)
+
+    def test_omits_checklist_section_when_no_criteria(self):
+        from implement_orchestrator import (
+            HUMAN_TASK_DEFERRAL_LINE,
+            build_human_task_prompt,
+        )
+
+        task = Task(id="T014", title="Task", description="Desc", acceptance_criteria=[])
+
+        result = build_human_task_prompt(task)
+
+        assert "## Checklist" not in result
+        assert result.rstrip().endswith(HUMAN_TASK_DEFERRAL_LINE)
+
+    def test_never_contains_agent_only_instructions(self):
+        """None of the write-subagent framing belongs in a human task's entry."""
+        from implement_orchestrator import (
+            ACCEPTANCE_CRITERIA_FRAMING,
+            build_human_task_prompt,
+        )
+
+        task = Task(
+            id="T014",
+            title="Task",
+            description="Desc",
+            acceptance_criteria=["Do the thing"],
+        )
+
+        result = build_human_task_prompt(task)
+
+        assert ACCEPTANCE_CRITERIA_FRAMING not in result
+        assert "## Constraints" not in result
+        assert "Proceed with the implementation." not in result
+        assert "kill" not in result.lower()
+
+    def test_overflow_is_reported_like_the_agent_section(self):
+        from implement_orchestrator import build_human_task_prompt
+
+        task = Task(
+            id="T014",
+            title="Task",
+            description="Desc",
+            acceptance_criteria=[f"Check {i}" for i in range(12)],
+        )
+
+        result = build_human_task_prompt(task)
+
+        assert "_(+2 more criteria; see full plan)_" in result
 
 
 class TestBuildTaskPromptDependencySection:
@@ -871,6 +972,65 @@ class TestFormatTaskForOutput:
 
         assert result["is_human"] is True
         assert result["subagent_type"] == "human"
+
+    def test_human_task_entry_is_the_checklist_not_a_dispatchable_prompt(self):
+        """N4, 2026-09-16: a materialized human task used to get the full
+        write-subagent template — acceptance-criteria framing that says "do
+        not attempt the browser or manual steps yourself" for a task that
+        *is* the browser/manual steps, a `## Constraints` block written for a
+        write subagent, and a terminal "Proceed with the implementation."
+        Nothing ever dispatches a human task, so none of that belongs in its
+        entry.
+        """
+        from implement_orchestrator import (
+            ACCEPTANCE_CRITERIA_FRAMING,
+            HUMAN_TASK_DEFERRAL_LINE,
+            format_task_for_output,
+        )
+
+        task = Task(
+            id="T014",
+            title="Manual browser verification checklist",
+            description="Walk the twelve-step manual checklist in a browser.",
+            subagent_type="human",
+            acceptance_criteria=[
+                "All twelve checklist items pass in a current browser.",
+                "Best lap survives a page reload.",
+            ],
+            status=TaskStatus.PENDING,
+        )
+
+        # No patching of build_task_prompt: a human entry must not reach it.
+        result = format_task_for_output(task)
+        prompt = result["prompt"]
+
+        assert "- [ ] All twelve checklist items pass in a current browser." in prompt
+        assert "- [ ] Best lap survives a page reload." in prompt
+        assert task.title in prompt
+        assert task.description in prompt
+        assert prompt.rstrip().endswith(HUMAN_TASK_DEFERRAL_LINE)
+
+        assert ACCEPTANCE_CRITERIA_FRAMING not in prompt
+        assert "do not attempt the browser or manual steps yourself" not in prompt
+        assert "## Constraints" not in prompt
+        assert "Proceed with the implementation." not in prompt
+
+    def test_non_human_task_entry_is_unaffected(self):
+        """The ordinary write-subagent template path is untouched by N4."""
+        from implement_orchestrator import format_task_for_output
+
+        task = Task(
+            id="T001",
+            title="Implement feature",
+            description="Build the feature",
+            subagent_type="general-purpose",
+            status=TaskStatus.PENDING,
+        )
+
+        with patch('implement_orchestrator.build_task_prompt', return_value="Test prompt"):
+            result = format_task_for_output(task)
+
+        assert result["prompt"] == "Test prompt"
 
     def test_is_human_flag_false_for_general_purpose(self):
         """Test that is_human is False for non-human subagent types."""
