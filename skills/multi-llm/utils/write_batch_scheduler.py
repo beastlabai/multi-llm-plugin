@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -203,6 +204,12 @@ WRITE_BATCH_REPORT_FILENAME = "write_batch_report.json"
 #: a positional kind's result filenames have never been renamed, so there is
 #: no earlier naming to be stale relative to.
 _ID_KEYED_WRITE_KINDS = frozenset({"implement"})
+
+#: The id shape the task decomposer gives implement's own tasks — mirrors
+#: ``StateManager._IMPLEMENT_TASK_ID_PATTERN`` for a state object without
+#: ``implementation_task_statuses`` (the test fakes), so "which of the flat
+#: ``task_status`` map's ids belong to THIS phase" has one answer here too.
+_IMPLEMENT_TASK_ID = re.compile(r"^T[0-9]{3}$")
 
 #: The D2g inputs binding for the results already on disk, kept beside them.
 #: A **leading dot** on purpose: reaggregation globs ``{phase_dir}/*.json`` and
@@ -946,7 +953,7 @@ class WriteBatchScheduler:
             self._retained_bytes = 0
 
     def _warn_stale_result_files(self) -> None:
-        """Name — never delete — result files an earlier naming scheme left.
+        """Name — never delete — result files no current task owns.
 
         ``implement``'s rename from the positional ``implement_batch_N.json``
         to the task-id-keyed ``implement_batch_T006.json`` (F1) left the old
@@ -958,7 +965,10 @@ class WriteBatchScheduler:
         rather than a batch position: a positional kind's filenames have
         never been renamed, and without an id to key on there is no way to
         tell "an earlier run's now-completed batch" apart from "orphaned by a
-        renumbering" — flagging those would be noise, not a finding.
+        renumbering" — flagging those would be noise, not a finding. An
+        id-keyed orphan (``implement_batch_T011.json`` from a run whose plan
+        had eleven tasks) is the other way a file ends up here, so the
+        warning does not call every one of them "an earlier naming".
         """
         if self.kind not in _ID_KEYED_WRITE_KINDS:
             return
@@ -992,8 +1002,9 @@ class WriteBatchScheduler:
         ]
         if stale:
             self.log(
-                f"[write-subagents] stale result files from an earlier "
-                f"naming, ignored: {', '.join(stale)}"
+                f"[write-subagents] result files no current task owns (an "
+                f"earlier naming, or a task the plan no longer has), ignored: "
+                f"{', '.join(stale)}"
             )
 
     def _run(self) -> SchedulerResult:
@@ -1194,6 +1205,20 @@ class WriteBatchScheduler:
             # complete — the one place the 2026-09-16 five-task skip would have
             # been visible as it happened (D3l).
             self._audit_resume_skip(outcome, task)
+            # The status the earlier run left for this task is not necessarily
+            # `completed`: the result file lands before `_record_batch_effects`
+            # saves, so a run killed in that window leaves a file resume trusts
+            # beside a `pending` nothing ever revisited — a finished phase
+            # reporting `(13/14 tasks)` with one task still `pending`
+            # (state-tracking F5, 2026-09-16). No metric: the duration was the
+            # earlier run's to measure, and a fabricated one would average in.
+            if self.state is not None:
+                with self._effects_lock:
+                    self.state.update_task_status(
+                        task_id, "completed",
+                        reason=f"resumed from {Path(outcome.output_path).name}",
+                    )
+                    self.state.save()
             return outcome
 
         try:
@@ -2136,6 +2161,9 @@ class WriteBatchScheduler:
         duration: float,
     ) -> None:
         self._audited.add(outcome.task_id)
+        # Every branch of `_classify` ends here, so this is the one place the
+        # verdict reaches the result file that resume reads (F1).
+        self._stamp_verdict(outcome)
         self.audit.completed(
             task_id=outcome.task_id, kind=self.kind, attempt=attempt,
             runner=runner, profile=profile, status=outcome.status,
@@ -2143,6 +2171,44 @@ class WriteBatchScheduler:
             files_touched=outcome.files_touched, observed=observed,
             duration_seconds=duration, reason=outcome.reason,
         )
+
+    def _stamp_verdict(self, outcome: TaskOutcome) -> None:
+        """Write the classified verdict back onto the batch's result file (F1).
+
+        ``persist_result`` runs BEFORE ``_classify``, so the file on disk
+        carries the runner's own ``status`` and nothing else — and the claim
+        is never the verdict. A runner that printed ``{"status": "applied",
+        "ids": [all of them]}`` and then died mid-edit is a partial
+        application: the loop stops at exit 3 promising "--resume
+        re-dispatches this batch", and ``_already_done`` then read that same
+        file — ``applied``, ids intersecting, a fingerprint recorded — and
+        skipped the batch as done (measured 2026-09-16, for the crash and the
+        reported-failure shapes both). The ``verdict`` key is additive (the
+        result schema admits extra properties, so the file still validates)
+        and its ``ok`` is the one bit resume needs: the same bit that decides
+        the task's ``completed``/``failed`` status and whether an inputs
+        binding is recorded, so the three records cannot disagree.
+        """
+        if not outcome.output_path:
+            return
+        path = Path(outcome.output_path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            data["verdict"] = {
+                "write_outcome": outcome.write_outcome,
+                "status": outcome.status,
+                "ok": outcome.ok,
+            }
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(str(temp), str(path))
+        except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+            self.log(
+                f"[write-subagents] warning: could not record the verdict on "
+                f"{path.name} for {outcome.task_id}: {exc}"
+            )
 
     # -- per-batch bookkeeping (D3n: append BEFORE the next substitution) ---
 
@@ -2214,11 +2280,14 @@ class WriteBatchScheduler:
                 f"{', '.join(outcome.files_touched) or 'no files changed'}"
             )
 
-            if outcome.output_path:
+            if outcome.output_path and outcome.ok:
                 # A result file only counts as this task's on resume when it was
                 # produced from these inputs (D2g/D3i). The binding is written
                 # here, under the same lock, because the file is one shared
-                # read-modify-write map for the whole phase.
+                # read-modify-write map for the whole phase — and only for an
+                # outcome that counts as done: a binding recorded for a failed
+                # or partial batch attested that its optimistic result file was
+                # current, which is half of how resume skipped it (F1).
                 self._record_fingerprint(task)
 
     def _record_metrics(
@@ -2491,6 +2560,36 @@ class WriteBatchScheduler:
             # file existing would skip exactly the batch --resume is for.
             return False
         task_id = str(task.get("task_id", ""))
+        verdict = data.get("verdict")
+        if isinstance(verdict, dict) and not verdict.get("ok", True):
+            # The scheduler's own classification, stamped by `_stamp_verdict`
+            # once `_classify` decided (F1): the file reads `applied` because
+            # that is what the runner printed before it died, and the loop
+            # stopped on it promising a re-dispatch.
+            self.log(
+                f"[write-subagents] {task_id}: {target.name} claims "
+                f"{data.get('status')!r} but the previous run classified it "
+                f"{verdict.get('write_outcome')} — re-dispatching it rather "
+                f"than resuming it (F1)."
+            )
+            return False
+        if self.state is not None and hasattr(self.state, "get_task_status"):
+            # The same fact from `state.json`, for a result file that predates
+            # the verdict stamp: `_record_batch_effects` wrote `failed` for
+            # every outcome that was not ok, and that record outlives the
+            # optimistic claim in the file.
+            try:
+                recorded_status = self.state.get_task_status(task_id)
+            except Exception:  # noqa: BLE001 - advisory, never fatal
+                recorded_status = None
+            if recorded_status == "failed":
+                self.log(
+                    f"[write-subagents] {task_id}: state.json records it "
+                    f"`failed` although {target.name} claims "
+                    f"{data.get('status')!r} — re-dispatching it rather than "
+                    f"resuming it (F1)."
+                )
+                return False
         expected = [str(item) for item in (task.get("expected_ids") or [])]
         returned = [
             str(item) for item in (data.get("ids") or [])
@@ -2634,13 +2733,17 @@ class WriteBatchScheduler:
           edit the plan and the tasks file; a typecheck has nothing to say about
           them, so they skip silently rather than nagging about a command that
           was never going to apply.
-        * **Nothing applied.** No batch dispatched means no edit to check.
+        * **Nothing applied.** No batch dispatched by this run **and** none
+          recorded applied by an earlier run of this phase
+          (:meth:`_phase_has_applied_batches`) means no edit to check.
 
         The command is a **shell string** (`&&` is in its documented shape), run
         with `cwd` at the pinned repo root — the same root every containment
         check resolves against — and bounded by `driver.verify_timeout_s`.
         """
-        if self.kind not in CODE_WRITE_KINDS or not result.batches_dispatched:
+        if self.kind not in CODE_WRITE_KINDS:
+            return True
+        if not result.batches_dispatched and not self._phase_has_applied_batches():
             return True
         command = get_verify_command(anchor=self.anchor)
         if not command:
@@ -2691,6 +2794,37 @@ class WriteBatchScheduler:
         result.messages.extend(self._verification_message(result))
         return False
 
+    def _phase_has_applied_batches(self) -> bool:
+        """Whether an earlier run of this phase left applied batches behind (F3).
+
+        The check used to gate on ``result.batches_dispatched`` alone. The
+        apply kinds re-materialize their full batch list on ``--resume`` and a
+        resume skip counts as dispatched, so their check re-ran; ``implement``
+        materializes only the tasks still owed, so after a run in which every
+        task applied and only the check failed, the resumed list was EMPTY,
+        nothing dispatched, the check never re-ran and ``_finalize`` stamped
+        the phase completed against a repository still failing its own check
+        — the exact ``--resume`` the exit-3 message had told the user to run
+        (2026-09-16). ``state.json``'s task statuses are the record that
+        survives that filter, so they answer here.
+        """
+        if self.state is None or not hasattr(self.state, "get_all_task_statuses"):
+            return False
+        try:
+            statuses = self.state.get_all_task_statuses()
+        except Exception:  # noqa: BLE001 - advisory, never fatal
+            return False
+        candidates = {str(task.get("task_id") or "") for task in self.tasks}
+        if self.kind in _ID_KEYED_WRITE_KINDS:
+            # The plan's own task ids, materialized this run or not — the flat
+            # map also holds the apply kinds' batch ids, which are not this
+            # phase's.
+            candidates |= {
+                task_id for task_id in statuses if _IMPLEMENT_TASK_ID.match(task_id)
+            }
+        candidates.discard("")
+        return any(statuses.get(task_id) == "completed" for task_id in candidates)
+
     def _verification_message(self, result: SchedulerResult) -> List[str]:
         """The exit-3 block for a failed `driver.verify_command` (F4).
 
@@ -2712,11 +2846,15 @@ class WriteBatchScheduler:
         if tail:
             lines.append("Last output:")
             lines += [f"  {line}" for line in tail.splitlines()[-20:]]
+        applied = (
+            f"batches {', '.join(str(i) for i in result.batches_dispatched)} "
+            f"are applied"
+            if result.batches_dispatched
+            else "every batch an earlier run of this phase applied is still applied"
+        )
         lines += [
-            f"Nothing was rolled back: batches "
-            f"{', '.join(str(i) for i in result.batches_dispatched)} are applied "
-            f"and their pre-batch snapshots are intact under "
-            f"{os.path.join(self.phase_dir, 'pre_batch')}/.",
+            f"Nothing was rolled back: {applied} and the pre-batch snapshots "
+            f"are intact under {os.path.join(self.phase_dir, 'pre_batch')}/.",
             "Fix the repository (or the fix the batches applied), then re-invoke "
             "with --resume: every batch is already done, so nothing is "
             "re-dispatched and only the check runs again.",

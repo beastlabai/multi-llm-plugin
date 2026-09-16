@@ -1142,6 +1142,27 @@ class TestFormatBatchesForOutput:
                      status=TaskStatus.COMPLETED, executor_role="human")
         assert format_batches_for_output([[human]], skip_completed=True) == []
 
+    def test_a_resume_re_materializes_a_failed_task_and_an_in_progress_one(self):
+        """A task the last run recorded `failed` is exactly what `--resume`
+        is for, and a PENDING-only filter dropped it: the scheduler never saw
+        it, ran the rest and stamped the phase completed with the task undone
+        (2026-09-16). `in_progress` is a run killed mid-dispatch, same debt.
+        """
+        from implement_orchestrator import format_batches_for_output
+
+        done = Task(id="T001", title="Task 1", description="d",
+                    status=TaskStatus.COMPLETED)
+        failed = Task(id="T002", title="Task 2", description="d",
+                      status=TaskStatus.FAILED)
+        killed = Task(id="T003", title="Task 3", description="d",
+                      status=TaskStatus.IN_PROGRESS)
+        pending = Task(id="T004", title="Task 4", description="d",
+                       status=TaskStatus.PENDING)
+        result = format_batches_for_output([[done, failed, killed, pending]],
+                                           skip_completed=True)
+
+        assert [t["id"] for t in result[0]["tasks"]] == ["T002", "T003", "T004"]
+
 
 class TestResumeMaterializationNamesResultsByTaskId:
     """The `--resume` re-materialization must not rename anyone's result file.
@@ -2340,7 +2361,7 @@ class TestImplementTasksFileIsStamped:
         seen = {}
 
         def fake_materialize(*, kind, batches, phase_dir, plan_file, tasks_file=None,
-                              grouped_file=None, output_name_index=None):
+                              grouped_file=None):
             seen["materialize"] = tasks_file
             return []
 
@@ -2408,7 +2429,7 @@ class TestImplementTasksFileIsStamped:
         seen = {}
 
         def fake_materialize(*, kind, batches, phase_dir, plan_file, tasks_file=None,
-                              grouped_file=None, output_name_index=None):
+                              grouped_file=None):
             seen["materialize"] = tasks_file
             return []
 

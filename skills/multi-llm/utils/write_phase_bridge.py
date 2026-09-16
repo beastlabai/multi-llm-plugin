@@ -210,7 +210,6 @@ def materialize_write_tasks(
     plan_file: str,
     tasks_file: Optional[str] = None,
     grouped_file: Optional[str] = None,
-    output_name_index: Optional[Callable[[int], int]] = None,
 ) -> List[Dict[str, Any]]:
     """Convert a phase's batch payload into materialized write tasks (D2g shape).
 
