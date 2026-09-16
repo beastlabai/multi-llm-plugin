@@ -250,6 +250,83 @@ class TestPhaseTrackingPersistence:
         assert state4.is_phase_completed("implement")
 
 
+class TestReloadAdoptsAnotherWritersState:
+    """F3: `save()` dumps this object's dict wholesale and never merges, so a
+    file-level helper's write (`finalize_tracking.py`) is erased by the next
+    one unless the caller adopts the file first."""
+
+    def test_reload_picks_up_what_another_writer_added(self, sample_plan):
+        state = StateManager(sample_plan)
+        state.mark_phase_completed("implement")
+        state.save()
+
+        # Stand in for finalize_tracking: read, add, write back.
+        on_disk = json.loads(state.state_file.read_text(encoding="utf-8"))
+        on_disk["tracked_files"] = [
+            {"path": "index.html", "action": "modified", "task_id": "implementation"}
+        ]
+        state.state_file.write_text(json.dumps(on_disk), encoding="utf-8")
+
+        state.reload()
+        state.save()
+
+        assert [f["path"] for f in state.get_tracked_files()] == ["index.html"]
+        assert json.loads(state.state_file.read_text(encoding="utf-8"))[
+            "tracked_files"][0]["path"] == "index.html"
+        # ...and nothing this object had saved before the reload was lost.
+        assert state.is_phase_completed("implement")
+
+    def test_reload_discards_unsaved_changes(self, sample_plan):
+        """Documented, and the reason callers must `save()` first."""
+        state = StateManager(sample_plan)
+        state.save()
+        state.set("branch_name", "never-saved")
+
+        state.reload()
+
+        assert state.get("branch_name") != "never-saved"
+
+    def test_reload_is_a_no_op_when_the_file_is_unreadable(self, sample_plan):
+        """A corrupt file is not worth losing the dict we hold: the next
+        `save()` rewrites it wholesale anyway."""
+        state = StateManager(sample_plan)
+        state.mark_phase_completed("implement")
+        state.save()
+        state.state_file.write_text("{ not json", encoding="utf-8")
+
+        state.reload()
+
+        assert state.is_phase_completed("implement")
+
+
+class TestMetricsGoThroughTheStateManager:
+    """F4: recording a metric through `metrics.py`'s own reader/writer put a
+    second writer on `state.json`, and the scheduler's `save()` right after it
+    erased the entry — three audited runs finished with `metrics: null`."""
+
+    def test_a_recorded_metric_survives_the_next_save(self, sample_plan):
+        state = StateManager(sample_plan)
+        state.record_metric("implement", "T001", duration_ms=1500)
+        state.save()
+
+        reloaded = StateManager(sample_plan)
+        entries = reloaded.get("metrics", {})["implement"]
+        assert [e["label"] for e in entries] == ["T001"]
+        assert entries[0]["duration_ms"] == 1500
+
+    def test_the_phase_baseline_is_stamped_and_then_cleared(self, sample_plan):
+        state = StateManager(sample_plan)
+        state.start_metrics_phase("implement", 3)
+        state.save()
+
+        assert state.get("metrics_progress")["implement"]["total_batches"] == 3
+        assert state.finish_metrics_phase("implement") is not None
+        state.save()
+        assert "metrics_progress" not in StateManager(sample_plan).state
+        # A phase that never started is a graceful no-op, not an error.
+        assert state.finish_metrics_phase("implement") is None
+
+
 class TestPhaseCompletionTimestamps:
     """Tests for phase completion timestamp handling."""
 

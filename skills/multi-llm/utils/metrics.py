@@ -115,6 +115,25 @@ def _colorize(text: str, code: str, enabled: bool) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
+    """``start_phase``'s mutation, applied to an in-memory state dict.
+
+    Split out so a holder of a live ``StateManager`` dict can record progress
+    without becoming a *second* writer of ``state.json``: the two race, and the
+    ``StateManager``'s own ``save()`` — which dumps its dict wholesale and never
+    merges — always wins. Measured 2026-09-16: three independent runs finished
+    with `metrics: null` after every batch had recorded one (F4).
+    """
+    progress = state.get("metrics_progress")
+    if not isinstance(progress, dict):
+        progress = {}
+        state["metrics_progress"] = progress
+    progress[phase] = {
+        "started_at": datetime.now().isoformat(),
+        "total_batches": int(total_batches),
+    }
+
+
 def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     """Record the start time and total batch count for a phase.
 
@@ -124,22 +143,19 @@ def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     (necessary so ``--resume`` runs reset the progress baseline).
     """
     state = _read_state(state_path)
-    if "metrics_progress" not in state:
-        state["metrics_progress"] = {}
-    state["metrics_progress"][phase] = {
-        "started_at": datetime.now().isoformat(),
-        "total_batches": int(total_batches),
-    }
+    start_phase_in_state(state, phase, total_batches)
     _write_state(state_path, state)
 
 
-def finish_phase(state_path: Path, phase: str) -> Optional[int]:
-    """Remove ``metrics_progress.{phase}`` and return total elapsed ms.
+def finish_phase_in_state(state: dict, phase: str) -> Optional[int]:
+    """``finish_phase``'s mutation, applied to an in-memory state dict.
 
-    Returns None if the phase was never started (graceful no-op).
+    Returns None — leaving ``state`` untouched — when the phase was never
+    started; otherwise pops the progress entry, prints the closing ``[ETA]``
+    line and returns the elapsed milliseconds. See ``start_phase_in_state``
+    for why the in-memory form exists.
     """
-    state = _read_state(state_path)
-    progress = state.get("metrics_progress", {})
+    progress = state.get("metrics_progress") or {}
     entry = progress.pop(phase, None)
     if entry is None:
         return None
@@ -159,13 +175,25 @@ def finish_phase(state_path: Path, phase: str) -> Optional[int]:
     else:
         state["metrics_progress"] = progress
 
-    _write_state(state_path, state)
-
     color_on = _should_colorize_stderr()
     complete_segment = _colorize(
         f"phase complete in {format_duration(elapsed_ms)}", "1;32", color_on,
     )
     print(f"[ETA] {phase}: {complete_segment}", file=sys.stderr)
+    return elapsed_ms
+
+
+def finish_phase(state_path: Path, phase: str) -> Optional[int]:
+    """Remove ``metrics_progress.{phase}`` and return total elapsed ms.
+
+    Returns None if the phase was never started (graceful no-op).
+    """
+    state = _read_state(state_path)
+    if phase not in (state.get("metrics_progress") or {}):
+        # Never started: nothing to mutate, so nothing to write back.
+        return None
+    elapsed_ms = finish_phase_in_state(state, phase)
+    _write_state(state_path, state)
     return elapsed_ms
 
 
@@ -270,6 +298,73 @@ def normalize_recorded_executor(value: str) -> str:
     return value
 
 
+def record_metric_in_state(
+    state: dict,
+    phase: str,
+    label: str,
+    subagent_type: Optional[str] = None,
+    token_count: Optional[int] = None,
+    tool_uses: Optional[int] = None,
+    duration_ms: Optional[int] = None,
+    total_batches: Optional[int] = None,
+    batch_index: Optional[int] = None,
+) -> Optional[str]:
+    """``record_metric``'s mutation, applied to an in-memory state dict.
+
+    Returns the rendered ``[ETA]`` line when ``total_batches`` and
+    ``batch_index`` are both given, so the caller decides *where* it goes —
+    stderr for the CLI, the phase log for the scheduler — and nothing is
+    printed for a caller that wants none. See ``start_phase_in_state`` for why
+    the in-memory form exists.
+    """
+    metrics = state.get("metrics")
+    if not isinstance(metrics, dict):
+        # Tolerate the `metrics: null` some older state files carry: `"metrics"
+        # not in state` was True for a dict and False for a null, so a null
+        # would have raised here rather than being replaced.
+        metrics = {}
+        state["metrics"] = metrics
+    entries = metrics.get(phase)
+    if not isinstance(entries, list):
+        entries = []
+        metrics[phase] = entries
+
+    entry = {
+        "label": label,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if subagent_type is not None:
+        # D2h: the flag name and the JSON key stay put (this is a CLI surface
+        # with recorded history in existing metrics.json files); what goes *in*
+        # becomes the host-neutral executor role. `general-purpose` carried no
+        # information — it is pure Claude Code vocabulary — so it is normalized
+        # to `agent`. A resolved `provider:model` runner spec (the executor path)
+        # or any other value passes through verbatim.
+        entry["subagent_type"] = normalize_recorded_executor(subagent_type)
+    if token_count is not None:
+        entry["token_count"] = token_count
+    if tool_uses is not None:
+        entry["tool_uses"] = tool_uses
+    if duration_ms is not None:
+        entry["duration_ms"] = duration_ms
+
+    entries.append(entry)
+
+    if total_batches is None or batch_index is None:
+        return None
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    result = _compute_eta(
+        entries=entries,
+        progress=progress,
+        phase=phase,
+        batch_index=batch_index,
+        total_batches=total_batches,
+        this_duration_ms=duration_ms,
+        colorize=_should_colorize_stderr(),
+    )
+    return result["line"]
+
+
 def record_metric(
     state_path: Path,
     phase: str,
@@ -306,47 +401,21 @@ def record_metric(
         print_eta: When False, suppresses ETA stderr output.
     """
     state = _read_state(state_path)
-
-    if "metrics" not in state:
-        state["metrics"] = {}
-    if phase not in state["metrics"]:
-        state["metrics"][phase] = []
-
-    entry = {
-        "label": label,
-        "timestamp": datetime.now().isoformat(),
-    }
-    if subagent_type is not None:
-        # D2h: the flag name and the JSON key stay put (this is a CLI surface
-        # with recorded history in existing metrics.json files); what goes *in*
-        # becomes the host-neutral executor role. `general-purpose` carried no
-        # information — it is pure Claude Code vocabulary — so it is normalized
-        # to `agent`. A resolved `provider:model` runner spec (the executor path)
-        # or any other value passes through verbatim.
-        entry["subagent_type"] = normalize_recorded_executor(subagent_type)
-    if token_count is not None:
-        entry["token_count"] = token_count
-    if tool_uses is not None:
-        entry["tool_uses"] = tool_uses
-    if duration_ms is not None:
-        entry["duration_ms"] = duration_ms
-
-    state["metrics"][phase].append(entry)
+    eta_line = record_metric_in_state(
+        state,
+        phase,
+        label,
+        subagent_type=subagent_type,
+        token_count=token_count,
+        tool_uses=tool_uses,
+        duration_ms=duration_ms,
+        total_batches=total_batches,
+        batch_index=batch_index,
+    )
     _write_state(state_path, state)
 
-    if print_eta and total_batches is not None and batch_index is not None:
-        entries = state["metrics"][phase]
-        progress = state.get("metrics_progress", {}).get(phase)
-        result = _compute_eta(
-            entries=entries,
-            progress=progress,
-            phase=phase,
-            batch_index=batch_index,
-            total_batches=total_batches,
-            this_duration_ms=duration_ms,
-            colorize=_should_colorize_stderr(),
-        )
-        print(result["line"], file=sys.stderr)
+    if print_eta and eta_line:
+        print(eta_line, file=sys.stderr)
 
 
 def generate_phase_report(state_path: Path, phase: str) -> str:

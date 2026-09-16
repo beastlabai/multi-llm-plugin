@@ -15,12 +15,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.metrics import (
     _compute_eta,
     finish_phase,
+    finish_phase_in_state,
     format_duration,
     format_number,
     generate_all_phases_report,
     generate_phase_report,
     record_metric,
+    record_metric_in_state,
     start_phase,
+    start_phase_in_state,
 )
 
 
@@ -612,6 +615,77 @@ class TestMetricsEdgeCases:
 
         # Totals should still be correct
         assert "**3,000**" in report  # 1000 + 2000
+
+
+class TestTheInMemoryMutators:
+    """F4: a holder of a live ``StateManager`` dict has to record metrics
+    without becoming a second writer of ``state.json`` — the two race, and the
+    ``StateManager``'s own wholesale ``save()`` always wins."""
+
+    def test_recording_into_a_dict_writes_no_file(self, tmp_path):
+        state_file = _create_state(tmp_path)
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+
+        record_metric_in_state(state, "implement", "T001", duration_ms=1200)
+
+        assert state["metrics"]["implement"][0]["label"] == "T001"
+        # Nothing reached disk: persisting is the dict owner's job.
+        assert "metrics" not in json.loads(state_file.read_text(encoding="utf-8"))
+
+    def test_a_null_metrics_key_is_replaced_rather_than_indexed(self):
+        """Real state files carry `metrics: null`, and `"metrics" not in state`
+        is False for one — the old guard would have raised on it."""
+        state = {"metrics": None}
+
+        record_metric_in_state(state, "implement", "T001")
+
+        assert state["metrics"]["implement"][0]["label"] == "T001"
+
+    def test_the_eta_line_is_returned_and_never_printed(self, capsys):
+        state = {}
+        start_phase_in_state(state, "implement", 4)
+
+        line = record_metric_in_state(
+            state, "implement", "T001", duration_ms=1000,
+            total_batches=4, batch_index=1,
+        )
+
+        assert line.startswith("[ETA] implement: batch 1/4")
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == ""
+
+    def test_no_eta_without_both_halves_of_the_batch_position(self):
+        state = {}
+        assert record_metric_in_state(state, "implement", "T001") is None
+        assert record_metric_in_state(
+            state, "implement", "T002", total_batches=4
+        ) is None
+
+    def test_finishing_a_phase_that_never_started_leaves_the_dict_alone(self):
+        state = {"metrics_progress": {"code-review": {"started_at": "x"}}}
+
+        assert finish_phase_in_state(state, "implement") is None
+        assert state["metrics_progress"] == {"code-review": {"started_at": "x"}}
+
+    def test_the_file_level_pair_still_round_trips_through_the_mutators(
+        self, tmp_path
+    ):
+        """The CLI leg is now a read/mutate/write wrapper; its observable
+        behaviour must not have moved."""
+        state_file = _create_state(tmp_path)
+
+        start_phase(state_file, "implement", 2)
+        assert json.loads(state_file.read_text())["metrics_progress"][
+            "implement"]["total_batches"] == 2
+
+        record_metric(state_path=state_file, phase="implement", label="T001",
+                      duration_ms=1000, print_eta=False)
+        assert len(json.loads(state_file.read_text())["metrics"]["implement"]) == 1
+
+        assert finish_phase(state_file, "implement") is not None
+        assert "metrics_progress" not in json.loads(state_file.read_text())
+        # A second finish is the documented graceful no-op.
+        assert finish_phase(state_file, "implement") is None
 
 
 class _ClockController:
