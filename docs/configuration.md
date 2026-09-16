@@ -66,8 +66,10 @@ prints the path), so you can port any custom settings into the regenerated file.
   batch applied. Left unset, those phases say so in one line rather than completing
   unchecked; a non-zero exit reverts nothing (every batch was already verified
   against its own snapshot) but ends the phase at exit 3 with the command and the
-  tail of its output. `driver.verify_timeout_s` bounds it (default 600 s). The
-  markdown apply phases never run it.
+  tail of its output. `driver.verify_timeout_s` bounds it (default 600 s), and
+  the bound is on the command's whole process group rather than on the
+  `/bin/sh` that started it, so a hung `tsc` is killed rather than orphaned.
+  The markdown apply phases never run it.
 
 ## Safety
 
@@ -76,11 +78,19 @@ selects — but never *what executes* on the model path: provider binaries are
 hardcoded and the config `command` field is never run, in any layer. The one key
 that *is* executed is `driver.verify_command`, and only by a write phase you asked
 for, after it edited that same repo with an agent CLI — the run prints the command
-and the config layer it came from before running it. Treat an untrusted repo's
-override the way you would its `Makefile`. The override now deep-merges its full
-contents (including a `providers:` block) over base, exactly like the
-`MULTI_LLM_PROVIDERS_CONFIG` env layer — but since `command` is documentation-only,
-a merged block can only retune metadata (timeouts, model lists), and a provider
-name with no hardcoded adapter is ignored at runtime. A present-but-malformed
-explicit override fails fast with a clear error naming the file; set
-`MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to warn-and-skip instead.
+and the config layer it came from before it starts, and again with its exit code
+once it ends. Treat an untrusted repo's override the way you would its `Makefile`
+— and the blast radius is not only the override file: the *scripts the command
+invokes* (`package.json`'s `typecheck`, a `Makefile` target) are files the write
+subagent was just allowed to edit, and they run outside whatever sandbox the
+agent CLI had. The check runs with the host's own session variables stripped and,
+when `env_allowlist` is on, with the same deny-by-default environment a runner
+gets; otherwise it inherits the environment you launched the run with.
+
+The override now deep-merges its full contents (including a `providers:` block)
+over base, exactly like the `MULTI_LLM_PROVIDERS_CONFIG` env layer — but since
+`command` is documentation-only, a merged block can only retune metadata
+(timeouts, model lists), and a provider name with no hardcoded adapter is
+ignored at runtime. A present-but-malformed explicit override fails fast with a
+clear error naming the file; set `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to
+warn-and-skip instead.

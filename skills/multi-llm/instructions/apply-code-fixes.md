@@ -70,7 +70,7 @@ With batching, 10 fixes across 4 files might become 5-6 batches:
    - Wait for completion before moving to the next batch
    - This prevents conflicts from concurrent edits
 6. **Run Verification**: Run the repository's `driver.verify_command`, if one is configured, after all fixes
-7. **Generate Report**: Create `{prefix}_applied_fixes.md` with results
+7. **Generate Report**: Create `{plan}/apply-fixes/summary.md` with results
 8. **Update Plan**: Add "Code Fixes Applied" section to plan file
 9. **Mark Phase Completed**: Record `apply-code-fixes` in `state.json` — **only** when every batch was applied and verified. See step 10.
 
@@ -387,7 +387,9 @@ result in `summary.md` and `.status.json`, and ends the phase at exit 3 when it 
 
 ### 8. Generate Summary Report
 
-After all batches are processed, create `{prefix}_applied_fixes.md`:
+After all batches are processed, create `{plan}/apply-fixes/summary.md` — the
+same path the *Output Files* tree above lists, and the same one the
+`--exec-subagents` leg writes for itself:
 
 ```markdown
 # Applied Code Fixes Report
@@ -487,7 +489,7 @@ Add a "Code Fixes Applied" section to the plan file:
 ### Skipped
 - **Style improvement** - User skipped (LOW importance)
 
-See: [Applied Fixes Report](./my-feature/my-feature_applied_fixes.md)
+See: [Applied Fixes Report](./my-feature/apply-fixes/summary.md)
 <!-- CODE_FIXES_APPLIED_END -->
 ```
 

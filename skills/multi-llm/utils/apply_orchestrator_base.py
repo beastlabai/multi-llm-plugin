@@ -496,9 +496,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # Whether ``write_phase_artifact()`` names ONE file the phase overwrites.
     # apply-suggestions edits the plan and apply-task-suggestions the tasks file,
     # so each can snapshot its target as ``{phase}/backup.md`` before the first
-    # batch and name it as an artifact afterwards. apply-code-fixes partitions by
-    # ``file_key`` — its declared set is per batch and it has no single target —
-    # so it sets this False and does neither.
+    # batch. apply-code-fixes partitions by ``file_key`` — its declared set is
+    # per batch and it has no single target — so it sets this False and takes no
+    # backup. The backup itself is announced on stderr by ``write_target_backup``
+    # and is NOT one of the paths ``_record_write_artifacts`` publishes; what it
+    # publishes for a single-target phase is ``applied_to`` (the file itself).
     has_single_write_target: bool = True
     # Whether this phase's batches rewrite the PLAN itself. Only
     # apply-suggestions does; apply-task-suggestions edits the tasks file and

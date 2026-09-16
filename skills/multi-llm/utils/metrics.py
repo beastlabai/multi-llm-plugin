@@ -11,7 +11,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -147,12 +147,18 @@ def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     _write_state(state_path, state)
 
 
-def finish_phase_in_state(state: dict, phase: str) -> Optional[int]:
+def finish_phase_in_state(
+    state: dict, phase: str
+) -> Optional[Tuple[Optional[int], str]]:
     """``finish_phase``'s mutation, applied to an in-memory state dict.
 
     Returns None — leaving ``state`` untouched — when the phase was never
-    started; otherwise pops the progress entry, prints the closing ``[ETA]``
-    line and returns the elapsed milliseconds. See ``start_phase_in_state``
+    started; otherwise pops the progress entry and returns
+    ``(elapsed_ms, line)``, where ``line`` is the closing ``[ETA] … phase
+    complete`` line. It is **returned, not printed**, mirroring
+    ``record_metric_in_state``: the caller decides where it goes — stderr for
+    the CLI, the phase log for the scheduler, which is where every other
+    ``[ETA]`` line of that run already went (F7). See ``start_phase_in_state``
     for why the in-memory form exists.
     """
     progress = state.get("metrics_progress") or {}
@@ -179,8 +185,7 @@ def finish_phase_in_state(state: dict, phase: str) -> Optional[int]:
     complete_segment = _colorize(
         f"phase complete in {format_duration(elapsed_ms)}", "1;32", color_on,
     )
-    print(f"[ETA] {phase}: {complete_segment}", file=sys.stderr)
-    return elapsed_ms
+    return elapsed_ms, f"[ETA] {phase}: {complete_segment}"
 
 
 def finish_phase(state_path: Path, phase: str) -> Optional[int]:
@@ -192,7 +197,13 @@ def finish_phase(state_path: Path, phase: str) -> Optional[int]:
     if phase not in (state.get("metrics_progress") or {}):
         # Never started: nothing to mutate, so nothing to write back.
         return None
-    elapsed_ms = finish_phase_in_state(state, phase)
+    finished = finish_phase_in_state(state, phase)
+    if finished is None:  # pragma: no cover - guarded above
+        return None
+    elapsed_ms, line = finished
+    # The CLI leg is the one that owns stderr; the in-memory twin only returns
+    # the line (F7).
+    print(line, file=sys.stderr)
     _write_state(state_path, state)
     return elapsed_ms
 

@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
+    from . import process_control as _process_control
     from .provider_registry import (
         get_driver_provenance,
         get_max_concurrent_write_subagents,
@@ -76,6 +78,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         TaskOutcome,
         _atomic_write_json,
         _host_ceiling,
+        _host_env_guards,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -110,6 +113,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import prior_changes as _prior_changes
+    from utils import process_control as _process_control
     from utils.provider_registry import (
         get_driver_provenance,
         get_max_concurrent_write_subagents,
@@ -139,6 +143,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         TaskOutcome,
         _atomic_write_json,
         _host_ceiling,
+        _host_env_guards,
         dispatch_task,
         persist_result,
         preflight_runner,
@@ -263,6 +268,17 @@ CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
 #: build prints megabytes and what names the failure is the end of it.
 VERIFY_TAIL_CHARS = 2000
 
+#: How much of the command's output is read back off disk before redaction and
+#: the tail cap above. `capture_output=True` buffered a whole build in this
+#: process to hand 2000 characters of it to a report (F6); a bounded read off the
+#: end of the capture file is the same tail at a fixed cost.
+VERIFY_OUTPUT_CAP_BYTES = 64 * 1024
+
+#: SIGTERM→SIGKILL grace for a timed-out command's process group, then how long
+#: the reaping wait holds. The same shape `subagent_executor` uses on a runner.
+VERIFY_KILL_GRACE_S = 0.5
+VERIFY_REAP_S = 5.0
+
 #: Recorded when the command produced no exit status of its own, in the shell's
 #: own vocabulary so a reader of `verification.exit_code` learns nothing private.
 VERIFY_EXIT_TIMEOUT = 124
@@ -334,19 +350,6 @@ def _redacted_text(text: str) -> str:
     except ImportError:  # pragma: no cover
         from utils.write_safety import redact_text
     return redact_text(text)
-
-
-def _decoded(chunk: Any) -> str:
-    """Whatever a killed child left behind, as text (F4).
-
-    ``TimeoutExpired`` carries the bytes ``communicate`` had buffered when the
-    deadline fired, joined *before* text-mode decoding runs — so a `text=True`
-    call still gets `bytes` here, and the tail of a build that hung is exactly
-    what the operator needs to read.
-    """
-    if isinstance(chunk, bytes):
-        return chunk.decode("utf-8", errors="replace")
-    return chunk or ""
 
 
 def _under_any(path: str, roots: Sequence[str]) -> bool:
@@ -652,6 +655,16 @@ class WriteBatchScheduler:
         #: status is silently dropped, leaving resume and the report disagreeing
         #: with what actually ran.
         self._effects_lock = threading.Lock()
+        #: Dispatched-or-skipped tasks finished so far, the `[ETA]` line's
+        #: numerator (F3, 2026-09-17). It counts TASKS because the denominator
+        #: beside it does — `len(self.tasks) - human skips`, the same total
+        #: `_mirror_status` publishes — and because an `implement` batch is a
+        #: dependency level with k tasks in it: `len(batches_dispatched) + 1`
+        #: repeated the same ordinal for every member of such a batch, so a
+        #: parallelizable plan could never reach `N/N` or print
+        #: `ALL BATCHES COMPLETE`. Read and incremented under `_effects_lock`
+        #: because a disjoint group finishes on several threads.
+        self._tasks_finished = 0
         #: Task ids for which a terminal (`completed`) audit line has been
         #: written, so `_audit_terminal` can close out a dispatch that never
         #: reached `_classify` without ever double-recording one that did.
@@ -1158,6 +1171,14 @@ class WriteBatchScheduler:
 
         def dispatch_and_mirror(task: Dict[str, Any]) -> TaskOutcome:
             outcome = self._dispatch_one(task, batch_index, result)
+            if outcome.skipped:
+                # A resume-skipped task is still one of the run's finished tasks
+                # — the mirror counts it in `completed` — and its branch returns
+                # before `_record_batch_effects`, so the `[ETA]` numerator is
+                # advanced here instead, or a resumed run's last line stops short
+                # of its own total by exactly the batches it skipped (F3).
+                with self._effects_lock:
+                    self._tasks_finished += 1
             with mirror_lock:
                 outcomes_so_far.append(outcome)
                 self._mirror_status(result, finished_in_batch=outcomes_so_far)
@@ -2260,6 +2281,9 @@ class WriteBatchScheduler:
                     self.output_dir, entry_id, self.phase, summary[:400]
                 )
 
+            # Before the metric, so the `[ETA]` line this task drives carries its
+            # own 1-based position in the run (F3).
+            self._tasks_finished += 1
             self._record_metrics(task, outcome, result)
 
             if self.state is not None:
@@ -2308,17 +2332,25 @@ class WriteBatchScheduler:
         no ``metrics`` key at all after every batch had recorded one (F4).
 
         The ``[ETA]`` line's own ``batch_index``/``total_batches`` are this run's
-        own dispatch order and dispatchable count — never ``task["batch_index"]``
+        own progress and dispatchable count — never ``task["batch_index"]``
         (the plan's global decomposition index, which starts wherever a resumed
         run's first undone task sits) and never bare ``len(self.tasks)`` (which
         still counts a deferred human task). Passing those two straight through
         made every line on a resumed run read `batch 7/6 done in 0m 51s ...
-        WARNING: batch_index > total_batches` (N1, 2026-09-16):
-        ``len(result.batches_dispatched)`` is exactly "batches this run has
-        already finished" at the moment a batch starts, so ``+1`` is this
-        batch's 1-based position in the run, and ``len(self.tasks) -
-        len(result.human_plan.skipped)`` is the same denominator
-        ``_mirror_status`` already uses.
+        WARNING: batch_index > total_batches` (N1, 2026-09-16).
+
+        **Both halves count tasks** (F3, 2026-09-17). ``len(result.batches_
+        dispatched) + 1`` was the numerator, and it is a *batch* ordinal against
+        a *task* denominator: for the three apply kinds one task is one batch and
+        the two agree, but an ``implement`` dependency level with k independent
+        tasks is one batch of k — every one of those k metric entries recorded
+        the same ordinal, so a 14-task plan in 9 batches ended at
+        ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
+        ``ALL BATCHES COMPLETE``. ``self._tasks_finished`` is the count
+        ``_mirror_status`` publishes as ``completed`` (resume skips included),
+        and ``len(self.tasks) - len(result.human_plan.skipped)`` is the same
+        denominator it publishes as ``total``, so the log and ``status`` now mean
+        the same thing by the same number.
         """
         if self.state is None or not hasattr(self.state, "record_metric"):
             return
@@ -2329,7 +2361,7 @@ class WriteBatchScheduler:
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
         total_batches = len(self.tasks) - len(result.human_plan.skipped)
-        run_batch_index = len(result.batches_dispatched) + 1
+        run_batch_index = self._tasks_finished
         try:
             eta_line = self.state.record_metric(
                 self.phase,
@@ -2739,7 +2771,10 @@ class WriteBatchScheduler:
 
         The command is a **shell string** (`&&` is in its documented shape), run
         with `cwd` at the pinned repo root — the same root every containment
-        check resolves against — and bounded by `driver.verify_timeout_s`.
+        check resolves against — and bounded by `driver.verify_timeout_s`, which
+        is a bound on the whole process group and not just on `/bin/sh`
+        (:meth:`_run_verify_command`). It is logged before it starts and again
+        with its exit code once it ends.
         """
         if self.kind not in CODE_WRITE_KINDS:
             return True
@@ -2756,22 +2791,19 @@ class WriteBatchScheduler:
             return True
         timeout = get_verify_timeout_s(anchor=self.anchor)
         source = get_driver_provenance("verify_command", anchor=self.anchor)
+        # Announced BEFORE it runs, which is what `docs/configuration.md`'s
+        # safety section already promises of the one config key whose value is
+        # executed: the only line used to be written once the command returned,
+        # so a 600 s check left a detached run's log silent about what it was
+        # waiting on — and naming it is the whole mitigation for an untrusted
+        # repo's override (F6/F3a, 2026-09-16). The closing line below still
+        # reports the exit code and the duration.
+        self.log(
+            f"[write-subagents] verification ({source}): running "
+            f"`{_redacted_text(command)}` (timeout {timeout}s)"
+        )
         started = time.monotonic()
-        try:
-            proc = subprocess.run(  # noqa: S602 - a shell string is the contract
-                command, shell=True, cwd=self.repo_root,
-                capture_output=True, text=True, timeout=timeout,
-            )
-            exit_code = int(proc.returncode)
-            output = (proc.stdout or "") + (proc.stderr or "")
-        except subprocess.TimeoutExpired as exc:
-            exit_code = VERIFY_EXIT_TIMEOUT
-            output = _decoded(exc.stdout) + _decoded(exc.stderr) + (
-                f"\n(no output for {timeout}s — killed)"
-            )
-        except OSError as exc:  # pragma: no cover - the shell itself is missing
-            exit_code = VERIFY_EXIT_NOT_RUN
-            output = f"verification command could not be started: {exc}"
+        exit_code, output = self._run_verify_command(command, timeout)
         duration = time.monotonic() - started
         # Redact BEFORE the tail cap, the same order the audit log uses: a build
         # that echoes a token into its log would otherwise put it in
@@ -2824,6 +2856,137 @@ class WriteBatchScheduler:
             }
         candidates.discard("")
         return any(statuses.get(task_id) == "completed" for task_id in candidates)
+
+    def _run_verify_command(self, command: str, timeout: int) -> Tuple[int, str]:
+        """Run the shell string; return ``(exit_code, output)`` (F3/F4, F6).
+
+        Three things the old one-line ``subprocess.run(shell=True, timeout=…)``
+        could not do, each measured 2026-09-16:
+
+        * **Stop the check.** ``run``'s timeout SIGKILLs ``/bin/sh`` and nothing
+          else, and the documented ``pnpm typecheck && pnpm lint:fix`` shape is
+          exactly the one where the shell cannot exec into the command — so the
+          phase reported ``exited 124`` while ``node`` kept the CPU, reparented
+          to init. The child is its own process-group leader here
+          (``process_control.new_process_group_kwargs``) and a timeout takes the
+          whole group down through ``kill_tree``, the same facade and the same
+          escalation the runner spawn uses.
+        * **Bound the wait.** A grandchild that inherited the capture pipes keeps
+          ``communicate()`` blocked past the deadline, so ``verify_timeout_s``
+          was not a bound at all. Both streams go to one temp file instead:
+          ``wait`` bounds on the direct child, and no descriptor this process
+          reads is held by anything that outlived the kill.
+        * **Bound the memory.** Only the last :data:`VERIFY_OUTPUT_CAP_BYTES` are
+          read back — a failing build prints megabytes and what names the failure
+          is the end of it, which is why the record keeps a tail in the first
+          place.
+        """
+        env = self._verify_env()
+        try:
+            sink = tempfile.TemporaryFile(prefix="multi_llm_verify_")
+        except OSError as exc:  # pragma: no cover - no writable temp dir
+            return VERIFY_EXIT_NOT_RUN, (
+                f"verification output could not be captured: {exc}"
+            )
+        with sink:
+            try:
+                proc = subprocess.Popen(  # noqa: S602 - a shell string is the contract
+                    command, shell=True, cwd=self.repo_root,
+                    stdin=subprocess.DEVNULL, stdout=sink,
+                    stderr=subprocess.STDOUT, env=env,
+                    **_process_control.new_process_group_kwargs(),
+                )
+            except OSError as exc:  # pragma: no cover - the shell itself is missing
+                return VERIFY_EXIT_NOT_RUN, (
+                    f"verification command could not be started: {exc}"
+                )
+            # Read the group while the leader is alive: `os.getpgid` stops
+            # answering once it is reaped, and the group is what still holds the
+            # build's children.
+            pgid = _process_control.process_group_id(proc.pid)
+            note = ""
+            try:
+                exit_code = int(proc.wait(timeout=timeout))
+            except subprocess.TimeoutExpired:
+                verdict = self._kill_verify_tree(proc, pgid)
+                exit_code = VERIFY_EXIT_TIMEOUT
+                note = (
+                    f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
+                    f"command's whole process group — verdict {verdict})"
+                )
+            return exit_code, self._verify_output_tail(sink) + note
+
+    def _kill_verify_tree(self, proc: Any, pgid: Optional[int]) -> str:
+        """SIGTERM → SIGKILL the timed-out command *and its group*, then reap it.
+
+        ``start_time=None`` is how an unverified kill is *requested*: this pid is
+        a child still held open here, not a record read off disk, so there is
+        nothing to corroborate and no recycled pid to protect.
+        """
+        try:
+            verdict = _process_control.kill_tree(
+                proc.pid, start_time=None, pgid=pgid,
+                escalate_after_s=VERIFY_KILL_GRACE_S, poll_interval_s=0.05,
+            )
+        except Exception:  # noqa: BLE001 - teardown must never mask the timeout
+            try:
+                proc.kill()
+            except OSError:  # pragma: no cover - already gone
+                pass
+            verdict = "killed"
+        try:
+            proc.wait(timeout=VERIFY_REAP_S)
+        except subprocess.TimeoutExpired:  # pragma: no cover - survived SIGKILL
+            pass
+        return verdict
+
+    def _verify_output_tail(self, sink: Any) -> str:
+        """The last :data:`VERIFY_OUTPUT_CAP_BYTES` the command wrote, as text."""
+        try:
+            size = sink.seek(0, os.SEEK_END)
+            sink.seek(max(0, size - VERIFY_OUTPUT_CAP_BYTES))
+            raw = sink.read()
+        except (OSError, ValueError):  # pragma: no cover - sink already closed
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return raw or ""
+
+    def _verify_env(self) -> Optional[Dict[str, str]]:
+        """The environment ``driver.verify_command`` runs with (F6).
+
+        Composed by the same function the runner spawn uses
+        (``providers.base.build_child_env``) instead of being inherited wholesale
+        from ``os.environ``: the running host's own ``env_guards`` — the
+        nested-session marker and the session-scoped ids this dispatcher was
+        handed — are stripped, and an operator who turned ``env_allowlist`` on
+        gets this check reduced to the same deny-by-default set a runner sees.
+        There is no provider (this is the repository's own command, not an agent
+        CLI), so nothing adapter-specific applies, and ``None`` means "inherit
+        unchanged" exactly as it does at the two spawn sites.
+
+        The reason it is worth composing at all: the *string* is config and a run
+        cannot change it, but the **scripts it invokes** — `package.json`'s
+        `typecheck`, a `Makefile` target — are files the write subagent was just
+        allowed to edit, so this command is inside the phase's own blast radius.
+        `docs/configuration.md`'s safety section says so too.
+        """
+        try:
+            from .providers.base import build_child_env
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.providers.base import build_child_env  # type: ignore
+        try:
+            guards, passthrough = _host_env_guards()
+            return build_child_env(
+                None, provider_env={}, host_guards=guards,
+                host_passthrough=passthrough, anchor=self.anchor,
+            )
+        except Exception as exc:  # noqa: BLE001 - env policy must not fail a check
+            self.log(
+                f"[write-subagents] warning: could not compose the verification "
+                f"environment ({exc}); inheriting this process's unchanged"
+            )
+            return None
 
     def _verification_message(self, result: SchedulerResult) -> List[str]:
         """The exit-3 block for a failed `driver.verify_command` (F4).
@@ -2934,13 +3097,14 @@ class WriteBatchScheduler:
         the executor path `metrics_progress` never existed and neither did the
         `[ETA]` line `instructions/implement.md` step 5 describes (F4).
 
-        The baseline is the number of batches this run will actually dispatch —
-        ``len(self.tasks) - len(result.human_plan.skipped)``, the same total
-        ``_record_metrics``/``_mirror_status`` use — never the bare materialized
-        count, which still counts a deferred human task that is never dispatched
-        (N1, 2026-09-16: with the bare count, the stored
+        The baseline is the number of **tasks** this run will actually dispatch
+        or resume-skip — ``len(self.tasks) - len(result.human_plan.skipped)``,
+        the same total ``_record_metrics``/``_mirror_status`` use — never the
+        bare materialized count, which still counts a deferred human task that is
+        never dispatched (N1, 2026-09-16: with the bare count, the stored
         ``metrics_progress.total_batches`` disagreed with every ``[ETA]`` line
-        the run went on to print).
+        the run went on to print). Tasks, not batches, because that is the unit
+        the numerator counts as well: see :meth:`_record_metrics` (F3).
         """
         if self.state is None or not hasattr(self.state, "start_metrics_phase"):
             return
@@ -2952,12 +3116,24 @@ class WriteBatchScheduler:
             pass
 
     def _metrics_finish(self) -> None:
+        """Pop the phase's ETA baseline and log its closing line (F7).
+
+        The line goes through ``self.log`` for the same reason every per-batch
+        ``[ETA]`` line does — so it lands in the phase log ``status`` points at,
+        beside the lines it closes. ``finish_metrics_phase`` used to print it to
+        stderr itself, which on a foreground or in-process ``full`` run put the
+        closing line somewhere none of the others went.
+        """
         if not hasattr(self.state, "finish_metrics_phase"):
             return
         try:
-            self.state.finish_metrics_phase(self.phase)
+            finished = self.state.finish_metrics_phase(self.phase)
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
-            pass
+            return
+        # `(elapsed_ms, line)` when the phase had a baseline, `None` when it
+        # never started.
+        if isinstance(finished, tuple) and finished[1]:
+            self.log(finished[1])
 
     def _finalize_tracking(self, result: Optional[SchedulerResult] = None) -> None:
         """``finalize_tracking.py --state-file`` in process (D3n).
@@ -2990,11 +3166,28 @@ class WriteBatchScheduler:
         for path in touched:
             argv += ["--touched", path]
         try:
-            finalize_tracking.main(argv)
+            code = finalize_tracking.main(argv)
         except SystemExit:  # pragma: no cover - argparse-style exit
-            pass
+            return
         except Exception as exc:  # noqa: BLE001
             self.log(f"[write-subagents] warning: finalize_tracking failed: {exc}")
+            return
+        # F4 (2026-09-17): `main` *returns* 1 for an unreadable or unparseable
+        # state file and for a failed write — it does not raise — and the return
+        # value used to be dropped. `_reload_state` then silently kept whatever
+        # it could read, the phase finalized, and `tracked_files` stayed whatever
+        # an earlier phase had left for `review-code` to review. A census that
+        # did not happen has to be visible in both places a reader looks.
+        if code:
+            message = (
+                f"WARNING: finalize_tracking exited {code}; tracked_files was "
+                f"NOT updated — `review-code` will read whatever the previous "
+                f"phase left. Re-run: util finalize-tracking --state-file "
+                f"{self.state.state_file}"
+            )
+            self.log(f"[write-subagents] {message}")
+            if result is not None:
+                result.messages.append(message)
 
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
