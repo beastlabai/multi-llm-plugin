@@ -161,6 +161,66 @@ Implement basic authentication with login and registration.
         assert "# Code Review Report" in report_content, "Report missing header"
         assert len(report_content) > 50, "Report appears too short"
 
+    def test_a_detached_review_counts_its_completed_reviewers(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """The checkpoint's progress counts the completed reviewers: the fanout
+        step writes `models_done=0` and a finished run used to leave it there,
+        so `status --view run` printed `models 0/3` beside three completed
+        reviewers (measured 2026-09-16). Progress is recorded for detached runs
+        only, so this one runs detached and waits for the run to close."""
+        import time
+
+        from utils import status_file
+
+        _configure_scenario(skill_runner, mock_provider, "happy_path")
+        plan = fixture_manager.create_plan(
+            "detached-code-review", "# Plan\n\n## Tasks\n- Create auth service\n"
+        )
+        _create_implement_phase(fixture_manager, plan)
+        fixture_manager.create_state_file(
+            plan,
+            phases_completed=["review-plan", "implement"],
+            extra_state={
+                "head_at_start": "abc123def",
+                "tracked_files": [
+                    {"path": "src/services/auth_service.py", "task_id": "T001"},
+                ],
+            },
+        )
+        # `--detach` is a dispatcher verb: the detached child re-executes
+        # multi_llm.py, so the launch goes through it rather than the script.
+        launch = skill_runner._run_command(
+            [
+                sys.executable, str(skill_runner.skill_dir / "multi_llm.py"),
+                "review-code", str(plan.plan_path),
+                "--models", "cursor-agent", "--skip-validation", "--detach",
+            ],
+            plan.plan_path, 45, False,
+        )
+        assert launch.success, launch.stderr
+        assert "run_id:" in launch.stdout, launch.stdout
+
+        phase_dir = plan.output_dir / "code-review"
+        deadline = time.time() + 60
+        run = {}
+        while time.time() < deadline:
+            run = status_file.read_run(str(phase_dir))
+            if run.get("state") in status_file.TERMINAL_RUN_STATES:
+                break
+            time.sleep(0.2)
+        assert run.get("state") == "done", run
+
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_completed"] == ["cursor-agent:cursor-agent"], status
+        progress = status["progress"]
+        assert progress["step"] == "complete"
+        assert progress["models_total"] == 1
+        assert progress["models_done"] == 1
+
     def test_code_review_multi_provider_aggregation(
         self,
         skill_runner: SkillRunner,
