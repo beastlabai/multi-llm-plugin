@@ -1183,8 +1183,8 @@ class WriteBatchScheduler:
         if census is None:
             return {}
         kept: Dict[str, str] = {}
-        skipped = 0
-        for relative, stamp in census.items():
+        skipped: List[str] = []
+        for relative, stamp in sorted(census.items()):
             cached = self._retained.get(relative)
             if cached is None or cached[0] != stamp:
                 cached = (stamp, self._store_blob(relative, stamp))
@@ -1192,19 +1192,41 @@ class WriteBatchScheduler:
             if cached[1]:
                 kept[relative] = cached[1]
             else:
-                skipped += 1
+                skipped.append(relative)
         if skipped and not self._retain_warned:
             self._retain_warned = True
+            # Named, with the reason each one was skipped: a count alone
+            # ("3 file(s) … have no rollback point") left the reader guessing
+            # which files and whether that was a problem (measured 2026-09-16:
+            # it was the three under `.multi-llm/`, which the deny list keeps
+            # out of executor artifacts by design).
+            named = ", ".join(
+                f"{path} ({self._skip_reason(path)})" for path in skipped[:5]
+            ) + (f", … {len(skipped) - 5} more" if len(skipped) > 5 else "")
             self.log(
-                f"[write-subagents] {skipped} file(s) under {self.repo_root} have "
-                f"no rollback point in {os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME)} "
-                f"(denied by driver.write_paths, over the {MAX_SNAPSHOT_BYTES}-byte "
-                f"per-file cap, or past the {SWEEP_RETAIN_MAX_BYTES}-byte store "
-                f"budget). An undeclared write to one of them is still detected, "
+                f"[write-subagents] {len(skipped)} file(s) under {self.repo_root} "
+                f"have no rollback point in "
+                f"{os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME)}: {named}. "
+                f"An undeclared write to one of them is still detected, "
                 f"policy-checked and audited — `util restore-batch` just cannot "
                 f"undo it (D3l)."
             )
         return kept
+
+    def _skip_reason(self, relative: str) -> str:
+        """Why :meth:`_store_blob` kept no bytes for ``relative``."""
+        absolute = os.path.join(self.repo_root, relative)
+        if self.policy.violation(absolute) is not None:
+            return "denied by driver.write_paths"
+        try:
+            size = os.stat(absolute).st_size
+        except OSError:
+            return "unreadable"
+        if size > MAX_SNAPSHOT_BYTES:
+            return f"over the {MAX_SNAPSHOT_BYTES}-byte per-file cap"
+        if self._retained_bytes + size > SWEEP_RETAIN_MAX_BYTES:
+            return f"past the {SWEEP_RETAIN_MAX_BYTES}-byte store budget"
+        return "unreadable"
 
     def _store_blob(
         self, relative: str, stamp: Tuple[int, int]
