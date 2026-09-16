@@ -394,7 +394,21 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     ok = mirror.get("ok")
     if not isinstance(ok, int):
         ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
-    parts = [f"{kind} {ok}/{total} ok"]
+    items_total = mirror.get("items_total")
+    items_applied = mirror.get("items_applied")
+    if isinstance(items_total, int) and isinstance(items_applied, int):
+        # F9: `ok`/`total` count batches, not the items inside them — a
+        # write mirror that recorded both (`write_batch_scheduler`) says so
+        # explicitly rather than leaving "ok" to be read as "items applied".
+        # "batches" appears only here, precisely because there is now an
+        # item count to contrast it with; the read path's `subagents` mirror
+        # carries neither key and keeps the plain `<kind> <ok>/<total> ok`.
+        parts = [
+            f"{kind} {ok}/{total} batches ok, "
+            f"{items_applied}/{items_total} items applied"
+        ]
+    else:
+        parts = [f"{kind} {ok}/{total} ok"]
     for status, count in sorted(counts.items()):
         if status != "ok" and count:
             parts.append(f"{status} {count}")
@@ -592,15 +606,24 @@ def _run_runner_facts(
     The host is the first one any listed run wrote into ``.status.json``
     (``RunHandle`` records the launcher's ``--host``); the specs are the runner
     keys that same run's executor mirror pinned, i.e. what its dispatches
-    actually ran on rather than what a fresh resolution would pick now.
+    actually ran on rather than what a fresh resolution would pick now. Checked
+    under both mirror keys — ``subagents`` (the read path) and
+    ``write_subagents`` (`write_batch_scheduler._mirror_status`, F7) — a write
+    phase carries only the second, and until it recorded a runner at all
+    `status` polled outside the launching session fell through to a fresh
+    resolution and named the *polling* host's model instead of the run's.
     """
     for view in views or ():
         run = view.get("run") or {}
         host = run.get("host")
         if not isinstance(host, str) or not host.strip():
             continue
-        mirror = (view.get("progress") or {}).get("subagents")
+        progress = view.get("progress") or {}
+        mirror = progress.get("subagents")
         versions = mirror.get("runner_versions") if isinstance(mirror, dict) else None
+        if not isinstance(versions, dict) or not versions:
+            mirror = progress.get("write_subagents")
+            versions = mirror.get("runner_versions") if isinstance(mirror, dict) else None
         specs = sorted(str(spec) for spec in versions) if isinstance(versions, dict) else []
         return host.strip(), specs
     return None, []

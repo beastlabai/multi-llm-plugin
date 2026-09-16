@@ -580,6 +580,12 @@ class WriteBatchScheduler:
         self._retained_before: Dict[str, Dict[str, str]] = {}
         self._retained_bytes = 0
         self._retain_warned = False
+        #: ``{spec: version}`` for every distinct runner this run actually
+        #: preflighted (F12), populated as ``_dispatch_executor`` dispatches —
+        #: the read path fills the same-shaped field from
+        #: ``_preflight_batch_runners``; the write path preflights inline, per
+        #: dispatch, and this is where its return value was being discarded.
+        self._runner_versions: Dict[str, str] = {}
 
     # -- ceilings -------------------------------------------------------
 
@@ -769,7 +775,34 @@ class WriteBatchScheduler:
         try:
             return self._run()
         finally:
+            self._report_rollback_store_utilization()
             self._discard_rollback_store()
+
+    def _report_rollback_store_utilization(self) -> None:
+        """One line naming how much of the reversibility budget this run used.
+
+        The sweep is deliberately generous (F15) — anything under the pinned
+        root the run could have touched, not just the phase's declared set,
+        because narrowing it would make its *detective* half (catching an
+        undeclared write outside that set) vacuous — so on a large enough repo
+        it can spend a real share of ``SWEEP_RETAIN_MAX_BYTES`` on files the
+        phase never intended to touch. Until now the only visible signal was
+        the warning in :meth:`_retain` for the files *already* denied a
+        rollback point; this prints once the run is done retaining, so the
+        trend toward that budget is visible before it happens rather than
+        only once it already has. Skipped when nothing was ever censused
+        (``--dry-run-subagents``, or a run that dispatched no batch).
+        """
+        if not self._retained:
+            return
+        digests = {digest for _stamp, digest in self._retained.values() if digest}
+        shards = {digest[:2] for digest in digests}
+        self.log(
+            f"[write-subagents] rollback store: "
+            f"{self._retained_bytes / (1024 * 1024):.1f} MB of "
+            f"{SWEEP_RETAIN_MAX_BYTES // (1024 * 1024)} MB budget retained "
+            f"({len(digests)} files, {len(shards)} shards)"
+        )
 
     def _discard_rollback_store(self) -> None:
         """Drop the sweep's staging bytes and the index that describes them."""
@@ -1388,8 +1421,13 @@ class WriteBatchScheduler:
     ) -> TaskOutcome:
         """Real subprocess dispatch, with the D3g/D3l hooks bound to this task."""
         runner = self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
-        preflight_runner(runner, profile=profile, anchor=self.anchor,
-                         key="driver.subagent_runner")
+        info = preflight_runner(runner, profile=profile, anchor=self.anchor,
+                                key="driver.subagent_runner")
+        # F12: `subagent_batch_report.json.runner_versions` was empty on this
+        # path — the read half fills it from its own batch-start preflight
+        # (`_preflight_batch_runners`); this call already runs one per
+        # dispatch and its version was simply never kept.
+        self._runner_versions[runner] = str(info.get("version") or "unknown")
 
         def before_attempt(context: Dict[str, Any]) -> None:
             self.audit.dispatched(
@@ -2172,11 +2210,25 @@ class WriteBatchScheduler:
         if self.state is not None:
             self._metrics_finish()
             self.state.mark_phase_completed(self.phase)
+            # F5: re-stamp `plan_hash` to what this run actually left on disk.
+            # Every batch's edit is already written by the time `_finalize`
+            # runs, so without this the *next* `StateManager` built on this
+            # plan reads the run's own edit as a human editing the plan
+            # mid-workflow and sets `plan_changed`, which
+            # `implement_orchestrator.py` reports as "Plan has changed since
+            # last session" for a change the plugin made.
+            self.state.refresh_plan_hash()
             self.state.save()
             self._finalize_tracking(result)
         if self.summary_file:
             result.summary_file = self._write_summary(result)
             self._insert_plan_reference(result.summary_file)
+            if self.state is not None:
+                # `_insert_plan_reference` is the one plan edit a run makes
+                # *after* the stamp above (implement's own back-reference
+                # insertion) — re-stamp once more so it is not left stale too.
+                self.state.refresh_plan_hash()
+                self.state.save()
         result.finalized = True
 
     def _metrics_finish(self) -> None:
@@ -2331,6 +2383,10 @@ class WriteBatchScheduler:
         report = BatchReport(
             phase=self.phase, kind=self.kind, phase_dir=self.phase_dir,
             outcomes=list(result.outcomes), invoker=self.invoker,
+            # F12: filled the same way the read path fills it
+            # (`_preflight_batch_runners`) — every distinct runner this run
+            # actually preflighted, with the version it reported.
+            runner_versions=dict(self._runner_versions),
             ceilings={"effective": self.write_ceiling(),
                       "driver_max_concurrent_write_subagents":
                           get_max_concurrent_write_subagents(anchor=self.anchor),
@@ -2364,6 +2420,23 @@ class WriteBatchScheduler:
                 phase_state = "subagents_failed"
             else:
                 phase_state = "running"
+            # F9: the mirror's `total`/`ok` count BATCHES, not the suggestions
+            # or fixes inside them — a 15-batch, 29-suggestion apply-suggestions
+            # run mirrored (and the model then reported) "15/15 ok, applied 15",
+            # 14 suggestions short. `expected_ids` is every write task's own
+            # declared item list (`write_phase_bridge`: suggestion/fix member
+            # ids for the three apply kinds, the task id itself for implement),
+            # so both counts are already on hand with no new bookkeeping.
+            expected_ids_by_task = {
+                str(task.get("task_id", "")):
+                    [str(i) for i in (task.get("expected_ids") or [])]
+                for task in self.tasks
+            }
+            items_total = sum(len(ids) for ids in expected_ids_by_task.values())
+            items_applied = sum(
+                len(expected_ids_by_task.get(o.task_id, []))
+                for o in outcomes if o.write_outcome == WRITE_APPLIED
+            )
             _status_file.update_status(self.phase_dir, {
                 # The read phases record a phase-level `state` beside the run
                 # record; without one here `status` printed `phase state: (none)`
@@ -2376,6 +2449,14 @@ class WriteBatchScheduler:
                         "invoker": self.invoker,
                         "total": len(self.tasks),
                         "dispatched": len(outcomes),
+                        "items_total": items_total,
+                        "items_applied": items_applied,
+                        # F7: the run's own resolved runner, so `status` polled
+                        # outside the session that launched it names what the
+                        # batches actually dispatched to — `render_runner_text`
+                        # prefers this over a fresh resolution the same way it
+                        # already prefers the read path's `subagents` mirror.
+                        "runner_versions": dict(self._runner_versions),
                         "batches_dispatched": list(result.batches_dispatched),
                         "stopped_at_batch": result.stopped_at_batch,
                         "finalized": result.finalized,

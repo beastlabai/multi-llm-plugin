@@ -359,6 +359,12 @@ class FakeState:
     def is_phase_completed(self, phase):
         return phase in self.state.get("phases_completed", {})
 
+    def refresh_plan_hash(self):
+        """F5: `_finalize` calls this beside `mark_phase_completed`. Recorded
+        rather than computed for real, since this fake carries no plan hash of
+        its own — see ``TestScheduler`` for the real-``StateManager`` version."""
+        self.state["plan_hash_refreshed"] = True
+
 
 def _patch_edit(path: Path, text: str = "edit\n"):
     return {"path": str(path), "mode": "patch", "content": text}
@@ -823,6 +829,52 @@ class TestScheduler:
         assert "## Task Results" in Path(result.summary_file).read_text()
         assert state.is_phase_completed("apply-suggestions")
         assert "## Implementation Summary" in env.plan.read_text()
+
+    def test_finalize_re_stamps_plan_hash_so_the_next_session_sees_no_change(
+        self, env
+    ):
+        """F5: apply-suggestions' whole job is rewriting the plan, so without a
+        re-stamp the next `StateManager` built on it reads this run's own edit
+        as a human editing the plan mid-workflow and sets `plan_changed`."""
+        from utils.state_manager import StateManager
+
+        state = StateManager(env.plan)
+        state.save()
+        assert state.has_plan_changed() is False
+
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)], state=state).run()
+        assert result.exit_code == 0
+        assert result.finalized is True
+        # The plan really changed on disk — the point of the phase.
+        assert "edit\n" in env.plan.read_text()
+
+        # The stamp `_finalize` wrote matches what is actually on disk now...
+        assert state.get("plan_hash") == state._compute_plan_hash()
+        assert "plan_changed" not in state.state
+
+        # ...and a FRESH session on this plan does not mistake the edit for a
+        # human's.
+        reloaded = StateManager(env.plan)
+        assert reloaded.has_plan_changed() is False
+
+    def test_the_batch_report_records_the_runners_version(self, env):
+        """F12: the write path preflights inline, per dispatch, and its
+        version was being discarded — the read path's `run_tasks` records the
+        same information via `_preflight_batch_runners`. `apply-suggestions`'s
+        `subagent_batch_report.json` had `"runner_versions": {}` while the log
+        beside it warned about that exact runner's version."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        assert result.exit_code == 0
+        batch_report = json.loads(
+            (env.phase_dir / "subagent_batch_report.json").read_text()
+        )
+        assert batch_report["runner_versions"] == {"codex:gpt-5.5": "0.146.0"}
 
     def test_a_run_that_dispatched_every_batch_but_skipped_finalization_fails(
         self, env
@@ -1418,6 +1470,37 @@ class TestAdditivityAndDetach:
         assert all(t["write_outcome"] == executor.WRITE_APPLIED
                    for t in progress["tasks"])
         assert progress["failed_task_ids"] == []
+
+    def test_status_json_carries_item_counts_distinct_from_batch_counts(
+        self, env
+    ):
+        """F9: `items_total`/`items_applied` count the suggestions inside a
+        batch, not the batches themselves — a batch of three applied
+        suggestions is one *batch* but three *items*, and the two counts must
+        not collapse into one number the way `total`/`dispatched` do."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0", "s1", "s2"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        # One batch, three expected ids — batches and items diverge on purpose.
+        task = env.apply_task(0, expected_ids=["s0", "s1", "s2"])
+        env.scheduler([task]).run()
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        progress = status["progress"]["write_subagents"]
+        assert progress["total"] == 1  # one batch
+        assert progress["items_total"] == 3  # three suggestions in it
+        assert progress["items_applied"] == 3
+
+    def test_a_no_op_batch_counts_zero_items_applied_though_it_is_ok(self, env):
+        """A `no-op` outcome is `status: ok` (the loop continues past it) but
+        it applied nothing — `items_applied` must not credit its
+        `expected_ids` the way a naive "every ok batch" count would."""
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "already present"})
+        env.scheduler([env.apply_task(0)]).run()
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        progress = status["progress"]["write_subagents"]
+        assert progress["items_total"] == 1
+        assert progress["items_applied"] == 0
 
     def test_the_write_mirror_moves_once_per_task_not_once_per_batch(
         self, env, monkeypatch
@@ -2071,3 +2154,45 @@ class TestTheRollbackStoreWarningNamesItsFiles:
         assert len(warning) == 1, lines
         assert ".env (denied by driver.write_paths)" in warning[0]
         assert "1 file(s)" in warning[0]
+
+    def test_the_rollback_store_utilization_is_reported_once_per_run(self, env):
+        """F15: the only visible signal toward ``SWEEP_RETAIN_MAX_BYTES`` was
+        this same warning, for the files *already* denied a rollback point —
+        nothing said how close a run came before that happened. One line,
+        after the sweep is done, names the fraction of the budget retained."""
+        import re
+
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        assert result.exit_code == 0, result.messages
+        reported = [
+            l for l in lines if l.startswith("[write-subagents] rollback store:")
+        ]
+        assert len(reported) == 1, lines
+        match = re.search(
+            r"rollback store: \d+\.\d MB of 64 MB budget retained "
+            r"\((\d+) files, (\d+) shards\)",
+            reported[0],
+        )
+        assert match, reported[0]
+        # At least the plan itself was censused and retained.
+        assert int(match.group(1)) >= 1
+        assert int(match.group(2)) >= 1
+
+    def test_no_rollback_utilization_line_when_nothing_was_ever_retained(
+        self, env
+    ):
+        """``--dry-run-subagents`` censuses nothing, so there is no budget to
+        report — the line would otherwise read "0.0 MB … (0 files, 0 shards)"
+        on every dry run, which says nothing a reader needs."""
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        env.scheduler([env.apply_task(0)], dry_run=True, log=lines.append).run()
+        assert not any(
+            l.startswith("[write-subagents] rollback store:") for l in lines
+        )
