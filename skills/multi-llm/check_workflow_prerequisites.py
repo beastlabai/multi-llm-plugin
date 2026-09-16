@@ -244,9 +244,15 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
             pass
 
     # Prerequisite NOT met - has unapplied task suggestions
+    # `actionable_count` is `valid_count`: one increment per validation VERDICT
+    # (a group-level judgment), never per suggestion inside a group. A group
+    # holds one or more suggestions, so "N unapplied task suggestions" reads as
+    # a suggestion count when it is actually a group count — measured
+    # 2026-09-16, a run with 17 valid groups (holding 26 suggestions between
+    # them) reported "17 unapplied task suggestions".
     return {
         "met": False,
-        "reason": f"review-tasks produced {actionable_count} unapplied task suggestions",
+        "reason": f"review-tasks produced {actionable_count} unapplied task suggestion groups",
         "actionable_count": actionable_count,
         "importance_breakdown": importance_breakdown
     }
@@ -720,8 +726,11 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
             and cached_task_check is not None):
         actionable_count = cached_task_check.get("actionable_count", 0)
         if actionable_count > 0 and not cached_task_check["met"]:
+            # F9.5: `actionable_count` is a count of valid GROUPS (see the
+            # matching comment on `check_apply_task_suggestions_prerequisite`),
+            # so this notice must not call it "suggestions" either.
             notices.append(
-                f"review-tasks produced {actionable_count} unapplied task suggestions. "
+                f"review-tasks produced {actionable_count} unapplied task suggestion groups. "
                 f"Run --apply-task-suggestions to apply them, or proceed to --implement to skip."
             )
 

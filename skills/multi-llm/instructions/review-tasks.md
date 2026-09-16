@@ -38,7 +38,7 @@ plans/todo/my-feature/                           # Output folder
 
 - `--skip-validation`: Skip the LLM validation step (faster but no false-positive filtering)
 - `--validation-model <model>`: Model to use for validation (default: "auto")
-- `--quick` / `-q`: Use quick_models from providers.yaml for lightweight reviews (2 models)
+- `--quick` / `-q`: Use quick_models from providers.yaml for lightweight reviews
 - `--interactive` / `-i`: Force interactive model selection even when models are provided
 
 ## Validation Statuses

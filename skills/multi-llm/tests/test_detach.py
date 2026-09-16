@@ -1536,6 +1536,109 @@ class TestStatusSurface:
         out = capsys.readouterr().out
         assert "consolidation recommended: 29 valid groups >= 15 — run --consolidate" in out
 
+    def test_a_terminal_run_carries_the_workflow_notice_into_view_run(
+        self, tmp_path, capsys
+    ):
+        """F7: the opencode plugin polls only `--view run`, which never fetched
+        the workflow view at all — so a terminal run's real follow-up (the
+        `notice:`/`suggested next:` lines `--view all` already renders) was
+        invisible on the one channel the plugin reads. The model saw
+        `next: null`, said "nothing further to run", then invented
+        `--apply-task-suggestions` from general knowledge instead of the
+        notice sitting one view over (measured 2026-09-16). It must land in
+        the rendered text AND in the `notice` key of `MULTI_LLM_RESULT` — never
+        in `next`, which the plugin auto-follows without asking."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        review_tasks = _phase_dir(plan, "review-tasks")
+        grouped = {
+            "format_version": 2,
+            "groups": [{
+                "category": "addition", "theme": "g1",
+                "suggestions": [{"title": "s1", "desc": "d", "importance": "LOW",
+                                  "type": "addition"}],
+            }],
+        }
+        (review_tasks / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
+        validation = {"format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]}
+        (review_tasks / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
+
+        state = StateManager(plan)
+        state.mark_phase_completed("review-tasks")
+        state.save()
+
+        status_file.write_status(str(review_tasks), {
+            "phase": "review-tasks", "state": "complete",
+        })
+        status_file.claim_run(str(review_tasks), {
+            "run_id": "run-notice-0001", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main(
+                ["--plan-file", str(plan), "--view", "run", "--phase", "review-tasks"]
+            ) == 0
+            payload = ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+
+        assert "workflow suggested next:" in out
+        assert "workflow notice: review-tasks produced 1 unapplied task suggestion groups" in out
+        assert payload["notice"] is not None
+        assert "review-tasks produced 1 unapplied task suggestion groups" in payload["notice"]
+        assert "suggested next:" in payload["notice"]
+        # The notice is advisory prose, never a mechanical continuation.
+        assert payload["next"] is None
+
+    def test_a_still_running_run_carries_no_workflow_notice(self, tmp_path, capsys):
+        """The carry-over is for a TERMINAL run only — a poll on a run still in
+        flight has nothing to say yet about what comes after it, and the
+        non-terminal payload must stay exactly what it was."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        review_tasks = _phase_dir(plan, "review-tasks")
+        grouped = {
+            "format_version": 2,
+            "groups": [{
+                "category": "addition", "theme": "g1",
+                "suggestions": [{"title": "s1", "desc": "d", "importance": "LOW",
+                                  "type": "addition"}],
+            }],
+        }
+        (review_tasks / "grouped.json").write_text(json.dumps(grouped), encoding="utf-8")
+        validation = {"format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]}
+        (review_tasks / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
+
+        state = StateManager(plan)
+        state.mark_phase_completed("review-tasks")
+        state.save()
+
+        status_file.claim_run(str(review_tasks), {
+            "run_id": "run-notice-0002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True,
+        })
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main(
+                ["--plan-file", str(plan), "--view", "run", "--phase", "review-tasks"]
+            ) == 2
+            payload = ctx.payload(2)
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+
+        assert "workflow notice:" not in out
+        assert "workflow suggested next:" not in out
+        assert "notice" not in payload
+
     def test_sweep_closes_out_orphans_across_the_plan(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)

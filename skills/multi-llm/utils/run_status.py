@@ -63,6 +63,7 @@ from .cli_common import (
     record_artifact,
     record_consolidation_recommended,
     record_next,
+    record_notice,
     record_state,
 )
 from .output_handler import output_dir_path, phase_dir_path, slugify_question
@@ -209,21 +210,15 @@ def _workflow_payload(plan_path: Path) -> Dict[str, Any]:
     return prereq.get_workflow_status(state, plan_path, output_dir_path(plan_path))
 
 
-def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
-    lines = ["workflow (state.json) — which phases are done:"]
-    width = max((len(p) for p in payload.get("phases", {})), default=0)
-    for phase, info in payload.get("phases", {}).items():
-        extra = []
-        if info.get("optional"):
-            extra.append("optional")
-        if info.get("reason"):
-            extra.append(str(info["reason"]))
-        if info.get("tasks_total"):
-            extra.append(f"{info.get('tasks_done', 0)}/{info['tasks_total']} tasks")
-        if info.get("timestamp"):
-            extra.append(str(info["timestamp"]))
-        suffix = f"  ({', '.join(extra)})" if extra else ""
-        lines.append(f"  {phase.ljust(width)}  {info.get('status', '?')}{suffix}")
+def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> List[str]:
+    """The workflow view's ``suggested next``/``notice`` lines, alone.
+
+    Split out of ``render_workflow_text`` so the terminal ``--view run`` carry-
+    over (F7, 2026-09-16, below) renders the identical text instead of a second
+    hand-typed copy that could drift from it — the whole point is that the two
+    channels can never say something different about the same ``state.json``.
+    """
+    lines: List[str] = []
     if payload.get("suggested_next"):
         # `suggested_next` already skips every optional phase in its way
         # (`check_workflow_prerequisites.get_workflow_status`'s own
@@ -245,9 +240,28 @@ def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
             f"  ({' / '.join(pending_optional)} optional, not run)"
             if pending_optional else ""
         )
-        lines.append(f"  suggested next: {payload['suggested_next']}{suffix}")
+        lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
-        lines.append(f"  notice: {notice}")
+        lines.append(f"{prefix}notice: {notice}")
+    return lines
+
+
+def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
+    lines = ["workflow (state.json) — which phases are done:"]
+    width = max((len(p) for p in payload.get("phases", {})), default=0)
+    for phase, info in payload.get("phases", {}).items():
+        extra = []
+        if info.get("optional"):
+            extra.append("optional")
+        if info.get("reason"):
+            extra.append(str(info["reason"]))
+        if info.get("tasks_total"):
+            extra.append(f"{info.get('tasks_done', 0)}/{info['tasks_total']} tasks")
+        if info.get("timestamp"):
+            extra.append(str(info["timestamp"]))
+        suffix = f"  ({', '.join(extra)})" if extra else ""
+        lines.append(f"  {phase.ljust(width)}  {info.get('status', '?')}{suffix}")
+    lines.extend(_workflow_trailer_lines(payload))
     return lines
 
 
@@ -623,7 +637,8 @@ def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:
 def _run_runner_facts(
     views: Sequence[Dict[str, Any]]
 ) -> "tuple":
-    """``(host, specs)`` the listed runs recorded about their own subagents.
+    """``(host, specs, source)`` the listed runs recorded about their own
+    subagents.
 
     The host is the first one any listed run wrote into ``.status.json``
     (``RunHandle`` records the launcher's ``--host``); the specs are the runner
@@ -645,8 +660,21 @@ def _run_runner_facts(
     one below it that had. So an empty-spec view is skipped rather than
     returned, and its host is kept only as the fallback for when no view in
     the whole list ever recorded a spec.
+
+    **Among the views that DID record a spec, the most recently updated one
+    wins — not whichever sorts first** (F4, 2026-09-16): ``discover_phase_dirs``
+    lists phases in alphabetical directory order, so a `generate-tasks` run's
+    pre-`--variant low` record outranked `review-tasks`' own `:low` record
+    directly below it, under a line that claimed to be "recorded by this run's
+    own dispatches". Every view carries ``updated_at``, so the candidates are
+    collected first and the freshest one answers. ``source`` names which run
+    the winning spec came from — ``None`` when only one view ever recorded a
+    spec, so the caller's existing "this run's own dispatches" wording stays
+    exactly as specific as it always was; a phase name, when more than one
+    view recorded one, so the line stops asserting an ownership it cannot back.
     """
     fallback_host: Optional[str] = None
+    candidates: List[Dict[str, Any]] = []
     for view in views or ():
         run = view.get("run") or {}
         host = run.get("host")
@@ -660,10 +688,22 @@ def _run_runner_facts(
             versions = mirror.get("runner_versions") if isinstance(mirror, dict) else None
         specs = sorted(str(spec) for spec in versions) if isinstance(versions, dict) else []
         if specs:
-            return host.strip(), specs
+            name = view.get("phase") or os.path.basename(str(view.get("phase_dir") or "")) or None
+            candidates.append({
+                "host": host.strip(),
+                "specs": specs,
+                "name": name,
+                "updated_at": str(view.get("updated_at") or ""),
+            })
+            continue
         if fallback_host is None:
             fallback_host = host.strip()
-    return fallback_host, []
+    if candidates:
+        candidates.sort(key=lambda c: c["updated_at"])
+        winner = candidates[-1]
+        source = winner["name"] if len(candidates) > 1 else None
+        return winner["host"], winner["specs"], source
+    return fallback_host, [], None
 
 
 def render_runner_text(
@@ -683,7 +723,10 @@ def render_runner_text(
     what this reports, and with it:
 
     * the specs the run's executor mirror recorded, when it has dispatched
-      anything — the only account on disk of what its subagents really ran on;
+      anything — the only account on disk of what its subagents really ran on,
+      and, when more than one listed view recorded one, the most recently
+      updated view's (F4, 2026-09-16), named in the printed line rather than
+      claimed as "this run's own";
     * otherwise a fresh resolution for that host, with the **session** rung
       skipped whenever the run was launched elsewhere: that rung reads
       ``MULTI_LLM_HOST_SESSION_MODEL`` off *this* process, which is the polling
@@ -712,11 +755,14 @@ def render_runner_text(
         from .provider_registry import resolve_subagent_runner
 
         invoking_host = caps.resolve_host_id(sys.argv[1:], explicit=host_id)
-        run_host, recorded = _run_runner_facts(views)
+        run_host, recorded, recorded_by = _run_runner_facts(views)
         resolved_host = run_host or invoking_host
         if recorded:
             spec = ", ".join(recorded)
-            source = "recorded by this run's own dispatches"
+            source = (
+                f"recorded by {recorded_by}'s own dispatches" if recorded_by
+                else "recorded by this run's own dispatches"
+            )
         else:
             spec, layer = resolve_subagent_runner(
                 "full", anchor=str(plan_path), host_id=resolved_host,
@@ -898,6 +944,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         views = _wait_for_terminal(plan_path, args, views)
 
     exit_code = exit_code_for(views)
+
+    # F7, 2026-09-16: the opencode plugin polls only `--view run`, so a
+    # terminal run's real follow-up — the workflow view's `notice:`/`suggested
+    # next:` line — lived in text that channel never read. The model saw
+    # `next: null`, said "nothing further to run", then invented
+    # `--apply-task-suggestions` from general knowledge instead of the notice
+    # already sitting one view over. Carried only for a TERMINAL run (every
+    # listed view done/failed/aborted) and only on `--view run` itself —
+    # `--view all` already renders the workflow section in full, and a
+    # still-running poll has nothing to say about what comes after a run that
+    # has not finished. A workflow-read failure here is swallowed rather than
+    # failing the poll: this line is advisory, the run view is not.
+    terminal_run = bool(views) and not any(
+        v["verdict"] not in detach.TERMINAL_VERDICTS for v in views
+    )
+    workflow_trailer: List[str] = []
+    terminal_notice: Optional[str] = None
+    if args.view == VIEW_RUN and terminal_run:
+        try:
+            terminal_workflow = _workflow_payload(plan_path)
+        except Exception:
+            terminal_workflow = None
+        if terminal_workflow:
+            trailer = _workflow_trailer_lines(terminal_workflow, prefix="")
+            if trailer:
+                workflow_trailer = [f"workflow {line}" for line in trailer]
+                terminal_notice = "; ".join(trailer)
+
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
         if args.view == VIEW_ALL:
@@ -918,7 +992,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if runner:
             lines.append("")
             lines += runner
+        if workflow_trailer:
+            lines.append("")
+            lines += workflow_trailer
         print("\n".join(lines))
+
+    if terminal_notice:
+        record_notice(terminal_notice)
 
     for view in views:
         for path in view["output_files"].values():

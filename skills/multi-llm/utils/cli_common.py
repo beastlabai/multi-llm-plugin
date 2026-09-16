@@ -520,6 +520,7 @@ class ResultContext:
         self.artifacts: List[str] = []
         self.next: Optional[str] = None
         self.consolidation_recommended: Optional[Dict[str, Any]] = None
+        self.notice: Optional[str] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -553,6 +554,22 @@ class ResultContext:
             dict(recommendation) if recommendation else None
         )
 
+    def set_notice(self, text: Optional[str]) -> None:
+        """Record the workflow-level notice a terminal ``status`` run carries.
+
+        Deliberately **not** ``next``: ``next`` is what the opencode plugin
+        auto-follows without asking, and a workflow notice is advisory prose
+        ("run --apply-task-suggestions, or skip to --implement"), not a
+        continuation the plugin should run unattended. It exists because
+        ``--view run`` — the only channel that plugin polls — used to omit the
+        workflow view entirely, so a terminal run's real follow-up lived only
+        in text nothing read: the model saw `next: null`, said "nothing
+        further to run", then invented `--apply-task-suggestions` from general
+        knowledge instead of the notice already sitting in `--view all`
+        (F7, 2026-09-16).
+        """
+        self.notice = text or None
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -571,6 +588,8 @@ class ResultContext:
             payload["consolidation_recommended"] = dict(
                 self.consolidation_recommended
             )
+        if self.notice:
+            payload["notice"] = self.notice
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -645,6 +664,12 @@ def record_consolidation_recommended(
     """Record the consolidation recommendation, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_consolidation_recommended(recommendation)
+
+
+def record_notice(text: Optional[str]) -> None:
+    """Record the workflow notice, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_notice(text)
 
 
 # ---------------------------------------------------------------------------
