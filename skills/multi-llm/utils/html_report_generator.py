@@ -16,10 +16,12 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
+    from .json_extractor import sanitize_model_name
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
     from stream_bootstrap import bootstrap_streams
+    from json_extractor import sanitize_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -650,9 +652,10 @@ def embed_log_snippets(
         return log_snippets
 
     for model in models:
-        # Sanitize model name for filename (replace colons, slashes, etc.)
-        safe_model = model.replace(':', '_').replace('/', '_').replace('\\', '_')
-        log_file = log_dir / f"log_{safe_model}.txt"
+        # Sanitize model name the same way the log files were actually named
+        # (utils/json_extractor.sanitize_model_name), or a model with a dot in
+        # it — e.g. "cursor-agent:composer-2.5" — never matches its own file.
+        log_file = log_dir / f"log_{sanitize_model_name(model)}.txt"
 
         if not log_file.exists():
             # Try without sanitization

@@ -548,6 +548,21 @@ class TestEmbedLogSnippets:
         assert "provider:model" in result
         assert "Log for model with colons" in result["provider:model"]
 
+    def test_finds_log_for_model_name_containing_a_dot(self, tmp_path):
+        """A model name with a dot (e.g. a version suffix) must resolve to
+        the same filename utils.json_extractor.sanitize_model_name produces
+        for it (dots become underscores too), not a naive colon/slash swap
+        that leaves the dot in place and never matches the real file."""
+        log_content = "Log for composer-2.5"
+        (tmp_path / "log_cursor-agent_composer-2_5.txt").write_text(
+            log_content, encoding="utf-8"
+        )
+
+        result = embed_log_snippets(tmp_path, ["cursor-agent:composer-2.5"])
+
+        assert "cursor-agent:composer-2.5" in result
+        assert "Log for composer-2.5" in result["cursor-agent:composer-2.5"]
+
     def test_multiple_models(self, tmp_path):
         """Handles multiple models."""
         (tmp_path / "log_model-a.txt").write_text("Log A", encoding="utf-8")

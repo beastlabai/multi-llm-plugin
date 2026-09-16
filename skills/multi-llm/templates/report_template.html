@@ -1537,7 +1537,8 @@
             var isModified = editedDescription !== undefined && editedDescription !== originalDescription;
             var sectionKey = suggestion.sectionRef || suggestion.section || suggestion.section_id || '';
             var sectionContext = (reportData && reportData.sectionContexts) ? reportData.sectionContexts[sectionKey] : null;
-            var logSnippet = (reportData && reportData.logSnippets) ? reportData.logSnippets[suggestionId] : (suggestion.log_snippet || null);
+            // logSnippets is keyed by model, not by suggestion id.
+            var logSnippet = (reportData && reportData.logSnippets) ? reportData.logSnippets[suggestion.model] : (suggestion.log_snippet || null);
 
             var refHtml = '';
             var fileRef = suggestion.fileRef || '';
