@@ -4928,6 +4928,65 @@ class TestTheSessionModelIsObservedAndHandedToPython:
         )
         assert observed == "opencode/nemotron-3-ultra-free"
 
+    def test_the_pickers_variant_rides_along_as_an_effort_suffix(self, built_package):
+        """A session opened with `--variant low` must dispatch at low, not default.
+
+        Measured 2026-09-16: a generate-tasks run launched from an opencode
+        session on `openrouter/~deepseek/deepseek-flash-latest` with
+        `--variant low` dispatched its subagent as
+        `opencode:openrouter/~deepseek/deepseek-flash-latest` — the model's
+        default effort — because `info.variant` sat unread beside the
+        `providerID`/`modelID` this function does read.
+        """
+        row = {"role": "assistant", "providerID": "openrouter",
+               "modelID": "~deepseek/deepseek-flash-latest", "variant": "low"}
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client(f"return {json.dumps(_messages(_USER, row))}")},
+              {{sessionID: "ses_1"}},
+            ))
+            """,
+            built_package,
+        )
+        assert observed == "openrouter/~deepseek/deepseek-flash-latest:low"
+
+    @pytest.mark.parametrize(
+        "variant, label",
+        [
+            (None, "no variant key at all"),
+            ("", "an empty variant"),
+            ("   ", "whitespace only"),
+            (7, "a non-string variant"),
+            ("low:high", "a word carrying the suffix separator"),
+            ("open/router", "a word carrying the provider separator"),
+            ("two words", "a word carrying whitespace"),
+        ],
+    )
+    def test_a_variant_that_cannot_be_a_suffix_is_left_off(
+        self, built_package, variant, label
+    ):
+        """Shape, not vocabulary: which efforts a model takes is Python's call.
+
+        A word carrying `:`, `/` or whitespace could not be split back off as an
+        `:effort` suffix, so gluing it on would corrupt the model id rather than
+        select an effort — and losing the model is worse than losing the effort.
+        """
+        row = {"role": "assistant", "providerID": "opencode",
+               "modelID": "nemotron-3-ultra-free"}
+        if variant is not None:
+            row["variant"] = variant
+        observed = node_json(
+            f"""
+            emit(await T.resolveSessionModel(
+              {_client(f"return {json.dumps(_messages(row))}")},
+              {{sessionID: "ses_1"}},
+            ))
+            """,
+            built_package,
+        )
+        assert observed == "opencode/nemotron-3-ultra-free", label
+
     def test_an_array_without_the_data_wrapper_is_read_too(self, built_package):
         """One shape check, not a version sniff."""
         rows = _messages(_ASSISTANT)["data"]

@@ -2156,6 +2156,66 @@ class TestOpenCodeProvider:
                 "Generate code",
             ], f"model {model!r} was not passed through verbatim"
 
+    def test_the_effort_suffix_of_a_capped_model_never_reaches_variant(
+        self, provider, capsys
+    ):
+        """The one model measured to HANG on `--variant` is stripped, not dispatched.
+
+        A capped model does not merely ignore the flag — it writes zero bytes and
+        burns the whole slot timeout — so the suffix has to die before argv, on
+        whichever route it arrived: this is the same code path a user-typed
+        `--models opencode:<model>:high` and the host session's propagated picker
+        variant both go through.
+        """
+        from utils.providers import opencode as oc
+
+        oc.reset_hermetic_state()
+        capped = "openrouter/deepseek/deepseek-v4-flash-0731"
+
+        cmd = provider.build_command("Generate code", f"{capped}:low")
+
+        assert "--variant" not in cmd
+        assert cmd == [
+            "opencode", "run", "--format", "json",
+            "--print-logs", "--log-level", "ERROR",
+            "--model", capped, "Generate code",
+        ]
+        assert capped in capsys.readouterr().err
+
+    def test_the_dropped_variant_is_announced_once_per_model_and_effort(
+        self, provider, capsys
+    ):
+        """A silently different effort is the defect this propagation exists to fix."""
+        from utils.providers import opencode as oc
+
+        oc.reset_hermetic_state()
+        capped = "openrouter/deepseek/deepseek-v4-flash-0731"
+
+        for _ in range(3):
+            provider.build_command("Generate code", f"{capped}:low")
+        provider.build_command("Generate code", f"{capped}:high")
+
+        lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+        assert len(lines) == 2, lines
+        assert "--variant low" in lines[0] and capped in lines[0]
+        assert "--variant high" in lines[1]
+
+    def test_an_uncapped_model_keeps_the_variant_it_was_given(self, provider, capsys):
+        """The cap is a fact about one model; nothing else loses its effort."""
+        from utils.providers import opencode as oc
+
+        oc.reset_hermetic_state()
+
+        cmd = provider.build_command(
+            "Generate code", "openrouter/~deepseek/deepseek-flash-latest:low"
+        )
+
+        assert cmd[cmd.index("--model") + 1] == (
+            "openrouter/~deepseek/deepseek-flash-latest"
+        )
+        assert cmd[cmd.index("--variant") + 1] == "low"
+        assert capsys.readouterr().err == ""
+
     @patch("shutil.which")
     def test_opencode_is_available_true(self, mock_which, provider):
         """Test is_available returns True when opencode is found."""

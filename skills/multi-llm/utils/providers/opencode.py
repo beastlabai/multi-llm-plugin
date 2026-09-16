@@ -855,6 +855,25 @@ class OpenCodeProvider(LLMProvider):
         # pinned to ERROR, so stdout stays pure NDJSON and a healthy run
         # stays silent.
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
+        if effort is not None and EFFORT_LADDER.refuses_for_model(base_model, effort):
+            # The per-model cap, asked at the ONE place `--variant` is emitted, so
+            # both routes to a suffix are covered by one check: a user-typed
+            # `--models opencode:<model>:high`, and the host session's own picker
+            # variant, which the OpenCode plugin propagates as the same suffix.
+            # A capped model is one measured to HANG on `--variant` rather than
+            # merely ignore it (see EFFORT_LADDER), so dropping the word is the
+            # conservative move: the slot answers at the model's default effort
+            # instead of burning its whole timeout writing nothing. Said out loud
+            # once per model+effort, because a silently different effort is the
+            # defect this propagation exists to fix.
+            _warn_once(
+                f"variant-capped:{base_model}:{effort}",
+                f"multi-llm warning: dropping `--variant {effort}` for "
+                f"{base_model} — that model is declared not to accept a "
+                f"reasoning effort (measured to hang on one); dispatching at "
+                f"its default effort instead",
+            )
+            effort = None
         cmd = [
             "opencode", "run", "--format", "json",
             "--print-logs", "--log-level", "ERROR",

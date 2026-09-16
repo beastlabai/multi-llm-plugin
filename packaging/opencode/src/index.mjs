@@ -677,7 +677,7 @@ function resolveAnchor(ctx) {
 const SESSION_MODEL_BUDGET_MS = 3000
 
 /**
- * The model the OpenCode session is itself running on, as `provider/model`.
+ * The model the OpenCode session is itself running on, as `provider/model[:variant]`.
  *
  * WHY THE PLUGIN HAS TO ASK. `resolve_subagent_runner`'s ladder had no rung for
  * "what the operator selected": an explicit `driver.subagent_runner` won, else
@@ -689,6 +689,19 @@ const SESSION_MODEL_BUDGET_MS = 3000
  * newest assistant message records the `providerID`/`modelID` it was produced
  * with. That is the observation; what it *means* is Python's to decide, which is
  * why this returns a string and sets no policy.
+ *
+ * THE VARIANT IS PART OF THE SELECTION. The same `info` carries `variant` — the
+ * reasoning effort the picker is set to — and dropping it made a session opened
+ * with `--variant low` dispatch every one of its subagents at the model's
+ * *default* effort, so the run's cost and latency silently diverged from what
+ * the operator chose and the echoed `session_model` told only two thirds of the
+ * truth. It rides along as the adapter's own `model:effort` suffix, which is the
+ * spelling `utils/providers/opencode.py` already splits back off and renders as
+ * `run --variant <name>`; still no policy here — which models may not take one
+ * is a measurement, and it lives with the adapter that emits the flag. The one
+ * thing checked is *shape*: a variant carrying `:`, `/` or whitespace could not
+ * be split back off as a suffix and would corrupt the model id instead, so such
+ * a word is left off rather than glued on.
  *
  * Best effort by construction, and every failure is swallowed (rule 4): an old
  * host with no `client`, a route that moved, a hang. `Promise.race` against a
@@ -724,7 +737,10 @@ async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_
       if (!info || info.role !== "assistant") continue
       const provider = typeof info.providerID === "string" ? info.providerID.trim() : ""
       const model = typeof info.modelID === "string" ? info.modelID.trim() : ""
-      if (provider && model) return `${provider}/${model}`
+      if (!provider || !model) continue
+      const variant = typeof info.variant === "string" ? info.variant.trim() : ""
+      const suffixable = variant && !/[\s:/]/.test(variant)
+      return suffixable ? `${provider}/${model}:${variant}` : `${provider}/${model}`
     }
     return null
   } catch (error) {

@@ -16,7 +16,7 @@ point a provider CLI at a different endpoint. Back to the [README](../README.md)
 | `gemini` | `gemini` | [Gemini CLI](https://geminicli.com/docs/get-started/) |
 | `grok` | `grok` | [Grok Build](https://docs.x.ai/build) |
 | `codex` | `codex` | [Codex CLI](https://developers.openai.com/codex/cli) |
-| `opencode` | `opencode` | [OpenCode CLI](https://opencode.ai/docs/cli/) |
+| `opencode` | `opencode` | [OpenCode CLI](https://opencode.ai/docs/cli/) - supports the `:effort` suffix, rendered as `run --variant <name>`, and when multi-llm runs *inside* an opencode session the variant the picker is set to rides along with the session's model, so a session opened at `--variant low` fans out at `low` rather than at the model's default. One measured exception is declared in the adapter (`EFFORT_LADDER.model_caps`) and stripped with a warning wherever it arrives: `openrouter/deepseek/deepseek-v4-flash-0731` does not ignore an unsupported `--variant`, it **hangs** - zero bytes on either stream until the slot times out, where the suffix-free model answers in ~3s |
 | `kilocode` | `kilocode` | [Kilo Code CLI](https://kilo.ai/docs/cli) |
 | `cline` | `cline` | [Cline](https://docs.cline.bot/) |
 | `goose` | `goose` | [goose](https://block.github.io/goose/) |
