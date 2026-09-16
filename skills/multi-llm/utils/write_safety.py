@@ -1011,9 +1011,17 @@ class AuditLog:
         observed: Dict[str, Any],
         duration_seconds: float,
         reason: Optional[str] = None,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """The post-classification line. The evidence behind D3g's verdict."""
-        self._append({
+        """The post-classification line. The evidence behind D3g's verdict.
+
+        ``usage`` (F6, 2026-09-16): optional and omitted when ``None``, so
+        every existing write-path call — none of which passes it — appends a
+        byte-identical record to before. The read path's judging dispatch is
+        the first caller to pass it, since that record is its only durable
+        home for what the dispatch cost.
+        """
+        record: Dict[str, Any] = {
             "event": "completed",
             "timestamp": _now(),
             "task_id": task_id,
@@ -1028,7 +1036,10 @@ class AuditLog:
             "observed": observed,
             "duration_seconds": round(duration_seconds, 3),
             "reason": reason,
-        })
+        }
+        if usage is not None:
+            record["usage"] = usage
+        self._append(record)
 
     def restored(self, *, task_id: str, report: Dict[str, str], force: bool) -> None:
         """``util restore-batch``'s own line — a rollback is an auditable event."""

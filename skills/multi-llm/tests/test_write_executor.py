@@ -554,6 +554,90 @@ class TestFourWriteOutcomes:
         assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
 
 
+class TestVerificationEvidenceOnEveryRow:
+    """F9: `expected_ids`/`returned_ids`/`sha256_before`/`sha256_after` land on
+    the outcome itself, so both reports built from it — `write_batch_report.json`
+    (`SchedulerResult.to_dict`) and this run's own `subagent_batch_report.json`
+    (`BatchReport`, same `TaskOutcome` list) — can answer "did every item come
+    back?" and "is the hash chain contiguous?" without re-deriving it from
+    `subagent_audit.jsonl` or the per-batch result file.
+    """
+
+    def test_an_applied_batch_carries_ids_and_hashes_on_the_outcome(self, env):
+        before = write_safety.file_sha256(str(env.plan))
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "did it"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        after = write_safety.file_sha256(str(env.plan))
+
+        assert outcome.expected_ids == ["s0"]
+        assert outcome.returned_ids == ["s0"]
+        assert outcome.sha256_before["plans/p.md"] == before
+        assert outcome.sha256_after["plans/p.md"] == after
+        assert before != after
+
+    def test_a_partial_application_still_names_the_ids_it_did_not_get_back(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "half"})
+        task = env.apply_task(0, expected_ids=["s0", "s1", "s2"])
+        result = env.scheduler([task]).run()
+        outcome = result.outcomes[0]
+        assert outcome.expected_ids == ["s0", "s1", "s2"]
+        assert outcome.returned_ids == ["s0"]
+
+    def test_a_no_op_batch_still_carries_the_unchanged_hash(self, env):
+        before = write_safety.file_sha256(str(env.plan))
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "already there"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.sha256_before["plans/p.md"] == before
+        assert outcome.sha256_after["plans/p.md"] == before
+
+    def test_both_reports_built_from_the_same_outcome_carry_the_same_evidence(
+        self, env
+    ):
+        """`write_batch_report.json` and `subagent_batch_report.json` disagreed
+        about this before F9 — not in which outcome they recorded, but in what
+        each row could answer about it.
+        """
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "did it"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        assert result.report_path is not None
+
+        write_report = json.loads(Path(result.report_path).read_text())
+        executor_report = json.loads(
+            (env.phase_dir / executor.BATCH_REPORT_FILENAME).read_text()
+        )
+        for document in (write_report, executor_report):
+            row = document["tasks"][0]
+            assert row["expected_ids"] == ["s0"]
+            assert row["returned_ids"] == ["s0"]
+            assert row["sha256_before"]["plans/p.md"]
+            assert row["sha256_after"]["plans/p.md"]
+            assert row["sha256_before"] != row["sha256_after"]
+
+    def test_a_read_kind_row_carries_none_of_this(self, tmp_path):
+        """The fields are write-only: a read/analyze row has no `write_outcome`
+        and stays exactly as it was — no `expected_ids`/`sha256_*` key at all.
+        """
+        outcome = executor.TaskOutcome(
+            task_id="validation-batch-0", kind="validation", runner="codex:gpt-5.5",
+            status=executor.STATUS_OK,
+        )
+        row = outcome.to_dict()
+        assert "expected_ids" not in row
+        assert "returned_ids" not in row
+        assert "sha256_before" not in row
+        assert "sha256_after" not in row
+
+
 # ===========================================================================
 # D3f — write containment
 # ===========================================================================

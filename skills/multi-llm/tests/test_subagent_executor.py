@@ -1047,6 +1047,163 @@ class TestBatchOutcome:
 
 
 # ---------------------------------------------------------------------------
+# F6 — the judging dispatch's own report name, and its subagent_audit.jsonl trail
+# ---------------------------------------------------------------------------
+
+def _judge_task(phase_dir: Path, group_id: str = "aaaa000000000000"):
+    """One materialized ``human_decision_judge`` task, prompt shaped exactly as
+    ``utils/human_decisions.build_judge_tasks`` writes it — the mock CLI's
+    ``echo_subagent_answer`` derives its reply from the embedded ``group_id``.
+    """
+    prompt = (
+        "You are deciding what to do with 1 review item.\n\n"
+        + json.dumps([{
+            "group_id": group_id, "title": "T", "description": "d",
+            "importance": "MEDIUM", "validation_reason": "r",
+            "confidence": 0.5, "models": ["model-a"],
+        }], indent=2)
+        + "\n\nPrint ONE JSON object and nothing else."
+    )
+    return make_task(
+        kind="human_decision_judge",
+        task_id=f"human_decision_judge-{group_id}",
+        prompt=prompt,
+        output_name=f"human_decision_batch_{group_id}.json",
+        inputs=_inputs(phase_dir),
+        phase_dir=str(phase_dir),
+        extra={"group_id": group_id, "items_count": 1, "batch_index": 0},
+    )
+
+
+class TestJudgeReportNamedByKind:
+    """The judging dispatch writes its own file — a later write dispatch to the
+    same phase dir must not silently overwrite it (F6).
+    """
+
+    def test_the_judging_kind_gets_a_name_a_write_phases_report_cannot_collide_with(
+        self, tmp_path
+    ):
+        judge = executor.BatchReport(
+            phase="apply-task-suggestions", kind="human_decision_judge",
+            phase_dir=str(tmp_path),
+            outcomes=[executor.TaskOutcome(
+                task_id="human_decision_judge-aaaa000000000000",
+                kind="human_decision_judge", runner="codex:gpt-5.5",
+                status=executor.STATUS_OK,
+            )],
+        )
+        judge_path = judge.write()
+        assert Path(judge_path).name == "subagent_batch_report_human_decision_judge.json"
+
+        # The same phase dir's write kind, written second, exactly as the real
+        # apply orchestrators do it (judge first, then the write batches).
+        write = executor.BatchReport(
+            phase="apply-task-suggestions", kind="apply_task_suggestions",
+            phase_dir=str(tmp_path),
+            outcomes=[executor.TaskOutcome(
+                task_id="apply-task-batch-0", kind="apply_task_suggestions",
+                runner="opencode:x", status=executor.STATUS_OK,
+            )],
+        )
+        write_path = write.write()
+        assert Path(write_path).name == executor.BATCH_REPORT_FILENAME
+
+        # Both survive: the write phase's report never clobbered the judge's.
+        assert json.loads(Path(judge_path).read_text())["kind"] == "human_decision_judge"
+        assert json.loads(Path(write_path).read_text())["kind"] == "apply_task_suggestions"
+
+    def test_every_other_kind_keeps_the_bare_name(self, tmp_path):
+        for kind in ("validation", "revalidation", "consolidation", "salvage",
+                     "task_generation"):
+            report = executor.BatchReport(
+                phase="review-plan", kind=kind, phase_dir=str(tmp_path),
+            )
+            assert Path(report.write()).name == executor.BATCH_REPORT_FILENAME
+
+    def test_recorded_runners_reads_back_the_kind_it_was_asked_for(self, tmp_path):
+        executor.BatchReport(
+            phase="p", kind="human_decision_judge", phase_dir=str(tmp_path),
+            outcomes=[executor.TaskOutcome(
+                task_id="j0", kind="human_decision_judge", runner="codex:gpt-5.5",
+                status=executor.STATUS_OK,
+            )],
+        ).write()
+        executor.BatchReport(
+            phase="p", kind="apply_task_suggestions", phase_dir=str(tmp_path),
+            outcomes=[executor.TaskOutcome(
+                task_id="w0", kind="apply_task_suggestions", runner="opencode:x",
+                status=executor.STATUS_OK,
+            )],
+        ).write()
+        assert executor._recorded_runners(str(tmp_path), "human_decision_judge") == {
+            "j0": "codex:gpt-5.5",
+        }
+        assert executor._recorded_runners(str(tmp_path), "apply_task_suggestions") == {
+            "w0": "opencode:x",
+        }
+        # The one caller that never passes `kind` (validation-family only,
+        # never collides) keeps reading the bare-name file.
+        assert executor._recorded_runners(str(tmp_path)) == {
+            "w0": "opencode:x",
+        }
+
+
+class TestJudgeDispatchIsAudited:
+    """The judging dispatch leaves the same ``subagent_audit.jsonl`` trail the
+    write executor leaves for a write dispatch (F6).
+    """
+
+    def test_a_real_dispatch_writes_a_dispatched_and_a_completed_line(
+        self, tmp_path, runner_env
+    ):
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("human_decision_judge")
+        report = executor.run_tasks(
+            [_judge_task(tmp_path)], phase_dir=str(tmp_path),
+            kind="human_decision_judge",
+        )
+        assert report.ok
+        audit_path = tmp_path / "subagent_audit.jsonl"
+        assert audit_path.exists()
+        records = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        events = [r["event"] for r in records]
+        assert events == ["dispatched", "completed"]
+
+        dispatched, completed = records
+        task_id = "human_decision_judge-aaaa000000000000"
+        assert dispatched["task_id"] == completed["task_id"] == task_id
+        assert dispatched["kind"] == completed["kind"] == "human_decision_judge"
+        assert dispatched["runner"] == completed["runner"] == "codex:gpt-5.5"
+        assert dispatched["argv"], "the audit line must carry a rendered argv"
+        assert dispatched["prompt_bytes"] > 0
+        assert len(dispatched["prompt_sha256"]) == 64
+        assert completed["status"] == executor.STATUS_OK
+        assert completed["duration_seconds"] >= 0
+        assert completed["usage"] is None or isinstance(completed["usage"], dict)
+
+    def test_no_attempt_means_no_completed_line(self, tmp_path, runner_env):
+        """A pre-dispatch refusal writes neither line — nothing was attempted."""
+        runner_env.use("codex:gpt-5.5")
+        (runner_env.bin_dir / "codex").unlink()
+        with pytest.raises(executor.RunnerRejected):
+            executor.run_tasks(
+                [_judge_task(tmp_path)], phase_dir=str(tmp_path),
+                kind="human_decision_judge",
+            )
+        assert not (tmp_path / "subagent_audit.jsonl").exists()
+
+    def test_a_non_judge_kind_is_not_audited(self, tmp_path, runner_env):
+        """AuditLog stays a write-safety control off this one kind (D3l)."""
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        report = executor.run_tasks(
+            [_validation_batch(tmp_path)], phase_dir=str(tmp_path), kind="validation",
+        )
+        assert report.ok
+        assert not (tmp_path / "subagent_audit.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
 # D3a — one result contract, two invokers
 # ---------------------------------------------------------------------------
 
