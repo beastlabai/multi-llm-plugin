@@ -953,6 +953,74 @@ class TestReaggregateReusesTheGroupedFileValidationIsBoundTo:
         assert attributed == set(_REAL_SPECS)
 
 
+class TestReaggregateAttributesTheExecutorsOwnRunner:
+    """F3: this branch (`validation_tasks.json` already on disk, its batch
+    files complete) merges and saves validation inline rather than calling
+    the shared `review_orchestrator_base.merge_validation_batches`, so it
+    owes itself the same runner attribution: a batch's own `metadata.model`
+    is a subagent's free-hand self-report, and `subagent_batch_report.json`
+    — written only when `--exec-subagents` dispatched the batch itself — is
+    the executor's own record of what actually ran it.
+    """
+
+    def test_metadata_names_the_executors_dispatch_record_not_the_self_report(
+        self, tmp_path
+    ):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        tasks = _complete_validation_batches(phase_dir)
+
+        (phase_dir / "subagent_batch_report.json").write_text(json.dumps({
+            "report_version": 1, "invoker": "executor", "phase": "code-review",
+            "kind": "validation", "task_file": None,
+            "tasks": [
+                {
+                    "task_id": batch["task_id"], "status": "ok",
+                    "runner": "opencode:openrouter/~deepseek/deepseek-flash-latest",
+                }
+                for batch in tasks["batches"]
+            ],
+        }), encoding="utf-8")
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+
+        validation = json.loads(
+            (phase_dir / "validation.json").read_text(encoding="utf-8")
+        )
+        assert validation["metadata"]["model"] == (
+            "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        )
+        assert validation["metadata"]["runner"] == (
+            "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        )
+
+    def test_falls_back_to_the_self_report_with_no_executor_record(
+        self, tmp_path
+    ):
+        """The host-native (Claude Code Task tool) path leaves no
+        `subagent_batch_report.json` — nothing this process ran — so the
+        best-effort derivation from the batches' own `metadata.model` is the
+        only provenance available."""
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        assert not (phase_dir / "subagent_batch_report.json").exists()
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+
+        validation = json.loads(
+            (phase_dir / "validation.json").read_text(encoding="utf-8")
+        )
+        # `_complete_validation_batches` writes no `metadata.model` of its own
+        # (it writes only `{"groups": verdicts}`), so the derivation falls
+        # through to "unknown" — the pre-existing behaviour this test pins is
+        # that nothing here raises and no `runner` key is invented.
+        assert validation["metadata"]["model"] == "unknown"
+        assert "runner" not in validation["metadata"]
+
+
 # ---------------------------------------------------------------------------
 # The documented validate-then-reaggregate workflow, end to end
 # ---------------------------------------------------------------------------

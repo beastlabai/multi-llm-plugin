@@ -148,6 +148,14 @@ class TestSelfContainedRun:
         validation = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
         groups = validation["groups"] if isinstance(validation, dict) else validation
         assert groups and all(g["status"] == "valid" for g in groups)
+        # F3: the mock validator's own self-report is `"model": "mock"`
+        # (`echo_subagent_answer`) — a free-hand string exactly like the one a
+        # real subagent wrote. `--exec-subagents` dispatched this batch
+        # itself, so `metadata.model`/`metadata.runner` must name the
+        # executor's own dispatch record (the driver override below,
+        # "codex:gpt-5.5") instead of trusting the self-report.
+        assert validation["metadata"]["model"] == "codex:gpt-5.5"
+        assert validation["metadata"]["runner"] == "codex:gpt-5.5"
         # ...and the phase completed, report included.
         assert list(phase_dir.glob("*report*.md")) or (phase_dir / "report.html").exists()
         state = json.loads((plan.output_dir / "state.json").read_text(encoding="utf-8"))

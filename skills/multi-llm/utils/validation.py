@@ -669,6 +669,7 @@ def save_validation_results(
     model: Optional[str] = None,
     groups: Optional[List[Dict[str, Any]]] = None,
     grouped_file: Optional[str] = None,
+    runner: Optional[str] = None,
 ) -> None:
     """
     Save validation results to a JSON file with metadata.
@@ -697,6 +698,15 @@ def save_validation_results(
             file on disk carried its own ``metadata.model``.
         groups: Optional list of groups to compute group_ids from
         grouped_file: The ``grouped.json`` this validation belongs to
+        runner: The executor's own dispatch record for this batch (F3) —
+            e.g. ``opencode:openrouter/~deepseek/deepseek-flash-latest``, read
+            back from ``subagent_batch_report.json`` rather than trusted from
+            a subagent's free-hand self-report. Stored verbatim under
+            ``metadata.runner`` when the caller has it (an ``--exec-subagents``
+            dispatch); omitted otherwise — the host-native (Claude Code Task
+            tool) path has no executor record to attribute. Does not change
+            how ``model`` is derived; a caller that wants the authoritative
+            spec to also win ``metadata.model`` passes it as both.
     """
     if not model:
         model = _derive_model_from_results(validation_results) or "unknown"
@@ -746,6 +756,7 @@ def save_validation_results(
             "model": model,
             "timestamp": datetime.now().isoformat(),
             "schema_version": "2.1",
+            **({"runner": runner} if runner else {}),
             **({"grouped_sha256": grouped_sha256} if grouped_sha256 else {}),
         }
     }
