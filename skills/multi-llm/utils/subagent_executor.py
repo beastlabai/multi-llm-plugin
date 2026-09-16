@@ -43,7 +43,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -4323,6 +4323,24 @@ def run_tasks(
         version = report.runner_versions.get(spec, "unknown")
         print(f"[exec-subagents]   {task_id} -> {spec} (version {version})")
 
+    # D4a, the *during* half: a batch of eleven validation tasks ran for a
+    # minute behind a status line that said nothing had started, because the
+    # mirror below this call was the only one (measured 2026-09-16). Each
+    # completion writes the counts so far against the batch's full size, so a
+    # poll reads `validation 3/11 ok` while it is happening. Display only, and
+    # deliberately not the batch report: that file is the batch's *record* and
+    # stays a single write after the last task.
+    finished: List[TaskOutcome] = []
+
+    def task_finished(outcome: TaskOutcome) -> None:
+        # Called from the dispatch loop's own event loop, one at a time, so the
+        # list needs no lock; `update_status` holds the inter-process one.
+        finished.append(outcome)
+        _mirror_status(
+            phase_dir, replace(report, outcomes=list(finished)),
+            total=len(selected),
+        )
+
     outcomes = _run_sync(_gather(
         _dispatch_order(selected),
         runners=runners,
@@ -4331,6 +4349,7 @@ def run_tasks(
         cwd=cwd,
         max_parallel=report.ceilings["effective"],
         resume=resume,
+        on_task_finished=task_finished,
     ))
     report.outcomes = [outcomes[str(t.get("task_id", i))]
                        for i, t in enumerate(selected)
@@ -4456,8 +4475,14 @@ async def _gather(
     cwd: Optional[str],
     max_parallel: int,
     resume: bool,
+    on_task_finished: Optional[Callable[[TaskOutcome], None]] = None,
 ) -> Dict[str, TaskOutcome]:
-    """Run the batch through the task-keyed concurrency helper."""
+    """Run the batch through the task-keyed concurrency helper.
+
+    ``on_task_finished`` is called once per task as it settles — dispatched,
+    skipped or refused by the fatal gate alike — from this loop and nowhere
+    else, which is what lets :func:`run_tasks` mirror progress without a lock.
+    """
     try:
         from .review_orchestrator_base import run_tasks_concurrent
     except ImportError:  # pragma: no cover
@@ -4507,6 +4532,15 @@ async def _gather(
     waves = (len(tasks) + lanes - 1) // lanes
     batch_timeout = per_task_budget * waves if per_task_budget > 0 else None
 
+    def settled(outcome: TaskOutcome) -> TaskOutcome:
+        """One task has reached its verdict — tell the caller, then hand it back."""
+        if on_task_finished is not None:
+            try:
+                on_task_finished(outcome)
+            except Exception:  # noqa: BLE001 - observability never fails a batch
+                pass
+        return outcome
+
     async def per_task(task: Dict[str, Any], runner: str, index: int) -> TaskOutcome:
         if fatal["hit"]:
             failed_spec = fatal["spec"]
@@ -4523,13 +4557,13 @@ async def _gather(
                     f"not dispatched: the batch stopped after {failed_spec} "
                     f"failed fatally; this task's runner {runner} was never tried"
                 )
-            return TaskOutcome(
+            return settled(TaskOutcome(
                 task_id=str(task.get("task_id", index)),
                 kind=str(task.get("kind", "")),
                 runner=runner,
                 status=STATUS_INCOMPLETE,
                 reason=reason,
-            )
+            ))
         provider_name, _ = parse_model_spec(runner, anchor=anchor)
         await backpressure.acquire(provider_name)
         try:
@@ -4554,21 +4588,21 @@ async def _gather(
                     f"narrowing it to {narrowed} in-flight slot(s) for the rest "
                     f"of the batch"
                 )
-        return outcome
+        return settled(outcome)
 
     def skip_done(task: Dict[str, Any], runner: str, index: int) -> Optional[TaskOutcome]:
         if not resume or not task_is_complete(task, phase_dir):
             return None
         target = resolve_output_target(task, phase_dir)
         print(f"[exec-subagents] {task.get('task_id')} already complete — skipping")
-        return TaskOutcome(
+        return settled(TaskOutcome(
             task_id=str(task.get("task_id", index)),
             kind=str(task.get("kind", "")),
             runner=runner,
             status=STATUS_OK,
             output_path=str(target),
             skipped=True,
-        )
+        ))
 
     return await run_tasks_concurrent(
         list(tasks),
@@ -4624,8 +4658,16 @@ def _recorded_runners(phase_dir: str) -> Dict[str, str]:
     return recorded
 
 
-def _mirror_status(phase_dir: str, report: BatchReport) -> None:
-    """Mirror the batch counts into ``.status.json`` (D4a). Best-effort."""
+def _mirror_status(
+    phase_dir: str, report: BatchReport, *, total: Optional[int] = None
+) -> None:
+    """Mirror the batch counts into ``.status.json`` (D4a). Best-effort.
+
+    ``total`` is the batch's task count, which while the batch is in flight is
+    larger than the number of outcomes recorded so far; it defaults to the
+    outcomes present, so the mirror a finished batch writes is byte-identical to
+    the one this wrote before it took the argument.
+    """
     try:
         from . import status_file as _status_file
     except ImportError:  # pragma: no cover
@@ -4636,7 +4678,7 @@ def _mirror_status(phase_dir: str, report: BatchReport) -> None:
                 _STATUS_MIRROR_KEY: {
                     "kind": report.kind,
                     "invoker": report.invoker,
-                    "total": len(report.outcomes),
+                    "total": total if isinstance(total, int) else len(report.outcomes),
                     "ok": sum(1 for o in report.outcomes if o.ok),
                     "counts": report.counts(),
                     "failed_task_ids": [o.task_id for o in report.failed],

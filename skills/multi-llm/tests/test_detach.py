@@ -923,6 +923,97 @@ class TestStatusSurface:
         assert "workflow phase: completed" in out
         assert "not yet marked completed" not in out
 
+    def test_the_run_block_names_the_host_that_launched_the_run(
+        self, tmp_path, capsys
+    ):
+        """F6: the block reported a runner for a host the reader never named,
+        and nothing on screen said whose run it was (measured 2026-09-16, an
+        `opencode` run polled from Claude Code)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-host-0001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "host": "opencode", "mode": "review-plan",
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
+        out = capsys.readouterr().out
+        assert "host:           opencode" in out
+        # ...and the runner block below it is about that host, not this one.
+        assert "every subagent opencode dispatches runs through it" in out
+        assert "claude-code dispatches subagents natively" not in out
+
+    def test_the_poll_command_it_hands_back_carries_the_runs_host(
+        self, tmp_path, capsys
+    ):
+        """Run the emitted `next` verbatim and it must report the same run the
+        same way — which it cannot without the selector the run was launched
+        with."""
+        assert "--host opencode" in detach.status_command_for(
+            "/p.md", phase="review-plan", host="opencode"
+        )
+        # Never guessed: a run that recorded no host selects none (D5b).
+        assert "--host" not in detach.status_command_for("/p.md", phase="review-plan")
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-host-0002", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "host": "opencode",
+            "mode": "review-plan",
+        })
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.next and "--host opencode" in context.next
+
+    def test_progress_renders_the_counts_a_run_is_still_accumulating(
+        self, tmp_path, capsys
+    ):
+        """F5's display half: mid-run the two longest stretches read `models
+        0/4` and `grouping` — 435 s of fan-out and 62 s of validation with
+        nothing on the line that moved (measured 2026-09-16)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-progress-001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "review-plan",
+        })
+        status_file.update_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 4, "models_done": 2},
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        assert "progress:       fanout, models 2/4" in capsys.readouterr().out
+
+        status_file.update_status(str(phase), {
+            "state": "grouping_complete",
+            "progress": {
+                "step": "validating", "models_done": 4,
+                "subagents": {
+                    "kind": "validation", "invoker": "executor",
+                    "total": 11, "ok": 3, "counts": {"ok": 3},
+                    "failed_task_ids": [],
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        assert (
+            "progress:       validating, models 4/4, validation 3/11 ok"
+            in capsys.readouterr().out
+        )
+
     def test_the_executor_mirror_is_progress_too(self, tmp_path, capsys):
         """A dispatch-only phase (`generate-tasks`) records no `step`; the
         executor's `progress.subagents` mirror is all the progress it has, and

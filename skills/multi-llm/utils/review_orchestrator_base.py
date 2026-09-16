@@ -333,6 +333,20 @@ def _print_executor_refusal(
     })
 
 
+#: The ``progress.step`` word each dispatched batch reports while it is in
+#: flight, keyed by the caller's ``label``. A dispatch is the *second* long
+#: stretch of a detached run — eleven validation batches ran for 62 s of a
+#: 516 s ``review-plan`` (measured 2026-09-16) under a progress line still
+#: reading ``grouping`` — and the executor's mirror only says how far the batch
+#: has got, never that one began. Anything not listed falls back to
+#: ``dispatching <label>``, which reads correctly for every label there is.
+_DISPATCH_STEPS = {
+    "validation": "validating",
+    "revalidation": "revalidating",
+    "consolidation": "consolidating",
+}
+
+
 def dispatch_subagent_tasks(
     args: Any,
     *,
@@ -387,6 +401,12 @@ def dispatch_subagent_tasks(
                 f"its marker and its follow-up command."
             )
             return False
+        # Reported before the dispatch, not after it: `report_progress` merges
+        # into `progress`, so the step stands while the executor's mirror fills
+        # in underneath it (`validating, validation 3/11 ok`).
+        _detach.report_progress(
+            phase_dir, step=_DISPATCH_STEPS.get(label, f"dispatching {label}")
+        )
         return continue_past_marker(
             args,
             task_file=task_file,
@@ -1807,6 +1827,33 @@ async def run_all_models(
     Returns:
         Dict mapping model spec to result dict
     """
+    fanout_phase_dir = str(get_phase_dir(Path(plan_path), phase_name))
+    slots_finished = 0
+
+    def slot_finished() -> None:
+        """Advance ``progress.models_done`` as each slot ends (D4a).
+
+        The fan-out is the longest stretch of a detached run — 435 s of a
+        516 s ``review-plan``, measured 2026-09-16 — and the counter was
+        written ``0`` once before the first launch and recomputed only after
+        the last model returned, so every poll in between read ``models 0/4``
+        beside two finished models. Counting *slots* rather than successes is
+        deliberate: a failed model has finished its slot, and which ones failed
+        is the recomputation's job at the end of the phase.
+
+        No lock: every call happens on the fan-out's own event loop (the skip
+        predicate is synchronous, ``per_model``'s ``finally`` runs after its
+        await resumes), and ``report_progress`` writes nothing at all unless
+        this process owns a detached run for this phase dir.
+        """
+        nonlocal slots_finished
+        slots_finished += 1
+        _detach.report_progress(
+            fanout_phase_dir,
+            models_total=len(model_specs),
+            models_done=slots_finished,
+        )
+
     def skip_existing_result(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
         # skip models that already have valid results (resume after partial
@@ -1826,6 +1873,9 @@ async def run_all_models(
                     existing_data = json.load(f)
                 if isinstance(existing_data, list):
                     print(f"[SKIP] {display_name} - already has results ({len(existing_data)} items)")
+                    # A slot answered from disk is a slot finished; a resumed
+                    # run must not read `models 0/4` while it skips four.
+                    slot_finished()
                     return {
                         "success": True,
                         "output": json.dumps(existing_data),
@@ -1857,11 +1907,17 @@ async def run_all_models(
             quiet=True,
         )
         prompt_context = prompt_context_factory(model_spec)
-        return await run_single_model(
-            model_spec, plan_path, prompt_template, prompt_context,
-            phase_name, invoke_phase, timeout,
-            out_dir=out_dir, prefix=prefix,
-        )
+        try:
+            return await run_single_model(
+                model_spec, plan_path, prompt_template, prompt_context,
+                phase_name, invoke_phase, timeout,
+                out_dir=out_dir, prefix=prefix,
+            )
+        finally:
+            # In a `finally` because a slot that raised (or was cancelled by the
+            # overall timeout) has stopped occupying the fan-out just as surely
+            # as one that returned a result.
+            slot_finished()
 
     return await run_models_concurrent(
         model_specs, per_model, timeout, max_parallel,
@@ -3389,6 +3445,10 @@ async def run_review_orchestration(
         # `.status.json` gains no key.
         **({"models_served": served_models} if served_models else {}),
     })
+    # Restates the count rather than adding to it: `run_all_models` advanced it
+    # per finished *slot*, and this is the same number re-derived from the
+    # models that actually produced a result — so a run that lost a model ends
+    # on `models 3/4` instead of the `4/4` the slot counter last wrote.
     _detach.report_progress(
         phase_dir,
         step="grouping",

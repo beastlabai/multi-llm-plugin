@@ -909,13 +909,30 @@ class WriteBatchScheduler:
                     f"them; they run sequentially instead (D3h)."
                 )
         outcomes: List[TaskOutcome] = []
+        # `outcomes` is the task file's order (what the report and the stop
+        # check read); this one grows in completion order, and is what the
+        # mirror reports.
+        outcomes_so_far: List[TaskOutcome] = []
+        # The mirror below the loop in `_run` moves once per *batch*, so a batch
+        # of co-scheduled tasks reported nothing until its last one landed. This
+        # is the same counts write, per task: display only, never the report,
+        # and taken under a lock because a disjoint group dispatches on threads.
+        mirror_lock = threading.Lock()
+
+        def dispatch_and_mirror(task: Dict[str, Any]) -> TaskOutcome:
+            outcome = self._dispatch_one(task, batch_index)
+            with mirror_lock:
+                outcomes_so_far.append(outcome)
+                self._mirror_status(result, in_flight=outcomes_so_far)
+            return outcome
+
         for group in groups:
             if len(group) == 1:
-                outcomes.append(self._dispatch_one(group[0], batch_index))
+                outcomes.append(dispatch_and_mirror(group[0]))
             else:
                 with ThreadPoolExecutor(max_workers=len(group)) as pool:
                     futures = [
-                        pool.submit(self._dispatch_one, task, batch_index)
+                        pool.submit(dispatch_and_mirror, task)
                         for task in group
                     ]
                     outcomes.extend(future.result() for future in futures)
@@ -2325,13 +2342,22 @@ class WriteBatchScheduler:
         report.write()
         return path
 
-    def _mirror_status(self, result: SchedulerResult) -> None:
-        """Per-task write progress in ``.status.json`` (D3g/D4a). Best-effort."""
+    def _mirror_status(
+        self, result: SchedulerResult, *, in_flight: Sequence[TaskOutcome] = ()
+    ) -> None:
+        """Per-task write progress in ``.status.json`` (D3g/D4a). Best-effort.
+
+        ``in_flight`` is the current batch's finished tasks, which are not on
+        ``result.outcomes`` until the batch returns; passing them is what makes
+        the counts advance *during* a batch instead of at its boundary. The
+        rows are appended, never merged, so a task cannot be counted twice.
+        """
         try:
             from . import status_file as _status_file
         except ImportError:  # pragma: no cover
             from utils import status_file as _status_file
         try:
+            outcomes = list(result.outcomes) + list(in_flight)
             if result.finalized:
                 phase_state = "complete"
             elif result.stopped_at_batch is not None or result.exit_code:
@@ -2349,7 +2375,7 @@ class WriteBatchScheduler:
                         "kind": self.kind,
                         "invoker": self.invoker,
                         "total": len(self.tasks),
-                        "dispatched": len(result.outcomes),
+                        "dispatched": len(outcomes),
                         "batches_dispatched": list(result.batches_dispatched),
                         "stopped_at_batch": result.stopped_at_batch,
                         "finalized": result.finalized,
@@ -2364,10 +2390,10 @@ class WriteBatchScheduler:
                                 "write_outcome": o.write_outcome,
                                 "files_touched": list(o.files_touched),
                             }
-                            for o in result.outcomes
+                            for o in outcomes
                         ],
                         "failed_task_ids": [
-                            o.task_id for o in result.outcomes if not o.ok
+                            o.task_id for o in outcomes if not o.ok
                         ],
                     }
                 }

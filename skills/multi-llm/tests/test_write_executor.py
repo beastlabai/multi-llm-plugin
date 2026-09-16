@@ -1419,6 +1419,39 @@ class TestAdditivityAndDetach:
                    for t in progress["tasks"])
         assert progress["failed_task_ids"] == []
 
+    def test_the_write_mirror_moves_once_per_task_not_once_per_batch(
+        self, env, monkeypatch
+    ):
+        """D4a: the mirror sat below the dispatch loop, so a batch carrying more
+        than one task reported nothing until its last task landed."""
+        from utils import status_file
+
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0", "s1"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        # Both in batch 0: one dispatch loop, two tasks.
+        tasks = [env.apply_task(0), env.apply_task(1, batch_index=0)]
+        rows = []
+        real_update = status_file.update_status
+
+        def record(phase_dir, updates):
+            mirror = (updates.get("progress") or {}).get("write_subagents")
+            if isinstance(mirror, dict):
+                rows.append(len(mirror["tasks"]))
+            real_update(phase_dir, updates)
+
+        monkeypatch.setattr(status_file, "update_status", record)
+        env.scheduler(tasks).run()
+        assert rows[:2] == [1, 2]
+        progress = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]["write_subagents"]
+        assert progress["total"] == 2
+        # The end state is what it was: one row per task, counted once.
+        assert [t["task_id"] for t in progress["tasks"]] == [
+            "apply-batch-0", "apply-batch-1",
+        ]
+
     def test_status_json_records_the_stopping_batch(self, env):
         env.edits([_patch_edit(env.plan)],
                   result={"status": "failed", "ids": [],

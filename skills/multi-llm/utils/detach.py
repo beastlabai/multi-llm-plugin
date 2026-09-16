@@ -1247,13 +1247,29 @@ def _print_banner(
 
 
 def status_command_for(
-    plan_file: str, *, phase: Optional[str] = None, run_id: Optional[str] = None
+    plan_file: str,
+    *,
+    phase: Optional[str] = None,
+    run_id: Optional[str] = None,
+    host: Optional[str] = None,
 ) -> str:
+    """The poll command for one run, carrying the run's own selectors.
+
+    ``host`` is one of them. ``status`` reports the subagent runner for the host
+    it resolves, and with no ``--host`` that is the *reader's* — so the command
+    a run on another host hands back would, run verbatim, describe a different
+    host's dispatch than the one it is polling (measured 2026-09-16 on an
+    opencode run: the emitted ``next`` omitted the flag and the line read
+    ``claude-code:sonnet``). Omitted when the run recorded no host, rather than
+    defaulted, because a guessed ``--host`` is exactly what D5b forbids.
+    """
     args: List[str] = [plan_file, "--view", "run"]
     if phase:
         args += ["--phase", phase]
     if run_id:
         args += ["--run-id", run_id]
+    if host:
+        args += ["--host", host]
     return dispatcher_command("status", *args)
 
 
@@ -1282,6 +1298,9 @@ def launch(
     phase_dir = os.path.abspath(str(phase_dir))
     force = bool(getattr(args, "force", False))
     if_not_running = bool(getattr(args, "if_not_running", False))
+    # The launcher's `--host`, carried into every poll command printed below —
+    # it is the host the worker records, so the poll must select it too.
+    host = getattr(args, "host", None)
     uv = resolve_uv()
 
     if not os.path.isdir(phase_dir) or not os.access(phase_dir, os.W_OK):
@@ -1347,9 +1366,13 @@ def launch(
             print(f"A detached run is already in flight for {phase_dir}.")
             print(f"  run_id:  {existing_id}")
             print(f"  log:     {existing['run'].get('log_path')}")
-            print(f"  status:  {status_command_for(plan_file, phase=phase, run_id=existing_id)}")
+            reattach_cmd = status_command_for(
+                plan_file, phase=phase, run_id=existing_id,
+                host=existing["run"].get("host") or host,
+            )
+            print(f"  status:  {reattach_cmd}")
             record_artifact(existing["run"].get("log_path") or log_path(phase_dir))
-            record_next(status_command_for(plan_file, phase=phase, run_id=existing_id))
+            record_next(reattach_cmd)
             return EXIT_OK
         if force:
             print(
@@ -1490,7 +1513,7 @@ def launch(
         )
 
     status_cmd = status_command_for(
-        plan_file, phase=phase, run_id=run_id if ask_slug else None
+        plan_file, phase=phase, run_id=run_id if ask_slug else None, host=host
     )
     _print_banner(
         run_id=run_id,
