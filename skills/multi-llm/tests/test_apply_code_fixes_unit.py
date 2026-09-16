@@ -3121,3 +3121,116 @@ class TestReportNumberingIsBoundToTheIssuesJsonItIndexes:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _two_file_issue(file, title="Missing error handling",
+                    desc="The call is not wrapped in try/except.", importance="high"):
+    return {
+        "title": title, "desc": desc, "importance": importance, "file": file,
+        "line_range": [10, 12], "type": "bug", "anchor_text": "x",
+    }
+
+
+class TestBuildIssueToGroupMapTellsIdenticalFindingsApart:
+    """A word-identical finding in two files is two groups (the grouper never
+    merges across files) under one content hash; the hash-lookup strategy
+    sent both issue numbers to the first group, so one Skip tick skipped
+    both, and the report called them the same finding."""
+
+    def _grouped(self, *files):
+        groups = [{"theme": "Missing error handling",
+                   "suggestions": [_two_file_issue(f)]} for f in files]
+        stamp_stable_ids(groups)
+        return groups
+
+    def _issues_json(self, temp_dir, issues):
+        path = Path(temp_dir) / "issues.json"
+        path.write_text(json.dumps(issues), encoding="utf-8")
+        return str(path)
+
+    def test_each_copy_maps_to_its_own_group(self, temp_dir):
+        issues = self._issues_json(temp_dir, [_two_file_issue("a.py"), _two_file_issue("b.py")])
+        assert build_issue_to_group_map(issues, self._grouped("a.py", "b.py")) == {
+            1: (1, 1), 2: (2, 1),
+        }
+
+    def test_the_order_the_model_emitted_them_in_does_not_matter(self, temp_dir):
+        issues = self._issues_json(temp_dir, [_two_file_issue("b.py"), _two_file_issue("a.py")])
+        assert build_issue_to_group_map(issues, self._grouped("a.py", "b.py")) == {
+            1: (2, 1), 2: (1, 1),
+        }
+
+
+class TestIdenticalFindingsInTwoFilesEndToEnd:
+    """issues.json -> grouped.json -> report.md -> one ticked Skip box ->
+    the apply phase's resolver, with nothing set by hand: the real grouper,
+    the real stamper, the real report renderer and the real map."""
+
+    def _pipeline(self, tmp_path):
+        from code_review_orchestrator import generate_review_report
+        from utils.suggestion_processor import group_similar_suggestions
+
+        results = {
+            "m1": (True, [
+                _two_file_issue("a.py"),
+                _two_file_issue("b.py"),
+                _two_file_issue("c.py", title="Something else", desc="unrelated",
+                                importance="low"),
+            ], None),
+        }
+        # main(): issues.json is the results dict's issues, in order, written
+        # BEFORE grouping stamps anything.
+        all_issues = [i for _s, issues, _e in results.values() for i in issues]
+        for issue in all_issues:
+            issue["model"] = "m1"
+        issues_path = tmp_path / "issues.json"
+        issues_path.write_text(json.dumps(all_issues), encoding="utf-8")
+        for issue in all_issues:
+            issue.setdefault("source_model", "m1")
+        grouped = [g.to_dict() for g in group_similar_suggestions(all_issues)]
+        stamp_stable_ids(grouped)
+        for group in grouped:
+            group["validation_status"] = "needs-human-decision"
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        report = generate_review_report(plan, results, ["a.py"], grouped, phase_dir=None)
+        return all_issues, grouped, str(issues_path), report
+
+    def _tick(self, report, number):
+        out, armed = [], False
+        for line in report.splitlines():
+            if line.startswith(f"### {number}. "):
+                armed = True
+            elif armed and line.strip() == "- [ ] Skip":
+                line, armed = "- [x] Skip", False
+            out.append(line)
+        return "\n".join(out)
+
+    def _group_holding(self, grouped, issue):
+        return next(g["group_hash"] for g in grouped
+                    if any(s is issue for s in g["suggestions"]))
+
+    def test_the_two_copies_are_two_groups_with_two_hashes(self, tmp_path):
+        _issues, grouped, _path, _report = self._pipeline(tmp_path)
+        hashes = [g["group_hash"] for g in grouped]
+        assert len(grouped) == 3 and len(set(hashes)) == 3
+
+    def test_the_report_does_not_call_them_the_same_finding(self, tmp_path):
+        _issues, _grouped, _path, report = self._pipeline(tmp_path)
+        assert "Same finding as" not in report
+
+    @pytest.mark.parametrize("number", [1, 2, 3])
+    def test_a_ticked_skip_box_lands_on_that_issue_s_own_group(self, tmp_path, number):
+        issues, grouped, issues_path, report = self._pipeline(tmp_path)
+        report_path = tmp_path / "report.md"
+        report_path.write_text(self._tick(report, number), encoding="utf-8")
+
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        orch.groups = grouped
+        orch.merged = [dict(g) for g in grouped]
+        orch.issue_to_group_map = build_issue_to_group_map(issues_path, grouped)
+        orch.validation_overrides = {}
+        orch.claude_decide_overrides = set()
+
+        hashes, _sugg_ids, _old = orch.parse_skips_from_report(str(report_path))
+        assert hashes == {self._group_holding(grouped, issues[number - 1])}

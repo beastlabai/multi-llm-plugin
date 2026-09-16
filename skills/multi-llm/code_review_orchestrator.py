@@ -43,8 +43,6 @@ from utils import (
     group_similar_suggestions,
     export_groups_to_json,
     validate_groups,
-    apply_validation_to_groups,
-    save_validation_results,
     sanitize_prefix,
     intent_to_add_untracked,
     subtract_baseline,
@@ -59,13 +57,12 @@ from utils.cli_common import (
     build_parent_parser,
     dispatcher_prefix,
     reaggregate_command,
-    record_artifacts,
     record_next,
 )
 from utils.report_parser import issue_numbering_footer
 from utils.state_manager import (
-    generate_suggestion_id,
     load_groups_payload,
+    match_issues_to_suggestions,
     save_groups_payload,
     stamp_stable_ids,
     CURRENT_FORMAT_VERSION,
@@ -74,12 +71,15 @@ from utils.output_handler import get_phase_dir, output_dir_path, phase_dir_path
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
-    _authoritative_validator_runner,
+    backfill_deadline_losses,
     dispatch_salvage_tasks,
     dispatch_subagent_tasks,
     exec_subagents_requested,
+    fanout_slot_counter,
     maybe_detach,
     merge_validation_batches,
+    record_high_priority_groups,
+    record_review_artifacts,
     resolve_result_files_by_model,
     retire_salvage_artifacts,
     retire_stale_validation,
@@ -99,7 +99,6 @@ from utils.validation import (
     VALIDATION_CONTEXT_LIMIT,
     excerpt_context_reported,
     prepare_batched_validation_tasks,
-    merge_batched_validation_results,
     resolved_reaggregate_command,
 )
 from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
@@ -135,7 +134,7 @@ from utils.git_utils import (
     validate_git_ref,
     _run_git,
 )
-from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK, compute_max_importance
+from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -1381,28 +1380,13 @@ async def run_all_reviews(
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
     results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
-    fanout_phase_dir = str(get_phase_dir(plan_path, 'code-review'))
-    slots_finished = 0
-
-    def slot_finished() -> None:
-        """Advance ``progress.models_done`` as each slot ends (F6).
-
-        Mirrors ``review_orchestrator_base.run_all_models``'s own
-        ``slot_finished()``, which this lane never got: `models_done` was
-        written `0` once before dispatch and recomputed only after the last
-        model returned, so a mid-run poll of this fan-out read `models 0/4`
-        beside three finished reviewers (measured 2026-09-16: 646 s of an
-        833 s run). Counting *slots* — a skipped or failed one included — is
-        deliberate; the post-fanout recomputation below is what turns slots
-        back into successes.
-        """
-        nonlocal slots_finished
-        slots_finished += 1
-        report_progress(
-            fanout_phase_dir,
-            models_total=len(model_specs),
-            models_done=slots_finished,
-        )
+    # F6: one `models_done` tick per finished slot — a skipped or failed one
+    # included — from the counter the base's fan-out uses; this lane never had
+    # one, so a mid-run poll read `models 0/4` beside three finished reviewers
+    # (measured 2026-09-16: 646 s of an 833 s run).
+    slot_finished = fanout_slot_counter(
+        str(get_phase_dir(plan_path, 'code-review')), len(model_specs)
+    )
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
         provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
@@ -1645,26 +1629,18 @@ def generate_review_report(
         issue_global_index[id(issue)] = idx
 
     # Which group each numbered issue belongs to, and who its siblings are.
-    # The join is the suggestion hash grouped.json stamps on every member
-    # (recomputed from the issue when absent — the same hash the apply phase's
-    # issue->group map uses, so the report and the checkbox contract agree).
+    # The same matcher the apply phase's issue->group map uses, so the report
+    # and the checkbox contract agree — including on a word-identical finding
+    # in two files, which is two groups and must not read "Same finding as".
     issue_siblings: Dict[int, List[int]] = {}   # id(issue) -> other issue numbers
     issue_group_models: Dict[int, int] = {}     # id(issue) -> models in its group
     if validated_groups:
-        hash_to_group: Dict[str, int] = {}
-        for g_num, group in enumerate(validated_groups, 1):
-            for sugg in group.get("suggestions", []):
-                if not isinstance(sugg, dict):
-                    continue
-                shash = sugg.get("suggestion_hash") or generate_suggestion_id(sugg)
-                if shash:
-                    hash_to_group.setdefault(shash, g_num)
+        placement = match_issues_to_suggestions(all_issues, validated_groups)
         members: Dict[int, List[Dict]] = {}
-        for issue in all_issues:
-            shash = issue.get("suggestion_hash") or generate_suggestion_id(issue)
-            g_num = hash_to_group.get(shash)
-            if g_num:
-                members.setdefault(g_num, []).append(issue)
+        for idx, issue in enumerate(all_issues, 1):
+            location = placement.get(idx)
+            if location:
+                members.setdefault(location[0], []).append(issue)
         for group_issues in members.values():
             if len(group_issues) < 2:
                 continue
@@ -2174,30 +2150,13 @@ async def reaggregate_from_existing_files(
                 # "done" on a run that produced no report and needs --force.
                 sys.exit(task_file_error.exit_code)
 
-            validation_results = merge_batched_validation_results(
-                output_dir=str(phase_dir),
-                batch_metadata=batch_metadata,
-                total_groups=len(grouped)
+            # The shared merge: batch files -> validation.json (with the
+            # executor's own runner attribution, F3) -> groups. This branch
+            # used to re-implement the three steps, importing the base's
+            # private runner lookup to do it.
+            validated_groups_for_report = merge_validation_batches(
+                str(phase_dir), batch_metadata, grouped, str(validation_path)
             )
-
-            # Apply validation to groups
-            validated_groups = apply_validation_to_groups(
-                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                validation_results
-            )
-            validated_groups_for_report = validated_groups
-
-            # Save merged validation results. F3: this branch merges batches
-            # already found on disk rather than calling the shared
-            # `merge_validation_batches`, so it owes itself the same runner
-            # attribution — the executor's own dispatch record (when
-            # `--exec-subagents` produced this batch) outranks each batch
-            # file's free-hand self-report.
-            runner = _authoritative_validator_runner(str(phase_dir), batch_metadata)
-            save_validation_results(
-                validation_results, validation_path, model=runner, runner=runner
-            )
-            print(f"Validation results saved to: {validation_path}")
         elif not args.skip_validation:
             # No validation batches exist - need to prepare them
             print("\nPreparing batched validation for subagent execution...")
@@ -2293,11 +2252,9 @@ async def reaggregate_from_existing_files(
             validation=str(validation_path),
             issues=str(issues_path),
         )
-        artifacts_to_record = [str(report_path), report_html_path, str(grouped_path)]
-        for optional_path in (str(validation_path), str(issues_path)):
-            if os.path.exists(optional_path):
-                artifacts_to_record.append(optional_path)
-        record_artifacts(artifacts_to_record)
+        record_review_artifacts(
+            report_path, report_html_path, grouped_path, validation_path, issues_path
+        )
 
         # Mark phase complete after successful reaggregation
         state = get_or_create_state(plan_path)
@@ -2689,14 +2646,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
             if not save_model_result(prefix, model_spec, success, issues, error, phase_dir):
                 failed_models[model_spec] = error or "Unknown error"
 
-        # F11: a model whose task never returned — cancelled by
-        # `run_all_reviews`'s own `asyncio.wait_for` deadline, or dropped as an
-        # `Exception` item there — is in neither `results` nor (so far)
-        # `failed_models`: without this it is counted completed, inflates
-        # `models_done`, and appears in no report section at all.
-        for model_spec in model_specs:
-            if model_spec not in results and model_spec not in failed_models:
-                failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+        # F11: a model `run_all_reviews`'s deadline cancelled has no result
+        # and, so far, no failure entry either.
+        backfill_deadline_losses(model_specs, results, failed_models)
 
         # D3b: a salvage task exists for every model whose output would not parse
         # (emit_salvage_task materialized it above). With --exec-subagents this
@@ -2986,18 +2938,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
             issues=issues_path_out,
         )
 
-        # `record_output_files` above only feeds `.status.json` (the channel
-        # `status` reads); the terminal `MULTI_LLM_RESULT.artifacts` line every
-        # host is told to trust instead is populated from `record_artifact(s)`,
-        # which this lane never called (F2) — a fully successful run reported
-        # `artifacts: []`. validation.json/issues.json are included only when
-        # they exist, the same guard `record_output_files` applies internally
-        # (it self-filters; `record_artifacts` does not).
-        artifacts_to_record = [str(report_path), report_html_path, grouped_path_out]
-        for optional_path in (validation_path_out, issues_path_out):
-            if os.path.exists(optional_path):
-                artifacts_to_record.append(optional_path)
-        record_artifacts(artifacts_to_record)
+        # The terminal `MULTI_LLM_RESULT.artifacts` half of the hand-back (F2);
+        # validation.json/issues.json only when they exist.
+        record_review_artifacts(
+            report_path, report_html_path, grouped_path_out,
+            validation_path_out, issues_path_out,
+        )
 
         # Mark phase as completed in state
         state.mark_phase_completed("code-review")
@@ -3007,17 +2953,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
         report_progress(str(phase_dir), step="complete")
 
     # Summary
-    # F4: count distinct HIGH-importance *groups*, not raw issues. Three
-    # models converging on the same bug is one finding, and grouping is what
-    # decides that — `compute_max_importance` is the same helper
-    # `html_report_generator` uses to rank a group for display. The old
-    # `len([i for i in all_issues if i.get("importance") == "high"])` counted
-    # every model's copy of a consensus bug separately: a single 3-model HIGH
-    # finding printed `[HIGH_PRIORITY_ISSUES] 3` (measured 2026-09-16).
-    high_count = sum(
-        1 for g in (validated_groups_for_report or [])
-        if compute_max_importance(g.get("suggestions", g.get("issues", []))) == "HIGH"
-    )
+    # F4: distinct HIGH-importance *groups*, not raw issues (the old per-issue
+    # count printed `[HIGH_PRIORITY_ISSUES] 3` for one 3-model finding), and
+    # recorded in `.status.json` and on the result line — a bare print is
+    # nothing a detached caller sees. The count and the record are the base's,
+    # shared with review-plan and review-tasks.
+    high_count = record_high_priority_groups(str(phase_dir), validated_groups_for_report)
     print("\n=== Review Summary ===")
     print(f"Total issues: {len(all_issues)}")
     print(f"High priority: {high_count} group(s)")
@@ -3027,14 +2968,6 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # [REAGGREGATE_AFTER_SALVAGE], [CONSOLIDATION_RECOMMENDED]). It carries the
         # count, which the exit code it replaces could not.
         print(f"[HIGH_PRIORITY_ISSUES] {high_count}")
-        # F4: the print above is a bare `print` on a detached run — no
-        # `.status.json` field, no result-line key, nothing a host reading
-        # only `MULTI_LLM_RESULT` (or polling `status`) ever sees. Recorded
-        # the way `[CONSOLIDATION_RECOMMENDED]` already is.
-        update_status(str(phase_dir), {
-            "high_priority_groups": {"count": high_count},
-        })
-        cli_common.record_high_priority_groups({"count": high_count})
 
     # Report fix tasks if prepared
     if args.apply_fixes and fix_tasks_path:

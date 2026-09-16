@@ -60,8 +60,8 @@ from utils.report_parser import (
 from utils.state_manager import (
     CURRENT_FORMAT_VERSION,
     StateManager,
-    generate_suggestion_id,
     load_groups_payload,
+    match_issues_to_suggestions,
     stamp_stable_ids,
 )
 from utils.validation import (
@@ -91,30 +91,21 @@ def build_issue_to_group_map(
 ) -> Optional[Dict[int, Tuple[int, int]]]:
     """Build mapping from 1-based issue number to (1-based group_index, 1-based suggestion_index).
 
-    Primary strategy: Use `suggestion_hash` on suggestions in grouped.json matched against
-    issues.json entries (hash-based matching).
+    Primary strategy: the content hash shared by issues.json entries and
+    grouped.json members (`state_manager.match_issues_to_suggestions`), which
+    tells same-hash duplicates apart by file/line and by occurrence. A plain
+    `suggestion_hash` lookup used to send both copies of a word-identical
+    finding in two files to the first group, so one Skip tick skipped both.
     Secondary strategy: Use `issue_index` field on suggestions in grouped.json (if available).
     Fallback strategy: Match issues.json entries to grouped.json suggestions by (title, model) pair.
 
     Returns None if no mapping can be built (no issues.json, no issue_index fields).
     """
-    # Build hash->location lookup from grouped.json
-    hash_lookup: Dict[str, Tuple[int, int]] = {}  # suggestion_hash -> (group_idx, sugg_idx)
-    for group_idx, group in enumerate(grouped, 1):
-        for sugg_idx, sugg in enumerate(group.get("suggestions", []), 1):
-            shash = sugg.get("suggestion_hash")
-            if shash:
-                hash_lookup[shash] = (group_idx, sugg_idx)
-
-    # Try hash-based strategy: match issues.json by suggestion_hash
     issues = load_json_file(issues_json_path)
     mapping: Dict[int, Tuple[int, int]] = {}
 
-    if issues and isinstance(issues, list) and hash_lookup:
-        for issue_num, issue in enumerate(issues, 1):
-            issue_hash = issue.get("suggestion_hash") or generate_suggestion_id(issue)
-            if issue_hash in hash_lookup:
-                mapping[issue_num] = hash_lookup[issue_hash]
+    if issues and isinstance(issues, list) and grouped:
+        mapping = match_issues_to_suggestions(issues, grouped)
         if mapping:
             return mapping
 

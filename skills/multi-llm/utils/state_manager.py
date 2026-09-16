@@ -54,7 +54,7 @@ def canonicalize_hash_input(value) -> str:
     return value
 
 
-def generate_group_id(group: Dict[str, Any]) -> str:
+def generate_group_id(group: Dict[str, Any], discriminator: int = 0) -> str:
     """
     Generate a stable identifier for a group based on its content.
 
@@ -63,6 +63,12 @@ def generate_group_id(group: Dict[str, Any]) -> str:
 
     Args:
         group: A group dictionary with theme, suggestions, etc.
+        discriminator: ``stamp_stable_ids``'s collision counter; ``0`` (the
+            plain content hash) for every caller that computes an id to *join*
+            on. Neither ``file`` nor ``line_range`` is hashed, so two
+            word-identical findings in two files — which the grouper keeps
+            apart on purpose — are two groups with one content hash; the
+            counter is what tells them apart once stamped.
 
     Returns:
         A 16-character hex string identifier
@@ -86,15 +92,20 @@ def generate_group_id(group: Dict[str, Any]) -> str:
             "details": str(s.get("details", s.get("desc", "")))[:200],  # Truncate for stability
         })
 
-    content = json.dumps({"theme": theme, "suggestions": normalized}, sort_keys=True)
+    payload: Dict[str, Any] = {"theme": theme, "suggestions": normalized}
+    if discriminator:
+        payload["discriminator"] = f"-{discriminator}"
+    content = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
-def generate_suggestion_id(suggestion: Dict[str, Any]) -> str:
+def generate_suggestion_id(suggestion: Dict[str, Any], discriminator: int = 0) -> str:
     """Generate a stable 16-char hex hash for a suggestion.
 
     Uses title + type + full description + reference (parent group excluded
-    for stability across regrouping).
+    for stability across regrouping). ``discriminator`` is the collision
+    counter ``stamp_stable_ids`` applies (``0`` hashes the plain content; a
+    non-zero value produces byte-for-byte the rehash it always stamped).
     """
     fields = {
         "v": ID_ALGO_VERSION,
@@ -107,6 +118,8 @@ def generate_suggestion_id(suggestion: Dict[str, Any]) -> str:
             suggestion.get("reference", suggestion.get("section", ""))
         ),
     }
+    if discriminator:
+        fields["discriminator"] = f"-{discriminator}"
     content = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
@@ -116,6 +129,73 @@ def group_id_short(group_id_16: str) -> str:
     return group_id_16[:8]
 
 
+def _anchor(suggestion: Dict[str, Any]) -> Tuple[str, str]:
+    """The (file, line_range) a code-review finding is pinned to; empty for a
+    plan suggestion. This is exactly what the identity hash leaves out."""
+    return (
+        str(suggestion.get("file", "") or ""),
+        str(suggestion.get("line_range", suggestion.get("line", "")) or ""),
+    )
+
+
+def match_issues_to_suggestions(
+    issues: List[Dict[str, Any]],
+    groups: List[Dict[str, Any]],
+) -> Dict[int, Tuple[int, int]]:
+    """Map each 1-based issue to the ``(group_index, suggestion_index)``
+    (both 1-based) that holds it in *groups*.
+
+    The join key is the content hash ``generate_suggestion_id`` computes — the
+    one key an ``issues.json`` entry (written before stamping, so it carries no
+    ``suggestion_hash``) and a ``grouped.json`` member share. Same-hash
+    duplicates — one reviewer's word-identical finding in two files, which the
+    grouper keeps as two groups — are told apart by the stamped hash when the
+    issue carries one, else by ``file`` and ``line_range``, else by order of
+    occurrence; each grouped location is consumed once, so the discriminated
+    second suggestion is reached rather than the first location twice. An
+    issue with no free location is left out of the map (never guessed).
+    """
+    locations: Dict[str, List[Tuple[Tuple[int, int], Dict[str, Any]]]] = {}
+    for g_idx, group in enumerate(groups, 1):
+        members = group.get("suggestions", group.get("issues", []))
+        for s_idx, sugg in enumerate(members, 1):
+            if isinstance(sugg, dict):
+                locations.setdefault(generate_suggestion_id(sugg), []).append(
+                    ((g_idx, s_idx), sugg)
+                )
+
+    mapping: Dict[int, Tuple[int, int]] = {}
+    consumed: set = set()
+    for issue_num, issue in enumerate(issues, 1):
+        if not isinstance(issue, dict):
+            continue
+        pool = [
+            (loc, sugg) for loc, sugg in locations.get(generate_suggestion_id(issue), [])
+            if loc not in consumed
+        ]
+        if not pool:
+            continue
+        chosen: Optional[Tuple[int, int]] = None
+        stamped = issue.get("suggestion_hash")
+        if stamped:
+            chosen = next(
+                (loc for loc, sugg in pool if sugg.get("suggestion_hash") == stamped),
+                None,
+            )
+        if chosen is None and len(pool) > 1:
+            want = _anchor(issue)
+            chosen = next((loc for loc, sugg in pool if _anchor(sugg) == want), None)
+            if chosen is None:
+                chosen = next(
+                    (loc for loc, sugg in pool if _anchor(sugg)[0] == want[0]), None
+                )
+        if chosen is None:
+            chosen = pool[0][0]
+        consumed.add(chosen)
+        mapping[issue_num] = chosen
+    return mapping
+
+
 def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
     """Idempotently stamp group_hash, suggestion_hash, display_label, display_hash
     on each group and its suggestions. Includes collision detection with
@@ -123,53 +203,50 @@ def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
 
     Mutates groups in-place.
     """
-    # Collect all canonical hashes for collision detection
+    # Collect all canonical hashes for collision detection. Groups and
+    # suggestions are two namespaces (a group may legitimately share a hash
+    # with a suggestion), so each collides only with its own kind.
     all_hashes: Dict[str, Tuple[str, int, int]] = {}  # hash -> (type, g_idx, s_idx)
+
+    def _discriminated(kind: str, label: str, hash_of) -> str:
+        """The first of ``hash_of(0)``, ``hash_of(1)``, … not yet stamped on
+        a *kind*. Deterministic: the n-th same-content item in stamping order
+        always gets discriminator n-1, so a re-stamp of the same groups
+        reproduces every id."""
+        discriminator = 0
+        candidate = hash_of(discriminator)
+        while candidate in all_hashes and all_hashes[candidate][0] == kind:
+            discriminator += 1
+            if discriminator > 10:
+                raise ValueError(
+                    f"Cannot resolve hash collision for {kind} {label} "
+                    f"after 10 attempts"
+                )
+            candidate = hash_of(discriminator)
+        return candidate
 
     for g_idx, group in enumerate(groups):
         g_num = g_idx + 1
-        # Group hash (reuse existing generate_group_id)
-        ghash = generate_group_id(group)
+        # Group hash, with the same collision loop the suggestions get. The
+        # content hash reads neither `file` nor `line_range`, and the grouper
+        # never merges across files, so one reviewer's boilerplate finding in
+        # two files used to become two groups under ONE `group_hash` — every
+        # consumer that filters by that hash (an apply-phase skip, an
+        # `invalid` mark, a human decision) then hit both groups at once.
+        ghash = _discriminated(
+            "group", f"G{g_num}", lambda d: generate_group_id(group, d)
+        )
+        all_hashes[ghash] = ("group", g_idx, -1)
         group["group_hash"] = ghash
         group["display_label"] = f"G{g_num}"
 
         suggestions = group.get("suggestions", group.get("issues", []))
         for s_idx, sugg in enumerate(suggestions):
             s_num = s_idx + 1
-            # Generate suggestion hash with collision detection
-            shash = generate_suggestion_id(sugg)
-
-            # Check for canonical hash collision
-            discriminator = 0
-            base_hash = shash
-            while shash in all_hashes:
-                existing_type, existing_g, existing_s = all_hashes[shash]
-                if existing_type == "suggestion":
-                    # Same hash for different content — rehash with discriminator
-                    discriminator += 1
-                    if discriminator > 10:
-                        raise ValueError(
-                            f"Cannot resolve hash collision for suggestion "
-                            f"G{g_num}S{s_num} after 10 attempts"
-                        )
-                    # Rehash with discriminator suffix
-                    fields = {
-                        "v": ID_ALGO_VERSION,
-                        "title": canonicalize_hash_input(sugg.get("title", "")),
-                        "type": canonicalize_hash_input(sugg.get("type", "")),
-                        "description": canonicalize_hash_input(
-                            sugg.get("details", sugg.get("desc", sugg.get("description", "")))
-                        ),
-                        "reference": canonicalize_hash_input(
-                            sugg.get("reference", sugg.get("section", ""))
-                        ),
-                        "discriminator": f"-{discriminator}",
-                    }
-                    content = json.dumps(fields, sort_keys=True)
-                    shash = hashlib.sha256(content.encode()).hexdigest()[:16]
-                else:
-                    break  # Collision with a group hash is fine (different namespace)
-
+            shash = _discriminated(
+                "suggestion", f"G{g_num}S{s_num}",
+                lambda d: generate_suggestion_id(sugg, d),
+            )
             all_hashes[shash] = ("suggestion", g_idx, s_idx)
             sugg["suggestion_hash"] = shash
             sugg["display_label"] = f"G{g_num}S{s_num}"

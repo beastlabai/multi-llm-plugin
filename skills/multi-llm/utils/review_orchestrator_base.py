@@ -303,6 +303,116 @@ def merge_validation_batches(
     )
 
 
+# ---------------------------------------------------------------------------
+# Facts every review lane reports the same way
+#
+# review-plan and review-tasks run through `run_review_orchestration` below;
+# review-code has its own fan-out and completion sites in
+# `code_review_orchestrator.py`. Each of these used to exist twice — once here
+# and once there, already drifting slightly — so the lanes were "consistent by
+# duplication". They share one implementation of each fact now.
+# ---------------------------------------------------------------------------
+
+def fanout_slot_counter(phase_dir: str, total: int) -> Callable[[], None]:
+    """Return a ``slot_finished()`` that advances ``progress.models_done``.
+
+    The fan-out is the longest stretch of a detached run — 435 s of a 516 s
+    ``review-plan``, measured 2026-09-16 — and the counter was written ``0``
+    once before the first launch and recomputed only after the last model
+    returned, so every poll in between read ``models 0/4`` beside models that
+    had already finished (D4a here; F6 for review-code, which never had a
+    counter at all). Counting *slots* rather than successes is deliberate: a
+    failed or skipped model has finished its slot, and which ones failed is the
+    post-fanout recomputation's job.
+
+    No lock: every call happens on the fan-out's own event loop, and
+    ``report_progress`` writes nothing unless this process owns a detached
+    run for *phase_dir*.
+    """
+    finished = 0
+
+    def slot_finished() -> None:
+        nonlocal finished
+        finished += 1
+        _detach.report_progress(phase_dir, models_total=total, models_done=finished)
+
+    return slot_finished
+
+
+def backfill_deadline_losses(
+    model_specs: List[str],
+    results: Dict[str, Any],
+    failed_models: Dict[str, str],
+) -> None:
+    """F11: name every model the fan-out lost without a result of its own.
+
+    A model whose task never returned — cancelled by the fan-out's own
+    ``asyncio.wait_for`` deadline, or dropped as an ``Exception`` item — is in
+    neither *results* nor (so far) *failed_models*: without this it is counted
+    completed, inflates ``models_done`` and appears in no report section.
+    """
+    for model_spec in model_specs:
+        if model_spec not in results and model_spec not in failed_models:
+            failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+
+
+def record_review_artifacts(
+    report_path: Any,
+    report_html_path: Any,
+    grouped_path: Any,
+    *optional_paths: Any,
+) -> List[str]:
+    """Hand a review phase's files to the terminal ``MULTI_LLM_RESULT`` line.
+
+    ``record_output_files`` feeds only ``.status.json`` (the channel ``status``
+    reads); the ``artifacts`` list every host is told to trust instead comes
+    from ``record_artifacts``, which no review lane used to call — a fully
+    successful run reported ``artifacts: []``. The three files every lane
+    writes are named unconditionally; *optional_paths* (validation.json,
+    issues.json) only when they exist — the guard ``record_output_files``
+    applies internally and ``record_artifacts`` does not.
+    """
+    artifacts = [str(report_path), str(report_html_path), str(grouped_path)]
+    for path in optional_paths:
+        if path and os.path.exists(str(path)):
+            artifacts.append(str(path))
+    record_artifacts(artifacts)
+    return artifacts
+
+
+def high_priority_group_count(groups: Optional[List[Dict[str, Any]]]) -> int:
+    """Distinct HIGH-importance *groups*, not raw suggestions.
+
+    Three models converging on the same bug is one finding, and grouping is
+    what decides that; ``compute_max_importance`` is the same helper the HTML
+    report ranks a group by. Counting every model's copy printed
+    ``[HIGH_PRIORITY_ISSUES] 3`` for a single 3-model HIGH finding (measured
+    2026-09-16).
+    """
+    return sum(
+        1 for g in (groups or [])
+        if compute_max_importance(g.get("suggestions", g.get("issues", []))) == "HIGH"
+    )
+
+
+def record_high_priority_groups(
+    phase_dir: str, groups: Optional[List[Dict[str, Any]]]
+) -> int:
+    """Record the distinct-HIGH-group count where a detached caller sees it.
+
+    Written to ``.status.json`` and onto the result line the way
+    ``consolidation_recommended`` is (F4): a bare print is nothing a host
+    polling ``status`` or reading only ``MULTI_LLM_RESULT`` ever sees. Only a
+    non-zero count is recorded — the key is optional, present when there is
+    something to act on. Returns the count so the caller can print it.
+    """
+    count = high_priority_group_count(groups)
+    if count > 0:
+        update_status(str(phase_dir), {"high_priority_groups": {"count": count}})
+        cli_common.record_high_priority_groups({"count": count})
+    return count
+
+
 def exec_subagents_requested(args: Any) -> bool:
     """Whether this run drives its own subagents (D3b self-contained mode).
 
@@ -1949,32 +2059,12 @@ async def run_all_models(
     Returns:
         Dict mapping model spec to result dict
     """
-    fanout_phase_dir = str(get_phase_dir(Path(plan_path), phase_name))
-    slots_finished = 0
-
-    def slot_finished() -> None:
-        """Advance ``progress.models_done`` as each slot ends (D4a).
-
-        The fan-out is the longest stretch of a detached run — 435 s of a
-        516 s ``review-plan``, measured 2026-09-16 — and the counter was
-        written ``0`` once before the first launch and recomputed only after
-        the last model returned, so every poll in between read ``models 0/4``
-        beside two finished models. Counting *slots* rather than successes is
-        deliberate: a failed model has finished its slot, and which ones failed
-        is the recomputation's job at the end of the phase.
-
-        No lock: every call happens on the fan-out's own event loop (the skip
-        predicate is synchronous, ``per_model``'s ``finally`` runs after its
-        await resumes), and ``report_progress`` writes nothing at all unless
-        this process owns a detached run for this phase dir.
-        """
-        nonlocal slots_finished
-        slots_finished += 1
-        _detach.report_progress(
-            fanout_phase_dir,
-            models_total=len(model_specs),
-            models_done=slots_finished,
-        )
+    # D4a: one `models_done` tick per finished slot (the skip predicate is
+    # synchronous, `per_model`'s `finally` runs after its await resumes, so
+    # every call is on this event loop). Shared with review-code's fan-out.
+    slot_finished = fanout_slot_counter(
+        str(get_phase_dir(Path(plan_path), phase_name)), len(model_specs)
+    )
 
     def skip_existing_result(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
@@ -2539,17 +2629,19 @@ def aggregate_results(
         validation=validation_path_out,
     )
 
-    # `record_output_files` above only feeds `.status.json` (a channel `status`
-    # reads); the terminal `MULTI_LLM_RESULT.artifacts` line every host is told
-    # to trust instead ("read state/artifacts/next rather than mining the
-    # transcript") is populated from `record_artifact(s)`, which nothing on this
-    # path called — so a fully successful run reported `artifacts: []`.
-    # validation.json is included when it exists: it is the only
-    # machine-readable record of the validation verdicts the report describes.
-    artifacts_to_record = [report_path, report_html_path, grouped_path_out]
-    if os.path.exists(validation_path_out):
-        artifacts_to_record.append(validation_path_out)
-    record_artifacts(artifacts_to_record)
+    # The terminal `MULTI_LLM_RESULT.artifacts` half of the same hand-back;
+    # validation.json only when it exists, it being the one machine-readable
+    # record of the verdicts the report describes.
+    record_review_artifacts(report_path, report_html_path, grouped_path_out,
+                            validation_path_out)
+
+    # Every lane records this the same way. review-plan and review-tasks used
+    # to print `HIGH priority: N` (validation prep only, and a count of
+    # suggestions) and record nothing, while review-code recorded its
+    # distinct-HIGH-group count in `.status.json` and on the result line; a
+    # plan suggestion carries the same `importance` field, so the same fact
+    # is now recorded for all three.
+    record_high_priority_groups(phase_dir, groups_to_display)
 
     return report_path
 
@@ -3548,16 +3640,9 @@ async def run_review_orchestration(
         ):
             failed_models[model_spec] = error or "Unknown error"
 
-    # F11: a model whose task never returned — cancelled by
-    # `run_models_concurrent`'s own `asyncio.wait_for` deadline, or dropped as
-    # an `Exception` item there — is in neither `results` nor (so far)
-    # `failed_models`: without this it is counted completed, inflates
-    # `models_done` and appears in no report section. Same gap
-    # `code_review_orchestrator.run_all_reviews`'s caller has, fixed the same
-    # way there.
-    for model_spec in model_specs:
-        if model_spec not in results and model_spec not in failed_models:
-            failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+    # F11: a model `run_models_concurrent`'s deadline cancelled has no result
+    # file and, so far, no failure entry either. Same helper review-code uses.
+    backfill_deadline_losses(model_specs, results, failed_models)
 
     # §3.6: which model actually served each slot. The per-model `{model}.json`
     # is a bare suggestion list reaggregation re-reads, so the attribution is

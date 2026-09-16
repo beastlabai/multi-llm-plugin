@@ -483,6 +483,23 @@ changes:
       line and in `.status.json` (mirroring `consolidation_recommended`)
       instead of only a bare `print` a detached caller never saw. The fixture's
       mock review returns findings that group into 2 distinct HIGH groups.
+  # 2026-09-17, the review-phases review (F5): the same fact for every review
+  # lane. review-plan and review-tasks printed `HIGH priority: N` (a count of
+  # suggestions, during validation prep only) and recorded nothing, while
+  # review-code recorded its distinct-HIGH-group count; `aggregate_results`
+  # now records it through the same base helper, so a detached plan review's
+  # result line and checkpoint carry it too. The fixture's mock plan review
+  # returns suggestions that group into 2 distinct HIGH groups. review-tasks
+  # is not in this bundle's phase list, so no entry for it.
+  - pointer: /result_lines/review-plan/high_priority_groups/count
+    rationale: >
+      F5 (review-phases, 2026-09-17): review-plan now records the
+      distinct-HIGH-group count on its result line, as review-code already
+      did. See the block comment above.
+  - pointer: /phases/review-plan/status_shape/high_priority_groups/count
+    rationale: >
+      F5 (review-phases, 2026-09-17): the same count in review-plan's
+      `.status.json`, where `status` reads it. See the block comment above.
 
   # ---------------------------------------------------------------------------
   # 2026-09-16, the apply-code-fixes audit of the racing-game pipeline (minor
@@ -495,18 +512,26 @@ changes:
   # apply-suggestions and apply-task-suggestions are untouched (only
   # apply_code_fixes_orchestrator.py changed).
   # ---------------------------------------------------------------------------
+  # The pointer index is the BASELINE slot each batch is aligned onto (by its
+  # fixes' titles — see the `@dispatch_order` block below); the value is where
+  # that batch dispatches now, which the F5 reorder moved.
   - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/batch_index
     rationale: >
-      The batch now serializes its own dispatch-order `batch_index` (0);
-      nothing existing changed. See the block comment above.
+      The batch now serializes its own dispatch-order `batch_index`; nothing
+      existing changed. Baseline slot 0 is the mixed MEDIUM batch, which
+      dispatches at index 2 since F5. See the block comment above.
   - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/batch_index
     rationale: >
-      The batch now serializes its own dispatch-order `batch_index` (1);
-      nothing existing changed. See the block comment above.
+      The batch now serializes its own dispatch-order `batch_index`; nothing
+      existing changed. Baseline slot 1 is the isolated HIGH batch "Define
+      minimum password requirements", which dispatches at index 0 since F5.
+      See the block comment above.
   - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/batch_index
     rationale: >
-      The batch now serializes its own dispatch-order `batch_index` (2);
-      nothing existing changed. See the block comment above.
+      The batch now serializes its own dispatch-order `batch_index`; nothing
+      existing changed. Baseline slot 2 is the isolated HIGH batch "Document
+      zero-downtime migration approach", which dispatches at index 1 since F5.
+      See the block comment above.
   # F5, 2026-09-16, the apply-code-fixes audit: isolated-high-risk batches now
   # dispatch first, not last.
   #
@@ -520,22 +545,30 @@ changes:
   # peak importance, above the summed score as a tiebreak, at both sort sites
   # (the early-return branch and the main one), so they cannot disagree again.
   #
-  # This fixture's three apply-fixes batches include one isolated HIGH fix
-  # ("Define minimum password requirements") that used to land at index 2 and
-  # now lands at index 0 — the whole list permuted, not one value drifting in
-  # place, so (like `/phases/review-plan/created_paths` above) the pointer
-  # covers the list rather than enumerating every leaf a full reorder touches:
-  # `batch_type`, `fix_count`, every `fixes[]` field, `prompt`,
-  # `priority_score` and `total_chars`, across all three batches. Placed after
-  # the L1 model-spec and `prior_changes_id` leaf entries above (both under
-  # this same subtree) so those keep matching by list order first — this entry
-  # only absorbs what neither of them already explains.
+  # This fixture's three apply-fixes batches are one mixed MEDIUM batch and
+  # TWO isolated HIGH batches ("Define minimum password requirements",
+  # "Document zero-downtime migration approach" — both `importance: HIGH`, so
+  # both isolated by `is_high_risk_fix`). The baseline dispatched them
+  # [mixed, password, zero-downtime] (the HIGH batches at indices 1 and 2);
+  # since F5 the order is [password, zero-downtime, mixed].
+  #
+  # A reorder is not a reason to excuse every leaf under the list, and an
+  # earlier entry here on the bare `…/batches` pointer did exactly that: it
+  # absorbed 67 leaves — every `fixes[]` field, `prompt`, `priority_score`,
+  # `total_chars` — and would have gone on excusing any future drift under
+  # them. `bundle_compare.diff_bundles` now compares a `batches` list as a
+  # multiset keyed by each batch's fix titles: the fresh list is aligned onto
+  # the baseline's slots, leaves are diffed in place at the baseline's index
+  # (which is why the L1 model-spec, `prior_changes_id` and `batch_index`
+  # entries above keep their indices), and the order itself is reported once,
+  # at the synthetic `@dispatch_order` leaf this entry names.
   # ---------------------------------------------------------------------------
-  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/@dispatch_order
     rationale: >
-      F5, 2026-09-16 — the whole `batches` list reordered (the isolated
-      HIGH-risk batch now dispatches first instead of last); see the block
-      comment above.
+      F5, 2026-09-16 — the `batches` list's dispatch order changed: the two
+      isolated HIGH-risk batches now dispatch first ([password, zero-downtime,
+      mixed]) instead of after the mixed MEDIUM batch. The batches' contents
+      did not change; see the block comment above.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
