@@ -2242,7 +2242,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 regenerate_report_with_human_decisions,
             )
         try:
-            report_path = regenerate_report_with_human_decisions(
+            report_path, matched = regenerate_report_with_human_decisions(
                 review_dir, decisions
             )
         except Exception as exc:  # noqa: BLE001 - an overlay must not fail a run
@@ -2252,8 +2252,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         print(
             f"[write-subagents] decisions overlaid on {report_path} "
-            f"({len(decisions)} decision(s))"
+            f"({matched} of {len(decisions)} decision(s) matched)"
         )
+        if matched < len(decisions):
+            self.logger.warning(
+                "decision overlay matched %d of %d decision(s) on %s — the "
+                "rest joined no group (no groupHash, or a stale group id)",
+                matched, len(decisions), report_path,
+            )
         return str(report_path)
 
     def run_write_executor(self) -> Optional[int]:

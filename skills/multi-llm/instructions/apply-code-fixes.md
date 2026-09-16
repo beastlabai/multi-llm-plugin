@@ -321,7 +321,12 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
    context missing its predecessors. `prior_changes_id` is that key plus a digest of the
    batch's own items — unique per batch, and identical if the same batch is re-dispatched.
-   Do **not** use the batch loop index. The `--phase` is `"apply-fixes"`.
+   Do **not** use the batch loop index. The `--phase` is `"apply-fixes"` — the
+   `--exec-subagents` executor appends under `"apply-code-fixes"` (its mode word)
+   instead, and `util prior-changes` accepts both: they are normalized to the same
+   phase (`utils/prior_changes.PHASE_ALIASES`), so a batch dispatched on one leg
+   and resumed on the other is recognised as the same entry rather than
+   re-appended under a phase the log now treats as "other".
 
    For **clean failures**, use summary: `(batch failed — {compact reason}, verified no file changes)`
 
@@ -487,7 +492,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 Two notes on the word this writes:
 
-- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that steps 5.1 and 5.7 pass to `util prior-changes`. Both spellings are deliberate; do not "unify" them.
+- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that steps 5.1 and 5.7 pass to `util prior-changes`. These are two different fields with two different owners (`state.json.phases_completed` vs. `prior_changes.jsonl`'s per-entry `phase`) and both spellings are deliberate; do not "unify" them here. `util prior-changes` itself is more forgiving of the *other* field: `append`/`render` treat `apply-fixes` and `apply-code-fixes` as one phase (`utils/prior_changes.PHASE_ALIASES`), because the `--exec-subagents` executor writes `prior_changes.jsonl` entries under the mode word — so passing either spelling to `util prior-changes` lands on the same entries; step 5.7 still names `"apply-fixes"` as the one to type.
 - It is the same word `--exec-subagents` records when its executor finalizes, so the native loop and the Python executor cannot drift apart. Under `--exec-subagents` the executor has already done this and there is no separate command to run.
 
 This ensures subsequent phases (and `check_workflow_prerequisites`) recognize that the code fixes have been applied.

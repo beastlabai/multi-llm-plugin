@@ -5,7 +5,12 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.output_handler import sanitize_prefix, get_output_paths
+from utils.output_handler import (
+    PHASE_DIRECTORIES,
+    phase_dir_path,
+    sanitize_prefix,
+    get_output_paths,
+)
 
 
 class TestSanitizePrefix:
@@ -144,3 +149,28 @@ class TestGetOutputPaths:
         assert get_output_paths(plan_file, "code_review_issues").suffix == ".json"
         assert get_output_paths(plan_file, "code_review_grouped").suffix == ".json"
         assert get_output_paths(plan_file, "code_review_validation").suffix == ".json"
+
+
+class TestApplyCodeFixesPhaseDirectory:
+    """F1: ``apply-code-fixes`` is the one mode whose ``modes.py`` phase name
+    differs from its on-disk directory word (``apply-fixes``).
+    ``PHASE_DIRECTORIES`` used to carry an entry for the directory word alone,
+    so ``phase_dir_path(plan, "apply-code-fixes")`` fell through its identity
+    fallback and pointed at a directory that is never created.
+    """
+
+    def test_apply_code_fixes_and_apply_fixes_resolve_to_the_same_directory(
+        self, tmp_path
+    ):
+        plan_file = tmp_path / "test-plan.md"
+        plan_file.write_text("# Test Plan", encoding="utf-8")
+
+        by_mode_word = phase_dir_path(plan_file, "apply-code-fixes")
+        by_dir_word = phase_dir_path(plan_file, "apply-fixes")
+
+        assert by_mode_word == by_dir_word
+        assert by_mode_word.name == "apply-fixes"
+
+    def test_phase_directories_maps_both_spellings(self):
+        assert PHASE_DIRECTORIES["apply-code-fixes"] == "apply-fixes"
+        assert PHASE_DIRECTORIES["apply-fixes"] == "apply-fixes"

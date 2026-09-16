@@ -26,6 +26,31 @@ DEFAULT_TAIL = 15
 MAX_CHARS = 2000
 DEFAULT_TEXT = "(none — this is the first batch)"
 
+#: Distinct spellings that name the *same* phase for this file's purposes
+#: (F6, 2026-09-16). ``apply-code-fixes`` is the write executor's own phase
+#: word (``PHASE_BY_WRITE_KIND`` — the mode/``state.json`` spelling);
+#: ``apply-fixes`` is the on-disk phase-directory word,
+#: ``instructions/apply-code-fixes.md`` step 5.7's documented `--phase` for
+#: this CLI on the native leg. That is a deliberate divergence *elsewhere*
+#: (`state.json.phases_completed` keys on the mode word — see the same
+#: instruction file's step 10) but not here: `append` dedupes and `render`
+#: prefers entries on the bare `(id, phase)` / `phase` value, so a run that
+#: starts on one leg and resumes on the other must not see two phases where
+#: there is one. Canonicalised to the phase-directory word, since that is the
+#: spelling steps 5.1/5.7 already put in front of a human. Add a row here,
+#: never a special case in `append`/`render`, if a future phase grows the
+#: same split.
+PHASE_ALIASES = {
+    "apply-code-fixes": "apply-fixes",
+}
+
+
+def canonical_phase(phase: Optional[str]) -> Optional[str]:
+    """Normalize *phase* through :data:`PHASE_ALIASES`; passes through unknowns."""
+    if phase is None:
+        return None
+    return PHASE_ALIASES.get(phase, phase)
+
 #: Hex digits kept from the member-id digest in :func:`entry_id`. Eight is the
 #: same width the state manager's group ids are truncated to for display, and it
 #: is far wider than the handful of batches one phase ever produces.
@@ -158,7 +183,11 @@ def render(
     if not entries:
         return DEFAULT_TEXT
 
-    same_phase = [e for e in entries if e.get("phase") == phase] if phase else []
+    phase = canonical_phase(phase)
+    same_phase = (
+        [e for e in entries if canonical_phase(e.get("phase")) == phase]
+        if phase else []
+    )
     if same_phase:
         working = same_phase
         other_count = len(entries) - len(same_phase)
@@ -203,10 +232,11 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
     per batch: idempotency on a key two different batches share is a *dropped*
     entry, silently, at exit 0.
     """
+    phase = canonical_phase(phase)
     path = _jsonl_path(output_dir)
     entries = _load_entries(path)
     for entry in entries:
-        if entry.get("id") == entry_id and entry.get("phase") == phase:
+        if entry.get("id") == entry_id and canonical_phase(entry.get("phase")) == phase:
             return False
     record = {
         "id": entry_id,
@@ -264,18 +294,22 @@ def cmd_read(args: argparse.Namespace) -> None:
 
 def cmd_append(args: argparse.Namespace) -> None:
     summary = args.summary if args.summary is not None else sys.stdin.read().strip()
+    # Canonicalize whatever spelling was passed — apply-code-fixes's native
+    # leg and its --exec-subagents executor otherwise write this same file
+    # under two different `phase` values for the same phase (F6).
+    phase = canonical_phase(args.phase)
 
     path = _jsonl_path(args.output_dir)
     entries = _load_entries(path)
 
     for entry in entries:
-        if entry.get("id") == args.id and entry.get("phase") == args.phase:
-            print(f"Notice: entry {args.id}/{args.phase} already exists, skipping", file=sys.stderr)
+        if entry.get("id") == args.id and canonical_phase(entry.get("phase")) == phase:
+            print(f"Notice: entry {args.id}/{phase} already exists, skipping", file=sys.stderr)
             return
 
     record = {
         "id": args.id,
-        "phase": args.phase,
+        "phase": phase,
         "summary": summary,
         # See the in-process `append`'s matching comment (F13).
         "timestamp": datetime.now().isoformat(),
@@ -283,7 +317,7 @@ def cmd_append(args: argparse.Namespace) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-    print(f"Appended entry {args.id}/{args.phase}", file=sys.stderr)
+    print(f"Appended entry {args.id}/{phase}", file=sys.stderr)
 
 
 def cmd_clear(args: argparse.Namespace) -> None:

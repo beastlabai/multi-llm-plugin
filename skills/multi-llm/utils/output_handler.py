@@ -17,6 +17,12 @@ PHASE_DIRECTORIES = {
     'implement': 'implement',
     'code-review': 'code-review',
     'apply-fixes': 'apply-fixes',
+    # apply-code-fixes is the one mode whose phase name (modes.py) and on-disk
+    # directory word differ; without this entry the identity fallback below
+    # looks for a directory that never gets created (see
+    # full_workflow_orchestrator.WRITE_PHASE_DIRS / html_report_generator's
+    # _APPLY_PHASE_STATE_KEYS, which already carry this same mapping).
+    'apply-code-fixes': 'apply-fixes',
     'apply-task-suggestions': 'apply-task-suggestions',
 }
 

@@ -165,6 +165,163 @@ class TestMainWrapsPipelineWithIntentToAdd:
         )
 
 
+class TestValidationInputsCarryTheStampedGroupHash:
+    """F2: ``group_similar_suggestions`` returns raw ``SuggestionGroup``
+    objects; ``stamp_stable_ids`` is run against a separate ``to_dict()`` copy
+    (``grouped_list``) so ``grouped.json`` carries a ``group_hash`` per group.
+    The validators and the post-validation merge used to be handed the
+    un-stamped originals instead, so no group in the review's own HTML report
+    ever carries a ``group_hash`` — the key ``_overlay_human_decisions`` joins
+    decisions on — and the decisions overlay silently matched nothing.
+    """
+
+    def test_stamped_group_hash_reaches_the_validator_batcher_and_the_merge(
+        self, tmp_path
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+
+        tracked_files = [{"path": "index.html"}]
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": tracked_files,
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        issue = {
+            "title": "OOB teleport skips resync",
+            "desc": "OOB teleport skips resync description",
+            "type": "bug",
+            "importance": "high",
+            "file": "index.html",
+        }
+
+        captured: dict = {}
+
+        def fake_prepare(groups, **kwargs):
+            captured["prepare_groups"] = groups
+            return {"total_batches": 1, "batching_stats": {}}
+
+        def fake_merge(phase_dir, batch_metadata, grouped, validation_path):
+            captured["merge_grouped"] = grouped
+            return grouped
+
+        args = _make_args(plan_path, skip_validation=False)
+
+        parent = MagicMock()
+
+        def fake_ctx(files):
+            return _TrackingContextManager(parent, list(files))
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, [issue], None)}
+             )), \
+             patch.object(cro, "build_validation_secondary_context",
+                          return_value=("", "")), \
+             patch.object(cro, "prepare_batched_validation_tasks",
+                          side_effect=fake_prepare), \
+             patch.object(cro, "dispatch_subagent_tasks", return_value=True), \
+             patch.object(cro, "merge_validation_batches",
+                          side_effect=fake_merge), \
+             patch.object(cro, "generate_review_report",
+                          return_value="# report\n"), \
+             patch.object(cro, "get_phase_dir", return_value=tmp_path / "phase"):
+            asyncio.run(cro.main())
+
+        prepare_groups = captured.get("prepare_groups")
+        merge_grouped = captured.get("merge_grouped")
+        assert prepare_groups, "no groups reached prepare_batched_validation_tasks"
+        assert merge_grouped, "no groups reached merge_validation_batches"
+        assert all(g.get("group_hash") for g in prepare_groups), prepare_groups
+        assert all(g.get("group_hash") for g in merge_grouped), merge_grouped
+        # Same grouping reached both call sites - one set of stable ids, not
+        # a second, un-stamped set computed independently.
+        assert (
+            [g["group_hash"] for g in prepare_groups]
+            == [g["group_hash"] for g in merge_grouped]
+        )
+
+    def test_skip_validation_groups_also_carry_the_stamped_hash(self, tmp_path):
+        """The ``--skip-validation`` branch had the identical bug (``grouped``,
+        not ``grouped_list``) feeding the report and any later ``--apply-fixes``
+        batcher.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+
+        tracked_files = [{"path": "index.html"}]
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": tracked_files,
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        issue = {
+            "title": "OOB teleport skips resync",
+            "desc": "OOB teleport skips resync description",
+            "type": "bug",
+            "importance": "high",
+            "file": "index.html",
+        }
+
+        captured: dict = {}
+
+        def fake_report(plan_path, results, changed_files, validated_groups, **kwargs):
+            captured["report_groups"] = validated_groups
+            return "# report\n"
+
+        args = _make_args(plan_path, skip_validation=True)
+
+        parent = MagicMock()
+
+        def fake_ctx(files):
+            return _TrackingContextManager(parent, list(files))
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, [issue], None)}
+             )), \
+             patch.object(cro, "generate_review_report",
+                          side_effect=fake_report), \
+             patch.object(cro, "get_phase_dir", return_value=tmp_path / "phase"):
+            asyncio.run(cro.main())
+
+        report_groups = captured.get("report_groups")
+        assert report_groups, "no groups reached generate_review_report"
+        assert all(g.get("group_hash") for g in report_groups), report_groups
+
+
 class TestReaggregateWrapsPipelineWithIntentToAdd:
     """Verify reaggregate_from_existing_files() wraps its pipeline too."""
 
