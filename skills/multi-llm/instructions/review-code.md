@@ -345,10 +345,9 @@ After spawning subagents to apply fixes:
    - Track success/failure of each fix
 
 2. **Run verification**
-   ```bash
-   pnpm typecheck
-   pnpm lint:fix
-   ```
+   Run the repository's own typecheck/lint commands, if any (for example
+   `pnpm typecheck` and `pnpm lint:fix` in a pnpm project) — this plan may
+   have neither.
 
 3. **Update `{plan}_code_review.md`** with implementation status for each issue:
 

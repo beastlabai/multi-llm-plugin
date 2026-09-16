@@ -745,17 +745,51 @@ class TestCodeReviewMockSafety:
 #: Issues the code-review schema accepts, with a known HIGH count. Built here
 #: rather than read from ``responses/code_review/issues.json`` so the assertions
 #: below name a count this test owns, and so no other lane's fixture can move it.
+#:
+#: Each HIGH issue names a distinct bug in a distinct file (F4: code-review
+#: counts distinct HIGH *groups*, not raw issues — near-duplicate issues, the
+#: same bug with only an index varying in the title/anchor, would merge into
+#: one group under `group_similar_suggestions`'s similarity clustering and
+#: undercount the fixture's own "known HIGH count").
+_HIGH_TEMPLATES = [
+    {
+        "title": "SQL injection in user lookup",
+        "desc": "The query is built with string formatting instead of a "
+                "parameterized statement.",
+        "file": "src/services/auth_service.py",
+        "anchor_text": "cursor.execute(lookup_query)",
+    },
+    {
+        "title": "Hardcoded admin credentials in config loader",
+        "desc": "The admin password is embedded directly in the module "
+                "instead of read from a secret store.",
+        "file": "src/config/loader.py",
+        "anchor_text": "ADMIN_PASSWORD = 'changeme'",
+    },
+    {
+        "title": "Path traversal in file export handler",
+        "desc": "The export handler joins the raw request path without "
+                "normalizing '..' segments before opening it.",
+        "file": "src/api/export_routes.py",
+        "anchor_text": "open(os.path.join(base_dir, request.args['path']))",
+    },
+]
+
+
 def _issues(high: int, low: int = 1):
+    assert high <= len(_HIGH_TEMPLATES), (
+        "add another distinct _HIGH_TEMPLATES entry — reusing one would "
+        "merge two 'known HIGH count' issues into one group"
+    )
     issues = [
         {
-            "title": f"SQL injection in user lookup {i}",
-            "desc": "The query is built with string formatting instead of a "
-                    "parameterized statement.",
+            "title": _HIGH_TEMPLATES[i]["title"],
+            "desc": _HIGH_TEMPLATES[i]["desc"],
             "importance": "high",
-            "file": "src/services/auth_service.py",
+            "file": _HIGH_TEMPLATES[i]["file"],
             "line_range": [40 + i, 42 + i],
             "type": "bug",
-            "anchor_text": f"cursor.execute(lookup_query_{i})",
+            "anchor_text": _HIGH_TEMPLATES[i]["anchor_text"],
         }
         for i in range(high)
     ]
@@ -901,6 +935,22 @@ class TestHighFindingsAreNotAFailedPhase:
         assert result["state"] == "done", (
             "a review that completed and wrote its report is `done`, never `error`"
         )
+        # F2/F3: this lane never called `record_artifacts` at all -- a fully
+        # successful run reported `artifacts: []` on the one line every host
+        # is told to trust instead of mining stdout.
+        code_review_dir = plan.output_dir / "code-review"
+        assert set(result["artifacts"]) == {
+            str(code_review_dir / "report.md"),
+            str(code_review_dir / "report.html"),
+            str(code_review_dir / "grouped.json"),
+            str(code_review_dir / "issues.json"),
+        }, (
+            "--skip-validation means validation.json is never written, so it "
+            "must not be claimed as an artifact either"
+        )
+        # F4: the distinct-HIGH-group count rides the same result line, not
+        # only the bare `[HIGH_PRIORITY_ISSUES]` log print.
+        assert result["high_priority_groups"] == {"count": 2}
 
     def test_fail_on_high_restores_the_standalone_gate(
         self,

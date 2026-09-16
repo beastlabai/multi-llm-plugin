@@ -345,6 +345,62 @@ class TestTheFanOutReportsProgressWhileItRuns:
             if "models_done" in c
         ]
         assert counted == [0, 1, 2, 2]
+
+
+class TestAFanoutModelLostToTheGatherDeadline:
+    """F11: a model whose task never returned — cancelled by
+    `run_models_concurrent`'s own `asyncio.wait_for` deadline, or dropped as
+    an `Exception` item there — is in neither `results` nor `failed_models`:
+    without this fix it is counted completed, inflates `models_done`, and
+    appears in no report section at all. Same gap
+    `code_review_orchestrator.run_all_reviews`'s caller has, fixed the same
+    way there.
+    """
+
+    def test_a_missing_model_is_recorded_failed_not_silently_completed(
+        self, tmp_path
+    ):
+        plan = _plan(tmp_path)
+        argv = [
+            "--plan-file", str(plan),
+            "--models", "cursor-agent:auto", "claude-code:sonnet",
+            "--skip-validation", "--timeout", "5", "--max-parallel", "2",
+        ]
+
+        # `claude-code:sonnet` never made it into `run_all_models`'s own
+        # return value -- exactly what an exception item or a total gather
+        # timeout leaves behind.
+        async def fake_run_all_models(*a, **kw):
+            return {
+                "cursor-agent:auto": {
+                    "success": True,
+                    "output": json.dumps([{
+                        "title": "Add input validation",
+                        "desc": "The plan does not validate the new email field.",
+                        "importance": "HIGH", "reference": "Overview",
+                        "type": "addition",
+                    }]),
+                    "error": None, "prompt": "", "stdout": "", "stderr": "",
+                    "duration_seconds": 0.1, "model_spec": "cursor-agent:auto",
+                    "source": "file",
+                },
+            }
+
+        with patch.object(base, "run_all_models", new=fake_run_all_models):
+            exit_code = asyncio.run(rpo.main(argv))
+
+        assert exit_code == 0
+        phase_dir = base.get_phase_dir(plan, "review-plan")
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_failed"]["claude-code:sonnet"] == (
+            "no result (cancelled at the fan-out deadline)"
+        )
+        assert "claude-code:sonnet" not in status["models_completed"]
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "## Models Failed" in report
+        assert "claude-code:sonnet" in report
+
+
 def _validation_group(index: int) -> dict:
     return {
         "theme": f"Group {index}",

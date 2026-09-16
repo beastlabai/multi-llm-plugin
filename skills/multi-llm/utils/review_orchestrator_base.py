@@ -3522,6 +3522,17 @@ async def run_review_orchestration(
         ):
             failed_models[model_spec] = error or "Unknown error"
 
+    # F11: a model whose task never returned — cancelled by
+    # `run_models_concurrent`'s own `asyncio.wait_for` deadline, or dropped as
+    # an `Exception` item there — is in neither `results` nor (so far)
+    # `failed_models`: without this it is counted completed, inflates
+    # `models_done` and appears in no report section. Same gap
+    # `code_review_orchestrator.run_all_reviews`'s caller has, fixed the same
+    # way there.
+    for model_spec in model_specs:
+        if model_spec not in results and model_spec not in failed_models:
+            failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+
     # §3.6: which model actually served each slot. The per-model `{model}.json`
     # is a bare suggestion list reaggregation re-reads, so the attribution is
     # recorded once here and carried to the report rather than stamped into an

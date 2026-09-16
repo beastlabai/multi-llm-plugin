@@ -531,6 +531,7 @@ class ResultContext:
         self.artifacts: List[str] = []
         self.next: Optional[str] = None
         self.consolidation_recommended: Optional[Dict[str, Any]] = None
+        self.high_priority_groups: Optional[Dict[str, Any]] = None
         self.notice: Optional[str] = None
         self._emitted = False
 
@@ -564,6 +565,17 @@ class ResultContext:
         self.consolidation_recommended = (
             dict(recommendation) if recommendation else None
         )
+
+    def set_high_priority_groups(self, data: Optional[Dict[str, Any]]) -> None:
+        """Record the distinct-HIGH-group count (F4), if there is one.
+
+        Mirrors ``set_consolidation_recommended``: a bare ``print`` never
+        reaches a detached caller, and the count a CI gate or `--fail-on-high`
+        would act on is the single most actionable fact a code review
+        produces. Present only when there is something to report, so every
+        other invocation's line is byte-for-byte what it was.
+        """
+        self.high_priority_groups = dict(data) if data else None
 
     def set_notice(self, text: Optional[str]) -> None:
         """Record the workflow-level notice a terminal ``status`` run carries.
@@ -599,6 +611,8 @@ class ResultContext:
             payload["consolidation_recommended"] = dict(
                 self.consolidation_recommended
             )
+        if self.high_priority_groups:
+            payload["high_priority_groups"] = dict(self.high_priority_groups)
         if self.notice:
             payload["notice"] = self.notice
         return payload
@@ -697,6 +711,12 @@ def record_consolidation_recommended(
     """Record the consolidation recommendation, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_consolidation_recommended(recommendation)
+
+
+def record_high_priority_groups(data: Optional[Dict[str, Any]]) -> None:
+    """Record the distinct-HIGH-group count (F4), if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_high_priority_groups(data)
 
 
 def record_notice(text: Optional[str]) -> None:

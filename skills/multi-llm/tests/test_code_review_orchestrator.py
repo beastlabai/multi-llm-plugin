@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
+from utils import cli_common, status_file
 
 
 def _make_args(plan_path: Path, **overrides) -> argparse.Namespace:
@@ -113,7 +114,15 @@ class TestMainWrapsPipelineWithIntentToAdd:
         # Parent mock to record call order across context + pipeline funcs
         parent = MagicMock()
 
-        parent.run_all_reviews = AsyncMock(return_value={})
+        # F11: a model spec missing from `run_all_reviews`'s result is now
+        # correctly treated as a fan-out failure ("no result (cancelled at
+        # the fan-out deadline)") rather than silently passing through as
+        # completed — so this wiring test's fake fan-out has to return a real
+        # (if empty) result for the one model it configured, or main() exits
+        # 3 before ever reaching generate_review_report.
+        parent.run_all_reviews = AsyncMock(
+            return_value={"cursor-agent:auto": (True, [], None)}
+        )
         parent.generate_review_report = MagicMock(return_value="# report\n")
 
         def fake_ctx(files):
@@ -223,6 +232,284 @@ class TestReaggregateWrapsPipelineWithIntentToAdd:
         _assert_between(
             names, "generate_review_report", "context_enter", "context_exit"
         )
+
+
+class TestAFanoutModelLostToTheGatherDeadline:
+    """F11: a model whose task never returned — cancelled by
+    `run_all_reviews`'s own `asyncio.wait_for` deadline, or dropped as an
+    `Exception` item there — used to be in neither `results` nor
+    `failed_models`: it was counted completed, inflated `models_done`, and
+    appeared in no report section at all.
+    """
+
+    def test_a_missing_model_is_recorded_failed_not_silently_completed(
+        self, tmp_path
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+
+        tracked_files = [{"path": "src/a.py"}]
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": tracked_files,
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        args = _make_args(
+            plan_path, models=["cursor-agent:auto", "claude-code:sonnet"],
+        )
+
+        # `claude-code:sonnet` never made it into the fan-out's own results --
+        # exactly what an exception item or a total gather timeout leaves
+        # behind in `run_all_reviews`'s return value.
+        async def fake_run_all_reviews(*a, **kw):
+            return {"cursor-agent:auto": (True, [{
+                "title": "Bug", "desc": "d", "importance": "low",
+                "file": "src/a.py", "type": "bug",
+            }], None)}
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto", "claude-code:sonnet"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
+            exit_code = asyncio.run(cro.main())
+
+        assert exit_code == 0
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_failed"]["claude-code:sonnet"] == (
+            "no result (cancelled at the fan-out deadline)"
+        )
+        assert "claude-code:sonnet" not in status["models_completed"]
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "## Failed Reviews" in report
+        assert "claude-code:sonnet" in report
+
+
+class TestReaggregateRecordsArtifacts:
+    """F2/F3: `reaggregate_from_existing_files` never called `record_artifacts`
+    or `record_output_files` at all — main()'s own completion site had the
+    same gap and got fixed; this one, reached only by `--reaggregate`, did
+    not. A detached `--reaggregate` run therefore reported `artifacts: []`
+    and an empty `output_files`, with nothing to tell a host the report it
+    just wrote exists.
+
+    ``get_phase_dir`` is deliberately left unmocked here (unlike the sibling
+    wiring tests above): this function's own local ``phase_dir`` comes from
+    calling it directly, but ``report_path``/``grouped_path``/``issues_path``
+    come from ``get_output_paths`` in ``utils/output_handler.py``, which calls
+    its *own* module-level ``get_phase_dir`` — a name a `patch.object(cro, …)`
+    cannot reach. Mocking it here would make the seeded per-model file and
+    the function's real outputs land in two different directories.
+    """
+
+    def test_reaggregate_records_report_grouped_and_issues(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            '[{"title": "x", "desc": "y", "importance": "low", '
+            '"file": "src/a.py", "type": "style"}]',
+            encoding="utf-8",
+        )
+
+        tracked_files = [{"path": "src/a.py"}]
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": tracked_files,
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+
+        args = _make_args(plan_path, reaggregate=True, skip_validation=True)
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            with patch.object(cro, "get_or_create_state", return_value=fake_state), \
+                 patch.object(cro, "validate_git_ref",
+                              side_effect=lambda r: r or "HEAD~1"), \
+                 patch.object(cro, "build_unsanitize_map", return_value={}):
+                asyncio.run(
+                    cro.reaggregate_from_existing_files(
+                        "plan", out_dir, plan_path, args
+                    )
+                )
+        finally:
+            cli_common.deactivate_result()
+
+        report_path = phase_dir / "report.md"
+        assert report_path.exists()
+        assert str(report_path) in ctx.artifacts
+        assert str(phase_dir / "report.html") in ctx.artifacts
+        assert str(phase_dir / "grouped.json") in ctx.artifacts
+        assert str(phase_dir / "issues.json") in ctx.artifacts
+        # No validation ran (--skip-validation), so validation.json was never
+        # written and must not be claimed as an artifact.
+        assert not (phase_dir / "validation.json").exists()
+        assert str(phase_dir / "validation.json") not in ctx.artifacts
+
+
+class TestGenerateReviewReportFailedModelDerivation:
+    """F10: ``success and issues`` misclassified a reviewer that legitimately
+    returned ``[]`` as failed — it was listed under ``## Failed Reviews`` as
+    "No issues returned" even though the model completed cleanly and
+    ``save_model_result``/``.status.json.models_completed`` already counted it
+    done.
+    """
+
+    def test_an_empty_but_successful_model_is_not_a_failed_review(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        results = {
+            "model-a": (True, [], None),
+            "model-b": (
+                True,
+                [{
+                    "title": "Bug", "desc": "d", "importance": "low",
+                    "file": "x.py", "type": "bug",
+                }],
+                None,
+            ),
+        }
+
+        report = cro.generate_review_report(plan_path, results, changed_files=["x.py"])
+
+        assert "## Failed Reviews" not in report
+        assert "No issues returned" not in report
+        models_line = next(
+            line for line in report.splitlines() if line.startswith("**Models:**")
+        )
+        assert "model-a" in models_line
+        assert "model-b" in models_line
+
+    def test_the_callers_authoritative_failed_models_map_is_trusted_verbatim(
+        self, tmp_path
+    ):
+        """F11: a model the fan-out lost to the gather deadline never gets an
+        entry in ``results`` at all — main() seeds it into ``failed_models``
+        instead, and this function must report that rather than silently
+        dropping it (or, worse, re-deriving nothing for it from ``results``).
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        results = {"model-a": (True, [], None)}
+        failed_models = {
+            "model-b": "no result (cancelled at the fan-out deadline)",
+        }
+
+        report = cro.generate_review_report(
+            plan_path, results, changed_files=[], failed_models=failed_models,
+        )
+
+        assert "## Failed Reviews" in report
+        failed_section = report.split("## Failed Reviews", 1)[1]
+        assert "model-b" in failed_section
+        assert "no result (cancelled at the fan-out deadline)" in failed_section
+        assert "model-a" not in failed_section
+
+    def test_a_genuinely_failed_model_reports_even_with_no_callers_map(
+        self, tmp_path
+    ):
+        """No ``failed_models`` passed — e.g. a fixture exercising this
+        function directly — falls back to deriving one from ``results`` on
+        ``success`` alone, not the old ``success and issues``.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        results = {"model-a": (False, None, "boom")}
+
+        report = cro.generate_review_report(plan_path, results, changed_files=[])
+
+        assert "## Failed Reviews" in report
+        assert "model-a" in report
+        assert "boom" in report
+
+
+class TestTheFanoutReportsProgressWhileItRuns:
+    """F6: `run_all_reviews` never advanced `progress.models_done` — it was
+    written `0` once before dispatch and recomputed only after the last model
+    returned, so a mid-run poll read `models 0/4` beside three finished
+    reviewers (measured 2026-09-16: 646 s of an 833 s run). Mirrors
+    `review_orchestrator_base`'s own `slot_finished()` and its test in
+    test_review_plan_orchestrator.py.
+    """
+
+    def test_each_finished_slot_advances_the_counter(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        calls = []
+
+        def record(phase_dir, **updates):
+            calls.append(dict(updates))
+
+        async def fake_review(*args, **kwargs):
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(cro, "report_progress", record):
+            results = asyncio.run(cro.run_all_reviews(
+                ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
+                plan_path, tmp_path, 30, 3,
+            ))
+
+        assert len(results) == 3
+        counted = [c["models_done"] for c in calls if "models_done" in c]
+        # One call per finished slot — no opening zero here, unlike the base's
+        # fan-out, because this lane's own `0` is written by `main()` before
+        # `run_all_reviews` is ever called, not by this function itself.
+        assert counted == [1, 2, 3]
+        assert all(c["models_total"] == 3 for c in calls if "models_total" in c)
+
+    def test_a_resumed_run_counts_the_skipped_slots_too(self, tmp_path):
+        """A model answered from an existing `{model}.json` has finished its
+        slot exactly as surely as one that was dispatched; a resume that
+        skips every model must not read `models 0/2` for the whole of it."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "cursor-agent_auto.json").write_text("[]", encoding="utf-8")
+        calls = []
+
+        def record(phase_dir_arg, **updates):
+            calls.append(dict(updates))
+
+        async def fake_review(*args, **kwargs):
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(cro, "report_progress", record):
+            results = asyncio.run(cro.run_all_reviews(
+                ["cursor-agent:auto", "claude-code:sonnet"],
+                plan_path, tmp_path, 30, 2,
+            ))
+
+        assert len(results) == 2
+        counted = [c["models_done"] for c in calls if "models_done" in c]
+        assert counted == [1, 2]
 
 
 # ---------------------------------------------------------------------------

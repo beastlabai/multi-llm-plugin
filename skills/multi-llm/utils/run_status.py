@@ -351,6 +351,13 @@ def render_run_text(
         consolidation = _consolidation_text(view.get("consolidation_recommended"))
         if consolidation:
             lines.append(f"      {consolidation}")
+        # F4: recorded only for a finished code-review run — `high_priority_groups`
+        # is written once, at the very end of main(), so a mid-run poll has
+        # nothing to render yet, and the key exists on no other phase.
+        if view.get("phase") == "code-review" and view["verdict"] == detach.VERDICT_DONE:
+            high_priority = _high_priority_text(view.get("high_priority_groups"))
+            if high_priority:
+                lines.append(f"      {high_priority}")
         if run.get("resolutions"):
             lines.append("      auto-resolved while you were gone:")
             for entry in run["resolutions"]:
@@ -431,6 +438,22 @@ def _consolidation_text(recommendation: Any) -> Optional[str]:
         f"consolidation recommended: {groups} valid groups >= {threshold} "
         f"— run {command}"
     )
+
+
+def _high_priority_text(high_priority: Any) -> Optional[str]:
+    """The one line naming a finished code-review's distinct HIGH groups.
+
+    F4: `[HIGH_PRIORITY_ISSUES] <n>` is a log line, and a detached caller never
+    reads the log — this is where a host polling `status` actually learns the
+    single most actionable fact a code review produces, the same way
+    `_consolidation_text` surfaces `[CONSOLIDATION_RECOMMENDED]`.
+    """
+    if not isinstance(high_priority, dict):
+        return None
+    count = high_priority.get("count")
+    if not isinstance(count, int):
+        return None
+    return f"high-priority groups: {count}"
 
 
 def _progress_text(progress: Dict[str, Any]) -> str:
