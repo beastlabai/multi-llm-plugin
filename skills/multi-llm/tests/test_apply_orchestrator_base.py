@@ -566,6 +566,83 @@ class TestInitSubclassValidation:
 
 
 # ======================================================================
+# Test: item_noun_plural (F8) — "fix" + "s" used to read "Fixs" everywhere.
+# ======================================================================
+
+
+class TestItemNounPlural:
+    """F8: an unset `item_noun_plural` defaults to the arithmetic plural,
+    which is correct for a regular noun and wrong for one that isn't."""
+
+    def test_defaults_to_the_arithmetic_plural_when_unset(self):
+        class Widget(ApplyOrchestratorBase):
+            phase_name = "apply-widget"
+            review_subdir = "review-plan"
+            item_noun = "widget"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def load_data(self):
+                return ([], [])
+
+            def parse_user_edits(self, report_path):
+                return {}
+
+            def merge_user_edits(self, groups, edited_descriptions):
+                return (groups, [])
+
+            def parse_skips_from_report(self, report_path):
+                return (set(), set(), set())
+
+            def parse_validation_overrides_from_report(self, report_path):
+                return ({}, {})
+
+            def format_item_for_output(self, group, index):
+                return group
+
+            def create_batches(self, items):
+                return []
+
+            def generate_batch_prompts(self, batches):
+                return batches
+
+            def build_output_json(self, batches, *, resume_info=None):
+                return {}
+
+            def get_output_path(self):
+                return "/tmp/test"
+
+            def print_text_summary(self, batches, output_path):
+                pass
+
+        assert Widget.item_noun_plural == "widgets"
+
+    def test_an_explicit_plural_is_not_overwritten(self):
+        assert MockApplyOrchestrator.item_noun == "suggestion"
+        assert MockApplyOrchestrator.item_noun_plural == "suggestions"
+
+    def test_apply_code_fixes_declares_the_irregular_plural(self):
+        """"fix" + "s" reads "Fixs" — the phase must set it explicitly."""
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        assert ApplyCodeFixesOrchestrator.item_noun == "fix"
+        assert ApplyCodeFixesOrchestrator.item_noun_plural == "fixes"
+
+    def test_the_two_sibling_phases_get_the_regular_plural_for_free(self):
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+        from apply_task_suggestions_orchestrator import (
+            ApplyTaskSuggestionsOrchestrator,
+        )
+
+        assert ApplySuggestionsOrchestrator.item_noun_plural == "suggestions"
+        assert (
+            ApplyTaskSuggestionsOrchestrator.item_noun_plural
+            == "task suggestions"
+        )
+
+
+# ======================================================================
 # Test: Abstract method contracts
 # ======================================================================
 
@@ -5487,13 +5564,18 @@ class _FakeOutcome:
     """The `TaskOutcome` fields the outcome summary reads, and no more."""
 
     def __init__(self, task_id, status="ok", write_outcome="applied",
-                 duration_seconds=1.0, runner="mock:model", reason=None):
+                 duration_seconds=1.0, runner="mock:model", reason=None,
+                 files_touched=None, output_path=None):
         self.task_id = task_id
         self.status = status
         self.write_outcome = write_outcome
         self.duration_seconds = duration_seconds
         self.runner = runner
         self.reason = reason
+        # F7/F10: only read by `_touched_files()` and the batch's own result
+        # file (`notes`) — optional so every existing caller is unaffected.
+        self.files_touched = files_touched or []
+        self.output_path = output_path
 
     @property
     def ok(self):
@@ -6131,3 +6213,310 @@ class TestTheExecutorLegRunsStepSeven:
             assert cls._rebuild_formatted_skipped is (
                 ApplyOrchestratorBase._rebuild_formatted_skipped
             )
+
+
+class TestTheFilesChangedFallback:
+    """F7: every output named the PLAN as what the phase changed, because a
+    phase with no single write target (``has_single_write_target`` False)
+    fell back to ``self.plan_path`` — the file it never opens."""
+
+    def _orchestrator_with_no_single_target(self, tmp_path, outcomes, tasks):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.has_single_write_target = False
+        orch.write_tasks = tasks
+        orch.write_result = _FakeSchedulerResult(outcomes)
+        return orch
+
+    def test_the_result_block_names_the_touched_files(self, tmp_path, capsys):
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
+            [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
+        )
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert "Files changed: index.html" in out
+        assert orch.plan_path not in out
+
+    def test_the_result_block_says_none_when_nothing_moved(self, tmp_path, capsys):
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [_FakeOutcome("apply-fix-batch-0", status="batch_failed",
+                          write_outcome=None)],
+            [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
+        )
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert "Files changed: (none)" in out
+
+    def test_a_single_target_phase_still_prints_file(self, tmp_path, capsys):
+        """The fallback is additive: a phase with a real target is unaffected."""
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a"]}]
+        orch.write_result = _FakeSchedulerResult([_FakeOutcome("apply-batch-0")])
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert f"File: {orch.plan_path}" in out
+        assert "Files changed:" not in out
+
+    def test_summary_md_names_files_changed_when_no_single_target(self, tmp_path):
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
+            [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
+        )
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "**Files changed**: index.html" in text
+        assert "**Applied to**" not in text
+
+    def test_touched_files_dedupes_across_outcomes_and_skips_failed_ones(
+        self, tmp_path
+    ):
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [
+                _FakeOutcome("apply-fix-batch-0", files_touched=["index.html"]),
+                _FakeOutcome(
+                    "apply-fix-batch-1",
+                    files_touched=["index.html", "style.css"],
+                ),
+                _FakeOutcome(
+                    "apply-fix-batch-2", status="batch_failed",
+                    write_outcome=None, files_touched=["should-not-appear.txt"],
+                ),
+            ],
+            [
+                {"task_id": "apply-fix-batch-0", "expected_ids": ["a"]},
+                {"task_id": "apply-fix-batch-1", "expected_ids": ["b"]},
+                {"task_id": "apply-fix-batch-2", "expected_ids": ["c"]},
+            ],
+        )
+        assert orch._touched_files() == ["index.html", "style.css"]
+
+    def test_record_write_artifacts_names_the_touched_files(self, tmp_path):
+        from utils import cli_common
+
+        orch = self._orchestrator_with_no_single_target(
+            tmp_path,
+            [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
+            [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
+        )
+        # `_touched_files()` names repo-root-relative paths; the resolved file
+        # must actually exist for `record_output_files`/`record_artifacts` to
+        # name it (same rule every other artifact path follows).
+        plan_dir = Path(orch.plan_path).parent
+        (plan_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = phase_dir / "orchestrator_output.json"
+        output_path.write_text("{}", encoding="utf-8")
+
+        context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
+        cli_common.activate_result(context)
+        try:
+            orch._record_write_artifacts(str(output_path))
+        finally:
+            cli_common.deactivate_result()
+
+        recorded = set(context.artifacts)
+        assert any(path.endswith("index.html") for path in recorded)
+
+
+class TestPerFixDetailInTheSummary:
+    """F10: summary.md listed batch ids/durations and no fix titles, files, or
+    notes, although the data — ``self.batches``' own fix dicts and each
+    batch's own result-file ``notes`` — was already on disk."""
+
+    def _orchestrator_with_a_fix_batch(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.has_single_write_target = False
+        orch.write_tasks = [
+            {"task_id": "apply-fix-batch-0", "expected_ids": ["a", "b"]}
+        ]
+        orch.batches = [
+            {
+                "fixes": [
+                    {"title": "Fix the OOB teleport", "file": "index.html",
+                     "line_range": [725, 727]},
+                    {"title": "Drop speedForward", "file": "index.html",
+                     "line_range": [40]},
+                ],
+                "file_key": "index.html",
+            }
+        ]
+        result_path = Path(orch.out_dir) / orch.phase_name / "apply_fix_batch_0.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps({
+                "status": "applied", "ids": ["a", "b"],
+                "summary": "applied 2 fixes",
+                "notes": "Fix 1: OOB now resyncs lap timing.",
+            }),
+            encoding="utf-8",
+        )
+        orch.write_result = _FakeSchedulerResult([
+            _FakeOutcome(
+                "apply-fix-batch-0", files_touched=["index.html"],
+                output_path=str(result_path),
+            )
+        ])
+        return orch
+
+    def test_each_fix_is_listed_with_its_title_and_status(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "1. **Fix the OOB teleport** - Applied" in text
+        assert "2. **Drop speedForward** - Applied" in text
+
+    def test_a_two_element_line_range_renders_as_a_span(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        stripped = [line.strip() for line in text.splitlines()]
+        assert "- File: index.html:725-727" in stripped
+
+    def test_a_single_element_line_range_renders_without_a_span(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        stripped = [line.strip() for line in text.splitlines()]
+        assert "- File: index.html" in stripped
+
+    def test_a_not_applied_batch_marks_its_fixes_not_applied(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.write_result = _FakeSchedulerResult([
+            _FakeOutcome(
+                "apply-fix-batch-0", status="batch_failed", write_outcome=None,
+                reason="no bytes moved",
+            )
+        ])
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "1. **Fix the OOB teleport** - Not applied" in text
+
+    def test_the_batch_result_notes_are_carried_through(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "**Notes**: Fix 1: OOB now resyncs lap timing." in text
+
+    def test_a_missing_result_file_yields_no_notes_line(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.write_result = _FakeSchedulerResult([
+            _FakeOutcome("apply-fix-batch-0")  # no output_path
+        ])
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "**Notes**" not in text
+
+    def test_batching_efficiency_line_when_batching_ran(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.batching_stats = {
+            "batching_enabled": True,
+            "subagent_calls_saved": 5,
+            "efficiency_gain_percent": 42,
+        }
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "Batching efficiency: 5 subagent call(s) saved (42%)" in text
+
+    def test_no_batching_line_when_batching_was_not_enabled(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.batching_stats = {"batching_enabled": False}
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "Batching efficiency" not in text
+
+    def test_base_ref_line_when_the_orchestrator_resolves_one(self, tmp_path):
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        orch.resolve_base_ref = lambda: "abc1234"
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "**Base ref**: abc1234" in text
+
+    def test_no_base_ref_line_when_none_is_resolved(self, tmp_path):
+        """The default hook returns "" for the sibling phases — no line."""
+        orch = self._orchestrator_with_a_fix_batch(tmp_path)
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "**Base ref**" not in text
+
+
+class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
+    """F11: ``write_batch_report.json`` said ``summary_file: null`` for a run
+    that went on to write ``summary.md`` a few lines later — the scheduler
+    serializes the report before this base ever calls
+    ``write_apply_summary_report()``."""
+
+    def test_the_report_on_disk_gains_the_summary_path(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a"]}]
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        report_path = phase_dir / "write_batch_report.json"
+        report_path.write_text(
+            json.dumps({"report_version": 1, "summary_file": None, "tasks": []}),
+            encoding="utf-8",
+        )
+        orch.write_result = _FakeSchedulerResult(
+            [_FakeOutcome("apply-batch-0")], report_path=str(report_path)
+        )
+
+        summary_path = orch.write_apply_summary_report()
+        orch._patch_write_batch_report_summary_file(summary_path)
+
+        patched = json.loads(report_path.read_text(encoding="utf-8"))
+        assert patched["summary_file"] == summary_path
+        assert orch.write_result.summary_file == summary_path
+        # Nothing else in the report moved.
+        assert patched["report_version"] == 1
+
+    def test_a_report_that_already_agrees_is_left_alone(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        report_path = phase_dir / "write_batch_report.json"
+        report_path.write_text(
+            json.dumps({"summary_file": "/already/there.md"}), encoding="utf-8"
+        )
+        orch.write_result = _FakeSchedulerResult([], report_path=str(report_path))
+        mtime_before = report_path.stat().st_mtime_ns
+
+        orch._patch_write_batch_report_summary_file("/already/there.md")
+
+        assert report_path.stat().st_mtime_ns == mtime_before
+
+    def test_a_missing_report_path_is_a_quiet_no_op(self, tmp_path):
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_result = _FakeSchedulerResult([])  # report_path=None
+        orch._patch_write_batch_report_summary_file("/tmp/does-not-matter.md")
+        assert orch.write_result.summary_file == "/tmp/does-not-matter.md"
+
+    def test_the_executor_leg_wires_it_end_to_end(self, tmp_path):
+        """Through `_write_outputs`, not just the helper in isolation."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        args = _make_args(plan_file=str(plan_path), yes=True)
+
+        class ExecutorOrch(MockApplyOrchestrator):
+            phase_name = "apply-f11"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+            marks_phase_completed = False
+
+            def run_write_executor(self):
+                phase_dir = Path(self.out_dir) / self.phase_name
+                phase_dir.mkdir(parents=True, exist_ok=True)
+                report_path = phase_dir / "write_batch_report.json"
+                report_path.write_text(
+                    json.dumps({"report_version": 1, "summary_file": None}),
+                    encoding="utf-8",
+                )
+                self.write_tasks = [
+                    {"task_id": "apply-batch-0", "expected_ids": ["a"]}
+                ]
+                self.write_result = _FakeSchedulerResult(
+                    [_FakeOutcome("apply-batch-0")], report_path=str(report_path)
+                )
+                return 0
+
+        orch = ExecutorOrch(args)
+        assert orch.run() == 0
+
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        patched = json.loads(
+            (phase_dir / "write_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert patched["summary_file"] == str(phase_dir / "summary.md")

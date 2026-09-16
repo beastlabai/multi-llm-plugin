@@ -485,6 +485,28 @@ changes:
       mock review returns findings that group into 2 distinct HIGH groups.
 
   # ---------------------------------------------------------------------------
+  # 2026-09-16, the apply-code-fixes audit of the racing-game pipeline (minor
+  # finding): `write_tasks.json` already carries a `batch_index` per task
+  # (`write_phase_bridge`'s materialization, 0-based, dispatch/array order) but
+  # `orchestrator_output.json`'s own `batches[]` did not, so a native-leg agent
+  # following "for each batch (index N)" had to derive it from array position.
+  # `generate_batch_prompts` now stamps the identical 0-based value onto each
+  # serialized batch. The diff is one ADDED key per batch and nothing else —
+  # apply-suggestions and apply-task-suggestions are untouched (only
+  # apply_code_fixes_orchestrator.py changed).
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/batch_index
+    rationale: >
+      The batch now serializes its own dispatch-order `batch_index` (0);
+      nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/batch_index
+    rationale: >
+      The batch now serializes its own dispatch-order `batch_index` (1);
+      nothing existing changed. See the block comment above.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/batch_index
+    rationale: >
+      The batch now serializes its own dispatch-order `batch_index` (2);
+      nothing existing changed. See the block comment above.
   # F5, 2026-09-16, the apply-code-fixes audit: isolated-high-risk batches now
   # dispatch first, not last.
   #

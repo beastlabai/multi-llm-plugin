@@ -552,6 +552,10 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     confirmation_phase_name = "apply-code-fixes"
     review_subdir = "code-review"
     item_noun = "fix"
+    # "fix" + "s" reads "Fixs" on every RESULT block, summary.md heading and log
+    # line the base builds arithmetically (F8) — the irregular plural the base's
+    # `__init_subclass__` default can't derive on its own.
+    item_noun_plural = "fixes"
     supports_revalidation = True
     supports_skip_flag = False
     # Stays False, deliberately: `run()` APPLIES NOTHING. It emits batch JSON and
@@ -859,9 +863,12 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             print("WARNING: Validation results not found, treating all as needs-human-decision", file=sys.stderr)
             validation = []
 
-        print(f"Loaded {len(groups)} issue groups", file=sys.stderr)
-        print(f"Loaded {len(validation)} validation results", file=sys.stderr)
-
+        # No "Loaded N groups"/"Loaded N validation results" print here: the
+        # base's own `_load_and_parse_inputs` (step 11) announces both right
+        # after `load_data()` returns. This method used to print them too, so a
+        # single load announced itself twice under two different nouns ("issue
+        # groups" here, "fix groups" from the base) — same two facts, four lines
+        # (minor, apply-code-fixes audit, 2026-09-16).
         return groups, validation
 
     def parse_user_edits(self, report_path: str) -> Dict[int, Tuple[str, str]]:
@@ -978,7 +985,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         self._base_ref = base_ref
 
         result = []
-        for batch in batches:
+        for i, batch in enumerate(batches):
             # output_dir carries the implement phase's own prior_changes.jsonl
             # record into the prompt (F3) — a finding is judged against the
             # plan, but nothing judged it against what implement deliberately
@@ -986,9 +993,18 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             # tune ("accel tuned 28->32 for <4s") that a later finding, judged
             # only against the plan's other half, called a deviation.
             prompt = format_fix_batch_prompt(
-                batch, self.plan_path, base_ref, output_dir=self.out_dir
+                batch, self.plan_path, base_ref,
+                # `out_dir` is set by `_setup()`; a prompt built before that
+                # (tests, or a caller that only formats) simply has no record.
+                output_dir=getattr(self, "out_dir", None),
             )
-            result.append({**batch.to_dict(), "prompt": prompt})
+            # `batch_index` matches the value `write_phase_bridge`'s
+            # `_apply_code_fixes_task` assigns the same batch under
+            # `--exec-subagents` (0-based, dispatch/array order) — write_tasks.json
+            # already carries it; orchestrator_output.json did not, so a native-leg
+            # agent following "for each batch (index N)" had to derive it from
+            # position (minor, apply-code-fixes audit, 2026-09-16).
+            result.append({**batch.to_dict(), "prompt": prompt, "batch_index": i})
         return result
 
     def build_output_json(

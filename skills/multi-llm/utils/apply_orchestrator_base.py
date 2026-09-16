@@ -471,6 +471,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     phase_name: str = ""
     review_subdir: str = ""
     item_noun: str = ""
+    # The plural every user-facing surface prints. Left empty, `__init_subclass__`
+    # fills it with the arithmetic plural (`item_noun + "s"`), which is correct
+    # for "suggestion"/"task suggestion". A noun with an irregular plural (F8:
+    # "fix" -> "fixs" read on every apply-code-fixes line) must set this
+    # explicitly, the way `display_decisions.py` already does.
+    item_noun_plural: str = ""
     supports_revalidation: bool = False
     supports_skip_flag: bool = False
     marks_phase_completed: bool = False
@@ -510,6 +516,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"{cls.__name__} must set '{attr}' to a non-empty string "
                     f"(got {value!r})"
                 )
+
+        # A subclass that leaves `item_noun_plural` unset gets the arithmetic
+        # plural of its own `item_noun`, computed once here rather than at every
+        # call site (F8).
+        if not getattr(cls, "item_noun_plural", ""):
+            cls.item_noun_plural = f"{cls.item_noun}s"
 
         # Validate boolean config attributes are explicitly set (not inherited defaults)
         for attr in ("supports_revalidation", "supports_skip_flag", "marks_phase_completed"):
@@ -596,6 +608,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # how many items each batch carried).
         self.write_result: Optional[Any] = None
         self.write_tasks: List[Dict[str, Any]] = []
+        # The review report path `regenerate_decisions_overlay()` rewrote, if it
+        # ran and matched anything (F7) — read by `_record_write_artifacts`.
+        self._decisions_overlay_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # D6 auto-resolutions (rows 10 and 11)
@@ -1348,7 +1363,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             dry_run=getattr(self.args, "dry_run", False),
         )
 
-        print(f"\nFiltered {self.item_noun}s:", file=sys.stderr)
+        print(f"\nFiltered {self.item_noun_plural}:", file=sys.stderr)
         print(f"  Valid (to apply): {len(self.valid)}", file=sys.stderr)
         print(f"  Needs human review: {len(self.needs_human)}", file=sys.stderr)
         print(f"  Skipped: {len(self.skipped)}", file=sys.stderr)
@@ -1781,8 +1796,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # *before* the artifact record, so the report is one of the
                 # files handed back.
                 try:
-                    self.write_apply_summary_report()
-                    self.regenerate_decisions_overlay()
+                    summary_path = self.write_apply_summary_report()
+                    self._decisions_overlay_path = self.regenerate_decisions_overlay()
+                    if summary_path:
+                        # F11: the scheduler already serialized
+                        # write_batch_report.json with summary_file: null by
+                        # this point — patch it now that the path is known.
+                        self._patch_write_batch_report_summary_file(summary_path)
                 except Exception as e:  # noqa: BLE001 - reporting is non-fatal
                     self.logger.warning("summary report failed: %s", e)
             self._record_write_artifacts(output_path)
@@ -1935,6 +1955,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         print(f"Backup saved: {backup_path}", file=sys.stderr)
         return backup_path
 
+    def _touched_files(self) -> List[str]:
+        """The files the write batches actually verified changed (F7).
+
+        The observed post-run byte comparison, not the runner's own claim — the
+        same set each ``ok`` outcome's ``files_touched`` carries. Repo-root-
+        relative, order-preserving, de-duplicated across every outcome; empty
+        before the write executor has run, or when every batch was a no-op /
+        clean failure. This is the only "what did this phase change" answer for
+        a phase with no single write target (``has_single_write_target`` False —
+        apply-code-fixes partitions by ``file_key``), and it is honest for the
+        single-target phases too since it reflects what actually moved rather
+        than the phase's own convention.
+        """
+        touched: List[str] = []
+        seen: Set[str] = set()
+        for outcome in getattr(self.write_result, "outcomes", None) or []:
+            if not getattr(outcome, "ok", False):
+                continue
+            for touched_path in getattr(outcome, "files_touched", None) or []:
+                if touched_path and touched_path not in seen:
+                    seen.add(touched_path)
+                    touched.append(touched_path)
+        return touched
+
     def _record_write_artifacts(self, output_path: str) -> None:
         """Hand back the files this phase produced, on the executor leg.
 
@@ -1946,6 +1990,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ``.status.json`` for ``status``, ``record_artifacts`` feeds the terminal
         ``MULTI_LLM_RESULT`` line every host is told to trust — and both drop
         paths that do not exist, so a stopped run names only what it produced.
+
+        F7: also names every file the batches verified changed
+        (``touched_file_{n}``, resolved against the same
+        ``write_safety.resolve_repo_root`` anchor the scheduler pins the write
+        path to — mirrors ``implement_orchestrator._record_implement_write_
+        artifacts``), plus the judge's own dispatch report and the review report
+        this run's decisions overlay rewrote, when either exists.
         """
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         paths: Dict[str, str] = {}
@@ -1961,6 +2012,36 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # The summary report this leg writes itself (F3). Dropped like every
         # other path when absent, so `--dry-run-subagents` names no report.
         paths["summary"] = os.path.join(phase_dir, "summary.md")
+
+        try:
+            from .write_safety import resolve_repo_root
+        except ImportError:  # pragma: no cover - direct script runs
+            from write_safety import resolve_repo_root  # type: ignore
+
+        repo_root = resolve_repo_root(self.plan_path)
+        for index, touched_path in enumerate(self._touched_files(), start=1):
+            resolved = (
+                touched_path if os.path.isabs(touched_path)
+                else os.path.join(repo_root, touched_path)
+            )
+            paths[f"touched_file_{index}"] = resolved
+
+        # The judge's own dispatch report, kind-qualified because a judge
+        # dispatch can share this phase dir with the later write dispatch
+        # (KINDS_SHARING_A_WRITE_PHASE_DIR) — otherwise invisible to a host
+        # that only reads this run's `output_files`.
+        judge_report = os.path.join(
+            phase_dir, "subagent_batch_report_human_decision_judge.json"
+        )
+        if os.path.exists(judge_report):
+            paths["human_decision_judge_report"] = judge_report
+
+        # The review report this phase's own decisions overlay just rewrote,
+        # if any (`regenerate_decisions_overlay`, called just before this).
+        overlay_path = getattr(self, "_decisions_overlay_path", None)
+        if overlay_path:
+            paths["decisions_overlay"] = overlay_path
+
         try:
             from . import detach as _detach
         except ImportError:  # pragma: no cover - direct script runs
@@ -1990,13 +2071,22 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ok = [o for o in outcomes if getattr(o, "ok", False)]
         applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
         target = self.write_target_file()
+        touched = self._touched_files()
 
         print(f"\n{'=' * 60}")
         print(f"{self.phase_name.upper()}: RESULT")
         print(f"{'=' * 60}")
-        print(f"File: {target or self.plan_path}")
+        # F7: a phase with no single write target (has_single_write_target False —
+        # apply-code-fixes partitions by file_key) used to fall back to
+        # `self.plan_path` here, which the phase never opens, so every run named
+        # the plan as what it changed. The files the batches actually verified
+        # changed are the honest answer, and they exist for every phase.
+        if target:
+            print(f"File: {target}")
+        else:
+            print(f"Files changed: {', '.join(touched) if touched else '(none)'}")
         print(f"Batches: {len(ok)}/{len(outcomes)} ok")
-        print(f"{self.item_noun.capitalize()}s applied: {applied_items}")
+        print(f"{self.item_noun_plural.capitalize()} applied: {applied_items}")
         print(f"Skipped: {len(self.formatted_skipped)}")
         if getattr(result, "stopped_at_batch", None) is not None:
             print(f"Stopped at batch: {result.stopped_at_batch}")
@@ -2020,7 +2110,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # specific reason validation gave it, plus its group id so the skip can
         # be looked up in the review report.
         if self.formatted_skipped:
-            print(f"\nSkipped {self.item_noun}s (not applied):")
+            print(f"\nSkipped {self.item_noun_plural} (not applied):")
             for item in self.formatted_skipped:
                 gid = str(item.get("group_id") or "")
                 label = f" [{gid[:8]}]" if gid else ""
@@ -2096,6 +2186,40 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     titles[gid] = str(item.get("title") or gid)
         return titles
 
+    @staticmethod
+    def _batch_member_items(batch: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The formatted items a batch dict carries (F10).
+
+        ``fixes`` for a ``CodeFixBatch``, ``suggestions`` for the two sibling
+        phases' ``SuggestionBatch`` — whichever key the batch's own
+        ``to_dict()`` used, so this reads all three phases' batches without a
+        subclass override.
+        """
+        if not batch:
+            return []
+        return list(batch.get("fixes") or batch.get("suggestions") or [])
+
+    @staticmethod
+    def _read_batch_result_notes(output_path: Optional[str]) -> Optional[str]:
+        """Best-effort read of a write batch's own ``notes`` field (F10).
+
+        ``notes`` (``schemas/write_batch_result.schema.json``) is the runner's
+        free-text detail beyond the structured ``status``/``ids``/``summary``
+        fields ``TaskOutcome`` already carries — on a real run, the only place a
+        batch's own account of *why* (e.g. "Fix 1: car.accel 32->28 per plan
+        §8.") survives past verification. Silent on any read/parse failure —
+        the field is optional and this is reporting, never gating.
+        """
+        if not output_path or not os.path.isfile(output_path):
+            return None
+        try:
+            with open(output_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        notes = data.get("notes") if isinstance(data, dict) else None
+        return notes if isinstance(notes, str) and notes.strip() else None
+
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
 
@@ -2105,6 +2229,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         finishes in that one invocation"). So the executor leg writes the same
         document itself, from the data it already has: the batch outcomes, the
         skip list rebuilt after judging, and the judge's own decisions.
+
+        F10 extends it with the per-fix detail the instructions' own template
+        promises and that was sitting unread on disk: each batch's own items
+        (title, file:lines when the item has them, applied/not-applied) from
+        ``self.batches``, the runner's free-text ``notes`` from its result file,
+        plus ``Base ref`` / batching-efficiency lines when the orchestrator
+        computed them (empty for the two sibling phases, which is why both are
+        conditional rather than assumed present).
 
         Best-effort and never fatal — a report is not worth failing an applied
         run over. Returns the path written, or ``None``.
@@ -2123,12 +2255,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             str(task.get("task_id", "")): list(task.get("expected_ids") or [])
             for task in self.write_tasks
         }
+        # Task and batch are materialized from the same `self.batches` list, in
+        # the same order (`run_write_executor`), so a positional zip joins each
+        # outcome's task_id back to the batch dict that carries its fix/
+        # suggestion titles and file/line_range — data `TaskOutcome` never kept.
+        batch_by_task_id = {
+            str(task.get("task_id", "")): batch
+            for task, batch in zip(self.write_tasks, self.batches)
+            if isinstance(batch, dict)
+        }
         ok = [o for o in outcomes if getattr(o, "ok", False)]
         applied_items = sum(len(expected_by_task.get(o.task_id, [])) for o in ok)
         decided = self.claude_decisions()
         titles = self._titles_by_group_id()
-        noun = self.item_noun
-        nouns = f"{noun}s"
+        nouns = self.item_noun_plural
 
         lines = [
             f"# Applied {nouns.title()} Report",
@@ -2136,8 +2276,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"**Plan**: {self.plan_path}",
         ]
         target = self.write_target_file()
+        touched = self._touched_files()
         if target:
             lines.append(f"**Applied to**: {target}")
+        elif touched:
+            # F7: apply-code-fixes has no single write target — the files the
+            # batches verified changed is the honest "what did this phase
+            # change" answer, where before nothing named it at all.
+            lines.append(f"**Files changed**: {', '.join(touched)}")
+        base_ref = self.resolve_base_ref()
+        if base_ref:
+            lines.append(f"**Base ref**: {base_ref}")
         lines += [
             f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
@@ -2153,6 +2302,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # code-editing phase — a typecheck has nothing to say about a plan file.
         if self.write_kind in CODE_WRITE_KINDS:
             lines.append(f"- Verification: {verification_line(result)}")
+        if self.batching_stats.get("batching_enabled"):
+            lines.append(
+                f"- Batching efficiency: "
+                f"{self.batching_stats.get('subagent_calls_saved', 0)} "
+                f"subagent call(s) saved "
+                f"({self.batching_stats.get('efficiency_gain_percent', 0)}%)"
+            )
         lines += [
             "",
             "## Applied Changes",
@@ -2170,6 +2326,28 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"**Duration**: {getattr(outcome, 'duration_seconds', 0.0):.1f}s  "
                     f"**Runner**: {getattr(outcome, 'runner', '') or '(none)'}"
                 )
+                items = self._batch_member_items(
+                    batch_by_task_id.get(outcome.task_id)
+                )
+                if items:
+                    item_status = "Applied" if getattr(outcome, "ok", False) else "Not applied"
+                    for item_index, item in enumerate(items, 1):
+                        item_title = item.get("title") or item.get("theme") or "Untitled"
+                        lines.append(f"{item_index}. **{item_title}** - {item_status}")
+                        file_path = item.get("file")
+                        if file_path:
+                            line_range = item.get("line_range") or []
+                            if len(line_range) >= 2:
+                                lines.append(
+                                    f"   - File: {file_path}:{line_range[0]}-{line_range[1]}"
+                                )
+                            else:
+                                lines.append(f"   - File: {file_path}")
+                notes = self._read_batch_result_notes(
+                    getattr(outcome, "output_path", None)
+                )
+                if notes:
+                    lines.append(f"**Notes**: {notes}")
                 reason = getattr(outcome, "reason", None)
                 if reason and not getattr(outcome, "ok", False):
                     lines.append(f"**Reason**: {reason}")
@@ -2227,6 +2405,45 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         print(f"[write-subagents] summary report: {path}")
         return path
+
+    def _patch_write_batch_report_summary_file(self, summary_path: str) -> None:
+        """Fill in ``write_batch_report.json``'s ``summary_file`` after the fact (F11).
+
+        ``WriteBatchScheduler`` serializes that report inside
+        ``run_write_executor()``, before this base ever calls
+        ``write_apply_summary_report()`` — the scheduler only fills
+        ``summary_file`` itself when constructed with its own ``summary_file``
+        argument, which the apply phases never pass (they write their own
+        summary here, on this leg). So the report on disk said
+        ``summary_file: null`` for a run that went on to write one a few lines
+        later. Patched here, once the apply phase's own path is known, rather
+        than by changing the scheduler (owned elsewhere — see AGENTS.md).
+
+        Best-effort: a read/parse/write failure is logged and never raised, the
+        same posture as the report it patches.
+        """
+        if self.write_result is not None:
+            self.write_result.summary_file = summary_path
+        report_path = getattr(self.write_result, "report_path", None)
+        if not report_path or not os.path.isfile(report_path):
+            return
+        try:
+            with open(report_path, "r", encoding="utf-8") as handle:
+                report = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - best-effort
+            self.logger.warning("write_batch_report.json not patched: %s", exc)
+            return
+        if not isinstance(report, dict) or report.get("summary_file") == summary_path:
+            return
+        report["summary_file"] = summary_path
+        try:
+            from .subagent_executor import _atomic_write_json
+        except ImportError:  # pragma: no cover - direct script runs
+            from subagent_executor import _atomic_write_json  # type: ignore
+        try:
+            _atomic_write_json(report_path, report)
+        except OSError as exc:  # noqa: BLE001 - best-effort
+            self.logger.warning("write_batch_report.json not patched: %s", exc)
 
     def regenerate_decisions_overlay(self) -> Optional[str]:
         """Badge the review report's findings with this phase's decisions (F3).
