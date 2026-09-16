@@ -2211,6 +2211,15 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # `.status.json` gains no key.
             **({"models_served": served_models} if served_models else {}),
         })
+        # The base fan-out's `models_done`, on the same truth: the fanout
+        # step above wrote `models_done=0` and nothing here advanced it, so
+        # `status --view run` printed `models 0/3` beside three completed
+        # reviewers (measured 2026-09-16).
+        report_progress(
+            str(phase_dir), step="grouping",
+            models_total=len(model_specs),
+            models_done=len(model_specs) - len(failed_models),
+        )
 
         # Save raw issues as JSON
         all_issues = []
