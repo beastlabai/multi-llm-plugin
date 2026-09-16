@@ -33,5 +33,8 @@ Read these files to understand existing patterns before implementing.
 - Stay focused on the specific task at hand
 - Only run tests directly related to this task's changed files — do NOT run broad test suites or regression checks
 - If a test fails, be aware that other tasks may be running in parallel and modifying shared code — the failure may not be caused by your changes. Only fix failures clearly related to your own modifications.
+- NEVER run `kill`, `pkill`, `killall`, or any other process-wide or kill-by-name command. You are one of several subagents sharing this machine: such a command kills the orchestrator that dispatched you, the other tasks running beside you, and unrelated processes belonging to the user.
+- Do NOT start a background server, a browser, or any other long-running process, and leave none running when you finish.
+- Verify with static checks only — a syntax check, the repo's linter or type checker, or a unit test that already exists. Do NOT try to verify by running the application or opening it in a browser.
 
 Proceed with the implementation.

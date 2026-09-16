@@ -1164,6 +1164,72 @@ class TestStatusSurface:
         capsys.readouterr()
         assert context2.payload(2)["state"] == "nothing-to-do"
 
+    def test_a_run_whose_pid_is_gone_is_rendered_died_not_running(
+        self, tmp_path, capsys
+    ):
+        """F2, 2026-09-16: an implement write subagent ran
+        `killall -9 node chrome google-chrome python3` and SIGKILLed the
+        detached orchestrator that had dispatched it. The record was left
+        `state: running, exit_code: null`, and for the whole heartbeat window
+        every poll printed `running (last beat Ns ago)` for a process the
+        identity probe could already prove was gone — with the resume command
+        withheld until the close-out fired. The close-out is right to wait; the
+        word is not."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "implement")
+        dead = _dead_pid()
+        status_file.claim_run(str(phase), {
+            "run_id": "run-sigkilled-1", "pid": dead,
+            # Not the same process even if the pid is recycled under us.
+            "process_start_time": "0",
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "implement",
+        })
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            # Still exit 2 — `classify_run` closes the run out as
+            # failed(heartbeat_timeout) once the beat expires, and every poll
+            # loop keys off the code, never off the word.
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        assert f"died (pid {dead} gone, last beat " in out, out
+        assert "running (stale" not in out, out
+        assert "process is gone (pid/creation-time probe says dead)" in out, out
+        assert "resume with:" in out and "--resume" in out, out
+        assert context.payload(2)["state"] == "died"
+
+    def test_a_dead_run_beside_a_live_one_still_reads_running(
+        self, tmp_path, capsys
+    ):
+        """The word answers for the plan, not for one phase dir: a poller with
+        something genuinely in flight must not be told the plan died."""
+        plan = _plan(tmp_path)
+        dead_phase = _phase_dir(plan, "implement")
+        status_file.claim_run(str(dead_phase), {
+            "run_id": "run-sigkilled-2", "pid": _dead_pid(),
+            "process_start_time": "0",
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "implement",
+        })
+        live_phase = _phase_dir(plan, "review-plan")
+        status_file.claim_run(str(live_phase), {
+            "run_id": "run-still-alive1", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "review-plan",
+        })
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.payload(2)["state"] == "running"
+
     def test_progress_renders_the_counts_a_run_is_still_accumulating(
         self, tmp_path, capsys
     ):

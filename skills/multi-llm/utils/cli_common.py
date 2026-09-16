@@ -95,6 +95,17 @@ _STATE_BY_EXIT = {
 #: ``dispatcher.states`` — looks to learn the vocabulary.
 STATE_RUNNING = "running"
 
+#: The second override word on ``EXIT_NOTHING_TO_DO``, and the narrower one:
+#: ``status`` proved the run's recorded pid is gone while its last heartbeat is
+#: still inside the window, so the run is not terminal yet (``detach`` closes it
+#: out as ``failed(heartbeat_timeout)`` once the beat expires) but calling it
+#: ``running`` is a lie — measured 2026-09-16, a write subagent's
+#: ``killall -9 … python3`` SIGKILLed the detached worker and every poll in the
+#: next minute reported the dead run as running (F2). Same exit code, same poll
+#: contract; only the word changes, and it lives here beside ``STATE_RUNNING``
+#: for the same reason: this table is where a host learns the vocabulary.
+STATE_DIED = "died"
+
 
 # ---------------------------------------------------------------------------
 # Skill-dir resolution and command building
