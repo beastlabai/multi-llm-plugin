@@ -1014,7 +1014,7 @@ class TestFullStackDetachedImplement:
             anchor=str(repo.plan), repo_root=str(repo.root), finalize=False,
             log=lambda line: None,
         ).run()
-        assert first.exit_code == 0
+        assert first.exit_code == 0, ([(o.status, o.write_outcome, o.reason) for o in first.outcomes], first.messages)
 
         # The "kill": the process is gone, batches 1 and 2 have no result file.
         assert (phase_dir / "implement_batch_T001.json").is_file()
@@ -1075,7 +1075,8 @@ class TestFullStackDetachedImplement:
                 kind="implement",
                 batches=[
                     {"batch_index": index, "can_parallelize": False, "tasks": [
-                        {"id": task_id, "prompt": f"do {task_id}",
+                        {"id": task_id,
+                         "prompt": f"do {task_id}\n\n{{prior_changes_context}}",
                          "files_to_modify": ["src/main.py"], "depends_on": [],
                          "title": task_id},
                     ]}
@@ -1091,7 +1092,7 @@ class TestFullStackDetachedImplement:
             plan_file=str(repo.plan), anchor=str(repo.plan),
             repo_root=str(repo.root), finalize=False, log=lambda line: None,
         ).run()
-        assert first.exit_code == 0
+        assert first.exit_code == 0, ([(o.status, o.write_outcome, o.reason) for o in first.outcomes], first.messages)
         log.unlink(missing_ok=True)
 
         # The resume: T001 completed, so the orchestrator materializes T002/T003
