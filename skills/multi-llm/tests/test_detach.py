@@ -1396,8 +1396,10 @@ class TestStatusSurface:
         apply-suggestions run mirrored (and the model then reported)
         "15/15 ok, applied 15" — 14 suggestions short. When the scheduler
         recorded `items_total`/`items_applied` (`write_batch_scheduler.
-        _mirror_status`), the line says so explicitly, and the write-outcome
-        breakdown the previous test pins still follows it unchanged."""
+        _mirror_status`), the line says so explicitly. The write-outcome
+        breakdown is dropped here (F14, 2026-09-16): every batch outcome is
+        `applied` and the count (15) is exactly the `ok` batch count already
+        stated, so printing it again read as a third, smaller quantity."""
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, "apply-suggestions")
         status_file.claim_run(str(phase), {
@@ -1424,8 +1426,10 @@ class TestStatusSurface:
         assert "phase state:    complete" in out
         assert (
             "progress:       apply_suggestions 15/15 batches ok, "
-            "29/29 items applied, applied 15"
+            "29/29 items applied"
         ) in out
+        # No redundant `, applied 15` tail: it would just restate the ok count.
+        assert ", applied 15" not in out
 
     def test_the_write_mirror_names_a_task_still_in_flight(self, tmp_path, capsys):
         """F10: the mirror's `dispatched` counter used to count FINISHED
@@ -1496,8 +1500,10 @@ class TestStatusSurface:
         })
         assert run_status.main(["--plan-file", str(plan)]) == 0
         out = capsys.readouterr().out
+        # No redundant `applied 13` breakdown (F14): every task's outcome is
+        # `applied` and 13 is exactly the ok count already stated.
         assert (
-            "progress:       implement 13/13 ok, applied 13, "
+            "progress:       implement 13/13 ok, "
             "deferred manual: T014 (skip-dependents)"
         ) in out
 

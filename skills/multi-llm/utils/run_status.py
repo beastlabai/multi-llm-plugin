@@ -537,8 +537,17 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         outcome = str((row or {}).get("write_outcome") or "")
         if outcome:
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
-    for outcome, count in sorted(outcomes.items()):
-        parts.append(f"{outcome} {count}")
+    # F14: when every batch's outcome is `applied` the breakdown collapses to
+    # a single `applied N` where N is exactly the `ok` count already stated
+    # earlier in the line (`<kind> <ok>/<total> [batches] ok`) — printing it
+    # again under a different label read as a third, smaller quantity rather
+    # than a restatement, and an opencode agent once repeated it verbatim as
+    # such. A breakdown with more than one outcome (`applied 7, no-op 2`)
+    # still tells the reader something the `ok` count alone does not, so that
+    # case is unchanged.
+    if not (len(outcomes) == 1 and outcomes.get("applied") == ok):
+        for outcome, count in sorted(outcomes.items()):
+            parts.append(f"{outcome} {count}")
     failed = mirror.get("failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
