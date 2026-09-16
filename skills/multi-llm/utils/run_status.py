@@ -57,11 +57,13 @@ from .cli_common import (
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
     EXIT_OK,
+    STATE_RUNNING,
     build_parent_parser,
     dispatcher_command,
     record_artifact,
     record_consolidation_recommended,
     record_next,
+    record_state,
 )
 from .output_handler import output_dir_path, phase_dir_path, slugify_question
 from .stream_bootstrap import bootstrap_streams
@@ -223,7 +225,27 @@ def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
         suffix = f"  ({', '.join(extra)})" if extra else ""
         lines.append(f"  {phase.ljust(width)}  {info.get('status', '?')}{suffix}")
     if payload.get("suggested_next"):
-        lines.append(f"  suggested next: {payload['suggested_next']}")
+        # `suggested_next` already skips every optional phase in its way
+        # (`check_workflow_prerequisites.get_workflow_status`'s own
+        # `OPTIONAL_PHASES` walk), so the bare word reads as "nothing else is
+        # outstanding" — a weak model given only this line, and the tool's own
+        # `next: null` beside it, asserted exactly that (F8, 2026-09-16). Name
+        # the optional phases it stepped over: the ones still `pending` that
+        # sit *before* it in phase order (`payload["phases"]` preserves that
+        # order), not every pending optional phase regardless of position — an
+        # optional phase further down the table has not been skipped for this
+        # suggestion, it just has not been reached yet.
+        pending_optional = []
+        for phase, info in payload.get("phases", {}).items():
+            if phase == payload["suggested_next"]:
+                break
+            if info.get("optional") and info.get("status") == "pending":
+                pending_optional.append(phase)
+        suffix = (
+            f"  ({' / '.join(pending_optional)} optional, not run)"
+            if pending_optional else ""
+        )
+        lines.append(f"  suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
         lines.append(f"  notice: {notice}")
     return lines
@@ -612,7 +634,19 @@ def _run_runner_facts(
     phase carries only the second, and until it recorded a runner at all
     `status` polled outside the launching session fell through to a fresh
     resolution and named the *polling* host's model instead of the run's.
+
+    **A host-bearing view that recorded no spec must not win outright** (F6,
+    2026-09-16): with several phases listed, the first one carrying a host can
+    be a run whose executor mirror is empty (a failed-before-dispatch run, a
+    stale pre-fix record, ``--dry-run-subagents``) while a *later* view holds
+    the real answer. Measured on a `generate-tasks` run: the default view's
+    ``apply-suggestions`` row sorted first, its mirror had recorded nothing,
+    and the search stopped there instead of reaching the `generate-tasks` row
+    one below it that had. So an empty-spec view is skipped rather than
+    returned, and its host is kept only as the fallback for when no view in
+    the whole list ever recorded a spec.
     """
+    fallback_host: Optional[str] = None
     for view in views or ():
         run = view.get("run") or {}
         host = run.get("host")
@@ -625,8 +659,11 @@ def _run_runner_facts(
             mirror = progress.get("write_subagents")
             versions = mirror.get("runner_versions") if isinstance(mirror, dict) else None
         specs = sorted(str(spec) for spec in versions) if isinstance(versions, dict) else []
-        return host.strip(), specs
-    return None, []
+        if specs:
+            return host.strip(), specs
+        if fallback_host is None:
+            fallback_host = host.strip()
+    return fallback_host, []
 
 
 def render_runner_text(
@@ -901,7 +938,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if recommended:
         record_consolidation_recommended(recommended)
     if exit_code == EXIT_NOTHING_TO_DO and views:
-        first = views[0]
+        # `views[0]` is `discover_phase_dirs`' alphabetical order, not "the run
+        # that made the exit code 2" — with several phases listed, a finished
+        # one can sort first while a different one is the live reason for the
+        # exit code (F3, 2026-09-16: `apply-suggestions` sorted ahead of the
+        # still-running `generate-tasks`, and the poll command handed back
+        # polled the finished run straight back to exit 0). Pick the first
+        # non-terminal view; only when none is live does the finished one
+        # answer, which is the genuine "nothing to do" case.
+        live_views = [v for v in views if v["verdict"] not in detach.TERMINAL_VERDICTS]
+        first = live_views[0] if live_views else views[0]
         record_next(
             detach.status_command_for(
                 str(plan_path),
@@ -912,6 +958,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 host=str(first["run"].get("host") or "") or None,
             )
         )
+        # The exit code stays 2 — the poll loops key off it, never off this
+        # word — but "nothing-to-do" is a false alarm when the reason is a run
+        # still in flight rather than an already-finished or unrecorded one
+        # (F11, 2026-09-16: the payload said `nothing-to-do` on the same
+        # screen whose text said `generate-tasks run … running`).
+        if live_views:
+            record_state(STATE_RUNNING)
     return exit_code
 
 

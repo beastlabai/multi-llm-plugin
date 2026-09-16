@@ -83,6 +83,18 @@ _STATE_BY_EXIT = {
     EXIT_NEEDS_HUMAN: "needs-human",
 }
 
+#: The one override word on ``EXIT_NOTHING_TO_DO`` that is not "nothing to
+#: do": ``status`` reuses exit 2 for "come back later" as well as "already
+#: complete" / "no run recorded" (F11, 2026-09-16), and a poll loop's own
+#: contract is the exit code, never the word — ``run_status.py``'s poll
+#: command and the opencode plugin's loop (``poll.code !== nothing_to_do``)
+#: both key off ``EXIT_NOTHING_TO_DO`` itself. So a live run gets this word
+#: instead of ``_STATE_BY_EXIT[EXIT_NOTHING_TO_DO]`` without touching the exit
+#: code, added here (not special-cased at the call site) because this table is
+#: the one place a host — or ``packaging/opencode/build.py``'s generated
+#: ``dispatcher.states`` — looks to learn the vocabulary.
+STATE_RUNNING = "running"
+
 
 # ---------------------------------------------------------------------------
 # Skill-dir resolution and command building
@@ -613,6 +625,18 @@ def record_next(command: Optional[str]) -> None:
     """Record the single follow-up command, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_next(command)
+
+
+def record_state(word: Optional[str]) -> None:
+    """Override ``MULTI_LLM_RESULT.state``, if a dispatcher run is active.
+
+    A no-op under direct invocation, same as every other ``record_*`` helper.
+    Left unset, ``payload()`` falls back to ``_STATE_BY_EXIT[exit_code]`` — this
+    is for the override cases (``STATE_RUNNING``, ``mark_needs_human``'s
+    ``"needs-human"``) where the exit code alone does not say which word fits.
+    """
+    if _ACTIVE is not None:
+        _ACTIVE.state = word
 
 
 def record_consolidation_recommended(

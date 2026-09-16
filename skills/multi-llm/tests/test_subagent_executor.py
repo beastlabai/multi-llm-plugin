@@ -3934,6 +3934,59 @@ class TestModelCatalogPreflight:
             f"{spec}  (recorded by this run's own dispatches)"
         )
 
+    def test_an_empty_recorded_spec_does_not_win_over_a_later_real_one(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F6: the default view lists `apply-suggestions` before `generate-tasks`
+        (alphabetical), and on the audited run `apply-suggestions`' mirror was
+        empty (`write_subagents.runner_versions: None` — pre-fix residue) while
+        `generate-tasks`, one row below it, had recorded the real dispatch. The
+        search used to stop at the first host-bearing view whether or not it
+        carried a spec, so the default screen named
+        `opencode:opencode/big-pickle` — a host-capabilities guess — instead of
+        the run's own `opencode:openrouter/~deepseek/deepseek-flash-latest`
+        (measured 2026-09-16)."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        spec = "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        views = [
+            {"run": {"host": "opencode"}, "progress": {
+                "write_subagents": {"runner_versions": None},
+            }},
+            {"run": {"host": "opencode"}, "progress": {
+                "subagents": {"runner_versions": {spec: "1.18.31"}},
+            }},
+        ]
+        lines = run_status.render_runner_text(plan, views=views)
+        assert lines[1].strip() == (
+            f"{spec}  (recorded by this run's own dispatches)"
+        )
+
+    def test_the_first_host_wins_only_when_nothing_recorded_a_spec_anywhere(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The fallback stays useful: with no view recording a spec at all, the
+        first host-bearing one still answers for a fresh resolution, rather than
+        the search coming back empty-handed."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        views = [
+            {"run": {"host": "opencode"}, "progress": {}},
+            {"run": {"host": "opencode"}, "progress": {}},
+        ]
+        lines = run_status.render_runner_text(plan, views=views)
+        assert lines[1].strip() == (
+            "opencode:opencode/big-pickle  (supplied by host capabilities)"
+        )
+
 
 class TestCredentialFreeModels:
     """D3 step 2: a declared credential-free model passes the auth leg; a
