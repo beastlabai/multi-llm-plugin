@@ -398,8 +398,15 @@ class TestGenerateBatchPrompt:
         with pytest.raises(ValueError, match="empty batch"):
             orch._generate_single_batch_prompt(batch)
 
-    def test_prompt_includes_tasks_content(self, tasks_content):
-        """Prompt includes current tasks.md content for context."""
+    def test_single_prompt_carries_no_frozen_tasks_excerpt(self, tasks_content):
+        """Single-suggestion prompt does not embed a snapshot of tasks.md (F7).
+
+        All batch prompts are materialized up front, before any batch runs, so
+        an embedded excerpt is frozen at that point and goes stale the moment an
+        earlier batch edits the file — exactly the header/dependency-graph
+        region every batch's own instructions tell it to regenerate. The prompt
+        must instead point the runner at the live file.
+        """
         batch = self._make_batch([{
             "title": "Test",
             "type": "addition",
@@ -410,25 +417,69 @@ class TestGenerateBatchPrompt:
         orch = self._make_orchestrator(tasks_content=tasks_content)
         prompt = orch._generate_single_batch_prompt(batch)
 
-        assert "## T001: Setup" in prompt
-        assert "## T002: Core" in prompt
+        assert "## T001: Setup" not in prompt
+        assert "## T002: Core" not in prompt
+        assert "carries no snapshot of" in prompt
+        assert "Read the file (step 1 below)" in prompt
 
-    def test_long_tasks_content_is_truncated(self):
-        """Tasks content longer than 3000 chars is truncated with ellipsis."""
-        long_content = "x" * 5000
-        batch = self._make_batch([{
+    def test_multi_prompt_carries_no_frozen_tasks_excerpt(self, tasks_content):
+        """Multi-suggestion batch prompt does not embed a snapshot of tasks.md (F7)."""
+        suggestions = [
+            {
+                "title": "Add validation",
+                "type": "addition",
+                "reference": "T001",
+                "importance": "HIGH",
+                "description": "Add input validation.",
+            },
+            {
+                "title": "Fix error handling",
+                "type": "modification",
+                "reference": "T001",
+                "importance": "MEDIUM",
+                "description": "Fix error handling.",
+            },
+        ]
+        batch = self._make_batch(suggestions, section_key="### Task T001: Setup")
+        orch = self._make_orchestrator(tasks_content=tasks_content)
+        prompt = orch._generate_single_batch_prompt(batch)
+
+        assert "## T001: Setup" not in prompt
+        assert "## T002: Core" not in prompt
+        assert "carries no snapshot of" in prompt
+        assert "Read the file (step 1 below)" in prompt
+
+    def test_prompt_still_tells_the_runner_to_read_the_file_first(self, tasks_content):
+        """Step 1 of both prompt formats still says to read the live file."""
+        single_batch = self._make_batch([{
             "title": "Test",
             "type": "addition",
             "reference": "T001",
             "importance": "LOW",
             "description": "Test.",
         }])
-        orch = self._make_orchestrator(tasks_content=long_content)
-        prompt = orch._generate_single_batch_prompt(batch)
+        orch = self._make_orchestrator(tasks_content=tasks_content)
+        single_prompt = orch._generate_single_batch_prompt(single_batch)
+        assert "1. Read the current tasks.md file" in single_prompt
 
-        assert "..." in prompt
-        # The full 5000 chars should NOT be in the prompt
-        assert "x" * 5000 not in prompt
+        multi_batch = self._make_batch([
+            {
+                "title": "Add validation",
+                "type": "addition",
+                "reference": "T001",
+                "importance": "HIGH",
+                "description": "Add input validation.",
+            },
+            {
+                "title": "Fix error handling",
+                "type": "modification",
+                "reference": "T001",
+                "importance": "MEDIUM",
+                "description": "Fix error handling.",
+            },
+        ])
+        multi_prompt = orch._generate_single_batch_prompt(multi_batch)
+        assert "1. Read the current tasks.md file first" in multi_prompt
 
     def test_type_instructions_present_for_all_types(self, tasks_content):
         """All four type-specific instruction blocks appear in prompt."""
