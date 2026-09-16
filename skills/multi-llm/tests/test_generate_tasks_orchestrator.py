@@ -704,3 +704,78 @@ class TestPhaseStateOnSuccess:
         assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 3
         capsys.readouterr()
         assert status_file.read_status(str(_phase_dir(plan))).get("state") == "subagents_failed"
+
+
+# ---------------------------------------------------------------------------
+# 10. A detached run hands its artifacts back instead of being globbed for
+# ---------------------------------------------------------------------------
+
+class _FakeRunHandle:
+    """Just enough of ``detach.RunHandle`` for the detached-only writes to fire.
+
+    ``record_output_files`` and ``report_progress`` are no-ops unless a handle
+    owns this phase dir — that is what keeps a foreground run's `.status.json`
+    free of new keys — so the detached half of the contract needs one.
+    """
+
+    def __init__(self, phase_dir: Path):
+        self.phase_dir = str(phase_dir)
+
+    def progress(self, **updates):
+        from utils import status_file
+
+        status_file.update_progress(self.phase_dir, updates)
+
+
+class TestTheHostIsToldWhatWasProduced:
+    """`status --view run` reads `output_files` off `.status.json` and repeats
+    it in `MULTI_LLM_RESULT.artifacts`; that poll is all a detached caller sees.
+    With nothing recorded, the one file this phase exists to produce was unnamed
+    — and it lands in the sibling `tasks/` dir, so globbing the phase dir could
+    not find it either. Measured 2026-09-16: an opencode host listed the four
+    intermediate JSON blobs under `generate-tasks/` and never mentioned
+    `tasks.md`, the plan edit, or how many tasks had been generated."""
+
+    def _consume_detached(self, tmp_path, monkeypatch, capsys):
+        from utils import detach, status_file
+
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        monkeypatch.setattr(detach, "_ACTIVE", _FakeRunHandle(_phase_dir(plan)))
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
+        capsys.readouterr()
+        return plan, status_file.read_status(str(_phase_dir(plan)))
+
+    def test_the_rendered_task_list_and_the_plan_are_named(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        plan, status = self._consume_detached(tmp_path, monkeypatch, capsys)
+        output_files = status.get("output_files") or {}
+        assert output_files.get("tasks") == str(_tasks_md(plan))
+        assert output_files.get("plan") == str(plan)
+        assert all(Path(path).exists() for path in output_files.values())
+
+    def test_the_progress_line_carries_the_task_count(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """1/1 subagents is the least informative number this phase has."""
+        _plan, status = self._consume_detached(tmp_path, monkeypatch, capsys)
+        progress = status.get("progress") or {}
+        assert progress.get("step") == "complete"
+        assert progress.get("tasks_total") == 2
+        assert progress.get("tasks_done") == 2
+
+    def test_a_foreground_run_still_records_nothing(self, tmp_path, capsys):
+        """No handle, no new keys — "with `--detach` unset, behavior is
+        unchanged" stays literally true."""
+        from utils import status_file
+
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
+        capsys.readouterr()
+        status = status_file.read_status(str(_phase_dir(plan)))
+        assert "output_files" not in status
+        assert "tasks_total" not in (status.get("progress") or {})

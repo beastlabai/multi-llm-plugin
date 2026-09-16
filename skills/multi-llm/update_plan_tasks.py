@@ -151,11 +151,17 @@ def generate_tasks_markdown(tasks: List[Dict[str, Any]], plan_name: str) -> str:
         else:
             lines.append("**Dependencies**: None")
 
-        # Files
-        if files_to_modify:
-            lines.append(f"**Files to modify**: {', '.join(files_to_modify)}")
-        if files_to_create:
-            lines.append(f"**Files to create**: {', '.join(files_to_create)}")
+        # Files. BOTH lines are always rendered, `none` when the task declares
+        # no files: `task_decomposer._explicit_files` reads "neither line
+        # present" as "hand-written task, guess the files from the narrative",
+        # so omitting them for an empty list handed the keyword heuristic the
+        # one kind of task it must never see — a generated one. The parser
+        # already discards `none`/`n/a`/`-`, so an empty declaration round-trips
+        # as empty instead of as absent.
+        modify_text = ', '.join(files_to_modify) if files_to_modify else "none"
+        create_text = ', '.join(files_to_create) if files_to_create else "none"
+        lines.append(f"**Files to modify**: {modify_text}")
+        lines.append(f"**Files to create**: {create_text}")
 
         # Complexity and executor. tasks.md is read by every host and by humans,
         # so it names the host-neutral executor role, never a Claude Code agent
@@ -312,6 +318,15 @@ def main(argv=None) -> int:
         state.set("plan_preamble", preamble)
         state.save()
         print(f"Stored plan preamble ({len(preamble)} chars)")
+
+    # Re-stamp the hash over the plan *this script just rewrote*. The
+    # StateManager above is constructed after the write, so `_load_or_create`
+    # sees the marker insertion as drift and sets `plan_changed: True` — the
+    # plugin flagging its own edit as a human's. Measured 2026-09-16: the next
+    # `implement --resume` then printed "WARNING: Plan has changed since last
+    # session" for a change generate-tasks had made one phase earlier.
+    state.refresh_plan_hash()
+    state.save()
 
     # Summary
     print(f"\nSuccessfully generated {len(tasks)} tasks:")

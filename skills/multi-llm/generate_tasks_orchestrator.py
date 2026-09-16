@@ -511,8 +511,26 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     from utils.status_file import update_status as _update_status
 
     phase_dir = str(get_phase_dir(plan_path, PHASE_NAME))
+    # The host-visible half of the same two channels the apply/review bases
+    # write: `status --view run` reads `output_files` off `.status.json` and
+    # repeats it in `MULTI_LLM_RESULT.artifacts`, and that poll — not this
+    # worker's log — is all a detached caller ever sees. Without it the one file
+    # this phase exists to produce was unnamed, and it does not even live in the
+    # phase dir (it lands in the sibling `tasks/`), so globbing could not find
+    # it either: measured 2026-09-16, an opencode host reported the four
+    # intermediate JSON blobs under `generate-tasks/` and never mentioned
+    # `tasks.md`, the plan edit or the task count.
+    _detach.record_output_files(
+        phase_dir, tasks=str(tasks_path), plan=str(plan_path)
+    )
     _update_status(phase_dir, {"state": "complete"})
-    _detach.report_progress(phase_dir, step="complete")
+    # The count is this phase's whole output, so report it: `_progress_text`
+    # renders `tasks_total`/`tasks_done`, and a step-only report left `status`
+    # printing the one subagent that produced the list (`task_generation 1/1
+    # ok`) as the only number on screen.
+    _detach.report_progress(
+        phase_dir, step="complete", tasks_total=len(tasks), tasks_done=len(tasks)
+    )
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
     print(
         "Next: "

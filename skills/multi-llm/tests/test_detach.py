@@ -1128,6 +1128,39 @@ class TestStatusSurface:
         assert "phase state:    complete" in out
         assert "progress:       complete, task_generation 1/1 ok" in out
 
+    def test_a_finished_generate_tasks_run_reports_the_task_count(
+        self, tmp_path, capsys
+    ):
+        """For the phase whose whole output is a count, `1/1 subagents` is the
+        least informative number on screen — the interesting one is how many
+        tasks it wrote (measured 2026-09-16: 14, present nowhere in
+        `.status.json`). `consume_document` now reports `tasks_total`/
+        `tasks_done`, which `_progress_text` already knew how to render."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-count-0001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "generate-tasks",
+        })
+        status_file.update_status(str(phase), {
+            "phase": "generate-tasks", "state": "complete",
+            "progress": {
+                "step": "complete", "tasks_total": 14, "tasks_done": 14,
+                "subagents": {
+                    "kind": "task_generation", "invoker": "executor",
+                    "total": 1, "ok": 1, "counts": {"ok": 1},
+                    "failed_task_ids": [],
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        assert (
+            "progress:       complete, tasks 14/14, task_generation 1/1 ok"
+            in capsys.readouterr().out
+        )
+
     def test_the_write_mirror_counts_its_task_rows(self, tmp_path, capsys):
         """`write_subagents` records one row per task and no `counts`/`ok`
         summary; a finished nine-task run printed `implement 0/9 ok`

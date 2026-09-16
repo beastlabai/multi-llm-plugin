@@ -1336,6 +1336,83 @@ class TestExternalTasksFile:
         assert data["total_tasks"] >= 1
 
 
+class TestMissingExternalTasksFile:
+    """A `TASKS_FILE` marker naming a file that is not there is a hard stop.
+
+    Falling back to parsing the plan does not fail — it *fabricates*: measured
+    2026-09-16 against a real plan, the fallback produced 18 confident tasks
+    titled ". Overview", with zero acceptance criteria and dotted identifiers
+    such as `camera.update` declared as files to create. The trigger is mundane
+    (a moved or cleaned `plans/<plan>/tasks/`, a plan copied without its
+    sibling directory) and a WARNING into a detached log is not a gate."""
+
+    def _run(self, plan_path, mock_state_manager, temp_dir):
+        from implement_orchestrator import main
+
+        (plan_path.parent / "tasks" / "tasks.md").unlink()
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'):
+
+            mock_args.return_value = MagicMock(
+                plan_file=str(plan_path),
+                output=str(temp_dir / "output.json"),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
+                yes=False,
+            )
+            with pytest.raises(SystemExit) as excinfo:
+                main()
+        return excinfo.value
+
+    def test_a_missing_tasks_file_is_exit_three_not_a_re_parse_of_the_plan(
+        self, sample_plan_with_tasks_reference, mock_state_manager, temp_dir, capsys
+    ):
+        exit_info = self._run(
+            sample_plan_with_tasks_reference, mock_state_manager, temp_dir
+        )
+
+        assert exit_info.code == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "tasks/tasks.md" in out, "the message names the path it could not read"
+        assert "generate-tasks" in out, "and the repair that produces it"
+        assert "Found " not in out, "nothing was decomposed"
+        assert not (temp_dir / "output.json").exists()
+
+    def test_a_plan_with_no_marker_still_parses_its_own_content(
+        self, sample_plan_with_tasks, mock_state_manager, temp_dir
+    ):
+        """The legacy embedded-task format is the one case the fallback is for."""
+        from implement_orchestrator import main
+
+        output_path = temp_dir / "legacy-output.json"
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('sys.exit'):
+
+            mock_args.return_value = MagicMock(
+                plan_file=str(sample_plan_with_tasks),
+                output=str(output_path),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=False,
+                dry_run_subagents=False,
+                internal_worker=False,
+            )
+            main()
+
+        assert json.loads(output_path.read_text(encoding="utf-8"))["total_tasks"] >= 1
+
+
 class TestOutputFormat:
     """Tests for output JSON format."""
 
