@@ -979,7 +979,15 @@ Finalization (run by the host AFTER every batch has been applied and verified):
 
         result = []
         for batch in batches:
-            prompt = format_fix_batch_prompt(batch, self.plan_path, base_ref)
+            # output_dir carries the implement phase's own prior_changes.jsonl
+            # record into the prompt (F3) — a finding is judged against the
+            # plan, but nothing judged it against what implement deliberately
+            # did, which is how a fix batch reverted a logged, plan-satisfying
+            # tune ("accel tuned 28->32 for <4s") that a later finding, judged
+            # only against the plan's other half, called a deviation.
+            prompt = format_fix_batch_prompt(
+                batch, self.plan_path, base_ref, output_dir=self.out_dir
+            )
             result.append({**batch.to_dict(), "prompt": prompt})
         return result
 

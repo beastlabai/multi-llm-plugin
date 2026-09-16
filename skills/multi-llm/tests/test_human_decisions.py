@@ -240,6 +240,55 @@ class TestGroupIdOf:
         assert isinstance(computed, str) and computed
 
 
+class TestJudgeItemFromGroup:
+    """F9: a code-fix group's judge item carries `file`/`line_range` too, so
+    the judge is told where to look instead of deciding from title and
+    prose alone."""
+
+    def test_plan_suggestion_group_carries_no_file_or_line_range(self):
+        """apply-suggestions / apply-task-suggestions groups never have a
+        file/line_range — the keys must not appear at all (not even null),
+        matching what the prompt-embedding table in test_subagent_prompts
+        keys its "does this item name a file" check on."""
+        item = judge_item_from_group(_group(GROUP_A))
+        assert "file" not in item
+        assert "line_range" not in item
+
+    def test_code_fix_group_carries_file_and_line_range(self):
+        group = _group(GROUP_A)
+        group["suggestions"][0]["file"] = "index.html"
+        group["suggestions"][0]["line_range"] = [93, 97]
+
+        item = judge_item_from_group(group)
+
+        assert item["file"] == "index.html"
+        assert item["line_range"] == [93, 97]
+
+    def test_falls_back_to_the_group_level_file_when_no_suggestions(self):
+        group = {
+            "group_hash": GROUP_A,
+            "theme": "A fix",
+            "file": "index.html",
+            "line_range": (10, 12),
+            "suggestions": [],
+        }
+
+        item = judge_item_from_group(group)
+
+        assert item["file"] == "index.html"
+        assert item["line_range"] == [10, 12]
+
+    def test_empty_line_range_is_omitted_not_rendered_as_empty_list(self):
+        group = _group(GROUP_A)
+        group["suggestions"][0]["file"] = "index.html"
+        group["suggestions"][0]["line_range"] = []
+
+        item = judge_item_from_group(group)
+
+        assert item["file"] == "index.html"
+        assert "line_range" not in item
+
+
 # ---------------------------------------------------------------------------
 # Consumer: read + validate + map
 # ---------------------------------------------------------------------------
