@@ -222,3 +222,86 @@ class TestReaggregateWrapsPipelineWithIntentToAdd:
         _assert_between(
             names, "generate_review_report", "context_enter", "context_exit"
         )
+
+
+# ---------------------------------------------------------------------------
+# D6 step 3 — the review-code lane asks the same pre-dispatch sandbox question
+# ---------------------------------------------------------------------------
+
+#: What real bubblewrap prints on a stock Ubuntu 24.04 with
+#: `kernel.apparmor_restrict_unprivileged_userns=1`, replayed verbatim.
+_BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+
+
+class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
+    """`run_single_review` is its own dispatch lane, so it asks for itself.
+
+    Same probe, same once-per-run cache and same wording as
+    `review_orchestrator_base.run_single_model`: a `generate` dispatch whose
+    sandbox cannot start reads neither the plan nor the diff, and answers with
+    a sentence about the files it could not open — which scores as a review.
+    """
+
+    class _Probed:
+        """An adapter declaring a `generate` probe that fails, as codex's does
+        where bwrap cannot start. The `sh` is real; the line is replayed."""
+
+        internal_retries = None
+
+        def sandbox_probe_command(self, profile):
+            from utils.providers.base import PROFILE_GENERATE
+
+            if profile != PROFILE_GENERATE:
+                return None
+            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+
+    def test_the_code_review_fanout_refuses_a_slot_whose_sandbox_cannot_start(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from utils import review_orchestrator_base as rob
+        from utils import subagent_executor as executor
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# Plan\n", encoding="utf-8")
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
+        monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
+
+        def no_dispatch(**kwargs):
+            raise AssertionError("a slot was dispatched past a refused probe")
+
+        monkeypatch.setattr(cro, "invoke_with_file_output", no_dispatch)
+
+        def no_retire(*args, **kwargs):
+            raise AssertionError("a refused slot claimed the phase dir")
+
+        monkeypatch.setattr(cro, "retire_salvage_artifacts", no_retire)
+        probes = []
+        real = executor._run_sandbox_probe
+
+        def counting(argv, **kwargs):
+            probes.append(list(argv))
+            return real(argv, **kwargs)
+
+        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+
+        success, issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out",
+        ))
+        assert success is False
+        assert issues is None
+        assert error.startswith("[SANDBOX_UNAVAILABLE]")
+        assert "fakebwrap's sandbox cannot start here" in error
+        assert _BWRAP_BROKEN_LINE in error
+        assert "multi_llm.py doctor" in error
+        assert error in capsys.readouterr().out
+
+        # `save_model_result` records this as a failed model under exactly this
+        # reason, so `models_failed` and the report's failed section carry it.
+        #
+        # The second slot shares the fan-out's cache: one probe for the run.
+        again = asyncio.run(cro.run_single_review(
+            "fakebwrap:m2", plan_path, tmp_path / "out",
+        ))
+        assert again[0] is False and again[2] == error
+        assert len(probes) == 1

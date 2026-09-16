@@ -77,6 +77,7 @@ from utils.review_orchestrator_base import (
     resolve_result_files_by_model,
     retire_salvage_artifacts,
     retire_stale_validation,
+    sandbox_refusal,
     update_status,
     write_status,
 )
@@ -689,6 +690,18 @@ async def run_single_review(
     # (§9.3.a): the value already exists here, it just used to be dropped.
     provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
     display_name = f"{provider_name}:{model_name}"
+
+    # D6 step 3, the gate `run_single_model` applies to the other review lanes,
+    # asked here for the same reason and off the same once-per-run cache: this
+    # slot is a `generate` dispatch, and a runner whose own sandbox cannot start
+    # reads neither the plan nor the diff — it answers with a sentence about not
+    # being able to open them, which scores as a completed review. Refused
+    # before the phase dir is claimed and before anything an earlier attempt
+    # left is retired, because a refused slot replaces nothing.
+    refusal = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+    if refusal is not None:
+        print(f"[{display_name}] {refusal}")
+        return False, None, refusal
 
     # Generate log file path for debugging
     sanitized_model = sanitize_model_name(model_spec)

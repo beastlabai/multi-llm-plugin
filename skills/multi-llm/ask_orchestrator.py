@@ -73,6 +73,7 @@ from utils.review_orchestrator_base import (
     maybe_detach,
     read_plan,
     run_models_concurrent,
+    sandbox_refusal,
     update_status,
     write_status,
 )
@@ -916,6 +917,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     async def ask_one(model_spec: str, index: int) -> Dict[str, Any]:
         provider_name, _ = parse_model_spec(model_spec, anchor=plan_path)
+
+        # D6 step 3, the review fan-out's gate on the third lane that reaches
+        # `generate`, off the same once-per-run cache. An ask slot reads the
+        # plan (or is handed it inline) and answers in prose, so a runner whose
+        # sandbox cannot start returns a paragraph about the file it could not
+        # open — an answer file, and therefore a success. Refused here, ahead of
+        # `--rerun-all`'s delete, because a slot that never runs may not destroy
+        # the previous run's answer.
+        refusal = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+        if refusal is not None:
+            print(f"[{model_spec}] {refusal}")
+            return {"model": model_spec, "success": False, "error": refusal,
+                    "source": "not-dispatched"}
+
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
         # cwd=project_root, so a relative path could escape the question dir.
