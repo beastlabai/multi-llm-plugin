@@ -2956,5 +2956,97 @@ class TestReportCheckboxesResolveThroughTheIssueMap:
         assert orch.merged[2]["validation_status"] == "valid"
 
 
+class TestBatchIndexInGeneratedPrompts:
+    """Minor (apply-code-fixes audit, 2026-09-16): orchestrator_output.json's
+    ``batches[]`` carried no ``batch_index``, although ``write_tasks.json``
+    (the executor's own materialization, same array order) already does — a
+    native-leg agent following "for each batch (index N)" had to derive it
+    from position."""
+
+    def _orch(self, tmp_path):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        plan_path = tmp_path / "p.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        orch.args = argparse.Namespace(plan_file=str(plan_path), base_ref=None)
+        orch.plan_path = str(plan_path)
+        orch.state = None
+        return orch
+
+    def test_each_batch_carries_its_own_zero_based_index(self, tmp_path):
+        orch = self._orch(tmp_path)
+        batches = [
+            CodeFixBatch(
+                fixes=[{"title": "A", "file": "a.py", "importance": "LOW"}],
+                file_key="a.py",
+            ),
+            CodeFixBatch(
+                fixes=[{"title": "B", "file": "b.py", "importance": "LOW"}],
+                file_key="b.py",
+            ),
+            CodeFixBatch(
+                fixes=[{"title": "C", "file": "c.py", "importance": "LOW"}],
+                file_key="c.py",
+            ),
+        ]
+        result = orch.generate_batch_prompts(batches)
+        assert [b["batch_index"] for b in result] == [0, 1, 2]
+
+    def test_batch_index_matches_write_phase_bridge_s_own_numbering(self, tmp_path):
+        """Same value ``_apply_code_fixes_task`` assigns under `--exec-subagents`."""
+        from utils.write_phase_bridge import _apply_code_fixes_task
+
+        orch = self._orch(tmp_path)
+        batches = [
+            CodeFixBatch(
+                fixes=[{"title": "A", "file": "a.py", "importance": "LOW"}],
+                file_key="a.py",
+            ),
+            CodeFixBatch(
+                fixes=[{"title": "B", "file": "b.py", "importance": "LOW"}],
+                file_key="b.py",
+            ),
+        ]
+        result = orch.generate_batch_prompts(batches)
+        context = {"plan_file": orch.plan_path, "tasks_file": None}
+        for i, batch in enumerate(batches):
+            bridged = _apply_code_fixes_task(batch.to_dict(), i, context)
+            assert bridged["batch_index"] == result[i]["batch_index"]
+
+
+class TestLoadDataAnnouncesItselfOnce:
+    """Minor (apply-code-fixes audit, 2026-09-16): the orchestrator-run.log
+    showed "Loaded 9 issue groups" / "Loaded 9 validation results" from
+    ``load_data()`` itself, then "Loaded 9 fix groups" / "Loaded 9 validation
+    results" again from the base's own post-``load_data`` announcement — two
+    loads, four lines, three distinct facts. ``load_data()`` must not print
+    either line; the base is the single announcer."""
+
+    def _orch(self, out_dir):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        orch.out_dir = str(out_dir)
+        return orch
+
+    def test_load_data_prints_nothing_about_what_it_loaded(
+        self, sample_output_dir, capsys
+    ):
+        code_review_dir = sample_output_dir / "code-review"
+        (code_review_dir / "grouped.json").write_text(
+            json.dumps([{"theme": "T", "suggestions": []}]), encoding="utf-8"
+        )
+        (code_review_dir / "validation.json").write_text(
+            json.dumps([{"group_index": 0, "status": "valid", "confidence": 0.9}]),
+            encoding="utf-8",
+        )
+        orch = self._orch(sample_output_dir)
+        groups, validation = orch.load_data()
+
+        assert len(groups) == 1
+        assert len(validation) == 1
+        err = capsys.readouterr().err
+        assert "Loaded" not in err
+        assert "groups" not in err
+        assert "validation results" not in err
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
