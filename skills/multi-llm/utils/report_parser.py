@@ -1,5 +1,6 @@
 """Parse report.md to extract user skip decisions and descriptions."""
 
+import hashlib
 import json
 import os
 import re
@@ -1238,3 +1239,62 @@ def merge_consolidated_selections(
         merged_skipped,
         merged_overrides,
     )
+
+
+# ---------------------------------------------------------------------------
+# The binding between report.md's issue numbers and the issues.json they index
+# ---------------------------------------------------------------------------
+
+#: The footer `generate_review_report` stamps and `parse_issue_numbering_digest`
+#: reads back. An HTML comment: it renders as nothing, and no parser above sees
+#: it as a block, a checkbox or a description.
+_ISSUE_DIGEST_RE = re.compile(
+    r"<!--\s*multi-llm:issues-digest\s+([0-9a-f]{8,64})\s*-->"
+)
+
+
+def issue_numbering_digest(issues: List[Dict]) -> str:
+    """A short hash of the issue ORDER a report.md's ``### N.`` numbers index.
+
+    report.md numbers issues positionally and ``build_issue_to_group_map`` reads
+    those numbers back as positions in issues.json, so a checkbox means what the
+    reader meant only while that list is the same list in the same order. The
+    ordinary run writes both files from one pass and they agree; a hand-kept
+    report.md against a re-aggregated issues.json resolves every number to
+    whatever now sits at that position, silently.
+
+    Hashed over the ordered suggestion hashes — the same identity the map itself
+    joins on — rather than over issues.json's bytes, which are written by a
+    different step and carry fields (timestamps, model attribution) that move
+    without the numbering moving.
+    """
+    try:
+        from .state_manager import generate_suggestion_id
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.state_manager import generate_suggestion_id
+
+    joined = "\n".join(
+        str(issue.get("suggestion_hash") or generate_suggestion_id(issue))
+        for issue in issues
+    )
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def issue_numbering_footer(issues: List[Dict]) -> str:
+    """The one line a rendered report.md carries so its numbers can be checked."""
+    return f"<!-- multi-llm:issues-digest {issue_numbering_digest(issues)} -->"
+
+
+def parse_issue_numbering_digest(report_path: str) -> Optional[str]:
+    """The digest a report.md was stamped with, or ``None``.
+
+    ``None`` for every report written before the stamp existed, which is why the
+    check it feeds warns on a *mismatch* only and never on an absence.
+    """
+    try:
+        with open(report_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = _ISSUE_DIGEST_RE.search(text)
+    return match.group(1) if match else None

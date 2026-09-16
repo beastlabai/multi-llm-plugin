@@ -37,7 +37,11 @@ from apply_code_fixes_orchestrator import (
 # Aliases for test convenience — these were previously module-level shims
 parse_args = ApplyCodeFixesOrchestrator.parse_args
 from utils.filtering import filter_items as filter_fixes, filter_user_skipped_groups
-from utils.report_parser import merge_selections
+from utils.report_parser import (
+    issue_numbering_digest,
+    issue_numbering_footer,
+    merge_selections,
+)
 from utils.state_manager import stamp_stable_ids, load_groups_payload
 from utils.code_fix_batcher import CodeFixBatch
 from utils.validation import (
@@ -3046,6 +3050,73 @@ class TestLoadDataAnnouncesItselfOnce:
         assert "Loaded" not in err
         assert "groups" not in err
         assert "validation results" not in err
+
+
+class TestReportNumberingIsBoundToTheIssuesJsonItIndexes:
+    """F9: a `### N.` checkbox resolves to a POSITION in issues.json.
+
+    A number the map *can* place is never questioned, so a report.md kept by
+    hand across a re-aggregation puts the reader's mark on whatever finding now
+    sits at that number.
+    """
+
+    ISSUES = [
+        {"title": "A", "type": "bug", "desc": "first"},
+        {"title": "B", "type": "bug", "desc": "second"},
+    ]
+
+    def _review_dir(self, tmp_path, issues, stamped_for):
+        review = tmp_path / "code-review"
+        review.mkdir(parents=True, exist_ok=True)
+        (review / "issues.json").write_text(
+            json.dumps(issues), encoding="utf-8"
+        )
+        body = "# Code Review Report\n\n### 1. A\n\n"
+        if stamped_for is not None:
+            body += issue_numbering_footer(stamped_for) + "\n"
+        (review / "report.md").write_text(body, encoding="utf-8")
+        return str(review / "report.md"), str(review / "issues.json")
+
+    def _orch(self):
+        orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
+        return orch
+
+    def test_a_report_numbered_against_a_different_list_is_warned_about(
+        self, tmp_path, capsys
+    ):
+        reordered = list(reversed(self.ISSUES))
+        report, issues_json = self._review_dir(
+            tmp_path, reordered, stamped_for=self.ISSUES
+        )
+        self._orch()._warn_if_report_numbering_is_stale(report, issues_json)
+        err = capsys.readouterr().err
+        assert "numbered against a different issues.json" in err
+        assert "report.html" in err
+
+    def test_the_list_it_was_numbered_against_is_silent(self, tmp_path, capsys):
+        report, issues_json = self._review_dir(
+            tmp_path, self.ISSUES, stamped_for=self.ISSUES
+        )
+        self._orch()._warn_if_report_numbering_is_stale(report, issues_json)
+        assert capsys.readouterr().err == ""
+
+    def test_an_unstamped_report_is_not_called_stale(self, tmp_path, capsys):
+        """Every report written before the stamp existed carries no digest."""
+        report, issues_json = self._review_dir(
+            tmp_path, self.ISSUES, stamped_for=None
+        )
+        self._orch()._warn_if_report_numbering_is_stale(report, issues_json)
+        assert capsys.readouterr().err == ""
+
+    def test_the_digest_ignores_fields_that_are_not_identity(self):
+        """Attribution and timestamps move without the numbering moving."""
+        annotated = [dict(issue, model="opencode:x") for issue in self.ISSUES]
+        assert issue_numbering_digest(annotated) == issue_numbering_digest(
+            self.ISSUES
+        )
+        assert issue_numbering_digest(list(reversed(self.ISSUES))) != (
+            issue_numbering_digest(self.ISSUES)
+        )
 
 
 if __name__ == "__main__":

@@ -376,6 +376,15 @@ def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
                 "needs_human": cli_common._STATE_BY_EXIT[
                     cli_common.EXIT_NEEDS_HUMAN
                 ],
+                # The two override words exit 2 also carries, keyed by the word
+                # rather than by an exit they share with ``nothing_to_do``.
+                # They are here because ``_STATE_BY_EXIT``'s own comment makes
+                # this dict the place a host learns the vocabulary, and because
+                # a predicate that decides what an ``ok: true`` state owes the
+                # model (``rowNeedsInstructions``) must be able to name every
+                # word it can be handed without spelling one in JS.
+                "running": cli_common.STATE_RUNNING,
+                "died": cli_common.STATE_DIED,
             },
             # The one exit 3 that is a *completed* run: a review held for a
             # decision. Read from the launch, because its result line carries

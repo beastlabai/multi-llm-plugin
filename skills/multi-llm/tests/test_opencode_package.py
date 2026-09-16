@@ -3271,6 +3271,13 @@ class TestInstructionsSurface:
             // under test: no state name is spelled in JS, here or there.
             const done = surface.dispatcher.states.ok
             const stuck = surface.dispatcher.states.needs_human
+            // Exit 2's three words. "Already completed, use --force" is the
+            // one a second `--review-plan` on the same plan hits, and it is
+            // `ok: true` — so a predicate written as "not done" attaches the
+            // runbook to a result whose whole content is "nothing to do".
+            const spare = surface.dispatcher.states.nothing_to_do
+            const live = surface.dispatcher.states.running
+            const gone = surface.dispatcher.states.died
             emit({
               finished: T.rowNeedsInstructions(
                 row, {state: done, next: null}, surface),
@@ -3280,6 +3287,12 @@ class TestInstructionsSurface:
                 row, {state: stuck, next: null}, surface),
               notDetachable: T.rowNeedsInstructions(
                 flat, {state: stuck, next: null}, surface),
+              nothingToDo: T.rowNeedsInstructions(
+                row, {state: spare, next: null}, surface),
+              running: T.rowNeedsInstructions(
+                row, {state: live, next: null}, surface),
+              died: T.rowNeedsInstructions(
+                row, {state: gone, next: null}, surface),
             })
             """,
             built_package,
@@ -3287,6 +3300,7 @@ class TestInstructionsSurface:
         assert verdicts == {
             "finished": False, "owesNext": True,
             "unfinished": True, "notDetachable": False,
+            "nothingToDo": False, "running": False, "died": False,
         }
 
 

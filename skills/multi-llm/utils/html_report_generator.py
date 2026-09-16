@@ -2075,6 +2075,13 @@ def _overlay_human_decisions(
     Decisions are keyed by group_id (== ``group_hash``), matched against each
     group's ``groupHash``. Returns the number of groups matched and stamps a
     ``humanDecisionsSummary`` onto ``report_data``.
+
+    The overlay is a **replacement**, not an accumulation: any stamp a previous
+    overlay left on a group that this decision map does not name is dropped
+    first. The sidecar is rewritten with what this function produced, so keeping
+    them would survive `--fresh` (which clears ``human_decisions_{phase}``) and
+    show two judging rounds' badges at once, under a
+    ``humanDecisionsSummary`` that counted only the newer round.
     """
     summary = {
         "approved": 0,
@@ -2086,6 +2093,7 @@ def _overlay_human_decisions(
     matched = 0
     for group in report_data.get("groups", []):
         group_hash = group.get("groupHash")
+        group.pop("humanDecision", None)
         if not group_hash or group_hash not in human_decisions:
             continue
         info = _normalize_human_decision(human_decisions[group_hash])

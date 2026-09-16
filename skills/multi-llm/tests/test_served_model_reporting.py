@@ -377,6 +377,31 @@ class TestCodeReviewReport:
         assert "**Model:** claude-code:sonnet\n" in report
         assert "served by" not in report and "fallback" not in report
 
+    def test_the_report_stamps_the_issue_ordering_it_numbered(self, tmp_path):
+        """F9: the `### N.` numbers are positions; say which list they index.
+
+        `apply-code-fixes` resolves a checkbox by looking up N in issues.json,
+        so the report has to name the ordering it numbered or a stale report.md
+        marks the wrong findings in silence.
+        """
+        from utils.report_parser import (
+            issue_numbering_digest, parse_issue_numbering_digest,
+        )
+
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        results = {"claude-code:sonnet": (True, list(ISSUES), None)}
+
+        report = cro.generate_review_report(plan, results, ["a.py"])
+        report_path = tmp_path / "report.md"
+        report_path.write_text(report, encoding="utf-8")
+
+        assert parse_issue_numbering_digest(str(report_path)) == (
+            issue_numbering_digest(list(ISSUES))
+        )
+        # A comment, so the issue blocks the parsers read are untouched.
+        assert report.count("### 1.") == 1
+
     def test_run_single_review_fills_the_collector(self, tmp_path):
         plan = tmp_path / "plan.md"
         plan.write_text("# plan\n", encoding="utf-8")
