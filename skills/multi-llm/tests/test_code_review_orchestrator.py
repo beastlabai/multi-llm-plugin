@@ -305,3 +305,106 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         ))
         assert again[0] is False and again[2] == error
         assert len(probes) == 1
+
+
+class TestTheReportReconcilesItsIssueCountWithItsGroupCount:
+    """`generate_review_report` numbers issues and validates groups.
+
+    Measured 2026-09-16: a header reading "12 issues, 7 valid, 1 invalid,
+    1 needs human review" over 9 groups, with the same consensus bug printed
+    three times as three findings with three checkboxes, and the word "group"
+    nowhere in the file — three sets of numbers, none reconcilable without
+    grouped.json.
+    """
+
+    def _issue(self, title, importance="high"):
+        return {
+            "title": title,
+            "desc": f"{title} description",
+            "type": "bug",
+            "importance": importance,
+            "file": "index.html",
+        }
+
+    def _render(self, tmp_path, validated=True):
+        import copy
+
+        teleport_a = self._issue("OOB teleport skips resync")
+        teleport_b = self._issue("Teleport leaves timing stale")
+        fog = self._issue("Fog distance from control points", importance="medium")
+        results = {
+            "cursor-agent:composer": (True, [teleport_a, fog], None),
+            "claude-code:sonnet": (True, [teleport_b], None),
+        }
+        groups = [
+            {
+                "theme": "Teleport does not resync timing",
+                "file": "index.html",
+                "validation_status": "valid",
+                "validation_reason": "",
+                "suggestions": [copy.deepcopy(teleport_a), copy.deepcopy(teleport_b)],
+            },
+            {
+                "theme": "Fog distance",
+                "file": "index.html",
+                "validation_status": "needs-human-decision",
+                "validation_reason": "Needs a human eye",
+                "suggestions": [copy.deepcopy(fog)],
+            },
+        ]
+        return cro.generate_review_report(
+            tmp_path / "plan.md",
+            results,
+            ["index.html"],
+            groups if validated else None,
+        )
+
+    def test_the_header_counts_issues_and_groups_separately(self, tmp_path):
+        report = self._render(tmp_path)
+        assert "**Total Issues:** 3" in report
+        assert "**Groups:** 2" in report
+        # The validation line has always counted groups; now it says so.
+        assert "1 valid, 0 invalid, 1 needs human review (of 2 groups)" in report
+
+    def test_a_consensus_finding_names_its_siblings_once_per_member(self, tmp_path):
+        report = self._render(tmp_path)
+        # Issues 1 and 3 are the same finding (model order: cursor, cursor, claude).
+        assert "_Same finding as #3 (2 models agree); marking any marks all._" in report
+        assert "_Same finding as #1 (2 models agree); marking any marks all._" in report
+        # The lone finding claims no siblings.
+        assert report.count("Same finding as") == 2
+
+    def test_a_shared_verdict_is_labelled_as_the_group_s(self, tmp_path):
+        report = self._render(tmp_path)
+        # Two badges for one verdict — counting badges is not counting verdicts.
+        assert report.count("**Validation:** Valid (group verdict)") == 2
+        assert "**Validation:** ? Needs Review |" in report
+        assert "? Needs Review (group verdict)" not in report
+
+    def test_the_checkbox_contract_survives_the_extra_lines(self, tmp_path):
+        """report_parser keys off `### N.` + the very next line, so Skip stays there."""
+        from utils.report_parser import (
+            parse_skipped_issues,
+            parse_validation_overrides_issues,
+            parse_issue_descriptions,
+        )
+
+        report = self._render(tmp_path).replace(
+            "### 3. Teleport leaves timing stale\n- [ ] Skip",
+            "### 3. Teleport leaves timing stale\n- [x] Skip",
+        ).replace("- [ ] Mark invalid", "- [x] Mark invalid")
+        path = tmp_path / "report.md"
+        path.write_text(report, encoding="utf-8")
+
+        assert parse_skipped_issues(str(path)) == {3}
+        assert parse_validation_overrides_issues(str(path)) == {2: "invalid"}
+        # The sibling line is not mistaken for an edited description.
+        descriptions = parse_issue_descriptions(str(path))
+        assert descriptions[1].startswith("OOB teleport skips resync description")
+
+    def test_an_unvalidated_report_says_nothing_about_groups(self, tmp_path):
+        """--skip-validation hands no groups over; the report claims none."""
+        report = self._render(tmp_path, validated=False)
+        assert "**Groups:**" not in report
+        assert "Same finding as" not in report
+        assert "**Total Issues:** 3" in report

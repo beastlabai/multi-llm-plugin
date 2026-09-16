@@ -80,6 +80,13 @@ To skip an issue when applying fixes later:
 3. Save the file
 4. Run `--apply-code-fixes` - marked issues will be filtered out
 
+The report numbers **issues** (one block per model finding) while a fix is
+applied per **group**, so a block carrying `_Same finding as #7, #11_` is one of
+several views of a single finding: marking `Skip`, `Mark valid` or `Mark
+invalid` on any of them marks the whole group. The header's `**Groups:**` line
+says how many distinct findings the issue count collapsed into, and the
+validation counts are per group.
+
 This is useful for:
 - Skipping valid issues that are intentional or out of scope
 - Excluding issues you've already fixed manually
