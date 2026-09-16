@@ -523,3 +523,53 @@ Create src/new.py and update src/a.py.
         # the heuristic still runs when no metadata line exists.
         assert "src/new.py" in tasks[0].files_to_create
         assert "src/a.py" in tasks[0].files_to_modify
+
+
+class TestExplicitComplexityLineWins:
+    """The rendered `**Complexity**:` line is the declared level; the keyword
+    heuristic is only for a task without one.
+
+    Measured 2026-09-16 on a generated 14-task `tasks.md`: every task came
+    back `high` because its description said "integration" or "architecture",
+    contradicting the JSON it was rendered from and the colours of the mermaid
+    graph in the same file. It was the only field of the round-trip that did
+    not survive."""
+
+    def test_the_declared_level_beats_the_keyword_guess(self):
+        plan = """### Task T001: Wire the camera
+**Dependencies**: None
+**Files to modify**: index.html
+**Files to create**: none
+**Complexity**: low
+
+Integration with the existing architecture: a complex refactor of the loop.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].estimated_complexity == "low"
+
+    def test_a_task_without_the_line_keeps_the_heuristic(self):
+        plan = """### Task T002: Hand-written
+A simple rename, nothing more.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].estimated_complexity == "low"
+
+    def test_an_unknown_level_falls_back_to_the_heuristic(self):
+        """Only the three declared levels are read; anything else is prose."""
+        plan = """### Task T003: Odd
+**Complexity**: enormous
+
+A simple rename.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].estimated_complexity == "low"
+
+    def test_the_list_item_spelling_is_read_too(self):
+        """Same two spellings `_FILES_LINE` accepts."""
+        plan = """### Task T004: Bulleted metadata
+- Complexity: high
+
+A simple rename.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].estimated_complexity == "high"

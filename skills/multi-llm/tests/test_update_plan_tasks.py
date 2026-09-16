@@ -98,12 +98,72 @@ class TestGenerateTasksMarkdown:
         assert "**Files to create**: src/main.py" in result
         assert "**Files to modify**: src/main.py" in result
 
+    def test_a_task_that_declares_no_files_still_renders_both_lines(self):
+        """An empty file list is rendered as `none`, never as a missing line.
+
+        `task_decomposer._explicit_files` reads "neither line present" as
+        "hand-written task, guess from the narrative", so an omitted line is
+        the one thing that hands a *generated* task to the keyword heuristic
+        (audited 2026-09-16 on T014 of a 14-task list).
+        """
+        tasks = [{
+            "id": "T001",
+            "title": "Ask the user to create an API token",
+            "description": "Manual step: no files change.",
+            "depends_on": [],
+            "files_to_create": [],
+            "files_to_modify": [],
+            "estimated_complexity": "low",
+        }]
+
+        result = generate_tasks_markdown(tasks, "plan.md")
+
+        assert "**Files to modify**: none" in result
+        assert "**Files to create**: none" in result
+
+    def test_an_empty_file_list_round_trips_as_empty_not_as_a_guess(self):
+        """The rendered `none` parses back to `[]` — the heuristic never runs."""
+        from utils.task_decomposer import TaskDecomposer
+
+        tasks = [{
+            "id": "T001",
+            "title": "Update the HUD interval",
+            # Every word here the keyword heuristic would mine for a file.
+            "description": "Create and update `CONFIG.hud.updateInterval` "
+                           "and `hud.update` to add a new readout.",
+            "depends_on": [],
+            "files_to_create": [],
+            "files_to_modify": [],
+            "estimated_complexity": "low",
+        }]
+
+        parsed = TaskDecomposer().parse_plan(generate_tasks_markdown(tasks, "plan.md"))
+
+        assert [t.files_to_create for t in parsed] == [[]]
+        assert [t.files_to_modify for t in parsed] == [[]]
+
     def test_complexity_displayed(self, sample_tasks_json):
         """Test that complexity is shown."""
         result = generate_tasks_markdown(sample_tasks_json, "plan.md")
 
         assert "**Complexity**: low" in result
         assert "**Complexity**: medium" in result
+
+    def test_the_declared_complexity_survives_the_round_trip(self, sample_tasks_json):
+        """Render then re-parse: the decomposer reads the line it was given.
+
+        It was the only field of the JSON → markdown → JSON round-trip that did
+        not survive — all 14 tasks of an audited `tasks.md` came back `high`
+        from the keyword heuristic, contradicting the colours of the mermaid
+        graph rendered five lines above them.
+        """
+        from utils.task_decomposer import TaskDecomposer
+
+        parsed = TaskDecomposer().parse_plan(
+            generate_tasks_markdown(sample_tasks_json, "plan.md")
+        )
+
+        assert [t.estimated_complexity for t in parsed] == ["low", "medium", "medium"]
 
     def test_executor_role_displayed(self):
         """tasks.md names the host-neutral executor role, not a Claude agent type."""
@@ -431,6 +491,68 @@ class TestUpdatePlanTasksScript:
 
         assert result.returncode == 1
         assert "Invalid tasks JSON" in result.stderr
+
+
+class TestThePluginsOwnPlanEdit:
+    """The marker this script inserts is the plugin's edit, not a human's.
+
+    `StateManager._load_or_create` reads any hash drift as "someone edited the
+    plan mid-workflow", and this script used to construct its StateManager
+    *after* rewriting the plan — so the run recorded `plan_changed: True` about
+    itself. Audited 2026-09-16 on a clean state.json: the next
+    `implement --resume` warns "Plan has changed since last session" for a
+    change generate-tasks made one phase earlier.
+    """
+
+    def _run(self, temp_dir, sample_tasks_json):
+        from utils.state_manager import StateManager
+
+        plan_path = temp_dir / "my-plan.md"
+        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+        # An EXISTING state.json, stamped with the plan as it stands — what
+        # every real generate-tasks run inherits from the review phases before
+        # it, and the only condition under which `_load_or_create` compares
+        # hashes at all.
+        StateManager(plan_path).save()
+        tasks_json_path = temp_dir / "tasks.json"
+        tasks_json_path.write_text(
+            json.dumps({"plan_preamble": "P.", "tasks": sample_tasks_json}),
+            encoding="utf-8",
+        )
+        script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
+        result = subprocess.run(
+            [sys.executable, str(script_path),
+             "--plan-file", str(plan_path),
+             "--tasks-file", str(tasks_json_path)],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        return plan_path
+
+    def test_the_marker_insertion_is_not_recorded_as_a_human_edit(
+        self, temp_dir, sample_tasks_json
+    ):
+        self._run(temp_dir, sample_tasks_json)
+
+        state_data = json.loads(
+            (temp_dir / "my-plan" / "state.json").read_text(encoding="utf-8")
+        )
+        assert state_data.get("plan_changed", False) is False
+
+    def test_the_stamped_hash_matches_the_plan_as_written(
+        self, temp_dir, sample_tasks_json
+    ):
+        """The other half: a stale hash would make the *next* reader flag it."""
+        from utils.state_manager import StateManager
+
+        plan_path = self._run(temp_dir, sample_tasks_json)
+
+        state_data = json.loads(
+            (temp_dir / "my-plan" / "state.json").read_text(encoding="utf-8")
+        )
+        # Constructed fresh, the way implement's resume path does it.
+        assert state_data["plan_hash"] == StateManager(plan_path)._compute_plan_hash()
+        assert StateManager(plan_path).has_plan_changed() is False
 
 
 class TestPreambleStorage:

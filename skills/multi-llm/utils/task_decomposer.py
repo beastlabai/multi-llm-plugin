@@ -196,7 +196,7 @@ class TaskDecomposer:
             depends_on = self._extract_dependencies(description)
             files_to_modify = self._extract_files(description, "modify")
             files_to_create = self._extract_files(description, "create")
-            estimated_complexity = self._estimate_complexity(description)
+            estimated_complexity = self._extract_complexity(description)
             executor_role = self._extract_executor_role(description)
 
             # Strip metadata sections to keep only narrative content
@@ -328,8 +328,49 @@ class TaskDecomposer:
 
         return files
 
+    #: The ``**Complexity**`` line ``update_plan_tasks`` renders for every
+    #: generated task, in the same two spellings ``_FILES_LINE`` accepts.
+    _COMPLEXITY_LINE = re.compile(
+        r'^\s*(?:\*{2}\s*complexity\s*\*{2}|[-*]\s+complexity)\s*:\s*'
+        r'\**\s*(?P<level>low|medium|high)\b',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    def _explicit_complexity(self, description: str) -> Optional[str]:
+        """The declared ``**Complexity**:`` level, or ``None`` when absent.
+
+        Same rule as ``_explicit_files``: the renderer writes this line for
+        every generated task, so when it is there it is the answer and the
+        keyword heuristic must not overrule it. It was the only field of the
+        JSON → markdown → JSON round-trip that did not survive — measured
+        2026-09-16, all 14 tasks of a rendered ``tasks.md`` (declared low and
+        medium, and coloured by that in the file's own mermaid graph) parsed
+        back as ``high``, because their descriptions say "integration" and
+        "architecture".
+        """
+        match = self._COMPLEXITY_LINE.search(description)
+        return match.group("level").lower() if match else None
+
+    def _extract_complexity(self, description: str) -> str:
+        """The declared complexity, else the heuristic's guess at the narrative.
+
+        The fallback reads the *stripped* description because the metadata
+        labels are not the task's content: the word "Complexity" contains
+        "complex", the heuristic's first high indicator, so any task carrying
+        the line at all scored `high` on the strength of the label. A
+        hand-written task with no metadata strips to itself, so its guess is
+        unchanged.
+        """
+        return self._explicit_complexity(description) or self._estimate_complexity(
+            self._strip_metadata_sections(description)
+        )
+
     def _estimate_complexity(self, description: str) -> str:
-        """Estimate task complexity based on description."""
+        """Estimate task complexity based on description.
+
+        The fallback for a hand-written task carrying no ``**Complexity**``
+        line; ``_extract_complexity`` prefers the declared value.
+        """
         desc_lower = description.lower()
 
         high_indicators = ["complex", "refactor", "architecture", "multiple files", "integration"]

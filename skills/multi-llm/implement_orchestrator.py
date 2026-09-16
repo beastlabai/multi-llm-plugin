@@ -38,7 +38,7 @@ from utils import (
     get_current_head,
 )
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import EXIT_NEEDS_HUMAN, build_parent_parser
+from utils.cli_common import EXIT_NEEDS_HUMAN, build_parent_parser, dispatcher_command
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
 from utils.provider_registry import set_run_anchor
@@ -916,8 +916,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             tasks_content = tasks_file_path.read_text(encoding="utf-8")
             print(f"Loading tasks from: {tasks_file_path}")
         else:
-            print(f"WARNING: Tasks file not found: {tasks_file_path}")
-            print("Falling back to parsing plan content directly.")
+            # The plan names a task list that is not on disk (a moved or cleaned
+            # `plans/<plan>/tasks/`, a plan copied without its sibling dir).
+            # Parsing the plan instead does not fail — it *fabricates*: measured
+            # 2026-09-16 against a real plan, the fallback returned 18 confident
+            # tasks titled ". Overview" and ".1 Rendering", with zero acceptance
+            # criteria and `camera.update` declared as a file to create. A
+            # WARNING into a detached log is not a gate, and this is the same
+            # rule `generate_tasks_orchestrator.verify_outcome` applies at the
+            # other end: a task list nobody generated is worse than none. Only a
+            # plan with NO marker at all (the legacy embedded-task format) still
+            # parses its own content.
+            print(
+                f"ERROR: the plan's <!-- TASKS_FILE: {tasks_file_ref} --> marker "
+                f"names a task list that does not exist:\n"
+                f"       {tasks_file_path}\n"
+                f"       Nothing was implemented. Regenerate the task list — "
+                + dispatcher_command("generate-tasks", plan_path.absolute(), "--yes")
+                + "\n       then re-run this command. (Parsing the plan itself "
+                "instead would invent a task list from its prose, which every "
+                "later phase would treat as ground truth.)"
+            )
+            unattended_mod.mark_needs_human("implement")
+            print(json.dumps({
+                "marker": "TASKS_FILE_MISSING",
+                "mode": "implement",
+                "state": "needs-human",
+                "exit": EXIT_NEEDS_HUMAN,
+                "tasks_file": str(tasks_file_path),
+                "reason": "Plan names a TASKS_FILE that does not exist",
+            }, indent=2))
+            sys.exit(EXIT_NEEDS_HUMAN)
 
     # Record pre-existing changes (before implementation modifies anything)
     record_pre_existing_changes(state)
