@@ -2189,3 +2189,32 @@ class TestRealWorldScenarios:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestEveryFanOutCallSiteNamesItsOwnScript:
+    """`reaggregate_mode` is rebuilt into every later retry hint, so the review
+    base must pass the phase's script at BOTH places it prepares validation
+    tasks. Measured 2026-09-14: the fan-out call omitted `orchestrator=`, the
+    helper defaulted to review-plan's script, and a failed review-tasks run told
+    the session model to re-invoke `review-plan --reaggregate`."""
+
+    def test_the_review_base_passes_orchestrator_at_every_call_site(self):
+        import ast
+        import inspect
+
+        from utils import review_orchestrator_base as base
+
+        tree = ast.parse(inspect.getsource(base))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "prepare_batched_validation_tasks"
+        ]
+        assert len(calls) >= 2, "both the fan-out and the reaggregate path prepare tasks"
+        for call in calls:
+            keywords = {kw.arg for kw in call.keywords}
+            assert "orchestrator" in keywords, (
+                f"line {call.lineno} prepares validation tasks without naming "
+                f"the phase's own script, so its reaggregate_mode defaults to "
+                f"review-plan"
+            )

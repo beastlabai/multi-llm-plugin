@@ -1368,3 +1368,53 @@ class TestOrchestratorOutputClaudeDecideShape:
         assert cfg["claude_decide_item_ids"] == ["h_marked"]
         # Per-item routing does not flip the global mode.
         assert cfg["decision_mode"] == "interactive"
+
+
+class TestTasksBackupSurvivesAResume:
+    """`tasks-backup.md` is the pre-phase file, so a resumed run keeps it.
+
+    A failed batch leaves tasks.md half-applied by design; measured 2026-09-15,
+    three resumes in a row each copied those partial edits over the backup.
+    """
+
+    def _orchestrator(self, tmp_path, *, resume):
+        orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
+        orch.args = argparse.Namespace(plan_file="p.md", resume=resume)
+        orch.out_dir = str(tmp_path / "out")
+        orch.phase_name = "apply-task-suggestions"
+        orch.plan_path = str(tmp_path / "p.md")
+        orch.prefix = "p"
+        tasks = tmp_path / "tasks.md"
+        orch.tasks_file = str(tasks)
+        for name in ("formatted_valid", "formatted_human", "formatted_skipped",
+                     "user_skipped_items", "skipped", "edit_log", "groups",
+                     "valid", "needs_human", "merged"):
+            setattr(orch, name, [])
+        orch.batching_stats = {}
+        orch.build_human_review_config = lambda: {}
+        backup = tmp_path / "out" / "apply-task-suggestions" / "tasks-backup.md"
+        return orch, tasks, backup
+
+    def test_a_resumed_run_keeps_the_pre_phase_backup(self, tmp_path, capsys):
+        orch, tasks, backup = self._orchestrator(tmp_path, resume=True)
+        backup.parent.mkdir(parents=True)
+        backup.write_text("pristine\n", encoding="utf-8")
+        tasks.write_text("half-applied\n", encoding="utf-8")
+        output = orch.build_output_json([], resume_info=None)
+        assert backup.read_text(encoding="utf-8") == "pristine\n"
+        assert output["tasks_file_backup"] == str(backup)
+        assert "kept from the previous run" in capsys.readouterr().err
+
+    def test_a_fresh_run_takes_the_backup(self, tmp_path):
+        orch, tasks, backup = self._orchestrator(tmp_path, resume=False)
+        backup.parent.mkdir(parents=True)
+        backup.write_text("stale\n", encoding="utf-8")
+        tasks.write_text("current\n", encoding="utf-8")
+        orch.build_output_json([], resume_info=None)
+        assert backup.read_text(encoding="utf-8") == "current\n"
+
+    def test_a_resume_with_no_backup_yet_takes_one(self, tmp_path):
+        orch, tasks, backup = self._orchestrator(tmp_path, resume=True)
+        tasks.write_text("current\n", encoding="utf-8")
+        orch.build_output_json([], resume_info=None)
+        assert backup.read_text(encoding="utf-8") == "current\n"

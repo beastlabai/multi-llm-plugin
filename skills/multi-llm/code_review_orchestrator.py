@@ -1777,6 +1777,21 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Output directory does not exist: {out_dir}")
             sys.exit(1)
 
+        # The detach boundary, crossed here as well as on the fan-out path
+        # below: a `--reaggregate --detach` launch must print its run banner
+        # and hand the re-dispatch to a worker, or the host that composed
+        # `--detach` has nothing to poll (see the same branch in
+        # `utils/review_orchestrator_base.main`).
+        detach_outcome = maybe_detach(
+            args=args,
+            mode='review-code',
+            phase_dir=str(get_phase_dir(plan_path, 'code-review')),
+            plan_file=str(plan_path),
+            phase='code-review',
+        )
+        if detach_outcome is not None:
+            sys.exit(detach_outcome)
+
         await reaggregate_from_existing_files(
             prefix, out_dir, plan_path, args,
             template_style=args.report_style,

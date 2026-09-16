@@ -384,7 +384,28 @@ _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
 #: has to agree with it: measured 2026-09-14, the two lines disagreed, the
 #: session model followed this one, and the run ended on ``--reaggregate found
 #: no task_generation_result.json`` with nothing re-dispatched.
-_RESUME_VERB_BY_MODE = {"generate-tasks": "--yes"}
+#:
+#: The four write phases resume with ``--resume``, the flag their own exit-3
+#: block names ("re-invoke with --resume, which re-dispatches only the
+#: unfinished batches and replays the prior-changes log from disk"). ``--force``
+#: is not their resume verb at all — the apply parsers define it as an alias
+#: for ``--yes`` (bulk approval), and under it the apply base re-ingests every
+#: human decision instead of replaying the recorded ones. Measured 2026-09-15
+#: on a failed ``apply-task-suggestions``: the log said ``--resume``, this line
+#: said ``--force``, and the session model ran ``--claude-decide --force`` twice
+#: before a human typed ``--resume`` by hand.
+_RESUME_VERB_BY_MODE = {
+    "generate-tasks": "--yes",
+    "apply-suggestions": "--resume",
+    "apply-task-suggestions": "--resume",
+    "apply-code-fixes": "--resume",
+    "implement": "--resume",
+}
+
+#: The modes whose progress mirror is ``write_subagents``
+#: (``write_batch_scheduler._mirror_status``) rather than ``subagents``.
+_WRITE_MODES = ("apply-suggestions", "apply-task-suggestions",
+                "apply-code-fixes", "implement")
 
 
 def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
@@ -430,7 +451,13 @@ def _resume_shape(view: Dict[str, Any]) -> "tuple":
     reason_code = None
     if run.get("state") == "runner_rejected" or view.get("state") == "runner_rejected":
         reason_code = run.get("reason_code") or view.get("reason_code") or "runner_rejected"
-    mirror = (view.get("progress") or {}).get("subagents") or {}
+    progress = view.get("progress") or {}
+    mirror = progress.get("subagents") or {}
+    if not mirror and isinstance(progress.get("write_subagents"), dict):
+        # A write phase mirrors per-batch outcomes instead of a counts table
+        # (`write_batch_scheduler._mirror_status`); its shape is the transient
+        # default and its cost line counts batches.
+        mirror = _write_mirror_as_counts(progress["write_subagents"])
     counts = mirror.get("counts") if isinstance(mirror.get("counts"), dict) else {}
     shape = cli_common.retry_shape(reason_code=reason_code, statuses=counts.keys())
     repair = None
@@ -442,6 +469,26 @@ def _resume_shape(view: Dict[str, Any]) -> "tuple":
     redispatch = len(mirror.get("failed_task_ids") or []) or None
     kept = mirror.get("ok") if isinstance(mirror.get("ok"), int) else None
     return shape, repair, redispatch, kept
+
+
+def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
+    """``progress.write_subagents`` in the shape ``_resume_shape`` reads.
+
+    ``ok`` counts every batch the mirror records as ``ok`` — the ones this run
+    applied and the ones a resume skipped because their result file was already
+    on disk — and ``failed_task_ids`` is carried as recorded.
+    """
+    tasks = mirror.get("tasks") if isinstance(mirror.get("tasks"), list) else []
+    counts: Dict[str, int] = {}
+    for row in tasks:
+        status = str((row or {}).get("status") or "")
+        if status:
+            counts[status] = counts.get(status, 0) + 1
+    return {
+        "counts": counts,
+        "ok": counts.get("ok", 0),
+        "failed_task_ids": list(mirror.get("failed_task_ids") or []),
+    }
 
 
 def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
@@ -464,10 +511,23 @@ def _resume_lines(view: Dict[str, Any], plan_path: Path) -> List[str]:
         lines.append(f"      repair first: {repair}")
     lines.append(f"      resume with: {_resume_command(view, plan_path)}")
     if redispatch:
-        cost = f"re-dispatches the {redispatch} failed task(s)"
-        if kept is not None:
-            cost += f" and keeps the {kept} valid result(s) already on disk"
-        lines.append(f"      ({cost}; --force is not needed and would re-run the reviewer panel)")
+        mode = str(view["run"].get("mode") or view.get("phase") or "")
+        if mode in _WRITE_MODES:
+            # The write loop stops at the failed batch, so what a resume
+            # re-dispatches is that batch and everything after it; the kept
+            # count is the batches whose result files it skips over.
+            cost = f"re-dispatches the {redispatch} failed batch(es) and the ones never reached"
+            if kept:
+                cost += f", keeps the {kept} already applied"
+            lines.append(
+                f"      ({cost}; the half-applied state is left in place — inspect "
+                f"it, or `util restore-batch` the failed batch, before resuming)"
+            )
+        else:
+            cost = f"re-dispatches the {redispatch} failed task(s)"
+            if kept is not None:
+                cost += f" and keeps the {kept} valid result(s) already on disk"
+            lines.append(f"      ({cost}; --force is not needed and would re-run the reviewer panel)")
     return lines
 
 

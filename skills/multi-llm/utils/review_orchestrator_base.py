@@ -2963,6 +2963,24 @@ async def run_review_orchestration(
             print(f"ERROR: Phase directory does not exist: {phase_dir}")
             sys.exit(1)
 
+        # The same detach boundary the fan-out crosses below, after the one
+        # pre-flight this branch has. Without it a `--reaggregate --detach`
+        # launch ran the whole re-dispatch in the invoker's foreground and
+        # printed no run banner; the opencode plugin, which composes `--detach`
+        # on every launch and adopts a run only from that banner, then reported
+        # the completed run as an error it could not poll (measured
+        # 2026-09-14 on review-tasks: "the launch reported no run_id on its
+        # banner").
+        outcome = maybe_detach(
+            args=args,
+            mode=_modes().mode_for_script(orchestrator_script) or phase_name,
+            phase_dir=phase_dir,
+            plan_file=plan_path,
+            phase=phase_name,
+        )
+        if outcome is not None:
+            sys.exit(outcome)
+
         await reaggregate_from_existing_files(
             prefix, out_dir, phase_dir, phase_name, plan_path, args, orchestrator_script,
             extra_validation_metadata=extra_validation_metadata,
@@ -3322,6 +3340,14 @@ async def run_review_orchestration(
                     output_dir=phase_dir,
                     plan_file=str(plan_path),
                     model=args.validation_model,
+                    # The document's `reaggregate_mode` is what every later
+                    # retry hint is rebuilt from (`resolved_reaggregate_command`),
+                    # so it has to be THIS phase's script. Measured 2026-09-14
+                    # on a `review-tasks` fan-out: the kwarg was missing, the
+                    # helper defaulted to review-plan's script, and the exit-3
+                    # block told the session model to re-invoke `review-plan
+                    # --reaggregate` for a review-tasks run.
+                    orchestrator=orchestrator_script,
                     **extra_kwargs,
                 )
                 batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
