@@ -9,9 +9,7 @@ Consult only if the above context leaves something genuinely ambiguous.
 
 ## Task
 Title: Add regression tests for lockout
-Description: **Executor**: agent
-
-Add a test module covering the lockout threshold and the constant time comparison introduced by the earlier tasks.
+Description: Add a test module covering the lockout threshold and the constant time comparison introduced by the earlier tasks.
 
 ---
 
@@ -28,8 +26,14 @@ Read these files to understand existing patterns before implementing.
 - [ ] a test asserts compare_tokens is true for equal tokens and false otherwise
 
 ## Preceding Tasks (already completed)
-- **T001: Make token comparison constant time** - **Executor**: agent
-- **T002: Bound the login attempt store** - **Executor**: agent
+- **T001: Make token comparison constant time** - Replace the plain equality in compare_tokens with hmac.compare_digest so refresh-token comparison does not leak timing information, and keep the existing signature.
+- **T002: Bound the login attempt store** - The module level _attempts dict grows without bound. Evict entries older than WINDOW_SECONDS when recording an attempt so the store stays proportional to active users.
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+1. **Batch 1** (T001): No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.
+2. **Batch 2** (T002): No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.
 
 ## Instructions
 1. Read the relevant files above to understand existing patterns

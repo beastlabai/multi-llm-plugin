@@ -21,6 +21,11 @@ Read these files to understand existing patterns before implementing.
 
 {acceptance_criteria_section}
 {dependency_section}
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+{{prior_changes_context}}
+
 ## Instructions
 1. Read the relevant files above to understand existing patterns
 2. Implement ONLY what is described in this task

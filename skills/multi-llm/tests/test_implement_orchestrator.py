@@ -730,6 +730,51 @@ class TestBuildTaskPromptDependencySection:
 
         assert "Preceding Tasks" not in result
 
+    def test_dependency_section_shows_the_first_real_sentence_not_the_executor_line(
+        self,
+    ):
+        """F6 end-to-end: a task decomposed from a *generated* tasks.md (which
+        renders `**Executor**: agent` ahead of every task's narrative) must not
+        hand its dependents that literal line as their only inter-task context.
+        Reproduces the audited `implement/write_tasks.json` shape: T007's
+        'Preceding Tasks' entry for T003 read
+        `- **T003: …** - **Executor**: agent` instead of T003's actual work.
+        """
+        from implement_orchestrator import build_task_prompt
+
+        rendered_tasks_md = """## Task T003: Implement kinematic Car step
+
+**Dependencies**: None
+**Files to modify**: index.html
+**Files to create**: none
+**Complexity**: medium
+**Executor**: agent
+
+Add the Car class with a fixed-timestep kinematic integrator.
+
+## Task T007: Wire surface penalty and out-of-bounds guard
+
+**Dependencies**: T003
+**Files to modify**: index.html
+**Files to create**: none
+**Complexity**: high
+**Executor**: agent
+
+Connect Track.surfaceAt into the Game simulation step.
+"""
+        decomposer = TaskDecomposer()
+        tasks = decomposer.parse_plan(rendered_tasks_md)
+        all_tasks = {t.id: t for t in tasks}
+        t007 = all_tasks["T007"]
+
+        result = build_task_prompt(t007, all_tasks=all_tasks)
+
+        assert "**Executor**: agent" not in result
+        assert (
+            "**T003: Implement kinematic Car step** - "
+            "Add the Car class with a fixed-timestep kinematic integrator."
+        ) in result
+
 
 class TestTokenBudgetEnforcement:
     """Tests for _enforce_token_budget."""

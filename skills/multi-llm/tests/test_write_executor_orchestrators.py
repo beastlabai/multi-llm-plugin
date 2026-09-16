@@ -890,7 +890,8 @@ class TestFullStackDetachedImplement:
             kind="implement",
             batches=[
                 {"batch_index": i, "can_parallelize": False, "tasks": [
-                    {"id": f"T00{i+1}", "prompt": f"do {i}",
+                    # implement prompts carry the token too since F6 (2026-09-16).
+                    {"id": f"T00{i+1}", "prompt": f"do {i} {{prior_changes_context}}",
                      "files_to_modify": ["src/main.py"], "depends_on": [],
                      "title": f"Task {i}"},
                 ]}
