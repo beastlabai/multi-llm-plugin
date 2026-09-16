@@ -482,7 +482,12 @@ def _save_log(
         stdout_parse_error: Set when the stdout extractor itself failed, even
             if a secondary channel (the file) went on to salvage the run —
             the two fields are independent because a failed stdout parse and
-            an overall success are not a contradiction.
+            an overall success are not a contradiction. Rendered as
+            ``Stdout parse: failed (...)`` only when ``result_source`` is
+            NOT one of ``FILE_WRITTEN_SOURCES`` — a file-output provider is
+            told not to print JSON on stdout at all, so a failed stdout
+            parse beside a file-channel success is expected, not a fault
+            (F9.2).
 
     Returns:
         True if log was saved successfully, False otherwise
@@ -528,7 +533,17 @@ def _save_log(
             lines.append(f"Result source: {result_source}")
 
         if stdout_parse_error:
-            lines.append(f"Stdout parse: failed ({stdout_parse_error})")
+            if result_source in FILE_WRITTEN_SOURCES:
+                # `render_output_location` told this provider NOT to print
+                # JSON on stdout, so a failed stdout parse is the expected
+                # shape of a run the file channel already answered for — not
+                # a fact worth flagging beside `Success: True` (F9.2, audited
+                # 2026-09-16 on review-tasks: two successful file-channel runs
+                # logged "Stdout parse: failed (No valid JSON found in
+                # text)").
+                lines.append("Stdout: not used (file output)")
+            else:
+                lines.append(f"Stdout parse: failed ({stdout_parse_error})")
 
         if error:
             lines.append(f"Error: {error}")

@@ -10,8 +10,43 @@ that need to locate the tasks file (review-tasks, apply-task-suggestions, etc.).
 import os
 import re
 import sys
+from datetime import datetime
 
 from .output_handler import sanitize_prefix
+
+#: `update_plan_tasks.py` writes tasks.md and then the plan itself,
+#: microseconds apart, so "older" only counts a gap past filesystem clock
+#: granularity (some filesystems round mtimes to the second) as a real
+#: staleness signal rather than write order within one burst (F3).
+STALENESS_TOLERANCE_S = 1.0
+
+
+def _plan_edited_after_generate_tasks(
+    plan_path_abs: str, plan_mtime: float, tasks_mtime: float
+) -> bool:
+    """Decide whether the tasks-older-than-plan warning describes a human edit.
+
+    Compares the fact actually being asked about — did anything touch the
+    plan *after* `generate-tasks` last rewrote it? — rather than raw mtime
+    order, which a `generate-tasks` run itself can never satisfy: it writes
+    tasks.md and then the plan, then stamps
+    `state.json.phases_completed["generate-tasks"]`, so on that very run the
+    plan's mtime is always at or before its own completion timestamp.
+    Falls back to a tolerant mtime comparison when no such record exists
+    (no state.json, or the tasks file predates the generate-tasks map).
+    """
+    try:
+        from .state_manager import StateManager
+
+        state = StateManager(plan_path_abs)
+        completed_at = state.get("phases_completed", {}).get("generate-tasks")
+        if completed_at:
+            completed_ts = datetime.fromisoformat(completed_at).timestamp()
+            return plan_mtime > completed_ts + STALENESS_TOLERANCE_S
+    except Exception:
+        pass  # No usable state record — fall back to the raw mtime comparison.
+
+    return plan_mtime - tasks_mtime > STALENESS_TOLERANCE_S
 
 
 def find_tasks_file(plan_path: str) -> str:
@@ -30,7 +65,12 @@ def find_tasks_file(plan_path: str) -> str:
     Error handling for edge cases:
     - TASKS_FILE comment points to nonexistent file: specific error message
     - Both TASKS_FILE comment and default location exist but differ: prefer comment, log warning
-    - Stale tasks file (older than plan): log warning but proceed
+    - Stale tasks file (plan genuinely edited after generate-tasks last ran):
+      log warning but proceed. See `_plan_edited_after_generate_tasks` — a
+      bare mtime comparison flags every run's own back-to-back tasks.md/plan
+      writes, so this checks `state.json.phases_completed["generate-tasks"]`
+      first and only falls back to mtimes (with a tolerance) when that
+      record is absent.
 
     Args:
         plan_path: Absolute path to the plan file
@@ -129,7 +169,7 @@ def find_tasks_file(plan_path: str) -> str:
     try:
         tasks_mtime = os.path.getmtime(tasks_path)
         plan_mtime = os.path.getmtime(plan_path_abs)
-        if tasks_mtime < plan_mtime:
+        if _plan_edited_after_generate_tasks(plan_path_abs, plan_mtime, tasks_mtime):
             print(
                 "Warning: Tasks file is older than the plan file. "
                 "Consider re-running '--generate-tasks' to pick up plan changes.",

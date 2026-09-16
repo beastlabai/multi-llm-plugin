@@ -368,26 +368,105 @@ class TestFindTasksFile:
         assert exc_info.value.code == 1
 
     def test_find_tasks_file_staleness_warning(self, temp_dir, capsys):
-        """Warns when tasks file is older than the plan file."""
+        """Warns when the plan is genuinely newer than the tasks file and no
+        `generate-tasks` completion record explains the gap (F3's fallback
+        path — a hand-written tasks.md with no state.json at all)."""
+        import time
+
         plan_path = temp_dir / "stale.md"
         prefix = sanitize_prefix("stale.md")
         tasks_dir = temp_dir / prefix / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
         tasks_path = tasks_dir / "tasks.md"
 
-        # Write tasks first, then plan (so plan is newer)
         tasks_path.write_text(
             "# Tasks\n\n## T001: Init\nSetup initial config.\n",
             encoding="utf-8",
         )
-
-        # Ensure plan has a strictly newer mtime
-        import time
-        time.sleep(0.05)
         plan_path.write_text(
             "# Plan\n\n## Overview\nUpdated plan content.\n",
             encoding="utf-8",
         )
+        # A gap well past the F3 tolerance (seconds, not the microseconds a
+        # single write burst produces), set directly rather than slept so the
+        # test stays fast and deterministic.
+        now = time.time()
+        os.utime(tasks_path, (now - 5, now - 5))
+        os.utime(plan_path, (now, now))
+
+        find_tasks_file(str(plan_path))
+        captured = capsys.readouterr()
+        assert "older than the plan" in captured.err
+
+    def test_find_tasks_file_no_false_warning_for_generate_tasks_own_writes(
+        self, temp_dir, capsys
+    ):
+        """F3: `update_plan_tasks.py` writes tasks.md and then the plan,
+        microseconds apart, and stamps
+        `state.json.phases_completed["generate-tasks"]` right after — that
+        record, not raw mtime order, is what the checker prefers, so the
+        phase's own writes never trigger the warning about themselves."""
+        from utils.state_manager import StateManager
+
+        plan_path = temp_dir / "fresh.md"
+        prefix = sanitize_prefix("fresh.md")
+        tasks_dir = temp_dir / prefix / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        tasks_path = tasks_dir / "tasks.md"
+
+        # Same order update_plan_tasks.py writes in: tasks.md, then the plan.
+        tasks_path.write_text(
+            "# Tasks\n\n## T001: Init\nSetup initial config.\n",
+            encoding="utf-8",
+        )
+        plan_path.write_text(
+            "# Plan\n\n## Overview\nUpdated plan content.\n",
+            encoding="utf-8",
+        )
+        # ...then, in the same run, the phase records its own completion.
+        state = StateManager(plan_path)
+        state.mark_phase_completed("generate-tasks")
+        state.save()
+
+        find_tasks_file(str(plan_path))
+        captured = capsys.readouterr()
+        assert "older than the plan" not in captured.err
+
+    def test_find_tasks_file_warns_for_a_real_edit_after_generate_tasks(
+        self, temp_dir, capsys
+    ):
+        """The other half of F3: a plan edited well after `generate-tasks`
+        completed is a genuine human edit, and must still warn even though a
+        completion record exists."""
+        import time
+
+        from utils.state_manager import StateManager
+
+        plan_path = temp_dir / "edited-later.md"
+        prefix = sanitize_prefix("edited-later.md")
+        tasks_dir = temp_dir / prefix / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        tasks_path = tasks_dir / "tasks.md"
+
+        tasks_path.write_text(
+            "# Tasks\n\n## T001: Init\nSetup initial config.\n",
+            encoding="utf-8",
+        )
+        plan_path.write_text(
+            "# Plan\n\n## Overview\nOriginal content.\n",
+            encoding="utf-8",
+        )
+        state = StateManager(plan_path)
+        state.mark_phase_completed("generate-tasks")
+        state.save()
+
+        # A human edits the plan long after generate-tasks finished.
+        plan_path.write_text(
+            "# Plan\n\n## Overview\nHuman edit after tasks were generated.\n",
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(plan_path, (now + 60, now + 60))
 
         find_tasks_file(str(plan_path))
         captured = capsys.readouterr()

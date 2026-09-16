@@ -256,7 +256,11 @@ class TestSaveLog:
         assert "CURSOR-AGENT LOG" not in content
 
     def test_save_log_new_optional_fields(self, tmp_path):
-        """``result_source``/``stdout_parse_error`` render when given, and only then."""
+        """``result_source``/``stdout_parse_error`` render when given, and only
+        then — except a failed stdout parse beside a FILE_WRITTEN_SOURCES
+        ``result_source`` (F9.2): the provider was told not to print JSON on
+        stdout at all, so that "failure" is expected, not a fault, and is
+        worded to say so instead of being dropped or read as a real error."""
         log_file = tmp_path / "log.txt"
 
         result = _save_log(
@@ -274,7 +278,8 @@ class TestSaveLog:
         assert result is True
         content = log_file.read_text(encoding="utf-8")
         assert "Result source: file" in content
-        assert "Stdout parse: failed (No valid JSON found in text)" in content
+        assert "Stdout: not used (file output)" in content
+        assert "Stdout parse: failed" not in content
 
         # Omitted (the default) renders neither line.
         log_file_2 = tmp_path / "log2.txt"
@@ -285,6 +290,32 @@ class TestSaveLog:
         content_2 = log_file_2.read_text(encoding="utf-8")
         assert "Result source:" not in content_2
         assert "Stdout parse:" not in content_2
+        assert "Stdout: not used" not in content_2
+
+    def test_save_log_real_stdout_parse_failure_still_reports_as_a_failure(
+        self, tmp_path
+    ):
+        """A genuine double failure (no file, no stdout — ``result_source``
+        is ``None``, as `_finalize_file_output_log` passes on that path) must
+        keep the honest ``Stdout parse: failed`` wording; only a
+        FILE_WRITTEN_SOURCES source excuses it."""
+        log_file = tmp_path / "log.txt"
+
+        _save_log(
+            log_file=log_file,
+            model="claude-code:opus",
+            prompt="p",
+            stdout="out",
+            stderr="",
+            returncode=0,
+            success=False,
+            result_source=None,
+            stdout_parse_error="No valid JSON found in text",
+        )
+
+        content = log_file.read_text(encoding="utf-8")
+        assert "Stdout parse: failed (No valid JSON found in text)" in content
+        assert "Stdout: not used" not in content
 
 
 class TestInvokeWithProvider:
@@ -1315,7 +1346,12 @@ class TestInvokeWithFileOutputLogFinalization:
         assert "CURSOR-AGENT LOG" in content
         assert "Success: True" in content
         assert "Result source: file" in content
-        assert "Stdout parse: failed" in content
+        # F9.2: the file channel is what answered for this run, so a header
+        # naming a failed stdout parse beside `Success: True` would read as
+        # a fault that never happened — the provider was told not to print
+        # JSON on stdout at all.
+        assert "Stdout: not used (file output)" in content
+        assert "Stdout parse: failed" not in content
         # The stale, pre-resolution verdict must never survive as the log's
         # own claim — this is the exact bug: a completed, salvaged run
         # recorded as failed because the log was written before the file
