@@ -1040,6 +1040,23 @@ class TestPartialResults:
         err = capsys.readouterr().err
         assert "nothing to" in err and "--force" in err
 
+    def test_the_auto_resolved_wording_says_continued_not_reaggregated(
+        self, tmp_path, capsys
+    ):
+        """The fan-out that hit this row is continuing in-process past the
+        models that failed -- nothing was reaggregated, and a separate
+        `--reaggregate` invocation is a different code path entirely."""
+        phase_dir = tmp_path / "code-review"
+        phase_dir.mkdir()
+        code = un.report_partial_results(
+            completed=["a:b"], failed=["c:d"],
+            phase_dir=str(phase_dir), unattended=True,
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "continued with partial results; failed: c:d" in out
+        assert "reaggregated" not in out
+
 
 # ---------------------------------------------------------------------------
 # 11. The exit-3 convention itself

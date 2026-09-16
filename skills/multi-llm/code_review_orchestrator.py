@@ -59,6 +59,7 @@ from utils.cli_common import (
     build_parent_parser,
     dispatcher_prefix,
     reaggregate_command,
+    record_artifacts,
     record_next,
 )
 from utils.state_manager import (
@@ -131,7 +132,7 @@ from utils.git_utils import (
     validate_git_ref,
     _run_git,
 )
-from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
+from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK, compute_max_importance
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -343,7 +344,9 @@ Examples:
     parser.add_argument(
         '--apply-fixes',
         action='store_true',
-        help='Prepare fix tasks for Claude Code subagents to apply'
+        # F13: host-neutral (printed by `multi_llm.py review-code --help` on
+        # every host, not only Claude Code).
+        help='Prepare fix tasks for the invoker to delegate to subagents'
     )
 
     parser.add_argument(
@@ -1261,6 +1264,28 @@ async def run_all_reviews(
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
     results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
+    fanout_phase_dir = str(get_phase_dir(plan_path, 'code-review'))
+    slots_finished = 0
+
+    def slot_finished() -> None:
+        """Advance ``progress.models_done`` as each slot ends (F6).
+
+        Mirrors ``review_orchestrator_base.run_all_models``'s own
+        ``slot_finished()``, which this lane never got: `models_done` was
+        written `0` once before dispatch and recomputed only after the last
+        model returned, so a mid-run poll of this fan-out read `models 0/4`
+        beside three finished reviewers (measured 2026-09-16: 646 s of an
+        833 s run). Counting *slots* — a skipped or failed one included — is
+        deliberate; the post-fanout recomputation below is what turns slots
+        back into successes.
+        """
+        nonlocal slots_finished
+        slots_finished += 1
+        report_progress(
+            fanout_phase_dir,
+            models_total=len(model_specs),
+            models_done=slots_finished,
+        )
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
         provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
@@ -1277,6 +1302,9 @@ async def run_all_reviews(
                         existing_data = json.load(f)
                     if isinstance(existing_data, list):
                         print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
+                        # A slot answered from disk is a slot finished; a
+                        # resumed run must not read `models 0/4` while it skips.
+                        slot_finished()
                         return (model_spec, (True, existing_data, None))
                 except (json.JSONDecodeError, IOError):
                     print(f"[{display_name}] Existing result file corrupt, re-running...")
@@ -1288,25 +1316,31 @@ async def run_all_reviews(
             print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
             await asyncio.sleep(stagger_delay)
 
-        # Acquire provider semaphore first (if any), then global semaphore.
-        # This order prevents capped providers from hogging global slots while
-        # waiting for their provider-specific turn.
-        prov_sem = provider_semaphores.get(provider_name)
-        if prov_sem:
-            async with prov_sem:
+        try:
+            # Acquire provider semaphore first (if any), then global semaphore.
+            # This order prevents capped providers from hogging global slots while
+            # waiting for their provider-specific turn.
+            prov_sem = provider_semaphores.get(provider_name)
+            if prov_sem:
+                async with prov_sem:
+                    async with semaphore:
+                        result = await run_single_review(
+                            model_spec, plan_path, out_dir, timeout, tracked_files,
+                            base_ref, served_models=served_models,
+                        )
+                        return (model_spec, result)
+            else:
                 async with semaphore:
                     result = await run_single_review(
                         model_spec, plan_path, out_dir, timeout, tracked_files,
                         base_ref, served_models=served_models,
                     )
                     return (model_spec, result)
-        else:
-            async with semaphore:
-                result = await run_single_review(
-                    model_spec, plan_path, out_dir, timeout, tracked_files,
-                    base_ref, served_models=served_models,
-                )
-                return (model_spec, result)
+        finally:
+            # In a `finally` because a slot that raised (or was cancelled by
+            # the overall timeout) has stopped occupying the fan-out just as
+            # surely as one that returned a result.
+            slot_finished()
 
     # Create tasks for all models with staggered starts
     tasks = [run_with_semaphore(spec, idx) for idx, spec in enumerate(model_specs)]
@@ -1358,6 +1392,7 @@ def generate_review_report(
     base_ref: Optional[str] = None,
     template_style: str = 'pr',
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    failed_models: Optional[Dict[str, str]] = None,
 ) -> str:
     """Generate a markdown review report.
 
@@ -1367,6 +1402,13 @@ def generate_review_report(
     the HTML report's badges — names the model that actually served the turn
     instead of silently crediting the primary. Empty (the shipped default, since
     ``fallback_models`` ships empty) leaves the report byte-for-byte what it was.
+
+    ``failed_models`` is main()'s authoritative post-salvage failure map
+    (model -> reason), including any model F11 seeded for never returning at
+    all. A caller with no map of its own (a fixture exercising this function
+    directly, or the reaggregate path, whose ``results`` is rebuilt from
+    per-model files on disk and so has no failures to report) gets the same
+    map derived from ``results`` on ``success`` alone (F10).
     """
     lines = [
         "# Code Review Report",
@@ -1380,16 +1422,24 @@ def generate_review_report(
     # Collect all issues
     all_issues = []
     successful_models = []
-    failed_models = {}
-
+    # F10: `success and issues` misclassified a reviewer that legitimately
+    # returned `[]` as failed — it was listed under "## Failed Reviews" as
+    # "No issues returned" even though `save_model_result` had already
+    # written its (empty) result file and `.status.json.models_completed`
+    # already counted it done. Testing `success` alone, on the caller's
+    # authoritative map when it has one.
+    if failed_models is None:
+        failed_models = {
+            model: (error or "No issues returned")
+            for model, (success, issues, error) in results.items()
+            if not success
+        }
     for model, (success, issues, error) in results.items():
-        if success and issues:
+        if success:
             successful_models.append(model)
-            for issue in issues:
+            for issue in issues or []:
                 issue["model"] = model
                 all_issues.append(issue)
-        else:
-            failed_models[model] = error or "No issues returned"
 
     lines.append(
         "**Models:** "
@@ -2097,6 +2147,25 @@ async def reaggregate_from_existing_files(
         print("\nReaggregation complete!")
         print(f"Report: {report_path}")
 
+        # F2/F3: this reaggregate path never called either recorder, so a
+        # detached --reaggregate run reported `output_files` with nothing in it
+        # and `MULTI_LLM_RESULT.artifacts: []` — the same gap main()'s own
+        # completion site had. Same existence-filtered list as there.
+        report_html_path = str(phase_dir / "report.html")
+        record_output_files(
+            str(phase_dir),
+            report=str(report_path),
+            report_html=report_html_path,
+            grouped=str(grouped_path),
+            validation=str(validation_path),
+            issues=str(issues_path),
+        )
+        artifacts_to_record = [str(report_path), report_html_path, str(grouped_path)]
+        for optional_path in (str(validation_path), str(issues_path)):
+            if os.path.exists(optional_path):
+                artifacts_to_record.append(optional_path)
+        record_artifacts(artifacts_to_record)
+
         # Mark phase complete after successful reaggregation
         state = get_or_create_state(plan_path)
         state.mark_phase_completed("code-review")
@@ -2487,6 +2556,15 @@ async def main(argv: Optional[List[str]] = None) -> int:
             if not save_model_result(prefix, model_spec, success, issues, error, phase_dir):
                 failed_models[model_spec] = error or "Unknown error"
 
+        # F11: a model whose task never returned — cancelled by
+        # `run_all_reviews`'s own `asyncio.wait_for` deadline, or dropped as an
+        # `Exception` item there — is in neither `results` nor (so far)
+        # `failed_models`: without this it is counted completed, inflates
+        # `models_done`, and appears in no report section at all.
+        for model_spec in model_specs:
+            if model_spec not in results and model_spec not in failed_models:
+                failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+
         # D3b: a salvage task exists for every model whose output would not parse
         # (emit_salvage_task materialized it above). With --exec-subagents this
         # run repairs them itself, exactly as the fan-out path in
@@ -2713,6 +2791,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
                 validated_groups = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
+                # Every other branch above sets both names to the same value;
+                # this one set only `validated_groups`, so `--skip-validation`
+                # left `validated_groups_for_report` `None` — which starved
+                # `--apply-fixes` (its guard just below) of any group to build
+                # fix tasks from, and undercounted F4's HIGH-group total to 0.
+                validated_groups_for_report = validated_groups
 
             # Prepare fix tasks for Claude Code subagents if requested
             if args.apply_fixes and validated_groups_for_report:
@@ -2723,10 +2807,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 )
 
         # Generate report (after validation so we can include validation status)
+        # F10: `failed_models` is this run's own authoritative post-salvage map
+        # (and, since F11, includes any model that never returned at all) —
+        # passed in rather than left for the function to re-derive.
         report = generate_review_report(
             plan_path, results, changed_files, validated_groups_for_report,
             phase_dir=phase_dir, base_ref=base_ref, template_style=args.report_style,
             served_models=served_models or None,
+            failed_models=failed_models,
         )
 
         # Save report
@@ -2736,13 +2824,36 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print(f"\nReport saved to: {report_path}")
 
         # A detached run's caller never saw this stdout, so `status` hands the
-        # artifacts back instead (no-op in the foreground).
+        # artifacts back instead (no-op in the foreground). validation.json and
+        # issues.json are included too (F3): apply-code-fixes reads exactly
+        # those two files, and a missing validation.json makes it treat every
+        # group as needs-human-decision — that was invisible to the host before,
+        # since only report/report_html/grouped were ever recorded here.
+        report_html_path = str(phase_dir / "report.html")
+        grouped_path_out = str(phase_dir / "grouped.json")
+        validation_path_out = str(phase_dir / "validation.json")
+        issues_path_out = str(phase_dir / "issues.json")
         record_output_files(
             str(phase_dir),
             report=str(report_path),
-            report_html=str(phase_dir / "report.html"),
-            grouped=str(phase_dir / "grouped.json"),
+            report_html=report_html_path,
+            grouped=grouped_path_out,
+            validation=validation_path_out,
+            issues=issues_path_out,
         )
+
+        # `record_output_files` above only feeds `.status.json` (the channel
+        # `status` reads); the terminal `MULTI_LLM_RESULT.artifacts` line every
+        # host is told to trust instead is populated from `record_artifact(s)`,
+        # which this lane never called (F2) — a fully successful run reported
+        # `artifacts: []`. validation.json/issues.json are included only when
+        # they exist, the same guard `record_output_files` applies internally
+        # (it self-filters; `record_artifacts` does not).
+        artifacts_to_record = [str(report_path), report_html_path, grouped_path_out]
+        for optional_path in (validation_path_out, issues_path_out):
+            if os.path.exists(optional_path):
+                artifacts_to_record.append(optional_path)
+        record_artifacts(artifacts_to_record)
 
         # Mark phase as completed in state
         state.mark_phase_completed("code-review")
@@ -2752,16 +2863,34 @@ async def main(argv: Optional[List[str]] = None) -> int:
         report_progress(str(phase_dir), step="complete")
 
     # Summary
-    high_count = len([i for i in all_issues if i.get("importance") == "high"])
+    # F4: count distinct HIGH-importance *groups*, not raw issues. Three
+    # models converging on the same bug is one finding, and grouping is what
+    # decides that — `compute_max_importance` is the same helper
+    # `html_report_generator` uses to rank a group for display. The old
+    # `len([i for i in all_issues if i.get("importance") == "high"])` counted
+    # every model's copy of a consensus bug separately: a single 3-model HIGH
+    # finding printed `[HIGH_PRIORITY_ISSUES] 3` (measured 2026-09-16).
+    high_count = sum(
+        1 for g in (validated_groups_for_report or [])
+        if compute_max_importance(g.get("suggestions", g.get("issues", []))) == "HIGH"
+    )
     print("\n=== Review Summary ===")
     print(f"Total issues: {len(all_issues)}")
-    print(f"High priority: {high_count}")
+    print(f"High priority: {high_count} group(s)")
     if high_count > 0:
         # The finding, in the channel this skill already uses for every other
         # "you must act on this" fact ([VALIDATION_PENDING], [PARTIAL_RESULTS: …],
         # [REAGGREGATE_AFTER_SALVAGE], [CONSOLIDATION_RECOMMENDED]). It carries the
         # count, which the exit code it replaces could not.
         print(f"[HIGH_PRIORITY_ISSUES] {high_count}")
+        # F4: the print above is a bare `print` on a detached run — no
+        # `.status.json` field, no result-line key, nothing a host reading
+        # only `MULTI_LLM_RESULT` (or polling `status`) ever sees. Recorded
+        # the way `[CONSOLIDATION_RECOMMENDED]` already is.
+        update_status(str(phase_dir), {
+            "high_priority_groups": {"count": high_count},
+        })
+        cli_common.record_high_priority_groups({"count": high_count})
 
     # Report fix tasks if prepared
     if args.apply_fixes and fix_tasks_path:
@@ -2831,7 +2960,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print(f"[REAGGREGATE_AFTER_SALVAGE] {salvage_reaggregate_cmd}")
         record_next(salvage_reaggregate_cmd)
         print("")
-        print("Claude Code: After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
+        # F13: host-neutral — this prints into the run log of whatever host is
+        # driving, not only Claude Code.
+        print("After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
 
     # A review that found HIGH-importance issues *worked*: the report is written
     # and `code-review` is recorded completed in state.json. Under the uniform

@@ -583,6 +583,11 @@ def classify_run(
         # `[CONSOLIDATION_RECOMMENDED]` site. A detached run's caller never saw
         # that stdout, so this view is the only route it reaches a host by.
         "consolidation_recommended": status.get("consolidation_recommended"),
+        # F4: optional, and present only on a finished code-review run —
+        # `{count}`, written once by that phase's own `[HIGH_PRIORITY_ISSUES]`
+        # site. Same reasoning as `consolidation_recommended` just above: a
+        # detached run's caller never saw the bracketed marker's stdout.
+        "high_priority_groups": status.get("high_priority_groups"),
         "run": dict(run),
         "run_state": run.get("state") if isinstance(run, dict) else None,
         # D4's refusal close-out: `{"state": "runner_rejected", "reason_code"}`

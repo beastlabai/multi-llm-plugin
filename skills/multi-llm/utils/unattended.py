@@ -1038,6 +1038,9 @@ def report_partial_results(
             record_resolution(
                 phase_dir,
                 row(3).site_id,
-                f"reaggregated with partial results; failed: {','.join(failed_list)}",
+                # "continued", not "reaggregated": this call is the fan-out's
+                # own in-process continuation past the models that failed,
+                # never a separate --reaggregate invocation.
+                f"continued with partial results; failed: {','.join(failed_list)}",
             )
     return EXIT_OK

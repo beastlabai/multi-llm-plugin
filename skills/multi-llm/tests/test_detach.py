@@ -1676,6 +1676,67 @@ class TestStatusSurface:
         out = capsys.readouterr().out
         assert "consolidation recommended: 29 valid groups >= 15 — run --consolidate" in out
 
+    def test_high_priority_groups_renders_for_a_terminal_code_review_run(
+        self, tmp_path, capsys
+    ):
+        """F4: `[HIGH_PRIORITY_ISSUES] <n>` is a bare log line a detached
+        caller never reads — `status` is where a host actually learns the
+        count, the same way it already surfaces `[CONSOLIDATION_RECOMMENDED]`.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "high_priority_groups": {"count": 1},
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-highpri-001", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
+        out = capsys.readouterr().out
+        assert "high-priority groups: 1" in out
+
+    def test_high_priority_groups_is_silent_off_a_non_terminal_run(
+        self, tmp_path, capsys
+    ):
+        """The key is written once, at the very end of main() — a mid-run poll
+        must not render a stale or premature count.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "models_running",
+            "high_priority_groups": {"count": 1},
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-highpri-002", "state": "running", "detached": True,
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "high-priority groups" not in out
+
+    def test_high_priority_groups_is_silent_on_a_non_code_review_phase(
+        self, tmp_path, capsys
+    ):
+        """The key only exists on code-review's own checkpoint; the phase
+        gate is belt-and-braces against a stray key elsewhere.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="review-plan")
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "high_priority_groups": {"count": 1},
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-highpri-003", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
+        out = capsys.readouterr().out
+        assert "high-priority groups" not in out
+
     def test_a_terminal_run_carries_the_workflow_notice_into_view_run(
         self, tmp_path, capsys
     ):

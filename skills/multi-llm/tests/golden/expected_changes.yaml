@@ -445,6 +445,45 @@ changes:
       path set moves. `/output_root_paths` shifts with it and is already declared
       above.
 
+  # ---------------------------------------------------------------------------
+  # 2026-09-16, the review-code audit of the opencode-host pipeline (F2/F3/F4):
+  # this lane never got the same `record_artifacts`/HIGH-count fixes the base
+  # review fan-out already had. All three changes are additive — new keys and a
+  # new marker line — driven by the fixture's own HIGH-importance finding.
+  # ---------------------------------------------------------------------------
+  - pointer: /markers/review-code/0
+    rationale: >
+      `[HIGH_PRIORITY_ISSUES]` now prints (F4) — it always should have, the
+      fixture's mock review returns a HIGH finding, but the run never recorded
+      *any* marker for review-code before. The list is covered rather than a
+      leaf because the bundle flattens it positionally.
+  - pointer: /result_lines/review-code/artifacts/0
+    rationale: >
+      review-code's result line now names report.md (F2: it recorded no
+      artifacts before, same defect review-plan already had fixed); the file
+      itself is unchanged.
+  - pointer: /result_lines/review-code/artifacts/1
+    rationale: >
+      review-code's result line now names report.html; the file itself is
+      unchanged.
+  - pointer: /result_lines/review-code/artifacts/2
+    rationale: >
+      review-code's result line now names grouped.json; the file itself is
+      unchanged.
+  - pointer: /result_lines/review-code/artifacts/3
+    rationale: >
+      review-code's result line now names issues.json (F3: `validation.json`
+      and `issues.json` joined `record_output_files`/`record_artifacts`
+      alongside report/report_html/grouped; this fixture's run has no
+      validation.json — validation was never reached — so only issues.json
+      appears here).
+  - pointer: /result_lines/review-code/high_priority_groups/count
+    rationale: >
+      F4: the phase now records the distinct-HIGH-group count on the result
+      line and in `.status.json` (mirroring `consolidation_recommended`)
+      instead of only a bare `print` a detached caller never saw. The fixture's
+      mock review returns findings that group into 2 distinct HIGH groups.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #
