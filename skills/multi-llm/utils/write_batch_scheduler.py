@@ -51,6 +51,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         parse_model_spec,
     )
     from .subagent_executor import (
+        STATUS_BATCH_FAILED,
         STATUS_OK,
         STATUS_PARTIAL,
         STATUS_POLICY_VIOLATION,
@@ -59,6 +60,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_UNPARSEABLE,
         WRITE_APPLIED,
         WRITE_CLEAN_FAILURE,
+        WRITE_NO_OP,
         WRITE_PARTIAL,
         WRITE_POLICY_VIOLATION,
         WRITE_SCHEMA_REJECTED,
@@ -107,6 +109,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         parse_model_spec,
     )
     from utils.subagent_executor import (
+        STATUS_BATCH_FAILED,
         STATUS_OK,
         STATUS_PARTIAL,
         STATUS_POLICY_VIOLATION,
@@ -115,6 +118,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_UNPARSEABLE,
         WRITE_APPLIED,
         WRITE_CLEAN_FAILURE,
+        WRITE_NO_OP,
         WRITE_PARTIAL,
         WRITE_POLICY_VIOLATION,
         WRITE_SCHEMA_REJECTED,
@@ -936,6 +940,9 @@ class WriteBatchScheduler:
                 write_outcome=WRITE_APPLIED,
             )
             outcome.output_path = str(resolve_output_target(task, self.phase_dir))
+            # The files the earlier run verified for this batch, so a resumed
+            # run's finalization (`--touched`) and summary still name them.
+            outcome.files_touched = self._recorded_files_touched(outcome.output_path)
             return outcome
 
         try:
@@ -1476,9 +1483,17 @@ class WriteBatchScheduler:
 
         * The runner **claimed** something (``status``) and the snapshot **shows**
           something (bytes moved or not). The claim is never the verdict.
-        * ``applied``/``no-op`` claimed + empty diff → **clean failure**: recorded,
-          the loop continues, and the prior-changes entry takes the documented
+        * ``applied`` claimed + empty diff → **clean failure**: recorded, the
+          loop continues, and the prior-changes entry takes the documented
           ``(batch failed — …, verified no file changes)`` form.
+        * ``no-op`` claimed + empty diff → **no-op**: the claim and the verdict
+          agree, so it is recorded under its own name (``(no-op — …, verified
+          no file changes)``) and the loop continues. Labelling it a clean
+          failure told the next batch the work had failed.
+        * ``failed`` claimed (or a non-zero exit) + empty diff → the batch
+          **failed cleanly**: nothing to roll back, but not ``ok`` either — the
+          loop stops at the boundary and ``--resume`` re-dispatches it. A runner
+          that says it could not do the work has not done it.
         * bytes moved + the batch reported ``failed``, **or** only some of the
           batch's ``expected_ids`` came back, **or** the runner exited non-zero →
           **partial application**: stops the loop, keeps the snapshots, exits 3
@@ -1623,16 +1638,50 @@ class WriteBatchScheduler:
             return
 
         if not changed:
-            # Success claimed, nothing moved. Recorded as a clean failure and the
-            # loop continues: the plan may simply already contain the change.
-            outcome.write_outcome = WRITE_CLEAN_FAILURE
-            outcome.status = STATUS_OK
-            outcome.reason = (
-                f"CLEAN FAILURE: the batch reported {claimed or 'no status'!r} but "
-                f"the pre-batch snapshot comparison found no byte changes in "
-                f"{', '.join(e.relative for e in snapshot.declared_entries()) or 'any declared file'}. "
-                f"Recorded; the loop continues."
+            declared_names = (
+                ", ".join(e.relative for e in snapshot.declared_entries())
+                or "any declared file"
             )
+            if crashed or claimed == "failed":
+                # The runner's own verdict, and the bytes agree. Nothing to
+                # restore, but nothing done either: the loop stops here rather
+                # than dispatching the next batch on top of the gap, and the
+                # status is one `ok` never reads as. D3k: a non-zero exit never
+                # counts as success on its own.
+                outcome.write_outcome = WRITE_CLEAN_FAILURE
+                outcome.status = STATUS_BATCH_FAILED
+                what = (
+                    f"the runner exited {exit_code} (claiming "
+                    f"{claimed or 'no status'!r})"
+                    if crashed else f"the batch reported {claimed!r}"
+                )
+                outcome.reason = (
+                    f"FAILED: {what} and the pre-batch snapshot comparison "
+                    f"confirms no byte changes in {declared_names}. Nothing to "
+                    f"restore; the loop stops here and --resume re-dispatches "
+                    f"this batch."
+                    + (f" Runner summary: {summary}" if summary else "")
+                )
+            elif claimed == "no-op":
+                # The claim and the verdict agree: nothing needed changing.
+                outcome.write_outcome = WRITE_NO_OP
+                outcome.status = STATUS_OK
+                outcome.reason = (
+                    f"NO-OP: the batch reported 'no-op' and the pre-batch "
+                    f"snapshot comparison confirms no byte changes in "
+                    f"{declared_names}. Recorded; the loop continues."
+                )
+            else:
+                # Success claimed, nothing moved. Recorded as a clean failure
+                # and the loop continues: the plan may simply already contain
+                # the change.
+                outcome.write_outcome = WRITE_CLEAN_FAILURE
+                outcome.status = STATUS_OK
+                outcome.reason = (
+                    f"CLEAN FAILURE: the batch reported {claimed or 'no status'!r} "
+                    f"but the pre-batch snapshot comparison found no byte changes "
+                    f"in {declared_names}. Recorded; the loop continues."
+                )
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
             return
@@ -1687,6 +1736,13 @@ class WriteBatchScheduler:
 
         if outcome.write_outcome == WRITE_APPLIED:
             summary = outcome.summary or f"batch {batch_index} applied"
+        elif outcome.write_outcome == WRITE_NO_OP:
+            # The claim and the verdict agreed; say so, so the next batch reads
+            # "already there" rather than "failed".
+            summary = (
+                f"(no-op — {outcome.summary or 'nothing needed changing'}, "
+                f"verified no file changes)"
+            )
         elif outcome.write_outcome == WRITE_CLEAN_FAILURE:
             # The documented clean-failure form, so a later batch reads why the
             # earlier one contributed nothing rather than assuming it succeeded.
@@ -1903,6 +1959,23 @@ class WriteBatchScheduler:
                 f"for {task.get('task_id')}: {exc}"
             )
 
+    @staticmethod
+    def _recorded_files_touched(output_path: str) -> List[str]:
+        """``files_touched`` as the batch's result file on disk records it."""
+        try:
+            data = json.loads(Path(output_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        raw = data.get("files_touched") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return []
+        seen: List[str] = []
+        for item in raw:
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.append(text)
+        return seen
+
     def _already_done(self, task: Dict[str, Any]) -> bool:
         """Resume's definition of done (D3i), all four clauses of it.
 
@@ -1931,6 +2004,11 @@ class WriteBatchScheduler:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return False
         if validate_result(self.kind, data):
+            return False
+        if str(data.get("status") or "") not in (WRITE_APPLIED, WRITE_NO_OP):
+            # A schema-valid `{"status": "failed"}` is a batch the previous run
+            # recorded as NOT done; resuming past it on the strength of the
+            # file existing would skip exactly the batch --resume is for.
             return False
         task_id = str(task.get("task_id", ""))
         recorded = self._load_fingerprints().get(task_id)
@@ -2056,7 +2134,7 @@ class WriteBatchScheduler:
             self._metrics_finish()
             self.state.mark_phase_completed(self.phase)
             self.state.save()
-            self._finalize_tracking()
+            self._finalize_tracking(result)
         if self.summary_file:
             result.summary_file = self._write_summary(result)
             self._insert_plan_reference(result.summary_file)
@@ -2072,8 +2150,24 @@ class WriteBatchScheduler:
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
 
-    def _finalize_tracking(self) -> None:
-        """``finalize_tracking.py --state-file`` in process (D3n)."""
+    def _finalize_tracking(self, result: Optional[SchedulerResult] = None) -> None:
+        """``finalize_tracking.py --state-file`` in process (D3n).
+
+        Every file a batch verifiably changed travels as ``--touched``.
+        ``finalize_tracking`` otherwise subtracts ``pre_existing_changes`` from
+        the working tree's current diff, which is right for a file the run
+        never touched and wrong for one it did: a file already modified when the
+        phase started (measured 2026-09-16, ``index.html`` under ``AM``) is
+        subtracted along with the rest, ``tracked_files`` ends up naming only
+        the noise, and ``review-code`` reviews the noise.
+        """
+        touched: List[str] = []
+        for outcome in (result.outcomes if result is not None else []):
+            if not outcome.ok:
+                continue
+            for path in outcome.files_touched:
+                if path not in touched:
+                    touched.append(path)
         try:
             import finalize_tracking  # type: ignore
         except ImportError:  # pragma: no cover - direct-script import shim
@@ -2083,8 +2177,11 @@ class WriteBatchScheduler:
                 import finalize_tracking  # type: ignore
             except ImportError:
                 return
+        argv = ["--state-file", str(self.state.state_file)]
+        for path in touched:
+            argv += ["--touched", path]
         try:
-            finalize_tracking.main(["--state-file", str(self.state.state_file)])
+            finalize_tracking.main(argv)
         except SystemExit:  # pragma: no cover - argparse-style exit
             pass
         except Exception as exc:  # noqa: BLE001
@@ -2213,7 +2310,18 @@ class WriteBatchScheduler:
         except ImportError:  # pragma: no cover
             from utils import status_file as _status_file
         try:
+            if result.finalized:
+                phase_state = "complete"
+            elif result.stopped_at_batch is not None or result.exit_code:
+                phase_state = "subagents_failed"
+            else:
+                phase_state = "running"
             _status_file.update_status(self.phase_dir, {
+                # The read phases record a phase-level `state` beside the run
+                # record; without one here `status` printed `phase state: (none)`
+                # for every finished write phase (measured 2026-09-16).
+                "state": phase_state,
+                "phase": self.phase,
                 "progress": {
                     "write_subagents": {
                         "kind": self.kind,

@@ -65,6 +65,22 @@ def main(argv=None) -> int:
         action="store_true",
         help="Show what would be tracked without updating state"
     )
+    # The write executor verifies every batch by a pre-batch snapshot
+    # comparison, so it knows which files a batch changed better than a git
+    # diff does. A file that was already modified before the phase started
+    # sits in pre_existing_changes and would be subtracted below along with
+    # the genuinely unrelated ones — measured 2026-09-16, a nine-batch run that
+    # edited only an already-dirty index.html tracked one stray file and the
+    # code review that followed would have reviewed that file instead.
+    parser.add_argument(
+        "--touched",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="A repo-relative file the write executor verified it changed; "
+             "kept in tracked_files even when it was modified before the "
+             "phase started (repeatable)",
+    )
     # The implementation summary's back-reference used to be an inline `python -c`
     # in instructions/implement.md that put the skill dir on sys.path by hand. That
     # made the instruction core carry a second skill-dir substitution site and a
@@ -121,6 +137,14 @@ def main(argv=None) -> int:
     pre_existing = set(state.get("pre_existing_changes", []))
     implementation_changes = current_modified - pre_existing
 
+    # ...except for the files the executor verified it changed: those are
+    # implementation changes whether or not they were dirty at the start.
+    verified = [f for f in args.touched if f and f.strip()]
+    kept_pre_existing = sorted(
+        f for f in verified if f in pre_existing and f not in implementation_changes
+    )
+    implementation_changes |= set(verified)
+
     # Build tracked_files list
     tracked_files = []
     for f in sorted(implementation_changes):
@@ -132,6 +156,15 @@ def main(argv=None) -> int:
 
     print(f"Current modified files: {len(current_modified)}")
     print(f"Pre-existing changes: {len(pre_existing)}")
+    if verified:
+        print(
+            f"Verified by the write executor: {len(verified)}"
+            + (
+                f" ({len(kept_pre_existing)} kept although modified before the "
+                f"phase started: {', '.join(kept_pre_existing)})"
+                if kept_pre_existing else ""
+            )
+        )
     print(f"Implementation changes: {len(implementation_changes)}")
 
     if args.dry_run:

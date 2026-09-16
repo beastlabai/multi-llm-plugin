@@ -545,3 +545,39 @@ class TestEdgeCases:
         tracked_paths = [f["path"] for f in updated_state["tracked_files"]]
         assert tracked_paths == ["new.py"]
         assert "old.py" not in tracked_paths
+
+
+class TestTouchedFilesSurvivePreExistingSubtraction:
+    """`--touched` names a file the write executor verified it changed; it is
+    tracked even when it was already dirty when the phase started."""
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_a_pre_existing_file_the_run_touched_is_tracked(self, mock_get_files, valid_state, capsys):
+        mock_get_files.return_value = {"existing_file1.py", "stray.md"}
+        result = main(["--state-file", str(valid_state), "--touched", "existing_file1.py"])
+        assert result == 0
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
+        paths = [e["path"] for e in state["tracked_files"]]
+        assert paths == ["existing_file1.py", "stray.md"]
+        out = capsys.readouterr().out
+        assert "Verified by the write executor: 1 (1 kept although modified before the phase started: existing_file1.py)" in out
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_touched_is_repeatable_and_deduplicated(self, mock_get_files, valid_state):
+        mock_get_files.return_value = {"new.py"}
+        result = main([
+            "--state-file", str(valid_state),
+            "--touched", "new.py", "--touched", "existing_file2.py",
+            "--touched", "existing_file2.py",
+        ])
+        assert result == 0
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
+        assert [e["path"] for e in state["tracked_files"]] == ["existing_file2.py", "new.py"]
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_without_touched_the_subtraction_is_unchanged(self, mock_get_files, valid_state, capsys):
+        mock_get_files.return_value = {"existing_file1.py", "new.py"}
+        assert main(["--state-file", str(valid_state)]) == 0
+        state = json.loads(valid_state.read_text(encoding="utf-8"))
+        assert [e["path"] for e in state["tracked_files"]] == ["new.py"]
+        assert "Verified by the write executor" not in capsys.readouterr().out

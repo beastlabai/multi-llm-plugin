@@ -1847,3 +1847,175 @@ class TestSnapshotReuseOnResume:
         assert result.exit_code == 0, result.messages
         manifest, _payload = self._snapshot(env)
         assert len(manifest["files"]) == 2
+
+
+# ===========================================================================
+# The empty-diff branch has three verdicts, not one (measured 2026-09-16)
+# ===========================================================================
+
+class TestTheEmptyDiffBranch:
+    """`applied`, `no-op` and `failed` with nothing moved are three different
+    things: a contradiction, an agreement, and a failure."""
+
+    def test_a_no_op_claim_with_no_bytes_moved_is_a_no_op(self, env):
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [],
+                              "summary": "already present"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.files_touched == []
+        assert "NO-OP" in outcome.reason
+        assert result.exit_code == 0
+        # The prior-changes entry says "no-op", never "failed": the next batch
+        # reads that the work was already there.
+        entries = [json.loads(l) for l in
+                   (env.out_dir / "prior_changes.jsonl").read_text().splitlines() if l]
+        assert [e["summary"] for e in entries] == [
+            "(no-op — already present, verified no file changes)"
+        ]
+
+    def test_an_applied_claim_with_no_bytes_moved_is_still_a_clean_failure(self, env):
+        env.edits([], result={"status": "applied", "ids": ["s0"],
+                              "files_touched": ["plans/p.md"],
+                              "summary": "claimed to apply"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.status == executor.STATUS_OK
+        assert result.exit_code == 0
+        entries = [json.loads(l) for l in
+                   (env.out_dir / "prior_changes.jsonl").read_text().splitlines() if l]
+        assert [e["summary"] for e in entries] == [
+            "(batch failed — claimed to apply, verified no file changes)"
+        ]
+
+    def test_a_failed_claim_with_no_bytes_moved_stops_the_loop(self, env):
+        """The runner said it could not do the work, and the bytes agree.
+        Not `ok`, no later batch, exit 3 naming --resume."""
+        env.edits([], result={"status": "failed", "ids": [],
+                              "files_touched": [],
+                              "summary": "could not find the section"})
+        result = env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert not outcome.ok
+        assert "FAILED" in outcome.reason
+        assert "could not find the section" in outcome.reason
+        assert result.exit_code == 3
+        assert result.stopped_at_batch == 0
+        assert 1 not in result.batches_dispatched
+        assert not result.finalized
+        joined = "\n".join(result.messages)
+        assert "--resume" in joined
+        progress = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]["write_subagents"]
+        assert progress["failed_task_ids"] == ["apply-batch-0"]
+
+    def test_resume_does_not_count_a_recorded_failure_as_done(self, env):
+        """A schema-valid `{"status": "failed"}` result file on disk is the
+        batch --resume exists for, not one it may skip."""
+        env.edits([], result={"status": "failed", "ids": [],
+                              "files_touched": [], "summary": "broke"})
+        first = env.scheduler([env.apply_task(0)]).run()
+        assert first.exit_code == 3
+        assert (env.phase_dir / "apply_batch_0.json").is_file()
+
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "now"})
+        second = env.scheduler([env.apply_task(0)]).run()
+        assert second.exit_code == 0, second.messages
+        assert not second.outcomes[0].skipped
+        assert second.outcomes[0].write_outcome == executor.WRITE_APPLIED
+        assert log.read_text().strip(), "the batch was re-dispatched"
+
+    def test_a_no_op_result_file_counts_as_done_on_resume(self, env):
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "already there"})
+        env.scheduler([env.apply_task(0)]).run()
+        log = env.enable_call_log()
+        second = env.scheduler([env.apply_task(0)]).run()
+        assert second.exit_code == 0
+        assert second.outcomes[0].skipped
+        assert not log.exists() or not log.read_text().strip()
+
+
+# ===========================================================================
+# Finalization hands the verified touched set to finalize_tracking
+# ===========================================================================
+
+class TestFinalizeTrackingSeesTheVerifiedFiles:
+
+    def test_every_applied_file_travels_as_touched(self, env, monkeypatch):
+        import finalize_tracking
+
+        seen = []
+        monkeypatch.setattr(finalize_tracking, "main",
+                            lambda argv: seen.append(list(argv)) or 0)
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler([env.apply_task(0)], state=state).run()
+        assert result.exit_code == 0, result.messages
+        assert len(seen) == 1
+        argv = seen[0]
+        assert argv[:2] == ["--state-file", state.state_file]
+        touched = [argv[i + 1] for i, a in enumerate(argv) if a == "--touched"]
+        assert touched == ["plans/p.md"]
+
+    def test_a_batch_skipped_on_resume_still_contributes_its_files(self, env, monkeypatch):
+        """The earlier run's result file records what it changed; a resumed
+        run's finalization must not lose those files."""
+        import finalize_tracking
+
+        state = FakeState(env.tmp_path / "state.json")
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        env.scheduler([env.apply_task(0)], state=state, finalize=False).run()
+
+        seen = []
+        monkeypatch.setattr(finalize_tracking, "main",
+                            lambda argv: seen.append(list(argv)) or 0)
+        result = env.scheduler([env.apply_task(0)], state=state).run()
+        assert result.outcomes[0].skipped
+        assert result.outcomes[0].files_touched == ["plans/p.md"]
+        touched = [seen[0][i + 1] for i, a in enumerate(seen[0]) if a == "--touched"]
+        assert touched == ["plans/p.md"]
+
+    def test_a_no_op_batch_contributes_nothing(self, env, monkeypatch):
+        import finalize_tracking
+
+        seen = []
+        monkeypatch.setattr(finalize_tracking, "main",
+                            lambda argv: seen.append(list(argv)) or 0)
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "there"})
+        state = FakeState(env.tmp_path / "state.json")
+        env.scheduler([env.apply_task(0)], state=state).run()
+        assert seen and "--touched" not in seen[0]
+
+    def test_the_mirror_records_a_phase_state(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        env.scheduler([env.apply_task(0)]).run()
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        assert status["state"] == "complete"
+        assert status["phase"] == "apply-suggestions"
+
+        env.plan.write_text("# Plan\n", encoding="utf-8")
+        shutil.rmtree(env.phase_dir / "pre_batch")
+        (env.phase_dir / "apply_batch_0.json").unlink()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "failed", "ids": [],
+                          "files_touched": ["plans/p.md"], "summary": "broke"})
+        env.scheduler([env.apply_task(0)]).run()
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        assert status["state"] == "subagents_failed"

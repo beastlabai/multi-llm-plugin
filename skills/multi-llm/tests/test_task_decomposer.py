@@ -469,3 +469,57 @@ class TestFileOverlapDetection:
         assert "T001" in batch_0_ids
         assert "T003" in batch_0_ids
         assert "T002" in batch_1_ids
+
+
+class TestExplicitFilesLinesWin:
+    """The `**Files to modify**:` / `**Files to create**:` metadata lines are
+    the declared set; the keyword heuristic is only for a task without them
+    (measured 2026-09-16: dotted identifiers in a narrative became files)."""
+
+    def test_dotted_identifiers_in_the_narrative_are_not_files(self):
+        plan = """### Task T000: Commit core boost baseline
+**Dependencies**: None
+**Files to modify**: index.html
+**Complexity**: low
+
+Map of existing code to plan sections:
+- CONFIG.boost at ~L404 (add all properties: maxCharges, rechargeTime)
+- Camera.update FOV kick, new EngineAudio.update pitch shift, HUD.update meter
+- Input._onKey: add e.preventDefault for Space
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert len(tasks) == 1
+        assert tasks[0].files_to_modify == ["index.html"]
+        assert tasks[0].files_to_create == []
+
+    def test_both_lines_are_read_and_split_on_commas(self):
+        plan = """### Task T001: Add the module
+**Files to modify**: `src/a.py`, src/b.py
+**Files to create**: src/new.py
+
+Create src/new.py and update src/a.py; also touch docs/x.md.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].files_to_modify == ["src/a.py", "src/b.py"]
+        assert tasks[0].files_to_create == ["src/new.py"]
+
+    def test_a_none_placeholder_declares_nothing(self):
+        plan = """### Task T002: Verify only
+**Files to modify**: none
+**Files to create**: (none)
+
+Update the README.md wording if needed.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert tasks[0].files_to_modify == []
+        assert tasks[0].files_to_create == []
+
+    def test_a_task_without_the_lines_keeps_the_heuristic(self):
+        plan = """### Task T003: Hand-written
+Create src/new.py and update src/a.py.
+"""
+        tasks = TaskDecomposer().parse_plan(plan)
+        # The keyword window is deliberately loose; what matters here is that
+        # the heuristic still runs when no metadata line exists.
+        assert "src/new.py" in tasks[0].files_to_create
+        assert "src/a.py" in tasks[0].files_to_modify
