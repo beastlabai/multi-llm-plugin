@@ -293,6 +293,11 @@ _HEADER = """\
 # and each `models:` list all take effect (lists replace). Those are the only
 # provider keys that DO anything — a key the base does not declare merges and is
 # then ignored, so writing one is a no-op, not a setting.
+#  * `models:` IS THE `--interactive` PICKER'S MENU, NOT AN ALLOWLIST: a model
+#    named directly in `defaults.models` / `defaults.quick_models` /
+#    `defaults.modes.<mode>` (or on `--models`) is DISPATCHED whether or not it
+#    appears in this provider's `models:` list — pruning a model here only
+#    removes it from the interactive picker.
 # `--init` writes a full block for each detected provider so the file is a
 # complete, self-describing snapshot.
 #  * NO layer can choose the BINARY. Provider binaries are hardcoded in the

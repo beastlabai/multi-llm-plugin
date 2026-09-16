@@ -41,6 +41,7 @@ from utils.review_orchestrator_base import (
     VALID_TYPES,
 )
 from utils.output_handler import sanitize_prefix
+from utils import cli_common
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +908,65 @@ class TestAggregateResults:
         report_content = Path(report_path).read_text(encoding="utf-8")
         assert "Missing Auth Coverage" in report_content
         assert "1 HIGH" in report_content
+
+    def test_aggregate_results_records_artifacts_for_a_dispatched_run(
+        self, phase_dir, temp_dir
+    ):
+        """F2: a detached run's caller never sees stdout, only the terminal
+        MULTI_LLM_RESULT.artifacts line -- which used to stay [] on a fully
+        successful review because nothing on this path called record_artifact.
+        With no validation.json on disk, only the three report artifacts are
+        recorded."""
+        plan_path = temp_dir / "test-plan.md"
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            report_path = aggregate_results(
+                prefix="test-plan",
+                out_dir=str(temp_dir),
+                phase_dir=phase_dir,
+                phase_name="review-tasks",
+                models=["model-a"],
+                failed_models={},
+                plan_path=str(plan_path),
+            )
+        finally:
+            cli_common.deactivate_result()
+
+        assert str(report_path) in ctx.artifacts
+        assert os.path.join(phase_dir, "report.html") in ctx.artifacts
+        assert os.path.join(phase_dir, "grouped.json") in ctx.artifacts
+        assert os.path.join(phase_dir, "validation.json") not in ctx.artifacts
+
+    def test_aggregate_results_records_validation_json_when_present(
+        self, phase_dir, temp_dir
+    ):
+        """F12: validation.json is the only machine-readable record of the
+        validation verdicts the report describes, and it was never handed to
+        the host -- when the file exists beside the others, it belongs in
+        MULTI_LLM_RESULT.artifacts too."""
+        plan_path = temp_dir / "test-plan.md"
+        plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
+        validation_path = os.path.join(phase_dir, "validation.json")
+        with open(validation_path, "w", encoding="utf-8") as f:
+            json.dump({"format_version": 2, "groups": []}, f)
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            aggregate_results(
+                prefix="test-plan",
+                out_dir=str(temp_dir),
+                phase_dir=phase_dir,
+                phase_name="review-tasks",
+                models=["model-a"],
+                failed_models={},
+                plan_path=str(plan_path),
+            )
+        finally:
+            cli_common.deactivate_result()
+
+        assert validation_path in ctx.artifacts
 
 
 # ---------------------------------------------------------------------------

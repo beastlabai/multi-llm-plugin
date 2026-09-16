@@ -763,3 +763,58 @@ class TestDependencyOverrides:
         override = sm2.get_dependency_overrides("T003")
         assert override is not None
         assert override["overridden_deps"] == ["T001", "T002"]
+
+
+# --- TestReviewPhaseCompletedFlag ---
+# F11: `review_phase_completed` was seeded False and never flipped by any
+# production caller — a run that fully completed `review-plan` still read
+# `review_phase_completed: false` beside `phases_completed: {"review-plan":
+# "..."}` in the same file. `mark_phase_completed` now flips it, but only for
+# the phase its own docstring names ("the *plan* review phase").
+
+class TestReviewPhaseCompletedFlag:
+    def test_starts_false(self, state_manager):
+        """A fresh state has not completed the plan review phase."""
+        assert state_manager.is_review_phase_completed() is False
+        assert state_manager.state["review_phase_completed"] is False
+
+    def test_marking_review_plan_phase_completed_flips_the_flag(self, state_manager):
+        """Completing review-plan sets both the map entry and the flag."""
+        state_manager.mark_phase_completed("review-plan")
+
+        assert "review-plan" in state_manager.state["phases_completed"]
+        assert state_manager.is_review_phase_completed() is True
+        assert state_manager.state["review_phase_completed"] is True
+
+    def test_marking_a_different_phase_leaves_the_flag_false(self, state_manager):
+        """Only review-plan is 'the plan review phase' — review-tasks and
+        code-review track their own completion through phases_completed and
+        must not be conflated with it."""
+        state_manager.mark_phase_completed("review-tasks")
+        state_manager.mark_phase_completed("code-review")
+
+        assert state_manager.is_review_phase_completed() is False
+
+    def test_flag_persists_across_save_reload(self, sample_plan_file):
+        """The flag survives a save/reload cycle like the rest of state.json."""
+        sm1 = StateManager(sample_plan_file)
+        sm1.mark_phase_completed("review-plan")
+        sm1.save()
+
+        sm2 = StateManager(sample_plan_file)
+        assert sm2.is_review_phase_completed() is True
+
+    def test_missing_key_loads_as_false(self, sample_plan_file):
+        """An existing state.json written before F11 (no key at all) still
+        loads — the field degrades to False rather than raising."""
+        sm = StateManager(sample_plan_file)
+        sm.save()
+        state_path = sm.state_file
+        with open(state_path, encoding="utf-8") as f:
+            data = json.load(f)
+        del data["review_phase_completed"]
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        reloaded = StateManager(sample_plan_file)
+        assert reloaded.is_review_phase_completed() is False
