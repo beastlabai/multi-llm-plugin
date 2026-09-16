@@ -29,6 +29,7 @@ inferring it from the absence of an `AskUserQuestion` string.
 
 import argparse
 import ast
+import os
 import functools
 import json
 import subprocess
@@ -47,7 +48,10 @@ import modes as mode_table
 import multi_llm
 from utils import cli_common
 from utils import unattended as un
-from utils.apply_orchestrator_base import apply_unattended_defaults
+from utils.apply_orchestrator_base import (
+    ApplyOrchestratorBase,
+    apply_unattended_defaults,
+)
 from utils.cli_common import build_parent_parser, flag_value, parse_result_line
 from utils.filtering import should_bypass_no_selection_confirmation
 from utils.state_manager import StateManager
@@ -1154,3 +1158,146 @@ class TestDocumentedResolutions:
             "row 14: unattended, a crash is a terminal condition, never a question"
         )
         assert "--resume" in text
+
+
+# ---------------------------------------------------------------------------
+# 6b. Rows 10/11 — taken is not the same as recorded
+# ---------------------------------------------------------------------------
+
+class _StubApplyOrchestrator(ApplyOrchestratorBase):
+    """The smallest concrete apply phase: enough to reach both D6 sites."""
+
+    phase_name = "apply-stub"
+    review_subdir = "review-plan"
+    item_noun = "suggestion"
+    supports_revalidation = False
+    supports_skip_flag = False
+    marks_phase_completed = False
+
+    GROUPS = [
+        {
+            "theme": "A",
+            "group_hash": "aaaa1111",
+            "suggestions": [{"title": "S1", "desc": "d", "importance": "MEDIUM"}],
+        }
+    ]
+    VALIDATION = [{"status": "valid", "reason": "OK", "confidence": 0.9}]
+
+    def load_data(self):
+        return (list(self.GROUPS), list(self.VALIDATION))
+
+    def parse_user_edits(self, report_path):
+        return {}
+
+    def merge_user_edits(self, groups, edited_descriptions):
+        return (groups, [])
+
+    def parse_skips_from_report(self, report_path):
+        return (set(), set(), set())
+
+    def parse_validation_overrides_from_report(self, report_path):
+        return ({}, {})
+
+    def format_item_for_output(self, group, index):
+        return {"index": index, "group_id": group.get("group_hash", "")}
+
+    def create_batches(self, items):
+        return []
+
+    def generate_batch_prompts(self, batches):
+        return batches
+
+    def build_output_json(self, batches, *, resume_info=None):
+        return {"batches": []}
+
+    def get_output_path(self):
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        return os.path.join(phase_dir, "orchestrator_output.json")
+
+    def print_text_summary(self, batches, output_path):
+        return None
+
+
+def _stub_apply_run(tmp_path, **flags):
+    """Run the stub phase against a real plan dir; returns the orchestrator."""
+    plan = tmp_path / "p.md"
+    plan.write_text("# P\n", encoding="utf-8")
+    (tmp_path / "p" / "review-plan").mkdir(parents=True, exist_ok=True)
+    defaults = dict(
+        plan_file=str(plan), yes=False, force=False, dry_run=False, fresh=False,
+        resume=False, approve_all=False, include_low=False, min_priority=None,
+        verbose=False, approve_all_low=False, skip_all_human=False,
+        approve_importance=None, skip_human_review=False, no_batch=False,
+        max_batch_size=4, batch_review_mode="by-importance",
+        accept_stale_consolidation=False, no_confirm=False, include_high=False,
+        claude_decide=False,
+    )
+    defaults.update(flags)
+    orch = _StubApplyOrchestrator(argparse.Namespace(**defaults))
+    assert orch.run() == 0
+    return orch
+
+
+class TestApplyPhaseRowsAreRecorded:
+    """D6's own standard: an auto-selection nobody can see is a degradation."""
+
+    def test_the_yes_that_flips_claude_decide_announces_itself(self, tmp_path, capsys):
+        _stub_apply_run(tmp_path, yes=True)
+        out = capsys.readouterr().out
+        assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in out
+        assert "--claude-decide" in out
+
+    def test_applying_everything_unasked_announces_itself(self, tmp_path, capsys):
+        """Row 11: the decision a `--yes` apply run actually makes."""
+        _stub_apply_run(tmp_path, yes=True)
+        out = capsys.readouterr().out
+        assert f"[AUTO_RESOLVED] {un.row(11).site_id}:" in out
+        # and names the flag that made the bypass deliberate, not just "bypassed"
+        assert "--yes" in out.split(un.row(11).site_id, 1)[1]
+
+    def test_without_yes_neither_is_announced(self, tmp_path, capsys):
+        """`--no-confirm` alone is a flag the caller typed, not a question answered."""
+        _stub_apply_run(tmp_path, no_confirm=True)
+        assert "[AUTO_RESOLVED]" not in capsys.readouterr().out
+
+    def test_a_detached_apply_run_lands_both_in_status_json(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The half that was silently lost: both sites fire BEFORE the detach.
+
+        `run.resolutions` stayed `[]` on exactly the runs that needed it, because
+        `detach.record_resolution` is a no-op until the worker owns the phase dir.
+        """
+        from utils import detach, status_file
+
+        plan = tmp_path / "p.md"
+        plan.write_text("# P\n", encoding="utf-8")
+        (tmp_path / "p" / "review-plan").mkdir(parents=True, exist_ok=True)
+        phase_dir = tmp_path / "p" / "apply-stub"
+        phase_dir.mkdir(parents=True)
+        handle = detach.RunHandle(
+            str(phase_dir), run_id="run-1", mode="apply-stub",
+            plan_file=str(plan), detached=True,
+        )
+        status_file.claim_run(str(phase_dir), {"run_id": "run-1", "state": "running"})
+        monkeypatch.setattr(detach, "_ACTIVE", handle)
+
+        _stub_apply_run(tmp_path, yes=True)
+        capsys.readouterr()
+
+        run = status_file.read_run(str(phase_dir))
+        assert [r["site"] for r in run["resolutions"]] == [
+            un.row(10).site_id, un.row(11).site_id
+        ]
+        assert all(r["decision"] and r["at"] for r in run["resolutions"])
+
+    def test_both_sites_are_where_the_table_says_they_are(self):
+        """Rows 10/11 declare `utils/apply_orchestrator_base.py`; check it calls."""
+        source = (
+            SKILL_ROOT / "utils" / "apply_orchestrator_base.py"
+        ).read_text(encoding="utf-8")
+        assert "utils/apply_orchestrator_base.py" in un.row(10).enforced_in
+        assert "utils/apply_orchestrator_base.py" in un.row(11).enforced_in
+        assert "_unattended.row(10).site_id" in source
+        assert "_unattended.row(11).site_id" in source
