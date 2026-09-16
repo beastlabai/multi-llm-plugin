@@ -847,6 +847,32 @@ class TestTheReportReconcilesItsIssueCountWithItsGroupCount:
         descriptions = parse_issue_descriptions(str(path))
         assert descriptions[1].startswith("OOB teleport skips resync description")
 
+    def test_a_title_holding_a_newline_keeps_its_skip_box_on_the_next_line(
+        self, tmp_path
+    ):
+        """F6: the header and the box are one unit to `report_parser`.
+
+        A title is model output. A `\\n` in it pushed the Skip box two lines
+        below the header, the `### N.` + next-line regex stopped matching, and
+        the tick was lost with no warning.
+        """
+        from utils.report_parser import parse_skipped_issues
+
+        issue = self._issue("Line one\nline two of the title")
+        report = cro.generate_review_report(
+            tmp_path / "plan.md",
+            {"cursor-agent:composer": (True, [issue], None)},
+            ["index.html"],
+            [{"theme": "t", "file": "index.html", "validation_status": "valid",
+              "validation_reason": "", "suggestions": [dict(issue)]}],
+            phase_dir=None,
+        )
+
+        assert "### 1. Line one line two of the title\n- [ ] Skip" in report
+        path = tmp_path / "report.md"
+        path.write_text(report.replace("- [ ] Skip", "- [x] Skip"), encoding="utf-8")
+        assert parse_skipped_issues(str(path)) == {1}
+
     def test_an_unvalidated_report_says_nothing_about_groups(self, tmp_path):
         """--skip-validation hands no groups over; the report claims none."""
         report = self._render(tmp_path, validated=False)
@@ -933,6 +959,113 @@ class TestWhatTheValidatorsAreShownOfTheCodeUnderReview:
         assert "S11 Definition of Done" in excerpt_context(plan)
 
 
+class TestTheExcerptStaysInsideTheRepository:
+    """F1: `suggestion["file"]` is model output, and whatever it names is read.
+
+    The lines land in every validation batch prompt and in
+    `validation_tasks.json`, which lives under the plan's output dir and is
+    commonly committed — so a reviewer (or a prompt injection a reviewer echoes)
+    citing `../../.config/multi-llm/e2e.env` used to ship those lines to the
+    validation provider.
+    """
+
+    @staticmethod
+    def _repo(tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text(
+            "\n".join(f"row {i}" for i in range(1, 51)), encoding="utf-8"
+        )
+        secret = tmp_path / "outside.txt"
+        secret.write_text("SECRET_ONE\nSECRET_TWO\nSECRET_THREE\n", encoding="utf-8")
+        return repo, secret
+
+    def test_a_relative_path_that_escapes_the_root_is_named_but_not_read(
+        self, tmp_path
+    ):
+        repo, _ = self._repo(tmp_path)
+        groups = [{"suggestions": [
+            {"file": "../outside.txt", "line_range": [1, 3]},
+        ]}]
+
+        excerpt = cro.build_reviewed_code_excerpt(groups, project_root=str(repo))
+
+        assert "### ../outside.txt" in excerpt
+        assert "outside the repository; not shown" in excerpt
+        assert "SECRET_ONE" not in excerpt
+
+    def test_an_absolute_cited_path_is_named_but_not_read(self, tmp_path):
+        repo, secret = self._repo(tmp_path)
+        groups = [{"suggestions": [{"file": str(secret), "line_range": [1, 3]}]}]
+
+        excerpt = cro.build_reviewed_code_excerpt(groups, project_root=str(repo))
+
+        assert f"### {secret}" in excerpt
+        assert "outside the repository; not shown" in excerpt
+        assert "SECRET_TWO" not in excerpt
+
+    def test_a_symlink_pointing_out_of_the_repository_is_not_followed(
+        self, tmp_path
+    ):
+        """Both sides are resolved, so an in-tree name is not enough."""
+        repo, secret = self._repo(tmp_path)
+        try:
+            (repo / "link.txt").symlink_to(secret)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable on this platform")
+        groups = [{"suggestions": [{"file": "link.txt", "line_range": [1, 3]}]}]
+
+        excerpt = cro.build_reviewed_code_excerpt(groups, project_root=str(repo))
+
+        assert "outside the repository; not shown" in excerpt
+        assert "SECRET_THREE" not in excerpt
+
+    def test_a_path_inside_the_repository_is_still_read(self, tmp_path):
+        repo, _ = self._repo(tmp_path)
+        groups = [{"suggestions": [
+            {"file": "src/app.py", "line_range": [10, 11]},
+            {"file": "./src/../src/app.py", "line_range": [30, 30]},
+        ]}]
+
+        excerpt = cro.build_reviewed_code_excerpt(
+            groups, project_root=str(repo), context_lines=0
+        )
+
+        assert "10: row 10" in excerpt
+        assert "30: row 30" in excerpt
+        assert "not shown" not in excerpt
+
+    def test_the_budget_drops_whole_files_and_names_the_ones_it_dropped(
+        self, tmp_path
+    ):
+        """Half a window reads as a whole one; a named absence does not."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        groups = []
+        for name in ("a.py", "b.py", "c.py"):
+            (repo / name).write_text(
+                "\n".join(f"{name} line {i} " + "x" * 80 for i in range(1, 41)),
+                encoding="utf-8",
+            )
+            groups.append({"suggestions": [
+                {"file": name, "line_range": [1, 40]},
+            ]})
+
+        full = cro.build_reviewed_code_excerpt(
+            groups, project_root=str(repo), context_lines=0
+        )
+        trimmed = cro.build_reviewed_code_excerpt(
+            groups, project_root=str(repo), context_lines=0,
+            budget=len(full) // 2,
+        )
+
+        assert "a.py line 1 " in trimmed
+        # A dropped file keeps none of its lines and is named instead.
+        assert "c.py line 1 " not in trimmed
+        assert "c.py" in trimmed.rsplit("(Over this block", 1)[-1]
+        assert len(trimmed) < len(full)
+
+
 class TestWhatTheReviewersAreToldTheImplementationDid:
     """F8: a logged, deliberate deviation must not read as an unexplained one."""
 
@@ -972,6 +1105,66 @@ class TestWhatTheReviewersAreToldTheImplementationDid:
         # write-batch id is not an implement task.
         assert "edited the plan" not in record
         assert "apply-batch-0" not in record
+
+    def test_a_task_that_did_not_finish_is_a_gap_and_not_a_decision(
+        self, tmp_path
+    ):
+        """F7: implement seeds every task `pending`, and crashes leave them.
+
+        "Must not be reported as missing" is a claim about a decision somebody
+        made. A failed task, or one left `pending` by an aborted run, is exactly
+        the one whose missing work a code review should report — so it goes on
+        its own line, with whatever reason was recorded for context.
+        """
+        plan_path = self._plan_with_a_record(tmp_path)
+        (tmp_path / "plan" / "state.json").write_text(
+            json.dumps({
+                "task_status": {
+                    "T001": "completed",
+                    "T002": "failed",
+                    "T003": "in_progress",
+                    "T004": "pending",
+                    "T014": "skipped",
+                },
+                "task_status_reasons": {
+                    "T002": "write batch timed out",
+                    "T014": "user chose to complete manually",
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        record = cro.build_implementation_record(plan_path)
+        decided, gaps = (
+            [line for line in record.splitlines()
+             if "must not be reported as missing" in line],
+            [line for line in record.splitlines() if "did not finish" in line],
+        )
+
+        assert len(decided) == 1 and len(gaps) == 1
+        assert "T014" in decided[0]
+        for task_id in ("T002", "T003", "T004"):
+            assert task_id in gaps[0]
+            assert task_id not in decided[0]
+        # The reason a failed task recorded is still shown, as context.
+        assert "write batch timed out" in gaps[0]
+        assert "T001" not in record
+
+    def test_a_pending_task_with_a_recorded_reason_is_a_decision(self, tmp_path):
+        """A reason is what distinguishes "not run on purpose" from "not run"."""
+        plan_path = self._plan_with_a_record(tmp_path)
+        (tmp_path / "plan" / "state.json").write_text(
+            json.dumps({
+                "task_status": {"T007": "pending"},
+                "task_status_reasons": {"T007": "deferred to the next milestone"},
+            }),
+            encoding="utf-8",
+        )
+
+        record = cro.build_implementation_record(plan_path)
+
+        assert "must not be reported as missing: T007 (pending: deferred" in record
+        assert "did not finish" not in record
 
     def test_a_plan_with_no_implement_phase_says_so_without_creating_state(
         self, tmp_path
@@ -1018,6 +1211,60 @@ class TestWhatTheReviewersAreToldTheImplementationDid:
         # Only the code half is hashed: the record is regenerated on every read.
         assert reviewed_code and "accel tuned" not in reviewed_code
         assert reviewed_code in secondary
+
+    def test_the_record_cannot_crowd_the_code_out_of_the_block(
+        self, tmp_path, capsys
+    ):
+        """F3: one budget between the halves made the *code* the half cut.
+
+        Measured: a 150-entry implement record (~20 KB) plus 20 cited files left
+        11 of the 20 with no window at all, traced only by a `[... truncated
+        ...]` line inside the prompt — the exact hole the second block exists to
+        close, one block over.
+        """
+        from utils.validation import VALIDATION_CONTEXT_LIMIT, excerpt_context
+
+        plan_path = self._plan_with_a_record(tmp_path)
+        with open(tmp_path / "plan" / "prior_changes.jsonl", "a",
+                  encoding="utf-8") as handle:
+            for i in range(150):
+                handle.write(json.dumps({
+                    "id": f"T{i:03d}", "phase": "implement",
+                    "summary": f"task {i}: " + ("changed a thing " * 10),
+                }) + "\n")
+        groups = []
+        for i in range(20):
+            name = f"m{i:02d}.py"
+            (tmp_path / name).write_text(
+                "\n".join(f"line {n} " + "x" * 60 for n in range(1, 201)),
+                encoding="utf-8",
+            )
+            groups.append({"suggestions": [
+                {"file": name, "line_range": [100, 101]},
+            ]})
+
+        secondary, reviewed_code = cro.build_validation_secondary_context(
+            groups, plan_path, project_root=str(tmp_path)
+        )
+
+        record_half = secondary.split("#### Code at the cited lines")[0]
+        assert len(record_half) <= cro.IMPLEMENTATION_RECORD_CHARS + 200
+        # The whole block now fits, so the caller's shared excerpt takes nothing
+        # more off the end of the code.
+        assert len(secondary) <= VALIDATION_CONTEXT_LIMIT
+        assert excerpt_context(secondary) == secondary
+        # Whole files are dropped, named, and never half-shown.
+        assert "the windows for these files are not shown" in secondary
+        assert "[... truncated ...]" not in secondary.split(
+            "#### Code at the cited lines"
+        )[1]
+        # The hash still covers the code as it is on disk, untrimmed, so the
+        # reaggregate site's own recompute agrees with it.
+        assert reviewed_code == cro.build_reviewed_code_excerpt(
+            groups, project_root=str(tmp_path)
+        )
+        assert len(reviewed_code) > VALIDATION_CONTEXT_LIMIT
+        assert "[VALIDATION_CONTEXT_TRUNCATED] reviewed-code" in capsys.readouterr().err
 
     def test_a_file_edited_after_fanout_moves_the_recorded_input_hash(
         self, tmp_path

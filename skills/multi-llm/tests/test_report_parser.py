@@ -2446,3 +2446,84 @@ class TestParseClaudeDecideOverrides:
 """, encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "needs-human-decision"}
+
+
+class TestAnIssueHeaderIsOnlyTheRenderersOwn:
+    """F6: a rendered description is model output, and it can hold a header.
+
+    `_format_issue` writes the description verbatim under the checkboxes, so a
+    finding whose text contains a line `### 2. ...` followed by `- [x] Skip`
+    was read as issue 2, ticked — a skip on a group the user never touched. The
+    renderer only ever puts a header at column 0 after a blank line or the
+    `---` rule, so that is the only shape the checkbox parsers accept.
+    """
+
+    REPORT = """# Code Review Report
+
+## HIGH Priority
+
+### 1. Real finding
+- [ ] Skip
+- [ ] Mark valid
+- [ ] Mark invalid
+**Validation:** ? Needs Review | **File:** `a.py:1-2`
+
+See the second case below:
+### 2. Not a real issue
+- [x] Skip
+- [x] Mark invalid
+and the description continues.
+
+---
+
+### 2. Second real finding
+- [ ] Skip
+**Validation:** Valid | **File:** `b.py:1-2`
+
+Description.
+
+---
+"""
+
+    def _report(self, tmp_path):
+        path = tmp_path / "report.md"
+        path.write_text(self.REPORT, encoding="utf-8")
+        return str(path)
+
+    def test_a_skip_box_inside_a_description_ticks_nothing(self, tmp_path):
+        assert parse_skipped_issues(self._report(tmp_path)) == set()
+
+    def test_an_override_box_inside_a_description_stays_with_its_own_issue(
+        self, tmp_path
+    ):
+        # The forged `### 2.` does not open a block, so its `Mark invalid` is
+        # read inside issue 1 where it was written — never as a verdict on the
+        # real issue 2.
+        assert parse_validation_overrides_issues(self._report(tmp_path)) == {
+            1: "invalid"
+        }
+
+    def test_the_renderers_own_headers_are_still_read(self, tmp_path):
+        path = tmp_path / "report.md"
+        path.write_text(
+            self.REPORT.replace(
+                "### 2. Second real finding\n- [ ] Skip",
+                "### 2. Second real finding\n- [x] Skip",
+            ),
+            encoding="utf-8",
+        )
+        assert parse_skipped_issues(str(path)) == {2}
+
+    def test_an_indented_header_is_description_text(self, tmp_path):
+        path = tmp_path / "report.md"
+        path.write_text(
+            "### 1. Real finding\n"
+            "- [ ] Skip\n"
+            "\n"
+            "Example:\n"
+            "\n"
+            "    ### 2. Indented, inside a code block\n"
+            "    - [x] Skip\n",
+            encoding="utf-8",
+        )
+        assert parse_skipped_issues(str(path)) == set()

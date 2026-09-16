@@ -123,6 +123,26 @@ def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
     return context[:limit] + "\n\n[... truncated ...]"
 
 
+def excerpt_context_reported(
+    context: str, block: str, limit: int = VALIDATION_CONTEXT_LIMIT
+) -> str:
+    """:func:`excerpt_context`, with the cut named on stderr.
+
+    The only trace of a trim used to be the ``[... truncated ...]`` line inside
+    the prompt, which nobody reads — so a 200 KB plan lost its whole tail (the
+    acceptance criteria live there) and the run said nothing about it. One line
+    per block, from the site that owns the budget, so an operator reading the
+    log can see which half was over and by how much.
+    """
+    if len(context) > limit:
+        print(
+            f"[VALIDATION_CONTEXT_TRUNCATED] {block} {len(context) - limit} "
+            f"chars over",
+            file=sys.stderr,
+        )
+    return excerpt_context(context, limit)
+
+
 def materialized_total_chars(tasks: List[Dict[str, Any]]) -> int:
     """Prompt characters a phase's task file will carry — the D2f file total."""
     return sum(len(task.get("prompt", "")) for task in tasks)
@@ -1363,8 +1383,12 @@ def prepare_batched_validation_tasks(
     # document is excerpted on its own budget rather than appended to the first:
     # concatenating would let a plan at the limit truncate the artifact under
     # review down to nothing, which is the failure two contexts exist to fix.
-    shared_context = excerpt_context(context)
-    shared_secondary = excerpt_context(secondary_context) if secondary_context else ""
+    shared_context = excerpt_context_reported(context, "context")
+    shared_secondary = (
+        excerpt_context_reported(secondary_context, "secondary-context")
+        if secondary_context
+        else ""
+    )
     budget = prompt_budget or PromptBudget(None)
 
     # Work list of (group_indices, is_high_priority). A batch whose materialized

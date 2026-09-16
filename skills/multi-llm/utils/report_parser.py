@@ -11,6 +11,37 @@ from typing import Dict, List, Optional, Set, Tuple
 # Matches 8-16 char lowercase hex strings inside square brackets.
 _HASH_RE = re.compile(r'\[([0-9a-f]{8,16})\]')
 
+#: A code-review issue header, anchored at column 0.
+_ISSUE_HEADER_RE = re.compile(r'^###[ \t]+(\d+)\.[^\n]*$', re.MULTILINE)
+
+
+def _issue_headers(content: str) -> List[re.Match]:
+    """The `### N.` lines that really open an issue block.
+
+    An issue's *description* is model output rendered verbatim, so it can hold
+    its own `### 2. …` line — and, under it, its own `- [x] Skip`. Read as a
+    header that forges a tick on an issue the user never touched (measured: a
+    description containing `### 2.` plus a ticked Skip box skipped two groups
+    off one report). `code_review_orchestrator._format_issue` only ever writes a
+    header at column 0 after the blank line that follows the previous issue's
+    `---` rule, so that is the only shape accepted here; anything indented, or
+    sitting mid-paragraph, is description text.
+    """
+    headers = []
+    for match in _ISSUE_HEADER_RE.finditer(content):
+        before = content[:match.start()]
+        if not before:
+            headers.append(match)  # first thing in the file
+            continue
+        # `^` under MULTILINE means `before` ends with the newline that put this
+        # header at column 0; drop it to read the line above.
+        previous = before[:-1].rsplit("\n", 1)[-1]
+        # Blank (the renderer's own spacing) or the `---` rule that closes the
+        # previous issue.
+        if previous.strip() in ("", "---"):
+            headers.append(match)
+    return headers
+
 
 def _load_stamped_groups_for_legacy(report_path: str) -> Optional[List[Dict]]:
     """Load grouped.json from the same directory as report_path and stamp stable IDs.
@@ -109,6 +140,9 @@ def parse_skipped_issues(report_path: str) -> Set[int]:
         ### 1. Title
         - [x/etc] Skip
 
+    Only a header `_issue_headers` accepts opens an issue, so a `### N.` line
+    inside a rendered description cannot carry a tick of its own.
+
     Returns:
         Set of issue indices marked with [x/etc] Skip (e.g., {1, 3})
     """
@@ -118,13 +152,16 @@ def parse_skipped_issues(report_path: str) -> Set[int]:
     content = Path(report_path).read_text(encoding='utf-8')
     skipped = set()
 
-    # Pattern: ### 1. ... followed by - [x/etc] Skip (case insensitive)
-    # Allow any non-blank content inside checkbox brackets
-    pattern = r'###\s+(\d+)\.[^\n]*\n-\s*\[\s*[^\]\s]+\s*\]\s*skip'
+    # The box on the line immediately under the header. Any non-blank content
+    # inside the brackets counts as ticked.
+    box = re.compile(r'-\s*\[\s*[^\]\s]+\s*\]\s*skip', re.IGNORECASE)
 
-    for match in re.finditer(pattern, content, re.IGNORECASE):
-        issue_index = int(match.group(1))
-        skipped.add(issue_index)
+    for match in _issue_headers(content):
+        # `$` stops before the header's own newline, so element 1 is the line
+        # under it — the box has to be there, exactly as it always had to be.
+        after = content[match.end():].split("\n", 2)
+        if len(after) > 1 and box.match(after[1]):
+            skipped.add(int(match.group(1)))
 
     return skipped
 
@@ -914,9 +951,9 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     overrides = {}
 
-    # Split content into issue sections by ### {n}. headers
-    issue_pattern = r'###\s+(\d+)\.[^\n]*'
-    issue_matches = list(re.finditer(issue_pattern, content))
+    # Split into issue sections by the headers `_issue_headers` accepts — a
+    # `### N.` line inside a description is description text, not a new block.
+    issue_matches = _issue_headers(content)
 
     for i, match in enumerate(issue_matches):
         issue_idx = int(match.group(1))
