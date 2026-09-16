@@ -143,7 +143,7 @@ class TestReadHumanDecisionsFromState:
             sf = Path(d) / "state.json"
             sf.write_text(json.dumps({
                 "human_decisions_apply-suggestions": {"aaa": APPROVE_REC},
-                "human_decisions_apply-code-fixes": {"zzz": SKIP_REC},
+                "human_decisions_apply-fixes": {"zzz": SKIP_REC},
             }), encoding="utf-8")
             got = _read_human_decisions_from_state(sf, "apply-suggestions")
             assert list(got.keys()) == ["aaa"]
@@ -153,6 +153,29 @@ class TestReadHumanDecisionsFromState:
             sf = Path(d) / "state.json"
             sf.write_text(json.dumps({}), encoding="utf-8")
             assert _read_human_decisions_from_state(sf, "apply-suggestions") == {}
+
+    def test_apply_code_fixes_mode_word_finds_decisions_the_orchestrator_wrote(self):
+        # ApplyCodeFixesOrchestrator.phase_name ("apply-fixes") is what
+        # ApplyOrchestratorBase.state.get_all_human_decisions(self.phase_name)
+        # actually stores under -- NOT the mode word "apply-code-fixes" the
+        # instructions pass as --apply-phase. Read the real orchestrator's
+        # attributes rather than hardcoding both spellings, so this test goes
+        # red if the two ever drift apart again.
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        written_key = ApplyCodeFixesOrchestrator.phase_name  # "apply-fixes"
+        mode_word = ApplyCodeFixesOrchestrator.confirmation_phase_name  # "apply-code-fixes"
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(json.dumps({
+                f"human_decisions_{written_key}": {"aaa": APPROVE_REC},
+            }), encoding="utf-8")
+            # The mode word (what instructions/apply-code-fixes.md passes).
+            got = _read_human_decisions_from_state(sf, mode_word)
+            assert list(got.keys()) == ["aaa"]
+            # The phase_name itself still works (identity pass-through).
+            got2 = _read_human_decisions_from_state(sf, written_key)
+            assert list(got2.keys()) == ["aaa"]
 
 
 class TestRegenerateReport:
@@ -226,3 +249,35 @@ class TestRegenerateReport:
             assert rc == 0
             html = (phase_dir / "report.html").read_text(encoding="utf-8")
             assert "approved" in html
+
+    def test_cli_apply_code_fixes_mode_word_finds_the_orchestrators_decisions(self):
+        # instructions/apply-code-fixes.md's step 8 runs exactly this command
+        # with --apply-phase "apply-code-fixes" (the mode word), while
+        # ApplyCodeFixesOrchestrator (and ApplyOrchestratorBase._record_decision
+        # et al.) record under state.json's "human_decisions_apply-fixes" (its
+        # phase_name). Before the _APPLY_PHASE_STATE_KEYS normalization this
+        # command silently regenerated the report with zero decisions overlaid
+        # -- exit 0, no error, no badges -- because the key it looked up was
+        # never written.
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        with tempfile.TemporaryDirectory() as d:
+            phase_dir = Path(d) / "code-review"
+            phase_dir.mkdir()
+            self._sidecar(phase_dir)
+            sf = Path(d) / "state.json"
+            sf.write_text(json.dumps({
+                f"human_decisions_{ApplyCodeFixesOrchestrator.phase_name}": {
+                    "aaa": SALVAGE_REC
+                },
+            }), encoding="utf-8")
+            rc = html_report_main([
+                "regenerate-decisions",
+                "--phase-dir", str(phase_dir),
+                "--state-file", str(sf),
+                "--apply-phase", ApplyCodeFixesOrchestrator.confirmation_phase_name,
+            ])
+            assert rc == 0
+            html = (phase_dir / "report.html").read_text(encoding="utf-8")
+            assert "salvaged" in html
+            assert "Add null-check before user.profile" in html

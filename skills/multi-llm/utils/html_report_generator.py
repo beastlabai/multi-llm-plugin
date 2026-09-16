@@ -2145,12 +2145,32 @@ def regenerate_report_with_human_decisions(
     return report_path
 
 
+#: ``apply-code-fixes`` is the one apply phase whose mode word is not its
+#: ``phase_name`` (the state.json key and phase-dir word the orchestrator
+#: itself reads/writes through, e.g. ``ApplyCodeFixesOrchestrator.phase_name``
+#: in ``apply_code_fixes_orchestrator.py``, ``"apply-fixes"``) — mirrors
+#: ``full_workflow_orchestrator.WRITE_PHASE_DIRS`` and ``display_decisions
+#: .resolve_output_file``'s ``phase_map``. ``apply-suggestions`` and
+#: ``apply-task-suggestions`` need no entry: their mode word already equals
+#: their phase_name.
+_APPLY_PHASE_STATE_KEYS = {
+    "apply-code-fixes": "apply-fixes",
+}
+
+
 def _read_human_decisions_from_state(
     state_file: Path, apply_phase: str
 ) -> Dict[str, Dict[str, Any]]:
-    """Read ``human_decisions_{apply_phase}`` from a state.json file."""
+    """Read ``human_decisions_{apply_phase}`` from a state.json file.
+
+    ``apply_phase`` is normalized through ``_APPLY_PHASE_STATE_KEYS`` first, so
+    a caller (the instructions, a human at the CLI) may pass either the mode
+    word (``apply-code-fixes``) or the phase_name it is stored under
+    (``apply-fixes``) and land on the same decisions.
+    """
     state = json.loads(Path(state_file).read_text(encoding="utf-8"))
-    return state.get(f"human_decisions_{apply_phase}", {}) or {}
+    key_phase = _APPLY_PHASE_STATE_KEYS.get(apply_phase, apply_phase)
+    return state.get(f"human_decisions_{key_phase}", {}) or {}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
