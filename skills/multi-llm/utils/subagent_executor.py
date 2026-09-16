@@ -942,7 +942,7 @@ _REASON_EXPLANATION = {
         "condition as often as a logged-out CLI, and neither is retryable"
     ),
     "sandbox_unavailable": (
-        "the runner's own sandbox cannot write under this repo; on Ubuntu 24.04 "
+        "the runner's own sandbox cannot start under this repo; on Ubuntu 24.04 "
         "this is the AppArmor user-namespace restriction, see "
         "`multi_llm.py doctor`"
     ),

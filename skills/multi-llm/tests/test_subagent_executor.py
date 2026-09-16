@@ -4548,7 +4548,7 @@ class TestSandboxUnavailable:
         assert rejected.reason_code == "sandbox_unavailable"
         assert rejected.exit_code == 3
         assert _BWRAP_BROKEN_LINE in rejected.detail
-        assert "the runner's own sandbox cannot write under this repo" in rejected.message
+        assert "the runner's own sandbox cannot start under this repo" in rejected.message
         assert "Nothing was dispatched." in rejected.message
         # A refusal is never cached.
         assert executor._SANDBOX_CACHE == {}
