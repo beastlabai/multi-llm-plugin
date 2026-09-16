@@ -988,6 +988,45 @@ class TestBatchOutcome:
         assert by_id["validation-batch-0"].skipped is True
         assert by_id["validation-batch-1"].skipped is False
 
+    def test_the_mirror_advances_as_each_task_finishes(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """D4a: the counts move during the batch, not only after it.
+
+        Measured 2026-09-16: eleven validation batches ran for a minute behind a
+        status line that said nothing had started, because `_mirror_status` was
+        called once, below the dispatch loop.
+        """
+        from utils import status_file
+
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
+        runner_env.echo("validation")
+        seen = []
+        real_update = status_file.update_status
+
+        def record(phase_dir, updates):
+            mirror = (updates.get("progress") or {}).get("subagents")
+            if isinstance(mirror, dict):
+                seen.append((mirror["ok"], mirror["total"]))
+            real_update(phase_dir, updates)
+
+        monkeypatch.setattr(status_file, "update_status", record)
+        tasks = [
+            _validation_batch(tmp_path, i, (f"{'abc'[i]*4}000000000000",))
+            for i in range(3)
+        ]
+        report = executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation",
+        )
+        assert report.ok
+        # One mirror per finished task, always against the batch's full size —
+        # and the closing mirror is unchanged from what it wrote before.
+        assert seen == [(1, 3), (2, 3), (3, 3), (3, 3)]
+        mirrored = json.loads(
+            (tmp_path / ".status.json").read_text(encoding="utf-8")
+        )["progress"]["subagents"]
+        assert mirrored["ok"] == mirrored["total"] == 3
+
     def test_a_corrupt_result_file_is_not_treated_as_complete(self, tmp_path):
         task = _validation_batch(tmp_path)
         (tmp_path / "validation_batch_0.json").write_text("{not json", encoding="utf-8")
@@ -1941,6 +1980,35 @@ class TestAdditiveUntilAsked:
         assert dispatch_salvage_tasks(
             args, phase_dir=str(tmp_path), phase="review-plan"
         ) == []
+
+    def test_a_dispatch_reports_its_step_before_the_batch_starts(
+        self, tmp_path, monkeypatch
+    ):
+        """F5's second half: `grouping` stood for the whole validation dispatch,
+        so a poll could not tell a phase that had eleven batches in flight from
+        one that had finished grouping and stalled (measured 2026-09-16)."""
+        from utils import detach as detach_module
+        from utils.review_orchestrator_base import dispatch_subagent_tasks
+
+        seen = []
+        monkeypatch.setattr(
+            detach_module, "report_progress",
+            lambda phase_dir, **updates: seen.append((str(phase_dir), updates)),
+        )
+        monkeypatch.setattr(
+            executor, "continue_past_marker",
+            lambda *a, **k: (seen.append(("dispatched", {})), True)[1],
+        )
+        args = type("Args", (), {"exec_subagents": True, "yes": True})()
+        for label, step in (("validation", "validating"),
+                            ("task generation", "dispatching task generation")):
+            seen.clear()
+            assert dispatch_subagent_tasks(
+                args, task_file="t.json", phase_dir=str(tmp_path),
+                phase="review-plan", label=label,
+            ) is True
+            # Reported first, so the step is standing while the batch runs.
+            assert seen == [(str(tmp_path), {"step": step}), ("dispatched", {})]
 
 
 # ---------------------------------------------------------------------------
@@ -3794,6 +3862,52 @@ class TestModelCatalogPreflight:
         assert time.monotonic() - started < 1.0
         assert lines and lines[1].strip() == (
             "opencode:opencode/big-pickle  (supplied by host capabilities)"
+        )
+
+    def test_the_runs_own_host_outranks_the_host_reading_the_status(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F6: three polls of an `opencode` run all printed `claude-code:sonnet`,
+        because the host came from the *invocation* while the run's own sat
+        unread in `.status.json` (measured 2026-09-16)."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        view = {"run": {"host": "opencode"}, "progress": {}}
+
+        # Invoked from claude-code (the default host), reading an opencode run.
+        lines = run_status.render_runner_text(plan, views=[view])
+        assert lines[1].strip() == (
+            "opencode:opencode/big-pickle  (supplied by host capabilities)"
+        )
+        assert "opencode dispatches" in lines[2]
+        # A run that recorded no host still answers for the invoking one.
+        assert "claude-code" in run_status.render_runner_text(
+            plan, views=[{"run": {}, "progress": {}}]
+        )[1]
+
+    def test_the_runner_a_run_really_dispatched_to_beats_a_fresh_resolution(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The executor mirror is the only account on disk of what a run's
+        subagents ran on; a resolution made now can only guess at it."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        spec = "opencode:openrouter/~deepseek/deepseek-flash-latest"
+        lines = run_status.render_runner_text(plan, views=[{
+            "run": {"host": "opencode"},
+            "progress": {"subagents": {"runner_versions": {spec: "1.18.31"}}},
+        }])
+        assert lines[1].strip() == (
+            f"{spec}  (recorded by this run's own dispatches)"
         )
 
 

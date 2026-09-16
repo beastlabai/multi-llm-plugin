@@ -273,6 +273,12 @@ def render_run_text(
                 lines.append(f"      advance it with: {advance}")
         if view.get("progress"):
             lines.append(f"      progress:       {_progress_text(view['progress'])}")
+        if run.get("host"):
+            # The host that *launched* the run, which is not necessarily the one
+            # reading this: without it nothing on screen said whose subagent
+            # runner the block below is about (measured 2026-09-16, an opencode
+            # run polled from Claude Code).
+            lines.append(f"      host:           {run['host']}")
         if run.get("pid"):
             # The identity probe only runs for a non-terminal record — a finished
             # run's pid is history, and probing it would invite exactly the
@@ -578,10 +584,52 @@ def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:
     return dispatcher_command("status", str(plan_path), "--abort", "--phase", str(phase))
 
 
+def _run_runner_facts(
+    views: Sequence[Dict[str, Any]]
+) -> "tuple":
+    """``(host, specs)`` the listed runs recorded about their own subagents.
+
+    The host is the first one any listed run wrote into ``.status.json``
+    (``RunHandle`` records the launcher's ``--host``); the specs are the runner
+    keys that same run's executor mirror pinned, i.e. what its dispatches
+    actually ran on rather than what a fresh resolution would pick now.
+    """
+    for view in views or ():
+        run = view.get("run") or {}
+        host = run.get("host")
+        if not isinstance(host, str) or not host.strip():
+            continue
+        mirror = (view.get("progress") or {}).get("subagents")
+        versions = mirror.get("runner_versions") if isinstance(mirror, dict) else None
+        specs = sorted(str(spec) for spec in versions) if isinstance(versions, dict) else []
+        return host.strip(), specs
+    return None, []
+
+
 def render_runner_text(
-    plan_path: Path, host_id: Optional[str] = None
+    plan_path: Path,
+    host_id: Optional[str] = None,
+    *,
+    views: Sequence[Dict[str, Any]] = (),
 ) -> List[str]:
     """The resolved subagent runner, its layer of origin, and who consults it (D3o).
+
+    **The run's host wins over the invoking one.** A poll is routinely typed
+    from a different host than the one that launched the run — measured
+    2026-09-16, three ``status`` calls on an ``opencode`` run whose eleven
+    batches all dispatched to ``opencode:openrouter/…`` each printed
+    ``claude-code:sonnet``, because the host came from *this* invocation's argv
+    while the run's own sat unread in ``.status.json``. So the run's host is
+    what this reports, and with it:
+
+    * the specs the run's executor mirror recorded, when it has dispatched
+      anything — the only account on disk of what its subagents really ran on;
+    * otherwise a fresh resolution for that host, with the **session** rung
+      skipped whenever the run was launched elsewhere: that rung reads
+      ``MULTI_LLM_HOST_SESSION_MODEL`` off *this* process, which is the polling
+      session's model and not the run's. The plugin's own poll passes
+      ``--host opencode`` from inside the session that launched the run, so
+      there the rung still applies and still answers ``(supplied by session)``.
 
     "I set ``driver.subagent_runner`` and nothing changed" has three different
     answers — a higher layer won, no layer expressed an opinion so the running
@@ -603,10 +651,18 @@ def render_runner_text(
         from . import host_capabilities as caps
         from .provider_registry import resolve_subagent_runner
 
-        resolved_host = caps.resolve_host_id(sys.argv[1:], explicit=host_id)
-        spec, layer = resolve_subagent_runner(
-            "full", anchor=str(plan_path), host_id=resolved_host
-        )
+        invoking_host = caps.resolve_host_id(sys.argv[1:], explicit=host_id)
+        run_host, recorded = _run_runner_facts(views)
+        resolved_host = run_host or invoking_host
+        if recorded:
+            spec = ", ".join(recorded)
+            source = "recorded by this run's own dispatches"
+        else:
+            spec, layer = resolve_subagent_runner(
+                "full", anchor=str(plan_path), host_id=resolved_host,
+                skip_session=resolved_host != invoking_host,
+            )
+            source = f"supplied by {layer}"
         native = str(caps.entry(resolved_host).get("subagents")) == "native"
     except Exception:
         return []
@@ -618,7 +674,7 @@ def render_runner_text(
     )
     return [
         "driver.subagent_runner — what a dispatched subagent would run:",
-        f"  {spec}  (supplied by {layer})",
+        f"  {spec}  ({source})",
         f"  {scope}",
     ]
 
@@ -796,7 +852,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args),
         )
-        runner = render_runner_text(plan_path, host_id=getattr(args, "host", None))
+        runner = render_runner_text(
+            plan_path, host_id=getattr(args, "host", None), views=views
+        )
         if runner:
             lines.append("")
             lines += runner
@@ -826,6 +884,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 str(plan_path),
                 phase=first.get("phase"),
                 run_id=str(first["run"].get("run_id") or "") or None,
+                # The run's own host, so the poll this hands back reports the
+                # run's runner rather than the reader's (F6, 2026-09-16).
+                host=str(first["run"].get("host") or "") or None,
             )
         )
     return exit_code

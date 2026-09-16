@@ -287,3 +287,59 @@ class TestConsolidationRecommendationLeavesTheLog:
             f"consolidation recommended: {groups} valid groups >= 2 "
             "— run --consolidate"
         ) in out
+class TestTheFanOutReportsProgressWhileItRuns:
+    """F5: `progress.models_done` was written `0` once, before the first launch,
+    and recomputed only after the last model returned — so every poll during the
+    fan-out (435 s of a 516 s run, measured 2026-09-16) read `models 0/4` beside
+    models that had already finished."""
+
+    #: A budget every slot can hold: `run_single_model` refuses to start a
+    #: dispatch whose runner's declared worst-case envelope is larger than what
+    #: is left of the slot, and this suite's 5 s default refuses codex outright.
+    TIMEOUT = "120"
+
+    def _recorded(self, tmp_path, models, *, force=False):
+        """One real `review-plan` run, recording every progress report it made."""
+        plan = _plan(tmp_path)
+        argv = [
+            "--plan-file", str(plan), "--models", *models,
+            "--skip-validation", "--timeout", self.TIMEOUT,
+            "--max-parallel", str(len(models)),
+        ] + (["--force"] if force else [])
+        calls = []
+        real = base._detach.report_progress
+
+        def record(phase_dir, **updates):
+            calls.append(dict(updates))
+            real(phase_dir, **updates)
+
+        with patch.object(
+            base, "invoke_with_file_output",
+            side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
+        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+            base._detach, "report_progress", record
+        ):
+            assert asyncio.run(rpo.main(argv)) == 0
+        return calls
+
+    def test_each_finished_model_advances_the_counter(self, tmp_path):
+        calls = self._recorded(
+            tmp_path, ("cursor-agent:auto", "codex:gpt-5.5", "opencode:auto")
+        )
+        counted = [c["models_done"] for c in calls if "models_done" in c]
+        # The opening zero, one per finished slot, then the phase's own
+        # recomputation from the models that produced a result.
+        assert counted == [0, 1, 2, 3, 3]
+        assert all(c["models_total"] == 3 for c in calls if "models_total" in c)
+
+    def test_a_resumed_run_counts_the_slots_it_answers_from_disk(self, tmp_path):
+        """A skipped model has finished its slot; a resume that skips every
+        model must not read `models 0/2` for the whole of it."""
+        models = ("cursor-agent:auto", "codex:gpt-5.5")
+        self._recorded(tmp_path, models)  # writes both `{model}.json` files
+        counted = [
+            c["models_done"]
+            for c in self._recorded(tmp_path, models, force=True)
+            if "models_done" in c
+        ]
+        assert counted == [0, 1, 2, 2]
