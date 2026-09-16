@@ -1966,3 +1966,339 @@ class TestHumanTaskDependencyEdgeCases:
 
         # T001 -> T003 -> T005 skipped. T002 and T004 are NOT skipped.
         assert skipped == {"T001", "T003", "T005"}
+
+
+class TestSeedPendingTaskStatuses:
+    """F5: the workflow view's denominator is `len(task_status)`, and nothing
+    seeded it before a task's first finish/skip — `WriteBatchScheduler` only
+    calls `update_task_status` on completion or skip, so a workflow snapshot
+    taken mid-run read `(1/2 tasks)`, then `(6/7 tasks)`, on the same 14-task
+    plan.
+    """
+
+    class _FakeState:
+        def __init__(self, initial=None):
+            self._status = dict(initial or {})
+            self.save_calls = 0
+
+        def get_task_status(self, task_id):
+            return self._status.get(task_id)
+
+        def update_task_status(self, task_id, status, reason=None):
+            self._status[task_id] = status
+
+        def save(self):
+            self.save_calls += 1
+
+    def test_every_materialized_task_gets_pending_when_untouched(self):
+        from implement_orchestrator import _seed_pending_task_statuses
+
+        state = self._FakeState()
+        tasks = [{"task_id": "T001"}, {"task_id": "T002"}, {"task_id": "T003"}]
+        _seed_pending_task_statuses(state, tasks)
+        assert state._status == {
+            "T001": "pending", "T002": "pending", "T003": "pending",
+        }
+        assert state.save_calls == 1
+
+    def test_a_resume_does_not_reset_an_already_recorded_status(self):
+        """A `--resume` restores completed/failed/skipped statuses from disk
+        before this runs — re-marking one of those `pending` would erase it.
+        """
+        from implement_orchestrator import _seed_pending_task_statuses
+
+        state = self._FakeState({"T001": "completed", "T002": "failed"})
+        tasks = [{"task_id": "T001"}, {"task_id": "T002"}, {"task_id": "T003"}]
+        _seed_pending_task_statuses(state, tasks)
+        assert state._status == {
+            "T001": "completed", "T002": "failed", "T003": "pending",
+        }
+
+    def test_nothing_to_seed_does_not_save(self):
+        from implement_orchestrator import _seed_pending_task_statuses
+
+        state = self._FakeState({"T001": "completed"})
+        _seed_pending_task_statuses(state, [{"task_id": "T001"}])
+        assert state.save_calls == 0
+
+    def test_a_task_with_no_id_is_skipped_not_seeded_as_empty_string(self):
+        from implement_orchestrator import _seed_pending_task_statuses
+
+        state = self._FakeState()
+        _seed_pending_task_statuses(state, [{"task_id": ""}, {}])
+        assert state._status == {}
+        assert state.save_calls == 0
+
+
+class TestRecordImplementWriteArtifacts:
+    """F7: `implement` never goes through `ApplyOrchestratorBase` — it drives
+    `WriteBatchScheduler` directly — so a fully successful detached run
+    reported `"artifacts": []` and `status` had no `output_files:` block,
+    unlike every apply phase.
+    """
+
+    class _Outcome:
+        def __init__(self, ok, files_touched):
+            self.ok = ok
+            self.files_touched = files_touched
+
+    class _Result:
+        def __init__(self, report_path=None, summary_file=None, outcomes=None):
+            self.report_path = report_path
+            self.summary_file = summary_file
+            self.outcomes = outcomes or []
+
+    def test_the_files_the_phase_produced_are_recorded(self, tmp_path, monkeypatch):
+        from implement_orchestrator import _record_implement_write_artifacts
+        from utils import cli_common, write_safety
+
+        # `files_touched` is repo-relative (`TaskSnapshot.changed()`, D3f/D3h),
+        # never relative to this process's own cwd — pin the "repo root" the
+        # same way the scheduler itself does, off the plan file anchor, rather
+        # than relying on (or being tripped up by) the test runner's cwd.
+        monkeypatch.setattr(
+            write_safety, "resolve_repo_root", lambda anchor: str(tmp_path)
+        )
+
+        phase_dir = tmp_path / "implement"
+        phase_dir.mkdir()
+        task_file = phase_dir / "write_tasks.json"
+        task_file.write_text("{}", encoding="utf-8")
+        report_path = phase_dir / "write_batch_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+        batch_report_path = phase_dir / "subagent_batch_report.json"
+        batch_report_path.write_text("{}", encoding="utf-8")
+        prior = tmp_path / "prior_changes.jsonl"
+        prior.write_text("", encoding="utf-8")
+        summary_path = phase_dir / "summary.md"
+        summary_path.write_text("# summary\n", encoding="utf-8")
+        (tmp_path / "src").mkdir()
+        touched = tmp_path / "src" / "main.py"
+        touched.write_text("x = 1\n", encoding="utf-8")
+
+        result = self._Result(
+            report_path=str(report_path),
+            summary_file=str(summary_path),
+            outcomes=[
+                # ok, and its declared file really changed -> named.
+                self._Outcome(True, ["src/main.py"]),
+                # not ok -> never consulted, even though it names a real file.
+                self._Outcome(False, ["src/main.py"]),
+            ],
+        )
+
+        context = cli_common.ResultContext(mode="implement", phase="implement")
+        cli_common.activate_result(context)
+        try:
+            _record_implement_write_artifacts(
+                phase_dir=str(phase_dir), output_dir=str(tmp_path),
+                task_file=str(task_file), plan_file=str(tmp_path / "plan.md"),
+                result=result,
+            )
+        finally:
+            cli_common.deactivate_result()
+
+        recorded = set(context.artifacts)
+        assert str(task_file) in recorded
+        assert str(report_path) in recorded
+        assert str(batch_report_path) in recorded
+        assert str(prior) in recorded
+        assert str(summary_path) in recorded
+        assert str(touched) in recorded
+
+    def test_a_file_that_does_not_exist_is_not_named(self, tmp_path, monkeypatch):
+        """A stopped run must name what it produced, not what it meant to."""
+        from implement_orchestrator import _record_implement_write_artifacts
+        from utils import cli_common, write_safety
+
+        monkeypatch.setattr(
+            write_safety, "resolve_repo_root", lambda anchor: str(tmp_path)
+        )
+        phase_dir = tmp_path / "implement"
+        phase_dir.mkdir()
+
+        result = self._Result(outcomes=[self._Outcome(True, ["src/never-written.py"])])
+
+        context = cli_common.ResultContext(mode="implement", phase="implement")
+        cli_common.activate_result(context)
+        try:
+            _record_implement_write_artifacts(
+                phase_dir=str(phase_dir), output_dir=str(tmp_path),
+                task_file=str(phase_dir / "write_tasks.json"),
+                plan_file=str(tmp_path / "plan.md"), result=result,
+            )
+        finally:
+            cli_common.deactivate_result()
+
+        assert context.artifacts == []
+
+    def test_a_file_touched_by_two_ok_outcomes_is_named_once(
+        self, tmp_path, monkeypatch
+    ):
+        from implement_orchestrator import _record_implement_write_artifacts
+        from utils import cli_common, write_safety
+
+        monkeypatch.setattr(
+            write_safety, "resolve_repo_root", lambda anchor: str(tmp_path)
+        )
+        phase_dir = tmp_path / "implement"
+        phase_dir.mkdir()
+        touched = tmp_path / "index.html"
+        touched.write_text("<html></html>", encoding="utf-8")
+
+        result = self._Result(outcomes=[
+            self._Outcome(True, ["index.html"]),
+            self._Outcome(True, ["index.html"]),
+        ])
+
+        context = cli_common.ResultContext(mode="implement", phase="implement")
+        cli_common.activate_result(context)
+        try:
+            _record_implement_write_artifacts(
+                phase_dir=str(phase_dir), output_dir=str(tmp_path),
+                task_file=str(phase_dir / "write_tasks.json"),
+                plan_file=str(tmp_path / "plan.md"), result=result,
+            )
+        finally:
+            cli_common.deactivate_result()
+
+        assert sum(1 for p in context.artifacts if p == str(touched)) == 1
+
+
+class TestImplementTasksFileIsStamped:
+    """F15: `write_tasks.json` used to record only `plan_sha256`, although
+    every prompt in it is built from the plan's external `tasks/tasks.md` when
+    it names one — `run_implement_write_phase` called `materialize_write_tasks`
+    / `write_task_file_for_phase` without `tasks_file=`.
+    """
+
+    def test_the_external_tasks_file_reaches_the_materializer(
+        self, sample_plan_with_tasks_reference, mock_state_manager, temp_dir
+    ):
+        from implement_orchestrator import main
+
+        seen = {}
+
+        def fake_materialize(*, kind, batches, phase_dir, plan_file, tasks_file=None,
+                              grouped_file=None, output_name_index=None):
+            seen["materialize"] = tasks_file
+            return []
+
+        def fake_write_task_file(*, kind, tasks, phase_dir, plan_file,
+                                  tasks_file=None, grouped_file=None):
+            seen["write_task_file"] = tasks_file
+            path = Path(phase_dir) / "write_tasks.json"
+            path.write_text("{}", encoding="utf-8")
+            return str(path)
+
+        class _FakeSchedulerResult:
+            exit_code = 0
+            messages = []
+            report_path = None
+            summary_file = None
+            outcomes = []
+
+        class _FakeScheduler:
+            def __init__(self, **kwargs):
+                pass
+
+            def run(self):
+                return _FakeSchedulerResult()
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state',
+                   return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('utils.write_phase_bridge.materialize_write_tasks',
+                   fake_materialize), \
+             patch('utils.write_phase_bridge.write_task_file_for_phase',
+                   fake_write_task_file), \
+             patch('utils.write_batch_scheduler.WriteBatchScheduler',
+                   _FakeScheduler):
+
+            mock_args.return_value = MagicMock(
+                plan_file=str(sample_plan_with_tasks_reference),
+                output=str(temp_dir / "output.json"),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=True,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
+                yes=False,
+                force_strategy=None,
+                human_task=None,
+            )
+            main()
+
+        expected = str(
+            Path(sample_plan_with_tasks_reference).resolve().parent
+            / "tasks" / "tasks.md"
+        )
+        assert seen["materialize"] == expected
+        assert seen["write_task_file"] == expected
+
+    def test_the_legacy_embedded_format_passes_none(
+        self, sample_plan_with_tasks, mock_state_manager, temp_dir
+    ):
+        """No `TASKS_FILE` marker -> no external file -> nothing to hash."""
+        from implement_orchestrator import main
+
+        seen = {}
+
+        def fake_materialize(*, kind, batches, phase_dir, plan_file, tasks_file=None,
+                              grouped_file=None, output_name_index=None):
+            seen["materialize"] = tasks_file
+            return []
+
+        def fake_write_task_file(*, kind, tasks, phase_dir, plan_file,
+                                  tasks_file=None, grouped_file=None):
+            seen["write_task_file"] = tasks_file
+            path = Path(phase_dir) / "write_tasks.json"
+            path.write_text("{}", encoding="utf-8")
+            return str(path)
+
+        class _FakeSchedulerResult:
+            exit_code = 0
+            messages = []
+            report_path = None
+            summary_file = None
+            outcomes = []
+
+        class _FakeScheduler:
+            def __init__(self, **kwargs):
+                pass
+
+            def run(self):
+                return _FakeSchedulerResult()
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state',
+                   return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('utils.write_phase_bridge.materialize_write_tasks',
+                   fake_materialize), \
+             patch('utils.write_phase_bridge.write_task_file_for_phase',
+                   fake_write_task_file), \
+             patch('utils.write_batch_scheduler.WriteBatchScheduler',
+                   _FakeScheduler):
+
+            mock_args.return_value = MagicMock(
+                plan_file=str(sample_plan_with_tasks),
+                output=str(temp_dir / "output.json"),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=True,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
+                yes=False,
+                force_strategy=None,
+                human_task=None,
+            )
+            main()
+
+        assert seen["materialize"] is None
+        assert seen["write_task_file"] is None
