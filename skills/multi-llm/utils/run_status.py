@@ -308,9 +308,13 @@ def render_run_text(
             # word on screen a reader is likely to take at face value and stop
             # watching, so a live run under a completed phase says so rather
             # than reading like a stale cache.
+            # F4, 2026-09-17: `stale` covers both "slow to beat" and "provably
+            # gone but not yet closed out"; only the first is live. A dead run
+            # printed "completed (re-running since …)" two lines under its own
+            # `died (pid N gone, …)`, which reads as the opposite of the truth.
             live_verdict = view["verdict"] in (
-                detach.VERDICT_STARTING, detach.VERDICT_RUNNING, detach.VERDICT_STALE,
-            )
+                detach.VERDICT_STARTING, detach.VERDICT_RUNNING,
+            ) or (view["verdict"] == detach.VERDICT_STALE and not _died(view))
             if wf_status == "completed" and live_verdict:
                 started = run.get("started_at")
                 suffix = f" (re-running since {started})" if started else " (re-running)"
@@ -1071,27 +1075,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     views = _collect(plan_path, args)
     if args.wait:
         views = _wait_for_terminal(plan_path, args, views)
-        # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
-        # `ctx.phase = None` before this ever ran (`status` is a command, not a
-        # phase) — right for a plain multi-run listing, but the opencode
-        # plugin's supervised poll pins one run (`--run-id`, sometimes also
-        # `--phase`) and reads this leg's own MULTI_LLM_RESULT verbatim. That
-        # payload said `{"mode": "status", "phase": null, …}` for a finished
-        # `implement` run, and a weaker model than the one that hit this had to
-        # infer its phase had finished from `state: done` alone. The watched
-        # run already knows both — `.status.json.run.mode`, falling back to the
-        # phase dir it lives in — so a `--wait` poll pinned to exactly one run
-        # carries them into its own result. Ambiguous (more than one view, or
-        # no selector at all) keeps `status`/`None`: no single run is "the"
-        # answer there.
-        if len(views) == 1 and (args.phase or args.run_id):
-            watched = views[0]
-            watched_run = watched.get("run") or {}
-            watched_mode = str(
-                watched_run.get("mode") or watched.get("phase") or ""
-            ) or None
-            watched_phase = str(watched.get("phase") or "") or None
-            record_mode_phase(watched_mode, watched_phase)
+
+    # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
+    # `ctx.phase = None` before this ever ran (`status` is a command, not a
+    # phase) — right for a plain multi-run listing, but the opencode plugin's
+    # supervised poll pins one run (`--run-id`, sometimes also `--phase`) and
+    # reads this leg's own MULTI_LLM_RESULT verbatim. That payload said
+    # `{"mode": "status", "phase": null, …}` for a finished `implement` run,
+    # and a weaker model than the one that hit this had to infer its phase had
+    # finished from `state: done` alone. The watched run already knows both —
+    # `.status.json.run.mode`, falling back to the phase dir it lives in — so a
+    # poll pinned to exactly one run carries them into its own result.
+    # Ambiguous (more than one view, or no selector at all) keeps
+    # `status`/`None`: no single run is "the" answer there. F3, 2026-09-17:
+    # what makes a poll "the watched run's" is the selector, not whether it
+    # also waited, so this sits outside `if args.wait` — a single-view poll
+    # without `--wait` was still emitting the old `status`/`null` pair.
+    if len(views) == 1 and (args.phase or args.run_id):
+        watched = views[0]
+        watched_run = watched.get("run") or {}
+        watched_mode = str(
+            watched_run.get("mode") or watched.get("phase") or ""
+        ) or None
+        watched_phase = str(watched.get("phase") or "") or None
+        record_mode_phase(watched_mode, watched_phase)
 
     exit_code = exit_code_for(views)
 
@@ -1176,7 +1183,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # polled the finished run straight back to exit 0). Pick the first
         # non-terminal view; only when none is live does the finished one
         # answer, which is the genuine "nothing to do" case.
-        live_views = [v for v in views if v["verdict"] not in detach.TERMINAL_VERDICTS]
+        # F1, 2026-09-17: "live" is non-terminal *and* actually holding a run.
+        # `no_run` is non-terminal only because there is nothing to be terminal
+        # about — a phase run in the foreground (every Claude Code host phase)
+        # leaves a checkpoint with no `run` record — and counting it live told
+        # a host `state: running` about a phase nothing ever launched, and
+        # handed back a poll command for it that can never leave exit 2.
+        live_views = [
+            v for v in views
+            if v["verdict"] not in detach.TERMINAL_VERDICTS
+            and v["verdict"] != detach.VERDICT_NO_RUN
+        ]
         first = live_views[0] if live_views else views[0]
         record_next(
             detach.status_command_for(

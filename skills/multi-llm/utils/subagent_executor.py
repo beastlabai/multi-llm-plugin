@@ -294,6 +294,19 @@ def _batch_report_filename(kind: str) -> str:
         return f"subagent_batch_report_{kind}.json"
     return BATCH_REPORT_FILENAME
 
+
+def batch_report_path(phase_dir: str, kind: str) -> str:
+    """Where ``kind``'s batch report lives under ``phase_dir`` — the public form.
+
+    The naming rule belongs to this module (F6, 2026-09-17), so a reader
+    outside it asks rather than spelling a filename out: ``apply_orchestrator_
+    base`` hands the judge's report to the host through ``output_files``, and a
+    hand-typed copy of the name would drop that key silently the day the rule
+    moves.
+    """
+    return os.path.join(phase_dir, _batch_report_filename(kind))
+
+
 #: Per-attempt diagnostic captures (D3k). A directory, so the reaggregation glob
 #: (``{phase_dir}/*.json``) never sees them.
 FAILED_CAPTURE_DIRNAME = "failed"
@@ -1237,10 +1250,11 @@ def preflight_runner(
     Between the catalog leg and the host's verdict sits the D6 sandbox
     self-test: an adapter that puts an OS sandbox between the model and the
     filesystem (codex, through bubblewrap) declares a model-free
-    ``sandbox_probe_command`` for its write profile, and a non-zero exit is
-    exit 3 here — ``sandbox_unavailable`` — before the first edit-capable
-    dispatch. Cached per host/spec/profile; a timeout is ``unknown`` and
-    dispatches.
+    ``sandbox_probe_command`` for **every** profile it dispatches — the
+    read-only one too, because a bwrap that cannot start denies a read dispatch
+    the repository it was sent to read — and a non-zero exit is exit 3 here,
+    ``sandbox_unavailable``, before the first dispatch of that profile. Cached
+    per host/spec/profile; a timeout is ``unknown`` and dispatches.
 
     Returns:
         ``{"provider", "model", "version", "auth", "nested_exec", "sandbox",
@@ -1341,9 +1355,10 @@ def preflight_runner(
         info["model_catalog"] = _detect_model(
             provider_name, model, key=key, spec=spec, profile=profile, anchor=anchor
         )
-        # D6 step 3 — the runner's own OS sandbox, asked to write one byte
-        # where the batch would, with no model involved. Only an adapter that
-        # declares a command for this profile is probed (codex, agent-write);
+        # D6 step 3 — the runner's own OS sandbox, exercised where the batch
+        # would run it, with no model involved. Only an adapter that declares a
+        # command for this profile is probed (codex, for every profile it
+        # dispatches — read-only included, since that is the same bubblewrap);
         # everything else records `not-required`. Same gate as the catalog
         # leg: a caller that asked for no CLI spawn gets none.
         info["sandbox"] = _detect_sandbox(
@@ -1583,12 +1598,13 @@ def _run_sandbox_probe(
 ) -> Optional["subprocess.CompletedProcess"]:
     """Run one ``sandbox_probe_command`` argv (D6 step 3).
 
-    A sibling of :func:`_run_probe` rather than a flag on it — the probe writes
-    a byte, so it has to run with ``cwd`` at the repo root the dispatch would
-    use, and it has its own, shorter budget. ``None`` means the command could
-    not be run at all (the binary vanished between ``is_available`` and here,
-    the interpreter refused the spawn) and every caller reads it as
-    ``unknown``: a preflight probe reports, it never blocks on its own failure.
+    A sibling of :func:`_run_probe` rather than a flag on it — a write
+    profile's probe writes a byte, so it has to run with ``cwd`` at the repo
+    root the dispatch would use, and it has its own, shorter budget. ``None``
+    means the command could not be run at all (the binary vanished between
+    ``is_available`` and here, the interpreter refused the spawn) and every
+    caller reads it as ``unknown``: a preflight probe reports, it never blocks
+    on its own failure.
     A timeout is ``None`` too, for the same reason.
     """
     launcher, _ = _resolve_executable(argv[0])
@@ -1686,7 +1702,7 @@ def _detect_sandbox(
     anchor: Optional[str] = None,
 ) -> str:
     """Run the adapter's model-free sandbox self-test once per host/spec/profile
-    and refuse a runner whose own sandbox cannot write (D6 step 3).
+    and refuse a runner whose own sandbox cannot run (D6 step 3).
 
     Returns ``ok`` | ``unknown`` | ``not-required``; a non-zero exit raises,
     because bubblewrap failing to start is a property of the machine — every
@@ -5407,7 +5423,7 @@ def continue_past_marker(
         # F6: names the file this dispatch's own kind actually wrote, not
         # always the bare name — a failed judging dispatch would otherwise
         # point at a report a later write dispatch may go on to overwrite.
-        f"Report: {os.path.join(phase_dir, _batch_report_filename(report.kind))}",
+        f"Report: {batch_report_path(phase_dir, report.kind)}",
         f"Diagnostics: {os.path.join(phase_dir, FAILED_CAPTURE_DIRNAME)}/",
         # Resume IS the retry-only-the-failures path: a task counts as done iff
         # its result file exists, parses and validates, so re-invoking the phase

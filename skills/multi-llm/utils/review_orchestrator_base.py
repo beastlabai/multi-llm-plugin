@@ -1062,6 +1062,24 @@ def collect_served_models(
 _FANOUT_SANDBOX_CACHE: Dict[str, Tuple[str, str]] = {}
 _FANOUT_SANDBOX_LOCK = threading.Lock()
 
+#: One probe lock per cache key, so the cache lock above is held only for the
+#: dict read and the dict write (F5, 2026-09-17). Held across the whole probe,
+#: it serialized every slot of every provider behind codex's — up to
+#: ``SANDBOX_PROBE_TIMEOUT_S`` (10 s) of dead time at the head of a fan-out for
+#: an opencode or claude slot whose own answer is ``not-required`` and spawns
+#: nothing. Keyed the same way the cache is, so two slots of one provider still
+#: share a single probe rather than racing it.
+_FANOUT_SANDBOX_PROBE_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _fanout_probe_lock(key: str) -> threading.Lock:
+    """The probe lock for one cache key, created once under the cache lock."""
+    with _FANOUT_SANDBOX_LOCK:
+        lock = _FANOUT_SANDBOX_PROBE_LOCKS.get(key)
+        if lock is None:
+            lock = _FANOUT_SANDBOX_PROBE_LOCKS[key] = threading.Lock()
+        return lock
+
 
 def sandbox_unavailable_reason(provider_name: str, tail: str) -> str:
     """The recorded reason for a slot refused because its sandbox cannot start.
@@ -1096,6 +1114,13 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str
     key = f"{provider_name}|{PROFILE_GENERATE}|{cwd or ''}"
     with _FANOUT_SANDBOX_LOCK:
         cached = _FANOUT_SANDBOX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _fanout_probe_lock(key):
+        # Double-checked: a sibling slot on this same key may have finished the
+        # probe while this thread waited for the lock.
+        with _FANOUT_SANDBOX_LOCK:
+            cached = _FANOUT_SANDBOX_CACHE.get(key)
         if cached is not None:
             return cached
         from .subagent_executor import sandbox_verdict
@@ -1106,7 +1131,8 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str
             )
         except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
             verdict = ("unknown", "")
-        _FANOUT_SANDBOX_CACHE[key] = verdict
+        with _FANOUT_SANDBOX_LOCK:
+            _FANOUT_SANDBOX_CACHE[key] = verdict
         return verdict
 
 
