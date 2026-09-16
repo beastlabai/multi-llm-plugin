@@ -667,6 +667,38 @@ class TestTheInMemoryMutators:
         assert finish_phase_in_state(state, "implement") is None
         assert state["metrics_progress"] == {"code-review": {"started_at": "x"}}
 
+    def test_the_closing_line_is_returned_rather_than_printed(self, capsys):
+        """F7: the in-memory twin printed the closing `[ETA] … phase complete`
+        line to stderr itself, so a scheduler whose every other ETA line went to
+        the phase log had this one land somewhere else. It is returned now,
+        beside the elapsed ms, exactly as `record_metric_in_state` returns its
+        own line."""
+        state = {}
+        start_phase_in_state(state, "implement", 3)
+
+        finished = finish_phase_in_state(state, "implement")
+        assert finished is not None
+        elapsed_ms, line = finished
+        assert isinstance(elapsed_ms, int)
+        assert line.startswith("[ETA] implement:") and "phase complete" in line
+        # Nothing reached the streams: the caller decides where the line goes.
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == ""
+        assert "metrics_progress" not in state
+
+    def test_the_cli_leg_still_prints_the_closing_line_to_stderr(
+        self, tmp_path, capsys
+    ):
+        """The file-level pair owns stderr; only its return value changed."""
+        state_file = _create_state(tmp_path)
+        start_phase(state_file, "implement", 1)
+
+        elapsed = finish_phase(state_file, "implement")
+
+        assert isinstance(elapsed, int)
+        err = capsys.readouterr().err
+        assert "[ETA] implement:" in err and "phase complete" in err
+
     def test_the_file_level_pair_still_round_trips_through_the_mutators(
         self, tmp_path
     ):

@@ -607,8 +607,16 @@ class StateManager:
 
         _metrics.start_phase_in_state(self.state, phase, int(total_batches))
 
-    def finish_metrics_phase(self, phase: str) -> Optional[int]:
-        """The in-memory twin of ``metrics.finish_phase``."""
+    def finish_metrics_phase(
+        self, phase: str
+    ) -> Optional[Tuple[Optional[int], str]]:
+        """The in-memory twin of ``metrics.finish_phase``.
+
+        Returns ``(elapsed_ms, line)`` — the closing ``[ETA] … phase complete``
+        line is handed back rather than printed, the way :meth:`record_metric`
+        already hands back its own, so the scheduler can route it to the phase
+        log the rest of that run's ETA lines went to (F7).
+        """
         from . import metrics as _metrics
 
         if phase not in (self.state.get("metrics_progress") or {}):

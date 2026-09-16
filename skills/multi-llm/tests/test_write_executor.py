@@ -31,6 +31,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,7 @@ from utils.subagent_tasks import (  # noqa: E402
 )
 from utils.write_batch_scheduler import (  # noqa: E402
     STRATEGY_PAUSE,
+    VERIFY_TAIL_CHARS,
     STRATEGY_SKIP_CONTINUE,
     STRATEGY_SKIP_DEPENDENTS,
     SchedulerResult,
@@ -2724,6 +2726,34 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         # ...and the dict this object holds agrees with the file it just wrote.
         assert state.get("tracked_files") == on_disk["tracked_files"]
 
+    def test_a_census_that_failed_is_reported_rather_than_finalized_over(
+        self, env, monkeypatch
+    ):
+        """F4 (2026-09-17): `finalize_tracking.main` *returns* 1 for an
+        unreadable state file or a failed write — it does not raise — and the
+        return value was dropped. `_reload_state` then silently kept whatever it
+        could read, the phase finalized, and `tracked_files` stayed whatever an
+        earlier phase had left for `review-code` to review, with nothing in the
+        log or the result saying so."""
+        import finalize_tracking
+
+        monkeypatch.setattr(finalize_tracking, "main", lambda argv: 1)
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler(
+            [env.apply_task(0)], state=FakeState(env.tmp_path / "state.json"),
+            log=lines.append,
+        ).run()
+
+        assert result.exit_code == 0, result.messages
+        warned = [l for l in lines if "finalize_tracking exited 1" in l]
+        assert len(warned) == 1, lines
+        assert "tracked_files was NOT updated" in warned[0]
+        # ...and it reaches the caller's own messages, not only the phase log.
+        assert [m for m in result.messages if "finalize_tracking exited 1" in m]
+
     def test_the_scheduler_stamps_an_eta_baseline_before_the_first_dispatch(
         self, env
     ):
@@ -2832,6 +2862,110 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         # is what pops `metrics_progress`; with it off the baseline this run
         # started with is still on disk to assert against directly.
         assert on_disk["metrics_progress"]["implement"]["total_batches"] == 5
+
+    def test_a_batch_of_two_tasks_still_ends_at_n_over_n(self, env):
+        """F3 (2026-09-17): the numerator counted BATCHES, the denominator TASKS.
+
+        An `implement` dependency level with two independent tasks is ONE batch
+        of two, so both metric entries recorded `len(batches_dispatched) + 1` = 1
+        against a total of 2: the log ended at `batch 1/2 · ~Nm remaining`,
+        `ALL BATCHES COMPLETE` never printed, and `status` (whose counters are
+        task-based) disagreed with it. Both halves count tasks now.
+        """
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [
+            env.apply_task(
+                i, kind="implement", task_id=f"T{1 + i:03d}",
+                expected_ids=[f"T{1 + i:03d}"], batch_index=0,
+            )
+            for i in range(2)
+        ]
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["T001", "T002"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler(
+            tasks, state=state, kind="implement", finalize=False,
+            log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        # One batch dispatched, two tasks finished — the two units the line used
+        # to mix.
+        assert result.batches_dispatched == [0]
+
+        eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
+        assert len(eta_lines) == 2, lines
+        assert "batch 1/2" in eta_lines[0], eta_lines
+        assert "ALL BATCHES COMPLETE" not in eta_lines[0], eta_lines
+        assert "batch 2/2" in eta_lines[1], eta_lines
+        assert "ALL BATCHES COMPLETE" in eta_lines[1], eta_lines
+        assert not [l for l in eta_lines if "WARNING" in l], eta_lines
+
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert on_disk["metrics_progress"]["implement"]["total_batches"] == 2
+
+    def test_a_resumed_skip_counts_toward_the_runs_own_total(self, env):
+        """A skipped task is one of the run's finished tasks, so the last line
+        still reads `N/N` — without this the denominator includes the skips and
+        the numerator does not, and a mostly-resumed run stops short."""
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [
+            env.apply_task(
+                i, kind="implement", task_id=f"T{1 + i:03d}",
+                expected_ids=[f"T{1 + i:03d}"], batch_index=i,
+            )
+            for i in range(2)
+        ]
+        # T001's result file is already on disk, so `--resume` skips it.
+        (env.phase_dir / "implement_batch_T001.json").write_text(
+            json.dumps({"status": "applied", "ids": ["T001"],
+                        "files_touched": ["plans/p.md"], "summary": "done"}),
+            encoding="utf-8",
+        )
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["T002"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler(
+            tasks, state=state, kind="implement", resume=True, finalize=False,
+            log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        assert [o.skipped for o in result.outcomes] == [True, False]
+
+        eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
+        assert len(eta_lines) == 1, lines
+        assert "batch 2/2" in eta_lines[0], eta_lines
+        assert "ALL BATCHES COMPLETE" in eta_lines[0], eta_lines
+
+
+class TestTheClosingEtaLineGoesToThePhaseLog:
+    """F7 (2026-09-17): `metrics.finish_phase_in_state` printed the closing
+    `[ETA] … phase complete` line to stderr itself, so in a foreground or
+    in-process `full` run it landed somewhere none of the per-batch lines did.
+    It is returned now, and the scheduler logs it like the rest."""
+
+    def test_the_phase_complete_line_lands_beside_the_batch_lines(
+        self, env, monkeypatch, capsys
+    ):
+        import finalize_tracking
+
+        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        state = FakeState(env.tmp_path / "state.json")
+        lines = []
+        result = env.scheduler(
+            [env.apply_task(0)], state=state, log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+
+        closing = [l for l in lines if "phase complete" in l]
+        assert len(closing) == 1, lines
+        assert closing[0].startswith("[ETA] apply-suggestions:")
+        # ...and nothing printed it out from under the log routing.
+        assert "phase complete" not in capsys.readouterr().err
 
 
 class TestTheRollbackStoreWarningNamesItsFiles:
@@ -3334,6 +3468,123 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
         tail = result.verification["output_tail"]
         assert "sk-ant-0123456789abcdefghij" not in tail
         assert "<redacted:" in tail
+
+    def test_the_command_and_its_layer_are_logged_before_the_command_runs(
+        self, env
+    ):
+        """F3a/F6: `docs/configuration.md` promises the run names the command and
+        the layer it came from *before* running it — the one mitigation an
+        untrusted repo's override gets, and worth nothing after the fact. The
+        only line used to be written once `subprocess.run` returned, so a 600 s
+        check left the log silent about what it was waiting on.
+
+        Pinned by making the command itself block: the run cannot finish until
+        this test sees the pre-run line and releases it, so a line written
+        afterwards deadlocks instead of passing.
+        """
+        import threading
+
+        release = env.tmp_path / "release"
+        verify = self._script(
+            env, f"echo waiting\nwhile [ ! -f {release} ]; do sleep 0.02; done\n"
+        )
+        env.use(verify_command=str(verify))
+        env.edits([{"path": "src/a.py", "mode": "patch", "content": "a = 2\n"}],
+                  result={"status": "applied", "ids": ["f0"],
+                          "files_touched": ["src/a.py"], "summary": "fixed"})
+        lines: list = []
+        outcome: list = []
+        scheduler = env.scheduler(
+            [self._fix_task(env)], kind="apply_code_fixes",
+            state=FakeState(env.tmp_path / "s.json"), log=lines.append,
+        )
+        worker = threading.Thread(target=lambda: outcome.append(scheduler.run()))
+        worker.start()
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline and not [
+                l for l in lines if "verification (env): running" in l
+            ]:
+                time.sleep(0.02)
+        finally:
+            release.touch()
+            worker.join(timeout=30)
+
+        assert not worker.is_alive(), "the phase never finished"
+        result = outcome[0]
+        assert result.exit_code == 0, result.messages
+        pre = [l for l in lines if "verification (env): running" in l]
+        assert len(pre) == 1, lines
+        assert str(verify) in pre[0] and "timeout" in pre[0]
+        # ...and the closing line still reports the exit code and the duration.
+        after = [l for l in lines if "exited 0" in l]
+        assert after and lines.index(pre[0]) < lines.index(after[0]), lines
+
+    def test_a_timed_out_check_kills_the_commands_whole_process_group(self, env):
+        """F4/F3b: `subprocess.run(shell=True, timeout=…)` SIGKILLs `/bin/sh`
+        and nothing else, so the `pnpm typecheck && pnpm lint:fix` shape left
+        the real check running, reparented to init, after the phase had reported
+        `exited 124` and moved on — and a grandchild holding the capture pipes
+        kept the internal `communicate()` blocked past the deadline, so the
+        timeout was not a bound at all."""
+        child_pid_file = env.tmp_path / "child.pid"
+        verify = self._script(
+            env,
+            "echo 'starting the check'\n"
+            "sleep 300 &\n"
+            f"echo $! > {child_pid_file}\n"
+            "wait\n",
+        )
+        env.use(verify_command=str(verify), verify_timeout_s=1)
+        env.edits([{"path": "src/a.py", "mode": "patch", "content": "a = 2\n"}],
+                  result={"status": "applied", "ids": ["f0"],
+                          "files_touched": ["src/a.py"], "summary": "fixed"})
+        result = env.scheduler(
+            [self._fix_task(env)], kind="apply_code_fixes",
+            state=FakeState(env.tmp_path / "state.json"),
+        ).run()
+
+        assert result.exit_code == 3, result.messages
+        assert result.verification["exit_code"] == 124
+        tail = result.verification["output_tail"]
+        # The tail says what really happened: output DID arrive, and what was
+        # killed was the process group, not "no output".
+        assert "starting the check" in tail
+        assert "killed after 1s" in tail and "process group" in tail
+
+        # The grandchild the shell forked is gone, not orphaned onto init.
+        child = int(child_pid_file.read_text().strip())
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(child, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:  # pragma: no cover - the leak this test exists for
+            os.kill(child, 9)
+            pytest.fail(f"pid {child} survived the verification timeout")
+
+    def test_only_the_end_of_a_large_output_is_read_back(self, env):
+        """F6: `capture_output=True` buffered a whole build in this process to
+        hand 2000 characters of it to a report. The capture goes to a file and
+        only its last `VERIFY_OUTPUT_CAP_BYTES` are read — so the tail is still
+        the END of the output, which is where a failure names itself."""
+        verify = self._script(
+            env,
+            "i=0\n"
+            "while [ $i -lt 4000 ]; do echo \"filler line $i\"; i=$((i+1)); done\n"
+            "echo 'FINAL: the thing that broke'\n"
+            "exit 1\n",
+        )
+        result = self._run(env, verify=verify,
+                           state=FakeState(env.tmp_path / "state.json"))
+
+        assert result.exit_code == 3
+        tail = result.verification["output_tail"]
+        assert "FINAL: the thing that broke" in tail
+        assert "filler line 0" not in tail
+        assert len(tail) <= VERIFY_TAIL_CHARS
 
     def test_a_plan_text_phase_skips_the_check_silently(self, env):
         """`apply_suggestions` edits markdown; a typecheck has nothing to say."""

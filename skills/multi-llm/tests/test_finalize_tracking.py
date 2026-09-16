@@ -362,20 +362,53 @@ class TestStateFileUpdates:
 
     @patch("finalize_tracking.get_all_modified_files")
     def test_write_failure_returns_error(self, mock_get_files, valid_state):
-        """Returns error when state file cannot be written."""
+        """Returns error when the state file cannot be written.
+
+        The *directory* is what has to be unwritable now: the write is temp file
+        + ``os.replace`` (the shape the comment above it always claimed and
+        ``StateManager.save()`` has always used), and a rename over a read-only
+        file succeeds as long as its directory is writable. The failure this
+        pins is the real one — no room, or no permission, to land the new file.
+        """
         mock_get_files.return_value = {"new_file.py"}
 
-        # Make the file read-only to cause write failure
-        valid_state.chmod(0o444)
+        directory = valid_state.parent
+        original = directory.stat().st_mode
+        directory.chmod(0o555)
 
         try:
             with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
                 result = main()
 
             assert result == 1
+            # ...and the state file the run could not update is still intact.
+            assert json.loads(valid_state.read_text(encoding="utf-8"))
         finally:
-            # Restore permissions for cleanup
-            valid_state.chmod(0o644)
+            directory.chmod(original)
+
+    @patch("finalize_tracking.get_all_modified_files")
+    def test_an_interrupted_write_never_truncates_the_state_file(
+        self, mock_get_files, valid_state
+    ):
+        """The census lands whole or not at all (F4).
+
+        ``write_text`` truncates first and serializes second, so a crash between
+        the two left the phase's own state file empty — and this is the one
+        file-level writer that runs *inside* a write phase. With temp +
+        ``os.replace`` a serialization that blows up leaves the original bytes
+        exactly where they were.
+        """
+        mock_get_files.return_value = {"new_file.py"}
+        before = valid_state.read_text(encoding="utf-8")
+
+        with patch("finalize_tracking.json.dump", side_effect=OSError("disk full")):
+            with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
+                result = main()
+
+        assert result == 1
+        assert valid_state.read_text(encoding="utf-8") == before
+        # No temp file is left lying beside it either.
+        assert not list(valid_state.parent.glob(".tracking_*"))
 
 
 # --- TestOutputMessages ---

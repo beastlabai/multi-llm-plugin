@@ -17,7 +17,9 @@ This approach is more reliable than parsing subagent output because:
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Set
@@ -257,12 +259,38 @@ def main(argv=None) -> int:
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
 
-    # Write state back atomically
+    # Write state back atomically. A plain `write_text` is not what the comment
+    # above it claimed: this is the ONE file-level writer that runs inside a
+    # write phase (the scheduler `save()`s, calls this, then `reload()`s), so a
+    # crash or a full disk part-way through leaves the phase's whole state file
+    # truncated rather than simply un-updated. Temp + `os.replace`, the same
+    # shape `StateManager.save()` and `metrics._write_state` use.
+    temp_fd = None
+    temp_path = None
     try:
-        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    except IOError as e:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=str(state_path.parent), suffix=".tmp", prefix=".tracking_",
+        )
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+        temp_fd = None  # fdopen closed it
+        os.replace(temp_path, str(state_path))
+        temp_path = None  # the file has been moved
+    except (IOError, OSError) as e:
         print(f"ERROR: Failed to write state file: {e}", file=sys.stderr)
         return 1
+    finally:
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if temp_path is not None and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
     print(f"\nTracked {len(tracked_files)} implementation files:")
     _print_path_list(tracked_files)
