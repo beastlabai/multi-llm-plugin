@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -68,6 +69,7 @@ from .providers.base import (
     CATEGORY_PERMISSION_DENIED,
     CATEGORY_SANDBOX_UNAVAILABLE,
     CATEGORY_SERVER_ERROR,
+    PROFILE_GENERATE,
     LLMProvider,
     classify_streams,
     context_length_message,
@@ -932,6 +934,63 @@ def collect_served_models(
     return served
 
 
+#: ``(state, tail)`` per ``provider|profile|cwd`` for the fan-out's sandbox
+#: self-test (D6 step 3), asked once per provider per run rather than once per
+#: slot. A ``threading.Lock`` and not an ``asyncio`` one: the probe is blocking,
+#: so it runs in a worker thread, and one process may drive more than one event
+#: loop (a phase per ``asyncio.run``) — a loop-bound primitive would be the
+#: wrong shape for both.
+_FANOUT_SANDBOX_CACHE: Dict[str, Tuple[str, str]] = {}
+_FANOUT_SANDBOX_LOCK = threading.Lock()
+
+
+def sandbox_unavailable_reason(provider_name: str, tail: str) -> str:
+    """The recorded reason for a slot refused because its sandbox cannot start.
+
+    The verdict ``multi_llm.py doctor`` renders, compressed into the one line a
+    per-model failure gets: the ``[SANDBOX_UNAVAILABLE]`` marker so the row
+    greps next to the classifier's own category, the redacted probe tail (the
+    ``bwrap:`` line, on the machine this was written for) so the reader is not
+    sent to look for evidence that was already in hand, and the one command
+    that prints the repair. No retry command: the fix is an AppArmor profile,
+    and a machine's sandbox does not start on the second ask.
+    """
+    said = f" ({tail.strip()})" if (tail or "").strip() else ""
+    return (
+        f"[SANDBOX_UNAVAILABLE] {provider_name}'s sandbox cannot start here"
+        f"{said}; run `multi_llm.py doctor` for details"
+    )
+
+
+def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str, str]:
+    """Run — or recall — this provider's ``generate`` sandbox self-test.
+
+    Blocking, so the caller hands it to a thread. ``sandbox_verdict`` is the
+    executor's, which is what makes the fan-out, the subagent preflight and
+    ``doctor`` read the same adapter-declared command the same way; ``cwd`` is
+    the repo root the dispatch is pinned to, the same root
+    ``subagent_executor._probe_cwd`` derives from the plan anchor. An adapter
+    with no probe for this profile answers ``not-required`` without spawning
+    anything, so this costs nothing for every adapter that declares no OS
+    sandbox — which is all of them but codex.
+    """
+    key = f"{provider_name}|{PROFILE_GENERATE}|{cwd or ''}"
+    with _FANOUT_SANDBOX_LOCK:
+        cached = _FANOUT_SANDBOX_CACHE.get(key)
+        if cached is not None:
+            return cached
+        from .subagent_executor import sandbox_verdict
+
+        try:
+            verdict = sandbox_verdict(
+                get_provider(provider_name), PROFILE_GENERATE, cwd=cwd
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
+            verdict = ("unknown", "")
+        _FANOUT_SANDBOX_CACHE[key] = verdict
+        return verdict
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -1036,6 +1095,35 @@ async def run_single_model(
         phase_dir = get_phase_dir(Path(plan_path), phase_name)
         os.makedirs(phase_dir, exist_ok=True)
         log_file = os.path.join(str(phase_dir), f"log_{sanitized_model}.txt")
+
+    # D6 step 3, on the fan-out's own profile: ask this runner's sandbox whether
+    # it can start at all, before either lane below dispatches. A review slot is
+    # a `generate` dispatch, and a bubblewrap that cannot start denies the child
+    # every file operation — the READ of the plan file included, which is this
+    # phase's whole input. Ungated, such a slot came back in 28 s with a one-item
+    # "review" saying the plan could not be read, and was scored a success
+    # (`codex:gpt-5.6-terra`, 2026-09-16). `unknown` and `not-required` dispatch
+    # exactly as before: a probe that could not be read is a diagnostic and never
+    # a gate, and a sandbox that then dies mid-dispatch still lands on the D3k
+    # ladder as rung 1.
+    sandbox_state, sandbox_tail = await asyncio.to_thread(
+        _fanout_sandbox_verdict, provider_name, project_root
+    )
+    if sandbox_state == "unavailable":
+        reason = sandbox_unavailable_reason(provider_name, sandbox_tail)
+        print(f"[{display_name}] {reason}")
+        return {
+            "success": False, "output": None,
+            "error": reason,
+            # `prompt` and `stdout` stay empty for the reason rule 4's refusal
+            # leaves them empty: nothing was dispatched, so there is no stream to
+            # excerpt — and neither lane below has chosen an output location yet,
+            # so a prompt rendered here would name a file no dispatch ever picked.
+            "prompt": "", "stdout": "", "stderr": "",
+            "duration_seconds": time.time() - start_time,
+            "model_spec": model_spec,
+            "source": "not-dispatched",
+        }
 
     # Fall back to old method if no out_dir provided
     if not out_dir:

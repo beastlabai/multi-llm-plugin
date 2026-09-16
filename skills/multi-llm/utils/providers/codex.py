@@ -218,6 +218,11 @@ class CodexProvider(LLMProvider):
     # and D6 step 3's sandbox probe is what gates it — and
     # `structured_output_transport` stays "file": that is the `--output-schema`
     # sidecar the CLI reads, not a file the model writes.
+    #
+    # None of this makes the fan-out sandbox-free. The child still READS the
+    # plan through the same bwrap, so a sandbox that cannot start ends the slot
+    # before the model has an input — which is why `sandbox_probe_command`
+    # answers for the `generate` profile too.
     supports_file_output = False
     supports_workspace_reads = True
     usage_support = USAGE_FULL
@@ -367,16 +372,29 @@ class CodexProvider(LLMProvider):
         under exactly the bubblewrap policy ``codex exec --sandbox <policy>``
         would use, with no model and no prompt — ~30 ms measured, and on a
         stock Ubuntu 24.04 it dies on ``bwrap: loopback: Failed RTM_NEWADDR:
-        Operation not permitted`` before the shell starts. Only the write
-        profile is probed: ``agent-readonly`` is never asked to write, and the
-        review fan-out stopped needing the sandbox when
-        ``supports_file_output`` went ``False``. The policy comes from
+        Operation not permitted`` before the shell starts.
+
+        Both ``workspace-write`` profiles answer: ``agent-write``, and
+        ``generate`` — the review fan-out's, which dispatches ``codex exec
+        --sandbox workspace-write`` (``_SANDBOX_BY_PROFILE``). ``generate`` used
+        to return ``None`` on the premise that "the review fan-out stopped
+        needing the sandbox when ``supports_file_output`` went ``False``". That
+        premise is wrong: the fan-out stopped needing the sandbox to *write*,
+        and a bwrap that cannot start denies the child every file operation —
+        including the READ of the plan file, which is the whole input to the
+        phase. Measured 2026-09-16, `codex:gpt-5.6-terra` on a review-plan
+        fan-out: 27.9 s, 61k input tokens, and a one-item "review" whose only
+        suggestion was that the plan file could not be read — scored a success,
+        because nothing had asked the sandbox whether it could start.
+        ``agent-readonly`` stays ``None``: this probe writes a byte, and a
+        read-only dispatch is never asked to. The policy comes from
         ``_SANDBOX_BY_PROFILE`` so the probe cannot answer for a policy the
         dispatch does not use (M5). The byte lands under ``.multi-llm/tmp`` of
-        the current directory — the executor runs this with ``cwd`` at the
-        repo root — and the shell leaves nothing behind it created.
+        the current directory — the executor and the fan-out both run this with
+        ``cwd`` at the repo root — and the shell leaves nothing behind it
+        created.
         """
-        if profile != PROFILE_AGENT_WRITE:
+        if profile not in (PROFILE_GENERATE, PROFILE_AGENT_WRITE):
             return None
         script = (
             'd=.multi-llm/tmp; f="$d/sandbox-probe-$$"; '
