@@ -128,5 +128,5 @@ Example output:
 If no issues are found, return an empty array: []
 
 ## Output Location
-CRITICAL: Return your JSON output on stdout as your final message. Do NOT write it to a file — you are running in a read-only mode and any file write will be refused.
+CRITICAL: Return your JSON output on stdout as your final message. Do NOT write it to a file — this is a read-only task, and a file write is refused by the sandbox where one runs.
 Your final message must be ONLY the raw JSON array - no markdown, no code blocks, no explanation, no preamble and no closing remarks.

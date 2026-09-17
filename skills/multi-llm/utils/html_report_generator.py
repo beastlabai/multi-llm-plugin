@@ -474,16 +474,34 @@ def served_model_label(
     a fallback reads the same wherever it surfaces. Without an entry — which is
     every run under the shipped, empty ``fallback_models`` — the bare model
     string is returned and the report is byte-for-byte what it was.
+
+    The D6 override's provenance (2026-09-17) renders on the same label:
+    ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
+    sandbox_fallback=external``, so a report reader sees which slot's findings
+    came from a model that ran with the operator's shell rights — beside the
+    served-model note when both apply, alone when only one does.
     """
     entry = (served_models or {}).get(model)
     if not isinstance(entry, dict):
         return model
+    notes = []
     served = entry.get("served_model")
-    if not served or served == model:
+    if served and served != model:
+        notes.append(
+            f"served by {served}, fallback" if entry.get("fallback")
+            else f"served by {served}"
+        )
+    if entry.get("sandbox") == "bypassed":
+        notes.append(SANDBOX_BYPASSED_LABEL)
+    if not notes:
         return model
-    if entry.get("fallback"):
-        return f"{model} (served by {served}, fallback)"
-    return f"{model} (served by {served})"
+    return f"{model} ({'; '.join(notes)})"
+
+
+#: The label a bypassed slot carries in every report surface. The config key
+#: and its value are spelled out because they are the one line that made the
+#: run possible, and the reader of a report is the person who should know it.
+SANDBOX_BYPASSED_LABEL = "ran unsandboxed: sandbox_fallback=external"
 
 
 def extract_section_contexts(
@@ -1288,6 +1306,13 @@ def generate_html_report(
                 model_metadata[model]["model"] = (
                     f"{model_metadata[model]['model']} (fallback: {served})"
                 )
+        # D6 override (2026-09-17): the same badge names a slot that ran with
+        # no sandbox, so the HTML report says it wherever the markdown does.
+        if isinstance(served_entry, dict) and served_entry.get("sandbox") == "bypassed":
+            model_metadata[model]["sandbox"] = "bypassed"
+            model_metadata[model]["model"] = (
+                f"{model_metadata[model]['model']} (unsandboxed)"
+            )
 
     # Extract plan title from markdown (first # heading), fallback to filename
     plan_title = ""

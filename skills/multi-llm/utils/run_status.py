@@ -487,6 +487,13 @@ def _progress_text(progress: Dict[str, Any]) -> str:
     # beside a mirror that said `ok: 1`. Measured 2026-09-14.
     for key in ("subagents", "write_subagents"):
         parts.extend(_mirror_text(key, progress.get(key)))
+    # D6 override (2026-09-17): a detached fan-out records the slots it ran
+    # without the runner's own sandbox under `progress.sandbox_bypassed`, and
+    # a host polling `status` is told so here — the `[SANDBOX_BYPASSED]` line
+    # is in a log a detached caller never reads.
+    bypassed = progress.get("sandbox_bypassed")
+    if isinstance(bypassed, list) and bypassed:
+        parts.append(f"unsandboxed {', '.join(map(str, bypassed))}")
     return ", ".join(parts) or "(none recorded)"
 
 
