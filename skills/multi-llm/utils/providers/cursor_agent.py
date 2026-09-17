@@ -23,7 +23,19 @@ from .base import (
     matches_any,
     reset_flag_gate_cache,  # noqa: F401 - M14: the one gate's reset, re-exported
 )
-from .result_envelope import classify_api_error_status, parse_result_envelope
+from .result_envelope import (
+    classify_api_error_status,
+    describe_refused_envelope,
+    parse_result_envelope,
+)
+
+#: The most of stderr's last line :meth:`CursorAgentProvider.describe_failure`
+#: will quote. The measured reason lines are short (``RetriableError:
+#: [resource_exhausted] Error`` is 40 characters); the cap is for the day the
+#: last line is a stack frame or a wrapped JSON body, and it matches the
+#: quoted-words bound ``result_envelope._MAX_QUOTED_CHARS`` applies to a
+#: ``result`` sentence, so the two channels' one-liners are the same length.
+_MAX_DESCRIBED_STDERR_CHARS = 400
 
 #: M12 (§6.1): cursor has no rung on the ladder because it has no separate
 #: effort *axis* to put one on. Its model list is fully pre-parameterized —
@@ -1436,6 +1448,41 @@ class CursorAgentProvider(LLMProvider):
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
+
+    def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
+        """The envelope's own line when there is one, else stderr's last line.
+
+        Two channels, in the base hook's order — **stderr is the diagnosis,
+        stdout is the answer** — read the way this CLI really writes them:
+
+        * A run that reached the backend answers with the nine-key
+          ``--output-format json`` envelope on stdout, and a failure is that
+          envelope with ``is_error: true``; its ``result`` is the sentence.
+          :func:`result_envelope.describe_refused_envelope` is the one renderer
+          for it, shared with claude-code.
+        * A run that never got an envelope leaves the reason on stderr, as its
+          **last** line. Measured 2026-09-17 on ``cursor-agent:kimi-k3-high``:
+          zero bytes on stdout, exit 1 after 23.7 s, and on stderr three
+          ``Connection lost, reconnecting to https://agentn.global.api5.cursor.sh
+          (attempt N)...`` / ``Retry attempt N...`` pairs followed by
+          ``RetriableError: [resource_exhausted] Error`` — the one line that
+          says what happened, and the one the bare ``exited with code 1`` in
+          ``error_<model>.log`` and ``.status.json`` dropped. The progress
+          lines above it are not the reason and are not returned; the line is
+          capped so a stack trace's last frame cannot become a paragraph.
+
+        Diagnostics, never classification: the same bytes reach
+        :meth:`classify_failure` for the verdict, and returning ``None`` stays
+        safe.
+        """
+        line = describe_refused_envelope(stdout)
+        if line:
+            return line
+        for raw in reversed((stderr or "").splitlines()):
+            candidate = " ".join(raw.split())
+            if candidate:
+                return candidate[:_MAX_DESCRIBED_STDERR_CHARS]
+        return None
 
     def classify_auth_probe(
         self, stdout: str, stderr: str, exit_code: int = 0

@@ -6212,7 +6212,26 @@ class TestClassifyFailure:
 #: the text: blanking it must leave a non-``None`` answer that is a **prefix** of
 #: the composed one. Encoded as a value rather than an exemption, so the row
 #: stays graded against ``tests/fixtures/opencode/invalid-model.*``.
+#:
+#: ``claude-code`` and ``cursor-agent`` joined on 2026-09-17, from one live
+#: ``review-code`` fan-out whose two failed slots were both recorded as the bare
+#: ``<provider> exited with code 1``. ``claude-code`` is plain **stdout**: the
+#: envelope carries ``api_error_status`` and the vendor sentence, stderr is 0
+#: bytes on all eleven committed captures, and the override renders
+#: ``result_envelope.describe_refused_envelope``'s line (a 491 s slot had died
+#: on a 429 usage cap with $25.05 spent, and nothing on screen said so).
+#: ``cursor-agent`` is the **fourth** shape: a run that reached the backend
+#: answers with the same envelope on stdout, so stdout is asked first — but a
+#: run that never got one leaves its reason as stderr's **last** line
+#: (``RetriableError: [resource_exhausted] Error`` under three reconnect
+#: lines, stdout empty), and that channel answers *only when stdout has
+#: nothing to say*. The graded rule is therefore precedence, not enrichment:
+#: with stdout answering, blanking stderr changes nothing; with stdout blank,
+#: the answer is stderr's own. Its committed captures are all stdout-shaped
+#: (stderr 0 bytes on both), and ``tests/test_failed_slot_reporting.py``
+#: grades the stderr leg over the measured kimi lines.
 STDOUT_THEN_STDERR = "stdout-then-stderr"
+STDOUT_ELSE_STDERR = "stdout-else-stderr"
 
 _DESCRIBE_FAILURE_CHANNELS = {
     "opencode": STDOUT_THEN_STDERR,
@@ -6220,6 +6239,8 @@ _DESCRIBE_FAILURE_CHANNELS = {
     "pi": "stderr",
     "gemini": "stderr",
     "kilocode": "stderr",
+    "claude-code": "stdout",
+    "cursor-agent": STDOUT_ELSE_STDERR,
 }
 
 
@@ -6336,6 +6357,19 @@ class TestDescribeFailureChannels:
                     f"{name}/{row}: a reason was recovered from stderr alone, "
                     f"which is enrichment and not the declared channel"
                 )
+                continue
+            if declared == STDOUT_ELSE_STDERR:
+                # Precedence: an answer from stdout is the answer, and stderr
+                # may not touch it; with stdout silent, stderr speaks alone.
+                stdout_only = provider.describe_failure(stdout, "")
+                if stdout_only is not None:
+                    assert both == stdout_only, (
+                        f"{name}/{row}: stderr changed an answer stdout had given"
+                    )
+                else:
+                    assert both == provider.describe_failure("", stderr), (
+                        f"{name}/{row}: with stdout silent the answer is not stderr's own"
+                    )
                 continue
             if declared == "stdout":
                 declared_only, other_only = (stdout, ""), ("", stderr)

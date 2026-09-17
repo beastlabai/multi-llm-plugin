@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -30,7 +31,11 @@ from .base import (
     vendor_backend_policy,
     warn_gate_once,
 )
-from .result_envelope import classify_api_error_status, parse_result_envelope
+from .result_envelope import (
+    classify_api_error_status,
+    describe_refused_envelope,
+    parse_result_envelope,
+)
 
 # Reasoning effort values accepted by `claude --effort`
 # (verified live against claude 2.1.205). Byte-identical to the CLI's own valid
@@ -495,6 +500,37 @@ FALLBACK_MODEL_VERIFIED_AT = "2.1.233"
 #: and it is the same one help read, not a second one.
 JSON_SCHEMA_FLAG = "--json-schema"
 JSON_SCHEMA_VERIFIED_AT = "2.1.227"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The account usage cap, told apart from a transient 429 by its own sentence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The tag :meth:`ClaudeCodeProvider.describe_failure` puts in front of a 429
+#: whose sentence says the *account* is out of budget rather than the endpoint
+#: momentarily busy. Both arrive as ``api_error_status: 429`` and both classify
+#: ``rate_limited`` — the status is the same integer and the ladder's rate-limit
+#: rung already refuses an identical re-dispatch to this adapter (rule 6(b),
+#: :meth:`~ClaudeCodeProvider.internal_retries`) — so no category moves. What
+#: moves is the sentence a human reads: "Rate limited (429)" says wait a
+#: minute; this says the fix is another model or more credits, and the wait is
+#: however long the cap takes to reset.
+USAGE_LIMIT_TAG = "[USAGE_LIMIT]"
+
+#: The measured shape (2026-09-17, ``claude-fable-5-1``, ``claude 2.1.x``):
+#: ``You've reached your Fable limit. Switch to another model, or manage usage
+#: credits at claude.ai/settings/usage?from=cc_cli_limit_message, to
+#: continue.`` No ``API Error:`` prefix, no number, no "rate limit" — the text
+#: ladder reads nothing in it, which is why it is matched here against the
+#: vendor sentence and not added to a classifier table. ``usage limit`` is the
+#: wording the shared rate-limit table already carries for the same condition
+#: at other vendors. Lowercased before matching, like every marker table. A
+#: "resets at HH:MM" clause has not been measured on this CLI and is not
+#: parsed: an invented time would be worse than none.
+USAGE_LIMIT_MARKERS = (
+    re.compile(r"\breached your\b.{0,40}\blimit\b"),
+    re.compile(r"\busage limit\b"),
+    re.compile(r"\bmanage usage credits\b"),
+)
 
 # The help read, its per-process cache, the flag-token regex and the warn-once
 # set that used to live here are **gone** — M14 (§5.4) absorbed them into the one
@@ -1465,6 +1501,37 @@ class ClaudeCodeProvider(LLMProvider):
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
+
+    def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
+        """The refusing envelope's own line, tagged when it names a usage cap.
+
+        This CLI puts the whole diagnosis on stdout (the class docstring: eleven
+        measured outcomes, stderr 0 bytes on every one), and the envelope carries
+        both the status and the vendor's sentence — yet with no override here a
+        failed slot was recorded as the bare ``claude-code exited with code 1``.
+        Measured 2026-09-17: ``claude-code:claude-fable-5-1:high`` ran 491 s,
+        spent $25.05, hit the account's usage cap, and every artifact a human
+        reads (``error_<model>.log``, ``.status.json``'s ``models_failed``, the
+        ``Agent failed`` line) said only the exit code; the session model had to
+        open the provider log to learn why.
+
+        :func:`result_envelope.describe_refused_envelope` renders ``HTTP 429:
+        <sentence>``; this method prepends :data:`USAGE_LIMIT_TAG` when the
+        sentence matches :data:`USAGE_LIMIT_MARKERS`, because a usage cap and a
+        busy endpoint share the status code and differ in every remedy.
+
+        Diagnostics, never classification (the base hook's rule):
+        :meth:`classify_failure` reads the same envelope for its own verdict and
+        nothing here changes it. ``stderr`` is accepted for the signature and
+        deliberately unread: it has been empty on every capture.
+        """
+        line = describe_refused_envelope(stdout)
+        if line is None:
+            return None
+        lowered = line.lower()
+        if any(marker.search(lowered) for marker in USAGE_LIMIT_MARKERS):
+            return f"{USAGE_LIMIT_TAG} {line}"
+        return line
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse Claude Code output and extract structured data.

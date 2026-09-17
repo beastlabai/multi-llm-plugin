@@ -949,7 +949,11 @@ def invoke_with_provider(
             except Exception:  # noqa: BLE001 - diagnostics must not raise
                 reason = None
             if reason:
-                error_message = f"{error_message}: {reason}"
+                # §4.5: the reason is the vendor's own sentence quoted off a
+                # stream, and it lands in `.status.json`'s `models_failed` and
+                # on the fan-out's stdout — neither of which goes through
+                # `_save_log`'s redaction. The one boundary applies here too.
+                error_message = f"{error_message}: {_redact(reason)}"
             # M10 (§5.1) — the **status**-consumer half of this site. A failure
             # whose own streams carry a login notice is an availability verdict,
             # not a parse, so name it instead of leaving the caller with a
