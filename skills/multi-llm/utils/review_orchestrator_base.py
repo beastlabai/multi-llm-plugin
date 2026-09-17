@@ -939,6 +939,57 @@ def grouped_coverage_gap(
     return lines
 
 
+def record_models_present(phase_dir: str, models: List[str]) -> List[str]:
+    """Reconcile the checkpoint's model outcomes with the result files on disk.
+
+    ``models_completed`` / ``models_failed`` are the fan-out's record of the
+    run it drove, and the fan-out is the only writer. A reaggregate reads the
+    per-model files, and a model whose file is there now — a salvage the host
+    ran after the marker, or a result obtained out of band — has completed as
+    far as every consumer of that file is concerned: the report lists it under
+    ``**Models:**`` and its issues are grouped and validated. Measured
+    2026-09-17: after such a reaggregate the report named three models while
+    ``.status.json`` still carried the third under ``models_failed`` with its
+    sandbox error, and ``progress.models_done`` read ``2/5``.
+
+    Only a checkpoint that records outcomes at all is touched (a dir with no
+    ``.status.json``, or one that never got the fields, gains nothing — same
+    field-not-file rule as ``build_unsanitize_map``), and only the models with
+    a file are moved: a model the fan-out completed whose file has since gone
+    keeps its entry, because the record of what the fan-out did is not this
+    function's to rewrite. ``progress.models_done`` follows the completed
+    count when the fan-out published a ``models_total``.
+
+    Returns:
+        The models moved out of ``models_failed``, so the caller can say so.
+    """
+    status = _status_file.read_status(phase_dir)
+    if "models_completed" not in status and "models_failed" not in status:
+        return []
+    completed = list(status.get("models_completed") or [])
+    failed = dict(status.get("models_failed") or {})
+    recovered: List[str] = []
+    changed = False
+    for model in models:
+        if model in failed:
+            del failed[model]
+            recovered.append(model)
+            changed = True
+        if model not in completed:
+            completed.append(model)
+            changed = True
+    if not changed:
+        return []
+    update_status(phase_dir, {
+        "models_completed": completed,
+        "models_failed": failed,
+    })
+    progress = status.get("progress")
+    if isinstance(progress, dict) and progress.get("models_total"):
+        _status_file.update_progress(phase_dir, {"models_done": len(completed)})
+    return recovered
+
+
 def dispatch_salvage_tasks(
     args: Any,
     *,
@@ -3182,6 +3233,12 @@ async def reaggregate_from_existing_files(
         print(f"  Loaded {len(suggestions)} suggestions from {model}")
 
     print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
+
+    # Same reconciliation as code-review's reaggregate: a result file on disk
+    # is a completed model, whatever the fan-out recorded before the salvage
+    # (or the out-of-band result) that produced it.
+    for model in record_models_present(phase_dir, sorted(models_found)):
+        print(f"[{model}] result file present; recorded as completed (was failed)")
 
     if not all_suggestions:
         print("No suggestions to aggregate.")

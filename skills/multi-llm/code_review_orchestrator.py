@@ -80,6 +80,7 @@ from utils.review_orchestrator_base import (
     maybe_detach,
     merge_validation_batches,
     record_high_priority_groups,
+    record_models_present,
     record_review_artifacts,
     resolve_result_files_by_model,
     retire_salvage_artifacts,
@@ -2036,6 +2037,14 @@ async def reaggregate_from_existing_files(
     if not results:
         print("No readable model results to aggregate.")
         return
+
+    # A model whose result file is on disk has completed as far as this
+    # report is concerned, whatever the fan-out recorded about it: a salvage
+    # the host ran after the marker, or a result obtained out of band for a
+    # slot the fan-out could not run, arrives by exactly this path. The
+    # checkpoint is what `status` and `build_unsanitize_map` read.
+    for model in record_models_present(str(phase_dir), sorted(models_found)):
+        print(f"[{model}] result file present; recorded as completed (was failed)")
 
     # Get changed files from state (or empty list if not available)
     state = get_or_create_state(plan_path)
