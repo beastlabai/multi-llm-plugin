@@ -138,6 +138,63 @@ def _refuse(wrapper: Dict[str, Any], raw: str) -> Optional[Dict[str, Any]]:
     return {"success": False, "error": error, "raw": raw, "data": None}
 
 
+def _whole_envelope(stdout: str) -> Optional[Dict[str, Any]]:
+    """stdout parsed as the one envelope both CLIs print, or ``None``.
+
+    The same read :func:`envelope_api_error_status` makes: one JSON object,
+    the whole of stdout. Anything else — a run that never launched, a truncated
+    stream, prose — is ``None``, and every caller treats ``None`` as "not an
+    envelope", never as "fine".
+    """
+    text = (stdout or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        wrapper = json.loads(text)
+    except ValueError:
+        return None
+    return wrapper if isinstance(wrapper, dict) else None
+
+
+def describe_refused_envelope(stdout: str) -> Optional[str]:
+    """One line for ``describe_failure``: the refusing envelope's own words.
+
+    ``None`` unless stdout is a single envelope :func:`envelope_verdict`
+    objects to; otherwise ``HTTP <status>: <sentence>`` when the envelope
+    carries an ``api_error_status``, and the sentence alone when it does not.
+
+    Why this exists (measured 2026-09-17, ``claude-code:claude-fable-5-1:high``):
+    neither envelope adapter overrode ``describe_failure``, so a review slot
+    that ran 491 s and died on a 429 usage cap was recorded — in
+    ``error_<model>.log``, in ``.status.json``'s ``models_failed`` and on the
+    fan-out's own ``Agent failed`` line — as the bare ``claude-code exited with
+    code 1``, while the CLI had printed the status **and** the sentence
+    ("You've reached your Fable limit. Switch to another model, or manage usage
+    credits at claude.ai/settings/usage…") on the one stream it uses. The
+    status is spelled out because the vendor sentence does not always carry it:
+    the committed ``rate-limit`` capture says ``API Error: Request rejected
+    (429)``, the usage cap says nothing numeric at all.
+
+    Diagnostics, never classification: the number is the same integer
+    :func:`classify_api_error_status` reads, and nothing here consults a marker
+    table.
+    """
+    wrapper = _whole_envelope(stdout)
+    if wrapper is None or not envelope_verdict(wrapper):
+        return None
+    words = _envelope_words(wrapper)
+    status = wrapper.get("api_error_status")
+    prefix = ""
+    if status is not None and not isinstance(status, bool):
+        try:
+            prefix = f"HTTP {int(status)}"
+        except (TypeError, ValueError):
+            prefix = ""
+    if prefix and words:
+        return f"{prefix}: {words}"
+    return prefix or words or None
+
+
 def envelope_api_error_status(stdout: str) -> Any:
     """The envelope's ``api_error_status``, or ``None`` when it has none.
 
@@ -147,14 +204,8 @@ def envelope_api_error_status(stdout: str) -> Any:
     CLI printing prose) yields ``None``, which
     :func:`classify_api_error_status` turns into "defer to the text ladder".
     """
-    text = (stdout or "").strip()
-    if not text.startswith("{"):
-        return None
-    try:
-        wrapper = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(wrapper, dict):
+    wrapper = _whole_envelope(stdout)
+    if wrapper is None:
         return None
     return wrapper.get("api_error_status")
 

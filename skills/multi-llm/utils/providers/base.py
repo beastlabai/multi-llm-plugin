@@ -1620,6 +1620,17 @@ SHARED_RATE_LIMIT_MARKERS = _markers(
     r"\bthrottl(?:ed|ing)\b",
     r"\bquota[ _-]?limit\b",
     r"\busage limit (?:reached|exceeded)\b",
+    # gRPC / Connect-RPC status 8, ``RESOURCE_EXHAUSTED``: "some resource has
+    # been exhausted, perhaps a per-user quota". cursor-agent speaks Connect-RPC
+    # to its backend and relays the code by name. Measured 2026-09-17 on
+    # ``cursor-agent:kimi-k3-high``: three ``Connection lost, reconnecting to
+    # https://agentn.global.api5.cursor.sh (attempt N)...`` lines and then
+    # ``RetriableError: [resource_exhausted] Error`` on stderr, exit 1, zero
+    # bytes on stdout, 23.7 s — and no table above matched a word of it, so the
+    # slot was recorded as a bare "exited with code 1" (its ``Connection lost``
+    # is not a ``CONNECTION_ERROR_MARKERS`` shape either). The CLI names the
+    # error retriable itself; this is the rung that retries.
+    r"\bresource[_ ]exhausted\b",
 )
 
 #: A wall-clock cutoff, wherever it was imposed. Checked before the connection
