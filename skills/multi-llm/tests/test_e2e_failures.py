@@ -2957,3 +2957,61 @@ class TestTheFanOutBaseReadsTheAnswerTheProviderLeftOnStdout:
         assert "gemini exited with code 1" in logged
         assert "Salvage: requested" not in logged
         assert "Raw output" not in logged
+
+
+# ---------------------------------------------------------------------------
+# A dead slot promises no result file
+# ---------------------------------------------------------------------------
+#
+# `invoke_with_file_output` hands every hard failure back with `output_file` set
+# (the path it *would* have read) and no `source`, so both fan-outs printed
+#
+#     [model] Result will be saved to: <path> (source: unknown)
+#     [model] Agent failed (23.7s): cursor-agent exited with code 1
+#
+# for each slot that produced nothing — measured 2026-09-17 on all three dead
+# slots of a run. The line is `describe_output_file`'s "the model did not write
+# here" wording (F14), which is right for a stdout fallback and a promise nothing
+# keeps for a failure. It is printed only for a slot that answered now; the
+# failure line that follows already names the outcome.
+
+
+class TestADeadSlotPromisesNoResultFile:
+    def test_the_code_review_fan_out_prints_no_result_line_for_a_failed_slot(
+        self, tmp_path, capsys
+    ):
+        """The real `invoke_with_file_output` forward — `output_file` set, no
+        `source` — through the real `run_single_review`."""
+        success, _issues, _error, _phase_dir = _drive_real_provider_failure(
+            tmp_path, KILOCODE_SPEC, "", KILOCODE_AUTH_FAILURE
+        )
+        out = capsys.readouterr().out
+
+        assert success is False
+        assert "Agent failed" in out
+        assert "Result will be saved to" not in out
+        assert "(source: unknown)" not in out
+
+    def test_the_fan_out_base_prints_none_either(self, tmp_path, capsys):
+        result, _phase_dir, _saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE, stdout="", stderr=KILOCODE_AUTH_FAILURE
+        )
+        out = capsys.readouterr().out
+
+        assert result["success"] is False
+        assert "Result will be saved to" not in out
+        assert "(source: unknown)" not in out
+
+    def test_a_slot_that_answered_still_names_its_file(self, tmp_path, capsys):
+        """The regression guard: the success line is exactly what it was."""
+        plan_path = _plan_file(tmp_path)
+        reply = {**_good_reply([_issue("Issue A")]), "output_file": "/out/kilocode.json"}
+
+        with patch.object(cro, "invoke_with_file_output", return_value=reply):
+            success, issues, _error = asyncio.run(
+                cro.run_single_review(KILOCODE_SPEC, plan_path, tmp_path / "out")
+            )
+        out = capsys.readouterr().out
+
+        assert success is True and len(issues) == 1
+        assert "Output file: /out/kilocode.json (source: file)" in out
