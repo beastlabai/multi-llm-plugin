@@ -2304,3 +2304,126 @@ class TestRecordModelsPresent:
     def test_no_checkpoint_at_all_writes_none(self, tmp_path):
         assert rob.record_models_present(str(tmp_path), ["a:x"]) == []
         assert not (tmp_path / ".status.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# `**Files Changed:**` on a reaggregated report counts the same files the
+# fan-out counted
+# ---------------------------------------------------------------------------
+#
+# The fan-out resolves its file list with a fallback — `tracked_files` empty
+# (no implement phase behind the plan) → `git diff` from the base ref, minus the
+# `pre_existing_changes` baseline — and printed `Files to review: 144` on the
+# 2026-09-17 run. The reaggregate path read `tracked_files` alone, so every
+# `report.md` that run's reaggregates wrote said `**Files Changed:** 0` over an
+# empty `## Changed Files` section. Nothing persists the list between the two
+# entry points; both now resolve it through `resolve_changed_files`.
+
+
+def _state_without_tracked_files(pre_existing=()):
+    fake_state = MagicMock()
+    fake_state.get = MagicMock(
+        side_effect=lambda k, default=None: {
+            "tracked_files": [],
+            "head_at_start": "abc123",
+            "pre_existing_changes": list(pre_existing),
+        }.get(k, default)
+    )
+    return fake_state
+
+
+def _rendered_report(plan):
+    """`report.md` where the code-review reaggregate writes it: the plan-derived
+    phase dir (`get_output_paths`), not the fixture's patched `get_phase_dir`."""
+    path = cro.get_output_paths(plan, "code_review", phase="code-review").with_suffix(".md")
+    return path.read_text(encoding="utf-8")
+
+
+class TestReaggregateCountsTheFilesTheFanOutCounted:
+    def test_a_plan_with_no_implement_phase_falls_back_to_the_diff(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _cro_phase(
+            tmp_path,
+            {cro.sanitize_model_name(_REAL_SPECS[0]): _issues(["Issue A"])},
+            models_requested=[_REAL_SPECS[0]],
+        )
+        diffed = ["apps/web/a.tsx", "apps/web/b.tsx", "plans/x.md"]
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            render_report=True,
+            extra_patches=[
+                patch.object(
+                    cro, "get_or_create_state",
+                    return_value=_state_without_tracked_files(pre_existing=["plans/"]),
+                ),
+                patch.object(cro, "get_files_changed_since_ref", return_value=diffed),
+            ],
+        )
+        out = capsys.readouterr().out
+
+        assert "No tracked files in state, falling back to git diff from abc123" in out
+        assert "Filtered out 1 pre-existing files (not part of implementation)" in out
+        assert "Files to review: 2" in out
+        report = _rendered_report(plan)
+        assert "**Files Changed:** 2" in report
+        assert "- `apps/web/a.tsx`" in report
+        assert "- `apps/web/b.tsx`" in report
+        assert "plans/x.md" not in report
+
+    def test_tracked_files_still_win_when_the_implement_phase_recorded_them(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _cro_phase(
+            tmp_path,
+            {cro.sanitize_model_name(_REAL_SPECS[0]): _issues(["Issue A"])},
+            models_requested=[_REAL_SPECS[0]],
+        )
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            render_report=True,
+            extra_patches=[
+                patch.object(cro, "get_files_changed_since_ref", side_effect=AssertionError(
+                    "the diff must not be consulted when tracked_files is populated"
+                )),
+            ],
+        )
+        out = capsys.readouterr().out
+
+        assert "Using 1 tracked files from implementation phase" in out
+        report = _rendered_report(plan)
+        assert "**Files Changed:** 1" in report
+        assert "- `src/a.py`" in report
+
+
+class TestResolveChangedFiles:
+    def test_tracked_entries_are_deduplicated_paths(self, capsys):
+        state = MagicMock()
+        state.get = MagicMock(side_effect=lambda k, d=None: {
+            "tracked_files": [{"path": "a.py"}, {"path": "b.py"}, {"path": "a.py"}, {}],
+        }.get(k, d))
+
+        assert sorted(cro.resolve_changed_files(state, "abc123")) == ["a.py", "b.py"]
+        assert "Using 4 tracked files from implementation phase" in capsys.readouterr().out
+
+    def test_no_tracked_files_and_no_base_ref_is_an_empty_list_with_a_warning(
+        self, capsys
+    ):
+        assert cro.resolve_changed_files(_state_without_tracked_files(), "") == []
+        assert "cannot discover changed files via git diff" in capsys.readouterr().err
+
+    def test_the_diff_minus_the_baseline_otherwise(self, capsys):
+        with patch.object(
+            cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
+        ):
+            files = cro.resolve_changed_files(
+                _state_without_tracked_files(pre_existing=["plans/"]), "abc123"
+            )
+        assert files == ["x.py", "y.py"]
+        assert "Filtered out 1 pre-existing files" in capsys.readouterr().out
