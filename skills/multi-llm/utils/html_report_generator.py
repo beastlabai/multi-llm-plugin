@@ -477,7 +477,7 @@ def served_model_label(
 
     The D6 override's provenance (2026-09-17) renders on the same label:
     ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
-    sandbox_fallback=external``, so a report reader sees which slot's findings
+    sandbox_fallback=auto``, so a report reader sees which slot's findings
     came from a model that ran with the operator's shell rights — beside the
     served-model note when both apply, alone when only one does.
     """
@@ -499,9 +499,11 @@ def served_model_label(
 
 
 #: The label a bypassed slot carries in every report surface. The config key
-#: and its value are spelled out because they are the one line that made the
-#: run possible, and the reader of a report is the person who should know it.
-SANDBOX_BYPASSED_LABEL = "ran unsandboxed: sandbox_fallback=external"
+#: and its value are spelled out because they name the one setting that
+#: decides this (and, by naming ``auto``, the word ``off`` that would have
+#: kept the slot out), and the reader of a report is the person who should
+#: know it.
+SANDBOX_BYPASSED_LABEL = "ran unsandboxed: sandbox_fallback=auto"
 
 
 def extract_section_contexts(

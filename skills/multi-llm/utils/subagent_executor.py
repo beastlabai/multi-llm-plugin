@@ -77,7 +77,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         SANDBOX_BYPASSED_MARKER,
-        SANDBOX_FALLBACK_EXTERNAL,
+        SANDBOX_FALLBACK_AUTO,
         SANDBOX_FALLBACK_PROFILES,
         ProfileUnsupported,
         StructuredOutputUnavailable,
@@ -154,7 +154,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         SANDBOX_BYPASSED_MARKER,
-        SANDBOX_FALLBACK_EXTERNAL,
+        SANDBOX_FALLBACK_AUTO,
         SANDBOX_FALLBACK_PROFILES,
         ProfileUnsupported,
         StructuredOutputUnavailable,
@@ -1412,10 +1412,10 @@ _MODEL_CACHE: Dict[str, str] = {}
 #: the profile is part of the key because the adapter answers a different
 #: command (or none) per profile. A refusal is never cached — it raises.
 #: ``bypassed`` (D6 override, 2026-09-17) is the one ``unavailable`` that did
-#: not raise: an ``agent-readonly`` runner whose operator wrote
-#: ``sandbox_fallback: external``. It is cached so the marker prints once per
-#: runner rather than once per batch, and so :func:`sandbox_bypassed` can hand
-#: the flag to every dispatch of that runner under that profile.
+#: not raise: an ``agent-readonly`` runner under ``sandbox_fallback: auto``
+#: (the default; ``off`` raises as before). It is cached so the marker prints
+#: once per runner rather than once per batch, and so :func:`sandbox_bypassed`
+#: can hand the flag to every dispatch of that runner under that profile.
 _SANDBOX_CACHE: Dict[str, str] = {}
 
 #: The cache state that carries the D6 override to the spawn.
@@ -1722,21 +1722,23 @@ def _current_host_id() -> str:
     return resolved[0] if resolved else "unknown-host"
 
 
-def _sandbox_fallback_attested(
+def _sandbox_fallback_allowed(
     provider: Any, profile: str, *, anchor: Optional[str]
 ) -> bool:
-    """Whether the operator's ``sandbox_fallback: external`` covers this dispatch.
+    """Whether ``sandbox_fallback`` resolves to ``auto`` for this dispatch.
 
     Two of the four gates, answered by the adapter: it declares the hook at all
     (``None`` for every adapter without a fallback — a stand-in in a test may
-    not declare it, hence ``getattr``), and it resolves the key to ``external``
-    for *this* profile — which the adapter answers ``None`` for outside
+    not declare it, hence ``getattr``), and it resolves the key to ``auto`` —
+    the default unless a config layer wrote ``off`` — for *this* profile,
+    which the adapter answers ``None`` for outside
     ``SANDBOX_FALLBACK_PROFILES``, so ``agent-write`` cannot pass here. The
     profile check is repeated locally all the same: two places have to agree
     before a write profile could slip through. The probe verdict is the
     caller's gate; ``anchor`` is the plan path, so the key is read from the
     same ``.multi-llm/providers.yaml`` the dispatch's env and timeout come from.
-    A config read that raises is "not attested" — the safe reading.
+    A config read that raises is "not allowed" — the narrow reading, and the
+    one that matches every other gate's posture on a config it cannot read.
     """
     if profile not in SANDBOX_FALLBACK_PROFILES:
         return False
@@ -1744,7 +1746,7 @@ def _sandbox_fallback_attested(
     if not callable(hook):
         return False
     try:
-        return hook(profile, anchor=anchor) == SANDBOX_FALLBACK_EXTERNAL
+        return hook(profile, anchor=anchor) == SANDBOX_FALLBACK_AUTO
     except Exception:  # noqa: BLE001 - a config read may never end a preflight
         return False
 
@@ -1769,8 +1771,9 @@ def _detect_sandbox(
 
     ``bypassed`` is the D6 override (2026-09-17), and it is the *only* way an
     ``unavailable`` verdict does not raise here: the adapter declares a
-    fallback for this profile and the operator resolved it to ``external``,
-    and the profile is ``agent-readonly`` — the one executor profile in
+    fallback for this profile, the key resolves to ``auto`` (the shipped
+    default — ``off`` is the operator restoring the refusal), and the profile
+    is ``agent-readonly`` — the one executor profile in
     ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
     for which the adapter's hook answers ``None`` whatever the config says,
     so a write batch under a broken sandbox is exit 3 exactly as before.
@@ -1781,7 +1784,7 @@ def _detect_sandbox(
         return _SANDBOX_CACHE[cache_key]
 
     state, tail = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
-    if state == "unavailable" and _sandbox_fallback_attested(
+    if state == "unavailable" and _sandbox_fallback_allowed(
         provider, profile, anchor=anchor
     ):
         # One line per runner per process, on stdout beside the other
@@ -1792,7 +1795,7 @@ def _detect_sandbox(
             f"[exec-subagents] {SANDBOX_BYPASSED_MARKER} {provider_name}: "
             f"bubblewrap cannot start; running --sandbox danger-full-access "
             f"under providers.{provider_name}.sandbox_fallback="
-            f"{SANDBOX_FALLBACK_EXTERNAL} (read-only phase; no OS boundary "
+            f"{SANDBOX_FALLBACK_AUTO} (read-only phase; no OS boundary "
             f"between the model's shell and this machine)"
         )
         _SANDBOX_CACHE[cache_key] = SANDBOX_STATE_BYPASSED

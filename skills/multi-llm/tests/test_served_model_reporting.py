@@ -534,7 +534,7 @@ class TestServedModelLabel:
 # D6 override (2026-09-17) — `sandbox: bypassed` rides the same carriage
 # ---------------------------------------------------------------------------
 
-BYPASS_LABEL = "ran unsandboxed: sandbox_fallback=external"
+BYPASS_LABEL = "ran unsandboxed: sandbox_fallback=auto"
 
 #: The JSONL a codex slot answers with under the fallback: the array as the
 #: final `agent_message`, which is the `stdout_fallback` shape the measured

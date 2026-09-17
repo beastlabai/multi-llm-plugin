@@ -225,9 +225,9 @@ FILE_OUTPUT_LOCATION = (
 #: :func:`recover_answer_text` already falls back to, and the answer lands in
 #: exactly the same ``answer_<model>.md`` either way. Worded like
 #: ``llm_client.STDOUT_OUTPUT_LOCATION``: "refused by the sandbox where one
-#: runs", because a codex slot under ``sandbox_fallback: external`` (D6,
-#: 2026-09-17) runs with no sandbox and a write there would succeed — the
-#: prompt may not claim otherwise.
+#: runs", because a codex slot under the D6 fallback (``sandbox_fallback:
+#: auto``, the default, 2026-09-17) runs with no sandbox and a write there
+#: would succeed — the prompt may not claim otherwise.
 STDOUT_OUTPUT_LOCATION = (
     "## Output Location\n"
     "Print your full answer to stdout as your final message, in MARKDOWN (not JSON).\n"
@@ -937,8 +937,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         #
         # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`
         # when the probe said `unavailable` AND `providers.<name>.sandbox_fallback`
-        # is `external`. One `[SANDBOX_BYPASSED]` line, the flag on the invoker,
-        # and a porcelain snapshot so a write the model makes can be named.
+        # is `auto` (the default; `off` refuses). One `[SANDBOX_BYPASSED]` line,
+        # the flag on the invoker, and a porcelain snapshot so a write the model
+        # makes can be named.
         sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
         if sandbox.refused:
             print(f"[{model_spec}] {sandbox.reason}")

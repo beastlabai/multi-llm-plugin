@@ -811,28 +811,38 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
 
     # -- the D6 override (2026-09-17): the third answer of the gate --------
 
-    class _Attested(_Probed):
-        """The probing adapter plus the operator's `external` attestation."""
+    class _AutoFallback(_Probed):
+        """The probing adapter declaring the fallback hook at its shipped
+        default, `auto` — what codex answers on a fresh install."""
 
         def sandbox_fallback_policy(self, profile, anchor=None):
             from utils.providers.base import PROFILE_GENERATE
 
-            return "external" if profile == PROFILE_GENERATE else None
+            return "auto" if profile == PROFILE_GENERATE else None
+
+    class _FallbackOff(_Probed):
+        """The same adapter under the operator's `sandbox_fallback: off`."""
+
+        def sandbox_fallback_policy(self, profile, anchor=None):
+            from utils.providers.base import PROFILE_GENERATE
+
+            return "off" if profile == PROFILE_GENERATE else None
 
     BYPASS_LINE = (
         "[SANDBOX_BYPASSED] fakebwrap: bubblewrap cannot start; running --sandbox "
-        "danger-full-access under providers.fakebwrap.sandbox_fallback=external "
+        "danger-full-access under providers.fakebwrap.sandbox_fallback=auto "
         "(read-only phase; no OS boundary between the model's shell and this "
         "machine)"
     )
 
-    def _attested_lane(self, tmp_path, monkeypatch, dispatch):
+    def _fallback_lane(self, tmp_path, monkeypatch, dispatch, adapter=None):
         from utils import review_orchestrator_base as rob
 
+        adapter = adapter or self._AutoFallback
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: adapter())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
         monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
         return plan_path
@@ -850,7 +860,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
                 "details": {"sandbox": "bypassed"},
             }
 
-        plan_path = self._attested_lane(tmp_path, monkeypatch, dispatch)
+        plan_path = self._fallback_lane(tmp_path, monkeypatch, dispatch)
         served = {}
         success, issues, error = asyncio.run(cro.run_single_review(
             "fakebwrap:m1", plan_path, tmp_path / "out", served_models=served,
@@ -884,7 +894,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
                 "details": {"sandbox": "bypassed"},
             }
 
-        plan_path = self._attested_lane(tmp_path, monkeypatch, dispatch)
+        plan_path = self._fallback_lane(tmp_path, monkeypatch, dispatch)
         success, issues, error = asyncio.run(cro.run_single_review(
             "fakebwrap:m1", plan_path, tmp_path / "out",
         ))
@@ -894,6 +904,24 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         )
         assert error in capsys.readouterr().out
         assert (tmp_path / "src.py").read_text(encoding="utf-8") == "v2\n"
+
+    def test_off_refuses_the_code_review_slot_exactly_as_before(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The operator's `off`: the refusal above, from an adapter that does
+        declare the hook — no flag, no marker, nothing dispatched."""
+        def no_dispatch(**kwargs):
+            raise AssertionError("a slot was dispatched past a refused probe")
+
+        plan_path = self._fallback_lane(
+            tmp_path, monkeypatch, no_dispatch, adapter=self._FallbackOff,
+        )
+        success, issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out",
+        ))
+        assert success is False and issues is None
+        assert error.startswith("[SANDBOX_UNAVAILABLE]")
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
 
 class TestTheReportReconcilesItsIssueCountWithItsGroupCount:

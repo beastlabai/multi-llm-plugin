@@ -59,23 +59,25 @@ PROFILE_AGENT_WRITE = "agent-write"
 # The sandbox fallback (D6, 2026-09-17) — the one dispatch-time override
 # ---------------------------------------------------------------------------
 
-#: ``providers.<name>.sandbox_fallback`` — the closed policy set. ``off`` is the
-#: shipped default: a runner whose own OS sandbox cannot start is refused, and
-#: ``multi_llm.py doctor`` prints the repair. ``external`` is the operator's
-#: *attestation* that something outside this process (a container, a VM, a
-#: throwaway account) is the boundary, so a **read-only** dispatch may run
-#: without the runner's own sandbox rather than being left out of the fan-out.
-#: It is a standing property of the machine and its operator, which is why it
-#: is a config key and never a CLI flag or an ``unattended`` row: the decision
-#: does not vary per run. The plugin cannot verify the boundary it is told
-#: about (measured 2026-09-17: the Claude Code Bash tool's ``mnt``/``net``/
-#: ``user``/``pid`` namespaces are identical to the outer terminal's), so the
-#: word is what it is — an assertion the operator owns.
+#: ``providers.<name>.sandbox_fallback`` — the closed policy set. ``auto`` is
+#: the shipped default: a runner whose own OS sandbox cannot start still runs
+#: its **read-only** dispatches, without that sandbox, rather than being left
+#: out of the fan-out — the footing every adapter with no OS sandbox of its own
+#: (cursor-agent, pi, claude-code, muse under ``--disable-sandbox``) has always
+#: had in the same phases. ``off`` restores the refusal: the runner is left out
+#: until the repair ``multi_llm.py doctor`` prints is installed. Neither value
+#: touches a write profile. It is a standing property of the machine, which is
+#: why it is a config key and never a CLI flag or an ``unattended`` row: the
+#: decision does not vary per run. The plugin makes no claim about what is
+#: outside the process (measured 2026-09-17: the Claude Code Bash tool's
+#: ``mnt``/``net``/``user``/``pid`` namespaces are identical to the outer
+#: terminal's), which is why the default is spelled ``auto`` and not a word
+#: that would assert a boundary nobody checked.
 SANDBOX_FALLBACK_OFF = "off"
-SANDBOX_FALLBACK_EXTERNAL = "external"
+SANDBOX_FALLBACK_AUTO = "auto"
 SANDBOX_FALLBACK_POLICIES: Tuple[str, ...] = (
     SANDBOX_FALLBACK_OFF,
-    SANDBOX_FALLBACK_EXTERNAL,
+    SANDBOX_FALLBACK_AUTO,
 )
 
 #: The only profiles the fallback may ever widen. ``generate`` is the review/ask
@@ -2425,8 +2427,9 @@ class LLMProvider(ABC):
         (``review_orchestrator_base.sandbox_refusal``,
         ``subagent_executor._detect_sandbox``) requires *all four* of: the
         probe verdict ``unavailable`` (never ``unknown`` — a probe that could
-        not be read must not widen anything), this answer ``external``, a
-        read-only profile, and the adapter declaring the hook at all.
+        not be read must not widen anything), this answer ``auto`` (the
+        shipped default; ``off`` is the operator turning it off), a read-only
+        profile, and the adapter declaring the hook at all.
         """
         return None
 
@@ -2996,7 +2999,7 @@ class LLMProvider(ABC):
                 builds anything, so the adapter never re-derives it.
             sandbox_fallback: The fan-out's D6 override (2026-09-17). ``True``
                 only when ``sandbox_refusal`` answered ``dispatch_unsandboxed``
-                for this slot — probe ``unavailable``, policy ``external``,
+                for this slot — probe ``unavailable``, policy ``auto``,
                 profile ``generate`` — and it reaches the argv through
                 :meth:`apply_sandbox_fallback`. Keyword-only, default
                 ``False``, and ignored by every adapter that keeps the default

@@ -1152,8 +1152,9 @@ async def run_single_review(
     #
     # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed` when
     # the probe said `unavailable` AND `providers.<name>.sandbox_fallback` is
-    # `external`. One `[SANDBOX_BYPASSED]` line, the flag on the invoker, and a
-    # porcelain snapshot taken now so a write the model makes can be named.
+    # `auto` (the default; `off` refuses). One `[SANDBOX_BYPASSED]` line, the
+    # flag on the invoker, and a porcelain snapshot taken now so a write the
+    # model makes can be named.
     sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
     if sandbox.refused:
         print(f"[{display_name}] {sandbox.reason}")

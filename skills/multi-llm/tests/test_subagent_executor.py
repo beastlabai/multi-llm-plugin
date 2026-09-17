@@ -4510,8 +4510,11 @@ class TestSandboxUnavailable:
         whose probe fails is exit 3 before the batch dispatches, instead of
         eleven validation batches whose bwrap failure surfaces inside the
         model's tool results — where the D3k classifier never sees `bwrap:` and
-        the JSON the model still returns is scored a valid batch."""
+        the JSON the model still returns is scored a valid batch. Under
+        `sandbox_fallback: off`, that is (D6 override, 2026-09-17): the
+        shipped `auto` dispatches this batch unsandboxed instead, below."""
         runner_env.use("codex:gpt-5.5")
+        self._fallback_off(runner_env)
         monkeypatch.chdir(tmp_path)
         provider = registry.get_provider("codex")
 
@@ -4534,15 +4537,16 @@ class TestSandboxUnavailable:
     # -- the D6 override (2026-09-17): the one `unavailable` that dispatches --
 
     @staticmethod
-    def _attest_external(runner_env, monkeypatch):
-        """`providers.codex.sandbox_fallback: external`, through the real config
+    def _fallback_off(runner_env):
+        """`providers.codex.sandbox_fallback: off`, through the real config
         layering — the same `MULTI_LLM_PROVIDERS_CONFIG` file `runner_env.use`
         wrote the driver block into, so the key is read the way an operator's
-        would be and not through a patched accessor."""
+        would be and not through a patched accessor. Written as the bare word
+        (YAML 1.1 reads it as `False`), which is what an operator types."""
         path = runner_env.config_path
         path.write_text(
             path.read_text(encoding="utf-8")
-            + "providers:\n  codex:\n    sandbox_fallback: external\n",
+            + "providers:\n  codex:\n    sandbox_fallback: off\n",
             encoding="utf-8",
         )
         registry._config = None
@@ -4556,16 +4560,18 @@ class TestSandboxUnavailable:
             return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
         return command
 
-    def test_a_read_only_batch_dispatches_unsandboxed_under_the_external_attestation(
+    def test_a_read_only_batch_dispatches_unsandboxed_by_default(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
-        """All four gates hold — `unavailable`, `external`, `agent-readonly`,
-        codex — so the preflight records `bypassed`, prints the marker once,
-        and the dispatch's argv carries `--sandbox danger-full-access`."""
+        """All four gates hold on the SHIPPED config — `unavailable`, `auto`,
+        `agent-readonly`, codex — so the preflight records `bypassed`, prints
+        the marker once, and the dispatch's argv carries `--sandbox
+        danger-full-access`. No config edit: this is what a fresh install does
+        on a machine whose bubblewrap cannot start."""
         runner_env.use("codex:gpt-5.5")
-        self._attest_external(runner_env, monkeypatch)
         monkeypatch.chdir(tmp_path)
         provider = registry.get_provider("codex")
+        assert provider.sandbox_fallback_policy(PROFILE_AGENT_READONLY) == "auto"
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command",
             self._broken_probe_for(PROFILE_AGENT_READONLY),
@@ -4576,7 +4582,7 @@ class TestSandboxUnavailable:
         assert out.count("[SANDBOX_BYPASSED]") == 1
         assert (
             "[SANDBOX_BYPASSED] codex: bubblewrap cannot start; running --sandbox "
-            "danger-full-access under providers.codex.sandbox_fallback=external "
+            "danger-full-access under providers.codex.sandbox_fallback=auto "
             "(read-only phase; no OS boundary between the model's shell and this "
             "machine)"
         ) in out
@@ -4610,15 +4616,18 @@ class TestSandboxUnavailable:
         assert refusal is None
         assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
 
-    def test_a_write_batch_is_refused_under_the_external_attestation_exactly_as_before(
-        self, tmp_path, runner_env, monkeypatch, capsys
+    @pytest.mark.parametrize("policy", ["auto", "off"])
+    def test_a_write_batch_is_refused_under_both_values_exactly_as_before(
+        self, tmp_path, runner_env, monkeypatch, capsys, policy
     ):
-        """WRITE_KINDS run `agent-write`, and the attestation never reaches it:
-        exit 3, nothing cached, no marker."""
+        """WRITE_KINDS run `agent-write`, and neither value reaches it: exit 3,
+        nothing cached, no marker — under the shipped `auto` and under `off`."""
         runner_env.use("codex:gpt-5.5")
-        self._attest_external(runner_env, monkeypatch)
+        if policy == "off":
+            self._fallback_off(runner_env)
         monkeypatch.chdir(tmp_path)
         provider = registry.get_provider("codex")
+        assert provider.sandbox_fallback_policy(PROFILE_AGENT_READONLY) == policy
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command",
             self._broken_probe_for(PROFILE_AGENT_WRITE),
@@ -4632,13 +4641,13 @@ class TestSandboxUnavailable:
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
         assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
-    def test_an_unknown_verdict_never_widens_even_under_the_attestation(
+    def test_an_unknown_verdict_never_widens_under_auto(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
         """A probe that could not be read dispatches sandboxed, as today —
-        the override needs `unavailable`, not the absence of `ok`."""
+        the override needs `unavailable`, not the absence of `ok`, and the
+        shipped default does not change that."""
         runner_env.use("codex:gpt-5.5")
-        self._attest_external(runner_env, monkeypatch)
         monkeypatch.chdir(tmp_path)
         provider = registry.get_provider("codex")
 
@@ -4657,9 +4666,11 @@ class TestSandboxUnavailable:
     def test_off_refuses_a_read_only_batch_exactly_as_before(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
-        """The shipped default: `providers.yaml` says `off`, and the refusal
-        is the one the read-only row test above pins."""
+        """`providers.codex.sandbox_fallback: off` in the operator's config
+        layer, and the refusal is the pre-D6 one the read-only row test above
+        pins — no marker, nothing cached."""
         runner_env.use("codex:gpt-5.5")
+        self._fallback_off(runner_env)
         monkeypatch.chdir(tmp_path)
         provider = registry.get_provider("codex")
         assert provider.sandbox_fallback_policy(PROFILE_AGENT_READONLY) == "off"
@@ -4986,13 +4997,16 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
     # -- the D6 override (2026-09-17): the third answer of the gate --------
 
-    class _Attested(_Probed):
-        """The probing adapter plus the operator's `external` attestation."""
+    class _AutoFallback(_Probed):
+        """The probing adapter declaring the fallback hook at its shipped
+        default, `auto` — what codex answers on a fresh install."""
 
         def sandbox_fallback_policy(self, profile, anchor=None):
-            return "external" if profile in (PROFILE_GENERATE, PROFILE_AGENT_READONLY) else None
+            return "auto" if profile in (PROFILE_GENERATE, PROFILE_AGENT_READONLY) else None
 
-    class _AttestedOff(_Probed):
+    class _FallbackOff(_Probed):
+        """The same adapter under the operator's `sandbox_fallback: off`."""
+
         def sandbox_fallback_policy(self, profile, anchor=None):
             return "off" if profile == PROFILE_GENERATE else None
 
@@ -5001,7 +5015,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         return (
             f"[SANDBOX_BYPASSED] {provider_name}: bubblewrap cannot start; running "
             f"--sandbox danger-full-access under providers.{provider_name}."
-            f"sandbox_fallback=external (read-only phase; no OS boundary between "
+            f"sandbox_fallback=auto (read-only phase; no OS boundary between "
             f"the model's shell and this machine)"
         )
 
@@ -5009,7 +5023,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
         assert verdict.bypass and not verdict.refused
@@ -5017,7 +5031,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": True}
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AttestedOff())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_REFUSE
         assert verdict.refused and not verdict.bypass
@@ -5037,7 +5051,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         seen = []
 
@@ -5063,7 +5077,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AttestedOff())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
         def no_dispatch(**kwargs):
@@ -5076,7 +5090,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert result["error"].startswith("[SANDBOX_UNAVAILABLE]")
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
-    def test_an_unknown_verdict_dispatches_sandboxed_even_under_the_attestation(
+    def test_an_unknown_verdict_dispatches_sandboxed_even_under_auto(
         self, tmp_path, monkeypatch, capsys
     ):
         """`unknown` is a diagnostic, never a gate — in either direction: the
@@ -5084,7 +5098,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         # The probe could not be run at all → `unknown`.
         monkeypatch.setattr(executor, "_run_sandbox_probe", lambda argv, **kw: None)
@@ -5123,7 +5137,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
         self._git_repo(tmp_path)
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
         def dispatch(**kwargs):
@@ -5159,7 +5173,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
         self._git_repo(tmp_path)
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         plan_out = output_dir_path(tmp_path / "plan.md")
 

@@ -9,7 +9,7 @@ from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
-    SANDBOX_FALLBACK_EXTERNAL,
+    SANDBOX_FALLBACK_AUTO,
     SANDBOX_FALLBACK_OFF,
     SANDBOX_FALLBACK_POLICIES,
     SANDBOX_FALLBACK_PROFILES,
@@ -22,7 +22,6 @@ from .base import (
     StructuredSchema,
     _provider_block,
     _resolve_policy,
-    _warn_policy_once,
     split_reasoning_effort,
 )
 
@@ -106,40 +105,38 @@ _SANDBOX_BY_PROFILE = {
 #: machine — reads and writes anywhere the user can, and network from model
 #: commands (workspace-write unshares it). `agent-readonly`'s "real denial
 #: mechanism" does not exist under it; a prompt-injected validator could write.
-#: That is why the value is reachable only behind `sandbox_fallback: external`,
-#: only after the probe said `unavailable`, and only for the two read-only
-#: profiles in `SANDBOX_FALLBACK_PROFILES`.
+#: That is exactly the footing cursor-agent, pi, claude-code and muse (always
+#: `--disable-sandbox`) run the same read-only phases on, which is why the
+#: value is rendered by default (`sandbox_fallback: auto`) rather than being
+#: held back until a machine installs the AppArmor repair — codex is the one
+#: reviewer that insists on its own sandbox, and a fan-out that dropped it for
+#: that reason alone was measured (2026-09-17) to miss 2 unique validated-high
+#: issues. Still: only after the probe said `unavailable` (never `unknown`),
+#: only for the two read-only profiles in `SANDBOX_FALLBACK_PROFILES`, and
+#: `off` puts the refusal back.
 SANDBOX_FALLBACK_VALUE = "danger-full-access"
 
 
 def sandbox_fallback_policy(anchor: Optional[str] = None) -> str:
-    """Resolve ``providers.codex.sandbox_fallback`` (default ``off``).
+    """Resolve ``providers.codex.sandbox_fallback`` (default ``auto``).
 
     Same shape as ``opencode.hermetic_policy``: read through the normal layering
     (base → ``<git-root>/.multi-llm/providers.yaml`` → ``MULTI_LLM_PROVIDERS_CONFIG``)
     via the shared ``_provider_block``, an unrecognised value warns once naming
-    the key and falls back to the default. YAML 1.1 resolves a bare ``off`` to
-    ``False``, so a user who wrote the documented word gets the documented
-    behaviour rather than a warning about their YAML loader. A bare ``True``
-    (``on``/``yes``) is deliberately **not** read as ``external``: the
-    attestation has to be spelled with the word that says what it does, so a
-    boolean warns and stays ``off``.
+    the key and falls back to the default. YAML 1.1 resolves a bare ``off`` /
+    ``on`` (``no``/``yes``, ``false``/``true``) to a boolean, so a user who
+    wrote either word gets what the word says — ``False`` is ``off``, ``True``
+    is ``auto`` — rather than a warning about their YAML loader. Only ``off``
+    narrows anything, so no spelling of "on" needs guarding: the key's whole
+    job is to let a machine turn the default fallback *off*.
     """
     value = _provider_block("codex", anchor).get("sandbox_fallback")
-    if value is False:
-        return SANDBOX_FALLBACK_OFF
-    if value is True:
-        _warn_policy_once(
-            "providers.codex.sandbox_fallback:true",
-            "multi-llm config warning: ignoring providers.codex.sandbox_fallback="
-            f"{value!r} (a boolean; the attestation must be spelled "
-            f"{SANDBOX_FALLBACK_EXTERNAL!r}); using {SANDBOX_FALLBACK_OFF}",
-        )
-        return SANDBOX_FALLBACK_OFF
+    if isinstance(value, bool):
+        return SANDBOX_FALLBACK_AUTO if value else SANDBOX_FALLBACK_OFF
     return _resolve_policy(
         value,
         SANDBOX_FALLBACK_POLICIES,
-        SANDBOX_FALLBACK_OFF,
+        SANDBOX_FALLBACK_AUTO,
         "providers.codex.sandbox_fallback",
     )
 
@@ -561,8 +558,9 @@ class CodexProvider(LLMProvider):
         the call sites: ``agent-write`` comes back ``None`` whatever the config
         says, so no gate that consults this hook can be talked into widening a
         write dispatch by a config line. The two read-only profiles return the
-        resolved policy (``off`` by default), which the gates then require to
-        be ``external`` — beside the probe verdict ``unavailable``.
+        resolved policy (``auto`` by default), which the gates then require to
+        be ``auto`` — beside the probe verdict ``unavailable`` — and ``off`` is
+        the one word that puts the refusal back.
         """
         if profile not in SANDBOX_FALLBACK_PROFILES:
             return None
@@ -620,13 +618,16 @@ class CodexProvider(LLMProvider):
         ``generate`` and ``agent-readonly`` only. It is reachable through
         exactly one gate, applied by ``sandbox_refusal`` (fan-out) and
         ``_detect_sandbox`` (executor): the D6 probe verdict is ``unavailable``
-        (bubblewrap cannot start here; never ``unknown``), the operator wrote
-        ``providers.codex.sandbox_fallback: external``, and the profile is one
-        of the two read-only ones. Under it the read-only profile's own denial
-        mechanism is gone — the model's shell has the operator's rights — which
-        every artifact of such a slot says in so many words. ``agent-write``
-        is refused under a broken sandbox exactly as before; the override
-        raises on it rather than rendering.
+        (bubblewrap cannot start here; never ``unknown``), the profile is one
+        of the two read-only ones, and ``providers.codex.sandbox_fallback`` is
+        ``auto`` — which it is unless a config layer wrote ``off``. So on a
+        stock Ubuntu 24.04 this is what a read-only codex dispatch runs as by
+        default: the read-only profile's own denial mechanism is gone — the
+        model's shell has the operator's rights, as it does for every reviewer
+        with no OS sandbox of its own — and every artifact of such a slot says
+        so in so many words. ``agent-write`` is refused under a broken sandbox
+        exactly as before, whatever the key says; the override raises on it
+        rather than rendering.
         """
         if profile not in (PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE):
             return super().build_agent_command(
