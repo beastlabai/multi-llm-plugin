@@ -387,6 +387,37 @@ _ANSWER_FIELD_NAMES = frozenset(
 _JSON_STRUCTURE_OPENING = re.compile(r'[\[{]\s*["\[{]')
 
 
+def is_refused_result_envelope(data: Any) -> bool:
+    """True when ``data`` is a result envelope the CLI itself flagged as failed.
+
+    ``claude -p --output-format json`` and ``cursor-agent --output-format json``
+    answer a failed run with the **same** envelope a successful one gets —
+    ``{"type": "result", …}`` — and say so in two fields, ``is_error`` and
+    ``terminal_reason``. The verdict rule is
+    :func:`utils.providers.result_envelope.envelope_verdict`'s and is consulted
+    there rather than re-spelled here; the late import is because that module
+    imports :func:`extract_json_from_text` from this one.
+
+    Why the gate needs it: that envelope's bookkeeping carries empty arrays —
+    ``permission_denials: []`` at the top level and ``usage.iterations: []``
+    one key down — and both :func:`is_answer_shaped` (an object with an
+    array-valued key) and clause 1 of :func:`has_salvageable_json` (a nested
+    candidate that parses to ``[]``) read those as an answer the model wrote.
+    Measured 2026-09-17 on ``claude-code:claude-fable-5-1:high``: a 491 s
+    review that ended on a 429 usage cap (``api_error_status: 429``,
+    ``result: "You've reached your Fable limit…"``) printed ``[SALVAGE_NEEDED]``
+    and handed the host that envelope as a document to repair. Every failure
+    capture under ``tests/fixtures/claude-code/`` has the same shape.
+    """
+    if not isinstance(data, dict):
+        return False
+    try:
+        from .providers.result_envelope import envelope_verdict
+    except ImportError:  # the flat import style ``utils/llm_client._redact`` also allows
+        from utils.providers.result_envelope import envelope_verdict
+    return bool(envelope_verdict(data))
+
+
 def is_answer_shaped(data: Any) -> bool:
     """True when a parsed value could be the answer, or hold it.
 
@@ -419,6 +450,10 @@ def is_answer_shaped(data: Any) -> bool:
     if isinstance(data, list):
         return True
     if isinstance(data, dict):
+        # The CLI's own verdict outranks the shape: a refused result envelope
+        # carries ``permission_denials: []`` and holds nothing to repair.
+        if is_refused_result_envelope(data):
+            return False
         if any(isinstance(value, list) for value in data.values()):
             return True
         return not _ANSWER_FIELD_NAMES.isdisjoint(data)
@@ -467,6 +502,13 @@ def has_salvageable_json(text: str) -> bool:
     array in an object (``{"suggestions": [ …``) is the ordinary salvage case,
     not a second failure mode, so both shapes count.
 
+    One document is turned down by *verdict* rather than by shape: a result
+    envelope the CLI itself flagged as failed
+    (:func:`is_refused_result_envelope`). Its empty bookkeeping arrays are what
+    made every committed claude-code failure capture — and the 2026-09-17 usage
+    cap — pass both clauses, and the candidates nested inside its span are the
+    same document, not a second one, so they are skipped rather than parsed.
+
     Args:
         text: Raw model output — whichever stream the failure left behind.
 
@@ -487,13 +529,26 @@ def has_salvageable_json(text: str) -> bool:
     # the next span begins inside it leaves a short, sorted, disjoint list of
     # the regions clause 2 must not read a truncation into.
     settled: List[Tuple[int, int]] = []
+    # The end of the last refused result envelope seen. Candidates arrive in
+    # increasing start order and nest or stay disjoint, so everything that
+    # starts before this offset is *inside* that envelope — its ``usage`` block,
+    # its ``iterations: []``, its ``permission_denials: []`` — and is the
+    # failure report's own bookkeeping, not a second document. It is scoped to
+    # the refused envelope on purpose: an ordinary turned-down object still lets
+    # its children speak, because ``{"data": {"issues": [...]}}`` is a doubly
+    # wrapped answer and the outer object is not the one that knows.
+    refused_until = -1
     for start, end, candidate in _candidate_spans(body, "both"):
+        if start < refused_until:
+            continue
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if is_answer_shaped(data):
             return True
+        if is_refused_result_envelope(data):
+            refused_until = end
         if settled and start <= settled[-1][1]:
             settled[-1] = (settled[-1][0], max(settled[-1][1], end))
         else:
