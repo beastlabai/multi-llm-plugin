@@ -409,6 +409,57 @@ def load_code_review_prompt() -> str:
     return load_prompt("code_review.txt")
 
 
+def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
+    """The files under review: the implement phase's tracked list, else the diff.
+
+    One resolution for both entry points. The fan-out always had the fallback
+    (``tracked_files`` empty → ``git diff`` from *base_ref*, minus the
+    ``pre_existing_changes`` baseline); the reaggregate path read
+    ``tracked_files`` alone, so a review that had printed ``Files to review:
+    144`` from the diff reported ``**Files Changed:** 0`` and an empty
+    ``## Changed Files`` section in every ``report.md`` its reaggregate wrote
+    (measured 2026-09-17, on a plan with no implement phase behind it). Nothing
+    persists the list between the two, and the fallback is the same live
+    computation either way, so it is re-derived rather than reported as 0.
+
+    Prints the same lines the fan-out printed, since they explain where the
+    count came from.
+    """
+    tracked_files = state.get("tracked_files", [])
+    if tracked_files:
+        print(f"Using {len(tracked_files)} tracked files from implementation phase")
+        return list(set(
+            entry.get("path", "") for entry in tracked_files if entry.get("path")
+        ))
+
+    # Fallback to git diff (legacy behavior or no implement phase run)
+    if not base_ref:
+        print(
+            "Warning: No tracked files and no valid base_ref — cannot discover changed files via git diff. "
+            "Code review will have no files to review.",
+            file=sys.stderr,
+        )
+        return []
+
+    print(f"No tracked files in state, falling back to git diff from {base_ref}")
+    try:
+        changed_files = get_files_changed_since_ref(base_ref)
+    except Exception:
+        changed_files = []
+
+    # Filter out pre-existing changes that were present before implementation.
+    # Through `subtract_baseline`, so a baseline entry that is an untracked
+    # *directory* (`plans/`, one porcelain line) covers the files under it.
+    pre_existing = list(state.get("pre_existing_changes", []) or [])
+    if pre_existing and changed_files:
+        original_count = len(changed_files)
+        changed_files = subtract_baseline(changed_files, pre_existing)
+        filtered_count = original_count - len(changed_files)
+        if filtered_count > 0:
+            print(f"Filtered out {filtered_count} pre-existing files (not part of implementation)")
+    return changed_files
+
+
 def format_tracked_files_for_prompt(tracked_files: List[Dict], max_chars: int = 5000) -> str:
     """
     Format tracked files list for the code review prompt.
@@ -2072,11 +2123,8 @@ async def reaggregate_from_existing_files(
             )
     base_ref = validate_git_ref(base_ref)
 
-    tracked_files = state.get("tracked_files", [])
-    if tracked_files:
-        changed_files = list(set(entry.get("path", "") for entry in tracked_files if entry.get("path")))
-    else:
-        changed_files = []
+    changed_files = resolve_changed_files(state, base_ref)
+    print(f"Files to review: {len(changed_files)}")
 
     with intent_to_add_untracked(changed_files):
         # Save raw issues as JSON
@@ -2591,36 +2639,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         except Exception:
             pass
 
-    if tracked_files:
-        print(f"Using {len(tracked_files)} tracked files from implementation phase")
-        changed_files = list(set(entry["path"] for entry in tracked_files))
-    else:
-        # Fallback to git diff (legacy behavior or no implement phase run)
-        if not base_ref:
-            print(
-                "Warning: No tracked files and no valid base_ref — cannot discover changed files via git diff. "
-                "Code review will have no files to review.",
-                file=sys.stderr,
-            )
-            changed_files = []
-        else:
-            print(f"No tracked files in state, falling back to git diff from {base_ref}")
-            try:
-                changed_files = get_files_changed_since_ref(base_ref)
-            except Exception:
-                changed_files = []
-
-        # Filter out pre-existing changes that were present before implementation.
-        # Through `subtract_baseline`, so a baseline entry that is an untracked
-        # *directory* (`plans/`, one porcelain line) covers the files under it.
-        pre_existing = list(state.get("pre_existing_changes", []))
-        if pre_existing and changed_files:
-            original_count = len(changed_files)
-            changed_files = subtract_baseline(changed_files, pre_existing)
-            filtered_count = original_count - len(changed_files)
-            if filtered_count > 0:
-                print(f"Filtered out {filtered_count} pre-existing files (not part of implementation)")
-
+    changed_files = resolve_changed_files(state, base_ref)
     print(f"Files to review: {len(changed_files)}")
     print("Running code review in agent exploration mode...")
     print("")
