@@ -318,6 +318,38 @@ class TestBothShapesTheProbeBoundaryReallyEmits:
         assert redact_text(line) == line
 
 
+class TestATokenCountIsNotAToken:
+    """The P1 key half matches ``token`` inside every counter claude-code prints.
+
+    Measured 2026-09-17 on a real ``claude -p --output-format json`` failure
+    envelope: ``"cacheReadInputTokens":<eight digits>`` was rewritten to
+    ``<redacted:secret-kv>`` in ``log_claude-code_*.txt``, which left the log's
+    one JSON document unparseable and the salvage gate reading a mangled
+    excerpt. A credential is never a bare integer.
+    """
+
+    ENVELOPE = (
+        '{"type":"result","is_error":true,"api_error_status":429,'
+        '"usage":{"input_tokens":1936,"output_tokens":137348,'
+        '"cache_read_input_tokens":12345678},'
+        '"modelUsage":{"claude-fable-5-1":{"inputTokens":1936,'
+        '"outputTokens":137348,"cacheReadInputTokens":12345678,'
+        '"cacheCreationInputTokens":1065254}},"total_cost_usd":25.05}'
+    )
+
+    def test_an_eight_digit_token_count_survives(self):
+        assert redact_text(self.ENVELOPE) == self.ENVELOPE
+
+    def test_the_envelope_still_parses_after_redaction(self):
+        assert json.loads(redact_text(self.ENVELOPE))["usage"]["cache_read_input_tokens"] == 12345678
+
+    def test_a_token_that_carries_letters_is_still_redacted(self):
+        """The floor is "bare integer", not "starts with a digit"."""
+        out = redact_text("token=1234567890abcdef1234567890abcdef")
+        assert "1234567890abcdef1234567890abcdef" not in out
+        assert "<redacted:secret-kv>" in out
+
+
 # ---------------------------------------------------------------------------
 # 2. Zero false positives
 # ---------------------------------------------------------------------------

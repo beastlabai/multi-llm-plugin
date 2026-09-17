@@ -1207,6 +1207,17 @@ def _looks_like_credential(value: str) -> bool:
         return False
     if value.strip("'\"").lower() in _PLACEHOLDER_VALUES:
         return False
+    # A bare integer is a count, never a credential. Measured 2026-09-17 on a
+    # real ``claude -p --output-format json`` failure: the envelope's
+    # ``"cacheReadInputTokens":<eight digits>`` matched the key half on
+    # ``token`` and this predicate on "has a digit", so the count came out as
+    # ``<redacted:secret-kv>`` and the one JSON document in
+    # ``log_claude-code_*.txt`` stopped parsing — the salvage gate then read
+    # the mangled excerpt as a truncated structure. Every token counter claude
+    # emits (``output_tokens``, ``inputTokens``, ``thinkingTokens``, …) carries
+    # the keyword, and a review's counters routinely pass eight digits.
+    if value.isdigit():
+        return False
     return (
         any(c.isdigit() for c in value)
         or (any(c.isupper() for c in value) and any(c.islower() for c in value))
