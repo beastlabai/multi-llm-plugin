@@ -126,7 +126,12 @@ from utils.json_extractor import (
     read_json_from_file,
     sanitize_model_name,
 )
-from utils.llm_client import describe_output_file, invoke_with_provider, invoke_with_file_output
+from utils.llm_client import (
+    describe_output_file,
+    describe_usage,
+    invoke_with_file_output,
+    invoke_with_provider,
+)
 from utils.git_utils import (
     capture_file_context,
     capture_file_snapshots,
@@ -1201,6 +1206,17 @@ async def run_single_review(
 
     if not result["success"]:
         error_msg = result.get("error", "Unknown error")
+        # What the failed slot spent, on the one string every artifact of a
+        # failure carries: this return's `error` is what `save_model_result`
+        # writes to `error_<model>.log` and what `.status.json` records under
+        # `models_failed`, and the tuple this function returns is destructured
+        # by every caller, so a fourth value has nowhere to go. Measured
+        # 2026-09-17: $25.05 and 137 348 output tokens went into a claude-code
+        # slot that ended on a usage cap, and the only place either number
+        # existed was the raw envelope in `log_<model>.txt`.
+        spent = describe_usage(details.get("usage"))
+        if spent:
+            error_msg = f"{error_msg} (spent {spent})"
         file_error = result.get("file_error", "")
         if file_error:
             print(f"[{display_name}] File error: {file_error}")

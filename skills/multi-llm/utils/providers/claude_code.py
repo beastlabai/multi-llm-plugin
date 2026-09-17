@@ -540,6 +540,38 @@ USAGE_LIMIT_MARKERS = (
 # for the whole gate rather than for one adapter's copy of it.
 
 
+#: ``modelUsage``'s camelCase counters and the normalized key each one feeds.
+#: Only the cache **read** half is "cached input" (the same rule the top-level
+#: block follows); ``cacheCreationInputTokens`` has no slot and is dropped.
+_MODEL_USAGE_KEYS = (
+    ("inputTokens", "input_tokens"),
+    ("outputTokens", "output_tokens"),
+    ("cacheReadInputTokens", "cached_input_tokens"),
+)
+
+
+def _sum_model_usage(model_usage: Any) -> Dict[str, Any]:
+    """The per-model ``modelUsage`` totals summed over every model.
+
+    Selected by name and omitted when no model reports the counter, so the
+    "reported or absent, never zero" contract holds here too: a key is present
+    only when at least one model carried a number for it. Every model is
+    summed rather than the served one alone because the session-title call is
+    a real request this invocation made and paid for.
+    """
+    if not isinstance(model_usage, dict):
+        return {}
+    totals: Dict[str, Any] = {}
+    for entry in model_usage.values():
+        if not isinstance(entry, dict):
+            continue
+        for source, target in _MODEL_USAGE_KEYS:
+            value = entry.get(source)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[target] = totals.get(target, 0) + value
+    return totals
+
+
 def _base_name(model: str) -> str:
     """A model id with any ``:effort`` suffix removed."""
     base, _effort = split_reasoning_effort(str(model), REASONING_EFFORTS)
@@ -1163,6 +1195,25 @@ class ClaudeCodeProvider(LLMProvider):
         # Claude Code reports cache reads and cache writes separately; only the
         # read half is "cached input".
         _put("cached_input_tokens", usage.get("cache_read_input_tokens"))
+
+        # The top-level ``usage`` block is the FINAL TURN's, not the run's:
+        # ``modelUsage`` is the per-model total for the whole invocation, and on
+        # every committed success capture it exceeds the block above by exactly
+        # the session-title call (1/1 beside 2/2). When the final turn is the
+        # API call that failed, the block above is all zeros while the run has
+        # already spent what ``modelUsage`` records. Measured 2026-09-17 on
+        # ``claude-fable-5-1``: ``usage.output_tokens: 0`` beside
+        # ``modelUsage[...].outputTokens: 137348`` and ``total_cost_usd: 25.05``
+        # — a report of "0 tokens, $25.05" is the exact "zero would read as a
+        # free run" this extractor exists to avoid. So a turn that reports no
+        # tokens at all defers to the per-model totals; a turn that reports any
+        # keeps the block the tests pin, because the two disagree by a known
+        # amount on a good run and this is not the place to re-attribute it.
+        if not any(out.get(k) for k in ("input_tokens", "output_tokens", "cached_input_tokens")):
+            totals = _sum_model_usage(envelope.get("modelUsage"))
+            if totals:
+                out.update(totals)
+
         _put("cost_usd", envelope.get("total_cost_usd"))
         if "input_tokens" in out and "output_tokens" in out:
             out["total_tokens"] = out["input_tokens"] + out["output_tokens"]

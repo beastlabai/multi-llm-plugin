@@ -446,6 +446,49 @@ def _attach_stdout_excerpt(details: Dict[str, Any], stdout: Optional[str]) -> No
         details["stdout_excerpt"] = excerpt
 
 
+def _attach_usage(
+    details: Dict[str, Any], provider: Any, stdout: Optional[str], stderr: Optional[str]
+) -> None:
+    """Put what the run spent on ``details`` as ``usage``, when the adapter can say.
+
+    The adapter's own :meth:`~utils.providers.base.LLMProvider.parse_usage`,
+    under the same never-raise rule ``subagent_executor._safe_parse_usage``
+    applies (D3j): metrics must not break a run, and an adapter that reports
+    nothing leaves the key **absent** — a ``{}`` would read as "reported,
+    free". Called on the losing paths only, because that is the lane's gap: a
+    completed slot's usage is a separate question this helper does not answer.
+    """
+    try:
+        usage = provider.parse_usage(stdout or "", stderr or "")
+    except Exception:  # noqa: BLE001 - metrics must not break the run
+        return
+    if isinstance(usage, dict) and usage:
+        details["usage"] = usage
+
+
+def describe_usage(usage: Optional[Dict[str, Any]]) -> str:
+    """One parenthetical clause naming what a run cost, or ``""``.
+
+    ``$25.05, 137,348 output tokens`` — the dollar figure first because it is
+    the number a human acts on, the output count second because it is the one
+    that says how far the run got. Input and cache counts are not rendered:
+    they are on ``details["usage"]`` for anything that wants them, and a
+    seven-figure cache-read count beside a failure reads as noise. Cost is
+    rendered to the cent and dropped when it rounds to nothing, so a duration-
+    only or free run says nothing rather than "$0.00".
+    """
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    parts = []
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0.005:
+        parts.append(f"${cost:.2f}")
+    output = usage.get("output_tokens")
+    if isinstance(output, (int, float)) and not isinstance(output, bool) and output > 0:
+        parts.append(f"{int(output):,} output tokens")
+    return ", ".join(parts)
+
+
 def _save_log(
     log_file: Union[str, Path],
     model: str,
@@ -1009,6 +1052,15 @@ def invoke_with_provider(
             # carries the text itself, under §4.5/§4.4, so a consumer can form a
             # different judgement from the same evidence.
             _attach_stdout_excerpt(details, result.stdout)
+            # A failed run still spent what its envelope records, and this lane
+            # never read it: `parse_usage` was Lane B's (`subagent_executor`)
+            # and the audit log's, so the fan-out carried usage for NO slot,
+            # failed or not. Measured 2026-09-17: a claude-code review slot ran
+            # 491 s, spent $25.05 and 137 348 output tokens, died on a usage cap,
+            # and nothing the run wrote — error log, `.status.json`, report —
+            # named a number. Best-effort like `describe_failure`, and absent
+            # rather than `{}` so "not reported" stays distinguishable.
+            _attach_usage(details, provider, result.stdout, result.stderr)
 
             if schema_phase:
                 # §4.2.1 cases 2 and 4 both arrive here as a non-zero exit, and
