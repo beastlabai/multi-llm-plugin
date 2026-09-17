@@ -1200,6 +1200,20 @@ def build_validation_batch_records(
         ``group_index`` — the same key the reply contract asks the subagent to
         echo back, rather than a differently-named ``index`` the subagent has
         to translate — and the ``group_hash`` the subagent must also echo.
+
+        A suggestion's ``file`` and ``line_range`` ride along **when the
+        finding has them**. ``CODE_REVIEW_VALIDATION_GUIDANCE`` has promised
+        the validator "each issue record carries `file` and `line_range`" since
+        D2 lifted that sentence out of the instruction markdown — where it was
+        true, because the markdown pointed the validator at ``grouped.json``
+        itself — but this builder kept the four-field shape the plan-review
+        records have, so every code-review validator was told to open
+        locations it was never given, beside a code block that names five
+        files and says nothing about which finding each window belongs to.
+        Measured 2026-09-17: six groups over five files, and the verdicts
+        located every one by reading the repository, which ``context_mode:
+        inline`` does not promise. Keyed on presence, so a plan-review record
+        (no location) renders byte-identically to before.
     """
     records: List[Dict[str, Any]] = []
     for idx in group_indices:
@@ -1221,6 +1235,11 @@ def build_validation_batch_records(
                     "desc": s.get("desc", ""),
                     "importance": s.get("importance", "medium"),
                     "type": s.get("type", "unknown"),
+                    **({"file": s["file"]} if s.get("file") else {}),
+                    **(
+                        {"line_range": s["line_range"]}
+                        if s.get("line_range") else {}
+                    ),
                 }
                 for s in group_dict.get("suggestions", [])
             ],
