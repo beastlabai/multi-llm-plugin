@@ -215,7 +215,7 @@ def _sandbox_fallback_for(provider: Any, cwd: Optional[str]) -> str:
     Read the way the fan-out reads it — through the adapter's own hook, for
     ``generate``, anchored on the repo root — so ``doctor`` reports the policy
     the next run will actually apply. ``""`` and ``off`` both render the row
-    as today; only ``external`` adds the note.
+    as today; ``auto`` (the default) adds the note to a BROKEN row.
     """
     from .providers.base import PROFILE_GENERATE
 
@@ -406,10 +406,11 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
                 s += f": {sandbox['detail']}"
             # D6 override (2026-09-17): the row stays BROKEN and the repair is
             # still printed — the write profile is refused regardless — but the
-            # operator who wrote the attestation is told what it buys here.
-            if sandbox.get("fallback") == "external":
+            # operator is told what the default does on this machine, so the
+            # `off` that would change it is a known choice and not a surprise.
+            if sandbox.get("fallback") == "auto":
                 s += (
-                    f" (fallback: external — {row['provider']} runs unsandboxed "
+                    f" (fallback: auto — {row['provider']} runs unsandboxed "
                     f"for read-only phases)"
                 )
         elif s == "ok":

@@ -1138,28 +1138,43 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
     invisible here: a runner whose sandbox cannot start writes a paragraph
     about the plan file it could not open, and a non-empty answer file *is*
     success. The refusal comes off the same once-per-run cache and carries the
-    same `[SANDBOX_UNAVAILABLE]` wording as the review lanes.
+    same `[SANDBOX_UNAVAILABLE]` wording as the review lanes — under
+    `sandbox_fallback: off`; the shipped `auto` dispatches the slot
+    unsandboxed instead (D6 override, 2026-09-17), below.
     """
 
     #: Real bubblewrap on a stock Ubuntu 24.04, replayed verbatim.
     BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 
-    def test_the_ask_fanout_refuses_a_slot_whose_sandbox_cannot_start(
-        self, plan, monkeypatch
-    ):
+    def _broken(self, monkeypatch, policy=None):
+        """The real codex adapter with only its probe argv replaced: `sh`
+        really runs, and what it prints is the line bwrap prints where it
+        cannot start. ``policy`` pins the resolved key through the accessor,
+        not the config file: `run_ask` reads the shipped base config, and what
+        these tests pin is the gate, not the YAML layering
+        (`test_subagent_executor` reads the key through the real file). `None`
+        leaves the shipped default in place."""
         from utils import provider_registry as registry
         from utils import review_orchestrator_base as rob
+        from utils.providers import codex as codex_module
         from utils.providers.base import PROFILE_GENERATE
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        # The real adapter, with only its probe argv replaced: `sh` really runs,
-        # and what it prints is the line bwrap prints where it cannot start.
         broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
         provider = registry.get_provider("codex")
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command",
             lambda _self, profile: broken if profile == PROFILE_GENERATE else None,
         )
+        if policy is not None:
+            monkeypatch.setattr(
+                codex_module, "sandbox_fallback_policy", lambda anchor=None: policy
+            )
+
+    def test_the_ask_fanout_refuses_a_slot_whose_sandbox_cannot_start_under_off(
+        self, plan, monkeypatch
+    ):
+        self._broken(monkeypatch, policy="off")
         inv = FakeInvoker()
         rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                       "--models", "codex:gpt-5.2-codex"], inv)
@@ -1180,35 +1195,20 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
 
     BYPASS_LINE = (
         "[SANDBOX_BYPASSED] codex: bubblewrap cannot start; running --sandbox "
-        "danger-full-access under providers.codex.sandbox_fallback=external "
+        "danger-full-access under providers.codex.sandbox_fallback=auto "
         "(read-only phase; no OS boundary between the model's shell and this "
         "machine)"
     )
 
-    def _broken_and_attested(self, monkeypatch):
-        from utils import provider_registry as registry
-        from utils import review_orchestrator_base as rob
-        from utils.providers import codex as codex_module
-        from utils.providers.base import PROFILE_GENERATE
-
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
-        provider = registry.get_provider("codex")
-        monkeypatch.setattr(
-            type(provider), "sandbox_probe_command",
-            lambda _self, profile: broken if profile == PROFILE_GENERATE else None,
-        )
-        # The accessor, not the config file: `run_ask` reads the shipped base
-        # config, and what this test pins is the gate, not the YAML layering
-        # (`test_subagent_executor` reads the key through the real file).
-        monkeypatch.setattr(
-            codex_module, "sandbox_fallback_policy", lambda anchor=None: "external"
-        )
-
-    def test_the_ask_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
+    def test_the_ask_fanout_dispatches_unsandboxed_by_default_with_the_flag_and_the_marker(
         self, plan, monkeypatch, capsys
     ):
-        self._broken_and_attested(monkeypatch)
+        """No policy pinned: the shipped base config resolves `auto`, and that
+        is what a fresh install does on a machine whose bwrap cannot start."""
+        from utils.providers import codex as codex_module
+
+        self._broken(monkeypatch)
+        assert codex_module.sandbox_fallback_policy() == "auto"
 
         class Invoker(FakeInvoker):
             seen = []
@@ -1246,7 +1246,7 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True, env=env)
         subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
-        self._broken_and_attested(monkeypatch)
+        self._broken(monkeypatch)
         d = qdir(plan, "Q")
         answer_file = os.path.join(d, "answer_codex_gpt-5_2-codex.md")
 

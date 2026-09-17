@@ -107,11 +107,14 @@ DISPATCH_TIME_OVERRIDE = {
     "token": "danger-full-access",
     "profiles": (PROFILE_GENERATE, PROFILE_AGENT_READONLY),
     "reason": (
-        "D6 (2026-09-17): on a machine where bubblewrap cannot start, the "
-        "operator's `providers.codex.sandbox_fallback: external` attests an "
-        "external boundary; the D6 probe verdict must be `unavailable` (never "
-        "`unknown`) and the profile read-only. A by-hand run under this value "
-        "found 2 unique validated-high issues the sandboxed reviewers did not."
+        "D6 (2026-09-17): on a machine where bubblewrap cannot start, codex — "
+        "the one reviewer that insists on its own OS sandbox — runs its "
+        "read-only phases without it under `providers.codex.sandbox_fallback: "
+        "auto` (the default; `off` restores the refusal), the footing every "
+        "other reviewer already has there; the D6 probe verdict must be "
+        "`unavailable` (never `unknown`) and the profile read-only. A by-hand "
+        "run under this value found 2 unique validated-high issues the "
+        "sandboxed reviewers did not."
     ),
     "retires_when": (
         "the AppArmor repair `multi_llm.py doctor` prints is the norm on the "
@@ -671,25 +674,36 @@ class TestTheOneDispatchTimeOverride:
         assert readonly == _profile_argv(name, PROFILE_AGENT_READONLY)
         assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_GENERATE) is None
 
-    def test_the_policy_defaults_to_off_and_refuses_a_bare_boolean(self, monkeypatch):
-        """`off` ships; `on`/`true` is not a spelling of the attestation."""
+    def test_the_policy_defaults_to_auto_and_reads_a_bare_boolean_as_its_word(
+        self, monkeypatch, capsys
+    ):
+        """`auto` ships; YAML's `off`/`false` is `off` and `on`/`true` is
+        `auto`, silently — the key exists to be turned off, so there is no
+        spelling of "on" that needs a warning. The retired `external` is not
+        an alias: it warns like any other unknown word and lands on the
+        default, which is the behaviour it used to ask for."""
         from utils.providers import codex as codex_module
 
         base_module.reset_env_policy_warnings()
         monkeypatch.setattr(
             codex_module, "_provider_block", lambda name, anchor=None: {}
         )
-        assert codex_module.sandbox_fallback_policy() == "off"
-        for value, expected in (
-            ("external", "external"), ("EXTERNAL", "external"), (False, "off"),
-            (True, "off"), ("on", "off"), ("yes", "off"), ("garbage", "off"),
+        assert codex_module.sandbox_fallback_policy() == "auto"
+        assert base_module.SANDBOX_FALLBACK_POLICIES == ("off", "auto")
+        for value, expected, warns in (
+            ("auto", "auto", False), ("AUTO", "auto", False),
+            ("off", "off", False), (False, "off", False), (True, "auto", False),
+            ("external", "auto", True), ("garbage", "auto", True),
         ):
             base_module.reset_env_policy_warnings()
+            capsys.readouterr()
             monkeypatch.setattr(
                 codex_module, "_provider_block",
                 lambda name, anchor=None, v=value: {"sandbox_fallback": v},
             )
             assert codex_module.sandbox_fallback_policy() == expected, value
+            err = capsys.readouterr().err
+            assert ("providers.codex.sandbox_fallback" in err) is warns, (value, err)
 
 
 class TestAgentsMdCarriesTheProfileScopedRule:

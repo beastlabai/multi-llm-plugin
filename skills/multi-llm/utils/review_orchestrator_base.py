@@ -76,7 +76,7 @@ from .providers.base import (
     CATEGORY_SERVER_ERROR,
     PROFILE_GENERATE,
     SANDBOX_BYPASSED_MARKER,
-    SANDBOX_FALLBACK_EXTERNAL,
+    SANDBOX_FALLBACK_AUTO,
     LLMProvider,
     classify_streams,
     context_length_message,
@@ -1535,17 +1535,19 @@ def sandbox_bypassed_notice(provider_name: str) -> str:
 
     Verbatim the sentence the design fixed (2026-09-17), because it is the
     whole of what the operator is told at the moment it matters: which runner,
-    why its own sandbox is not in the path, which config line let it through,
-    and — the clause that cannot be left out — that nothing stands between the
-    model's shell and this machine. Read-only phase or not, the model runs
-    with the operator's rights; 4 of the 5 reviewers on the host this was
-    measured on already do (muse always, under ``--disable-sandbox``), and
-    the sentence is what keeps codex's case from being the quiet one.
+    why its own sandbox is not in the path, which config key governs it (and
+    so which word turns it off), and — the clause that cannot be left out —
+    that nothing stands between the model's shell and this machine. It is
+    printed under the *default* policy, loudly and on purpose: read-only
+    phase or not, the model runs with the operator's rights; 4 of the 5
+    reviewers on the host this was measured on already do (muse always,
+    under ``--disable-sandbox``), and the sentence is what keeps codex's case
+    from being the quiet one.
     """
     return (
         f"{SANDBOX_BYPASSED_MARKER} {provider_name}: bubblewrap cannot start; "
         f"running --sandbox danger-full-access under "
-        f"providers.{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_EXTERNAL} "
+        f"providers.{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_AUTO} "
         f"(read-only phase; no OS boundary between the model's shell and this "
         f"machine)"
     )
@@ -1585,19 +1587,23 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     never a gate, and a sandbox that dies mid-dispatch still lands on the D3k
     ladder as rung 1.
 
-    ``unavailable`` answers ``refuse`` — exactly as before — unless **all** of
-    the D6 override's conditions hold (2026-09-17): the adapter declares a
-    fallback for ``generate`` and the operator resolved it to ``external``.
-    The verdict itself is the third condition (``unavailable``, never
-    ``unknown``: the override widens nothing on a probe that was not read),
-    and ``generate`` is the profile this gate exists for, so the fourth holds
-    by construction. Then the answer is ``dispatch_unsandboxed`` with the
-    ``[SANDBOX_BYPASSED]`` line, and the lane runs the slot with the flag.
+    ``unavailable`` answers ``dispatch_unsandboxed`` — the D6 override
+    (2026-09-17) — when **all** of its conditions hold: the adapter declares a
+    fallback for ``generate`` at all (codex alone; a stand-in without the hook
+    is refused as before) and the key resolves to ``auto``, which is the
+    shipped default. The verdict itself is the third condition
+    (``unavailable``, never ``unknown``: the override widens nothing on a
+    probe that was not read), and ``generate`` is the profile this gate
+    exists for, so the fourth holds by construction. The lane then prints the
+    ``[SANDBOX_BYPASSED]`` line and runs the slot with the flag. ``refuse`` —
+    the ``[SANDBOX_UNAVAILABLE]`` line — is the answer under
+    ``providers.<name>.sandbox_fallback: off``, and for every adapter that
+    declares no fallback.
     """
     state, tail = _fanout_sandbox_verdict(provider_name, cwd)
     if state != "unavailable":
         return SandboxVerdict(SANDBOX_DISPATCH, None)
-    if _fanout_sandbox_fallback(provider_name, cwd) == SANDBOX_FALLBACK_EXTERNAL:
+    if _fanout_sandbox_fallback(provider_name, cwd) == SANDBOX_FALLBACK_AUTO:
         return SandboxVerdict(
             SANDBOX_DISPATCH_UNSANDBOXED, sandbox_bypassed_notice(provider_name)
         )
@@ -1842,10 +1848,11 @@ async def run_single_model(
     # ladder as rung 1.
     #
     # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`, only
-    # when the probe said `unavailable` AND the operator wrote
-    # `providers.<name>.sandbox_fallback: external`. The slot then runs with
-    # the flag, prints the one `[SANDBOX_BYPASSED]` line, and is bracketed by
-    # the porcelain detective check below — nothing else about the lane moves.
+    # when the probe said `unavailable` AND `providers.<name>.sandbox_fallback`
+    # resolves to `auto` (the default; `off` restores the refusal). The slot
+    # then runs with the flag, prints the one `[SANDBOX_BYPASSED]` line, and is
+    # bracketed by the porcelain detective check below — nothing else about
+    # the lane moves.
     sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
     if sandbox.refused:
         reason = sandbox.reason

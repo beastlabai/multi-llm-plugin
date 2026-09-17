@@ -42,10 +42,10 @@ ERROR_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
 ERROR_PROMPT_UNSAFE = "PROMPT_UNSAFE"
 
 #: ``details["sandbox"]`` for a slot that ran under the D6 fallback (2026-09-17):
-#: the runner's own OS sandbox could not start and the operator's
-#: ``sandbox_fallback: external`` let the read-only dispatch run without it.
-#: Absent means "ran as the adapter's default argv renders it" — never written
-#: as any other value, so a reader tests for presence.
+#: the runner's own OS sandbox could not start and ``sandbox_fallback: auto``
+#: (the default) let the read-only dispatch run without it. Absent means "ran
+#: as the adapter's default argv renders it" — never written as any other
+#: value, so a reader tests for presence.
 SANDBOX_BYPASSED = "bypassed"
 
 # Windows-only concern: POSIX exec passes argv verbatim (no reparsing) and
@@ -763,7 +763,7 @@ def invoke_with_provider(
             only when ``review_orchestrator_base.sandbox_refusal`` answered
             ``dispatch_unsandboxed`` for this slot — the runner's own sandbox
             probe said ``unavailable``, ``providers.<name>.sandbox_fallback``
-            is ``external``, and this is a ``generate`` dispatch. It is
+            is ``auto`` (the default), and this is a ``generate`` dispatch. It is
             forwarded to the adapter's ``build_command_for_transport`` (which
             every adapter but codex ignores) and, on success, recorded as
             ``details["sandbox"] = "bypassed"`` so the provenance rides the
@@ -1401,8 +1401,9 @@ FILE_OUTPUT_LOCATION = (
 #: "Refused by the sandbox where one runs", not "will be refused": until D6's
 #: fallback (2026-09-17) every adapter on this roster really did refuse the
 #: write — a chat mode, a zero tool budget, a missing tool, or codex's own
-#: bubblewrap. A codex slot dispatched under ``sandbox_fallback: external``
-#: runs with no sandbox at all, so a write there would *succeed*, and a prompt
+#: bubblewrap. A codex slot dispatched under the fallback (``sandbox_fallback:
+#: auto``, the default) runs with no sandbox at all, so a write there would
+#: *succeed*, and a prompt
 #: that promised otherwise would be lying to the model about the one thing it
 #: is being asked not to do. The instruction is the same either way (return the
 #: array on stdout); only the claim about what happens on disobedience moved.

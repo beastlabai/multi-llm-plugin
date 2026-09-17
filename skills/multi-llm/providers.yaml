@@ -367,50 +367,61 @@ providers:
       - gpt-5.6-terra
       - gpt-5.6-sol
       - gpt-5.6-sol:xhigh
-    # sandbox_fallback: off | external   (default: off)
+    # sandbox_fallback: auto | off   (default: auto)
     #
     # D6 (2026-09-17) — the ONE dispatch-time override of a sandbox refusal.
-    # `codex exec` runs the model's shell through bubblewrap, and on a stock
-    # Ubuntu 24.04 (kernel.apparmor_restrict_unprivileged_userns=1) bwrap
-    # cannot start: `bwrap: loopback: Failed RTM_NEWADDR: Operation not
-    # permitted`. Under `off` the D6 probe refuses every codex slot and phase
-    # on such a machine and `multi_llm.py doctor` prints the AppArmor repair —
-    # that is the fix, and it stays the fix.
+    # codex is the only reviewer on this roster that insists on its own OS
+    # sandbox: `codex exec` runs the model's shell through bubblewrap, and on
+    # a stock Ubuntu 24.04 (kernel.apparmor_restrict_unprivileged_userns=1)
+    # bwrap cannot start: `bwrap: loopback: Failed RTM_NEWADDR: Operation not
+    # permitted`. Every other CLI in the fan-out — cursor-agent, pi,
+    # claude-code, muse (always `--disable-sandbox`) — runs the same read-only
+    # phases with no OS boundary at all, and always has.
     #
-    #   off      (default) refuse; codex is left out of the fan-out and every
-    #            read/write batch until the repair is installed.
-    #   external YOUR attestation that something outside this process — a
-    #            container, a VM, a throwaway account — is the boundary. Then,
-    #            ONLY when the probe verdict is `unavailable` (never `unknown`)
-    #            and ONLY for the read-only profiles (the review/ask fan-out
-    #            and the executor's read kinds: validation, revalidation,
-    #            consolidation, salvage, task generation, the human-decision
-    #            judge), codex runs `--sandbox danger-full-access` in the real
-    #            repo root. Every artifact of such a slot says so: one
+    #   auto     (default) When the D6 probe says the sandbox cannot start
+    #            (verdict `unavailable`; never on `unknown`), codex's read-only
+    #            phases run without it — `--sandbox danger-full-access` in the
+    #            real repo root — the same footing as every other reviewer.
+    #            Read-only means the review/ask fan-out and the executor's read
+    #            kinds: validation, revalidation, consolidation, salvage, task
+    #            generation, the human-decision judge. On a machine where the
+    #            sandbox starts, nothing changes: codex runs sandboxed. Every
+    #            slot that ran without it says so, loudly: one
     #            `[SANDBOX_BYPASSED]` line on stdout, `models_served` in
-    #            `.status.json`, `(ran unsandboxed: sandbox_fallback=external)`
-    #            on the report's model labels, and a `git status` taken before
-    #            and after the slot that fails it by path if the tree changed.
-    #            The write profile (`agent-write`, every apply/implement kind)
-    #            is refused exactly as under `off`, whatever this key says.
+    #            `.status.json`, `(ran unsandboxed: sandbox_fallback=auto)` on
+    #            the report's model labels, a `(fallback: auto …)` note on
+    #            doctor's BROKEN row, and a `git status` taken before and after
+    #            the slot that fails it by path if the tree changed.
+    #   off      Restore the refusal: on such a machine codex is left out of
+    #            the fan-out and every read batch until the AppArmor repair
+    #            `multi_llm.py doctor` prints is installed. That repair is
+    #            still the fix for codex's *write* profile.
     #
-    # What `external` gives up, in plain words: no OS boundary of any kind
-    # between the model's shell and this machine — reads and writes anywhere
-    # you can, network from model commands, and no prompt-injection resistance
-    # for a validation batch. The plugin cannot verify the boundary you assert
-    # (measured 2026-09-17: the host's own shell tool runs in the same
-    # namespaces as your terminal), so the word is what it is. Measured on
+    # The write profile (`agent-write`, every apply/implement kind) is refused
+    # under a broken sandbox whatever this key says: the fallback keeps
+    # read-only work flowing; it never hands a model pre-approved edit access
+    # with the boundary removed.
+    #
+    # What `auto` gives up, in plain words: for a codex read-only slot on a
+    # machine where bwrap cannot start, no OS boundary of any kind between the
+    # model's shell and this machine — reads and writes anywhere you can,
+    # network from model commands, and no prompt-injection resistance for a
+    # validation batch beyond the detective `git status` check. That is the
+    # footing four of five reviewers already run on (measured 2026-09-17: the
+    # host's own shell tool runs in the same namespaces as your terminal), so
+    # the plugin makes no claim about a boundary it never checked — which is
+    # why the value is `auto` and not a word that would assert one. Measured
     # the same day: a by-hand `danger-full-access` review over a worktree
     # snapshot escaped the snapshot in 6 commands to read the real repo, and
     # found 2 unique validated-high issues the sandboxed reviewers did not —
-    # which is the whole reason this key exists and the whole reason it is
-    # spelled `external` rather than `on`. A bare boolean is ignored with a
-    # warning; write the word.
+    # the whole reason the fallback is on by default rather than behind a
+    # repair most machines never install. YAML booleans are read as the words
+    # they spell: `off`/`false` is `off`, `on`/`true` is `auto`.
     #
     # This key is read through the normal layering, so a cloned repository's
-    # `.multi-llm/providers.yaml` can set it: treat an untrusted repo's
-    # override the way docs/configuration.md already says to.
-    sandbox_fallback: "off"
+    # `.multi-llm/providers.yaml` can set it — and since the default is already
+    # `auto`, all a project layer can do with it is turn the fallback *off*.
+    sandbox_fallback: auto
 
   kilocode:
     default_timeout: 1200

@@ -480,8 +480,9 @@ REVIEWED_STILL_WRITES = {
 DISPATCH_TIME_OVERRIDES = {
     ("codex", "--sandbox danger-full-access"): (
         "D6 override (2026-09-17). Rendered only by `apply_sandbox_fallback` "
-        "for `generate`/`agent-readonly`, behind `providers.codex."
-        "sandbox_fallback: external` plus a probe verdict of `unavailable`. "
+        "for `generate`/`agent-readonly`, behind a probe verdict of "
+        "`unavailable` under `providers.codex.sandbox_fallback: auto` (the "
+        "default; `off` restores the refusal). "
         "The word is `sandbox` but the value REMOVES one: `codex sandbox -c "
         "'sandbox_mode=\"danger-full-access\"' -- sh -c 'exit 0'` runs with no "
         "bwrap at all (rc 0, codex-cli 0.154.0) where `read-only` and "
