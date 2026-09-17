@@ -7,6 +7,7 @@ and identify items needing human review.
 """
 
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -123,6 +124,88 @@ def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
     return context[:limit] + "\n\n[... truncated ...]"
 
 
+#: How many of a cut context's dropped section headings the stderr line names
+#: before folding the rest into ``(+n more)``, and how long each may be.
+_CUT_SECTIONS_NAMED = 3
+_CUT_SECTION_TITLE_CHARS = 60
+
+_ATX_HEADING = re.compile(r"^(#{1,3}) \S")
+_CODE_FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def _markdown_headings(text: str) -> Dict[int, List[Tuple[int, str]]]:
+    """``{level: [(offset, line), …]}`` for the ATX headings outside code fences.
+
+    A line scan rather than a multiline regex because a plan's ```bash``
+    blocks are full of ``# comment`` lines, which a regex would file as level-1
+    headings — and two of them would outnumber the real title.
+    """
+    by_level: Dict[int, List[Tuple[int, str]]] = {}
+    offset = 0
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        if _CODE_FENCE.match(line):
+            in_fence = not in_fence
+        elif not in_fence:
+            match = _ATX_HEADING.match(line)
+            if match:
+                by_level.setdefault(len(match.group(1)), []).append(
+                    (offset, line.rstrip("\n"))
+                )
+        offset += len(line)
+    return by_level
+
+
+def describe_context_cut(context: str, limit: int) -> str:
+    """What a head-kept cut of ``context`` at ``limit`` leaves out, by section.
+
+    A raw "N chars over" says how much was lost and nothing about *what*: the
+    run this was measured on cut a 336 026-char plan at 60 000 and printed
+    ``276143 chars over``, while every verdict that came back cited a section —
+    §2, §4, §6, the implementation notes at the tail — that no validator had
+    been shown. Named sections make the same line answer "did the part this
+    review is about survive?" without opening the task file.
+
+    Sections are the ATX headings (``#``/``##``/``###``) at the shallowest
+    level that occurs more than once, so a plan's ``##`` phases count and its
+    single ``#`` title does not; a document with no headings (a diff, plain
+    text) gets the empty string and the line stays as it was.
+    """
+    if len(context) <= limit:
+        return ""
+    by_level = _markdown_headings(context)
+    if not by_level:
+        return ""
+    level = next(
+        (lvl for lvl in sorted(by_level) if len(by_level[lvl]) > 1),
+        min(by_level),
+    )
+    headings = by_level[level]
+    # A section is whole when the next one still starts inside the excerpt.
+    starts = [start for start, _ in headings] + [len(context)]
+    kept = sum(1 for nxt in starts[1:] if nxt <= limit)
+    dropped = [title for start, title in headings if start >= limit]
+    cut_mid = len(headings) - kept - len(dropped)
+
+    def name(title: str) -> str:
+        title = title.strip()
+        if len(title) > _CUT_SECTION_TITLE_CHARS:
+            title = title[: _CUT_SECTION_TITLE_CHARS - 1] + "…"
+        return f"'{title}'"
+
+    parts = [f"kept {kept} of {len(headings)} sections whole"]
+    if cut_mid:
+        parts.append(f"cut {name(headings[kept][1])} mid-section")
+    if dropped:
+        named = ", ".join(name(title) for title in dropped[:_CUT_SECTIONS_NAMED])
+        more = len(dropped) - _CUT_SECTIONS_NAMED
+        parts.append(
+            f"dropped {len(dropped)}: {named}"
+            + (f" (+{more} more)" if more > 0 else "")
+        )
+    return "; ".join(parts)
+
+
 def excerpt_context_reported(
     context: str, block: str, limit: int = VALIDATION_CONTEXT_LIMIT
 ) -> str:
@@ -132,12 +215,14 @@ def excerpt_context_reported(
     the prompt, which nobody reads — so a 200 KB plan lost its whole tail (the
     acceptance criteria live there) and the run said nothing about it. One line
     per block, from the site that owns the budget, so an operator reading the
-    log can see which half was over and by how much.
+    log can see which half was over, by how much, and — for a document with
+    headings — which sections went (:func:`describe_context_cut`).
     """
     if len(context) > limit:
+        detail = describe_context_cut(context, limit)
         print(
             f"[VALIDATION_CONTEXT_TRUNCATED] {block} {len(context) - limit} "
-            f"chars over",
+            f"chars over" + (f"; {detail}" if detail else ""),
             file=sys.stderr,
         )
     return excerpt_context(context, limit)

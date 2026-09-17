@@ -574,10 +574,28 @@ def build_reviewed_code_excerpt(
     file is always kept, so a single over-budget file falls through to the
     caller's own trim rather than producing nothing. Confinement to
     ``project_root`` is :func:`_readable_inside_repo`'s job.
+
+    The two halves are :func:`_reviewed_code_sections` (the reads) and
+    :func:`_fit_reviewed_code_sections` (the budget), so a caller that needs
+    the dropped list — :func:`build_validation_secondary_context` names it on
+    stderr — can read the files once and fit them twice.
     """
+    sections = _reviewed_code_sections(
+        groups, project_root=project_root, context_lines=context_lines
+    )
+    return _fit_reviewed_code_sections(sections, budget)[0]
+
+
+def _reviewed_code_sections(
+    groups: List[Any],
+    *,
+    project_root: Optional[str],
+    context_lines: int,
+) -> List[Tuple[str, str]]:
+    """``(path, rendered section)`` per cited file, files read once, in path order."""
     windows = _issue_line_windows(groups, context_lines)
     if not windows:
-        return ""
+        return []
 
     # With no git root (a plan outside a repository) the run's own working
     # directory is the only boundary there is, and a code review always runs
@@ -613,9 +631,16 @@ def build_reviewed_code_excerpt(
             blocks.append(f"```\n{body}\n```")
         if blocks:
             sections.append((path, f"### {path}\n\n" + "\n\n".join(blocks)))
+    return sections
 
+
+def _fit_reviewed_code_sections(
+    sections: List[Tuple[str, str]],
+    budget: Optional[int],
+) -> Tuple[str, List[str]]:
+    """``(excerpt, dropped paths)`` — the sections under ``budget``, whole files only."""
     if not sections:
-        return ""
+        return "", []
     header = (
         "Lines are numbered as they are in the file. Only the windows these "
         "issues cite are shown; nothing between them is.\n\n"
@@ -634,7 +659,7 @@ def build_reviewed_code_excerpt(
             "(Over this block's budget, so the windows for these files are not "
             "shown: " + ", ".join(dropped) + ".)"
         )
-    return header + "\n\n".join(kept)
+    return header + "\n\n".join(kept), dropped
 
 
 def build_implementation_record(plan_path: Path) -> str:
@@ -760,18 +785,23 @@ def build_validation_secondary_context(
     code_heading = "#### Code at the cited lines\n\n"
     code_budget = VALIDATION_CONTEXT_LIMIT - len(record_part) - len(code_heading) - 2
 
-    reviewed_code = build_reviewed_code_excerpt(groups, project_root=project_root)
+    sections = _reviewed_code_sections(
+        groups, project_root=project_root, context_lines=REVIEWED_CODE_CONTEXT_LINES
+    )
+    reviewed_code, _ = _fit_reviewed_code_sections(sections, None)
     embedded = reviewed_code
     if len(embedded) > code_budget:
         # Re-cut by whole files rather than letting the caller's shared excerpt
-        # slice the last file mid-window. Only reached when the code really is
-        # over budget, so the common case reads the files once.
-        embedded = build_reviewed_code_excerpt(
-            groups, project_root=project_root, budget=code_budget
-        )
+        # slice the last file mid-window. The files were read once, above; only
+        # the fit is redone. The stderr line names the files that went, not a
+        # char count, because "which cited file has no window" is the question
+        # a verdict about an unshown file raises.
+        embedded, dropped = _fit_reviewed_code_sections(sections, code_budget)
         print(
             f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code "
-            f"{len(reviewed_code) - code_budget} chars over",
+            f"{len(reviewed_code) - code_budget} chars over; windows for "
+            f"{len(dropped)} of {len(sections)} cited files not shown: "
+            + ", ".join(dropped),
             file=sys.stderr,
         )
 

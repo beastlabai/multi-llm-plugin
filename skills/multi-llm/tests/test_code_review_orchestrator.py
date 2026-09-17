@@ -1301,9 +1301,17 @@ class TestWhatTheReviewersAreToldTheImplementationDid:
                 {"file": name, "line_range": [100, 101]},
             ]})
 
-        secondary, reviewed_code = cro.build_validation_secondary_context(
-            groups, plan_path, project_root=str(tmp_path)
-        )
+        snapshot_calls = []
+        real_snapshots = cro.capture_file_snapshots
+
+        def counting_snapshots(paths):
+            snapshot_calls.append(list(paths))
+            return real_snapshots(paths)
+
+        with patch.object(cro, "capture_file_snapshots", counting_snapshots):
+            secondary, reviewed_code = cro.build_validation_secondary_context(
+                groups, plan_path, project_root=str(tmp_path)
+            )
 
         record_half = secondary.split("#### Code at the cited lines")[0]
         assert len(record_half) <= cro.IMPLEMENTATION_RECORD_CHARS + 200
@@ -1322,7 +1330,22 @@ class TestWhatTheReviewersAreToldTheImplementationDid:
             groups, project_root=str(tmp_path)
         )
         assert len(reviewed_code) > VALIDATION_CONTEXT_LIMIT
-        assert "[VALIDATION_CONTEXT_TRUNCATED] reviewed-code" in capsys.readouterr().err
+        # The over-budget path used to render the excerpt twice, reading every
+        # cited file twice; now it reads once and fits twice.
+        assert len(snapshot_calls) == 1
+        # And the stderr line names the files that lost their window — the
+        # question a verdict about an unshown file raises — not just a count.
+        err = capsys.readouterr().err
+        line = next(ln for ln in err.splitlines() if "reviewed-code" in ln)
+        assert "[VALIDATION_CONTEXT_TRUNCATED] reviewed-code" in line
+        shown = secondary.split("#### Code at the cited lines")[1]
+        dropped = [
+            f"m{i:02d}.py" for i in range(20) if f"### m{i:02d}.py" not in shown
+        ]
+        assert dropped, "the fixture is meant to overflow the code budget"
+        assert f"windows for {len(dropped)} of 20 cited files not shown: " in line
+        for name in dropped:
+            assert name in line.split("not shown: ")[1]
 
     def test_a_file_edited_after_fanout_moves_the_recorded_input_hash(
         self, tmp_path
