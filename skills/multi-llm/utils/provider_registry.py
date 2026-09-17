@@ -394,6 +394,17 @@ def _load_override_layer(layer_name: str, path: Path, permissive: bool) -> Optio
     # provider name has no adapter and is ignored at runtime, and a non-mapping
     # provider value is dropped by the load-time guard in load_config. Any future
     # change that feeds config into command construction MUST revisit this.
+    #
+    # Revisited 2026-09-17, one key: `providers.codex.sandbox_fallback: external`
+    # changes the *value* in codex's own `--sandbox` slot (never the binary, never a
+    # new flag) to `danger-full-access`, and only after the D6 probe said the
+    # sandbox cannot start, only for the two read-only profiles. It is honored from
+    # the project layer on purpose, alongside `driver.verify_command` — the key
+    # that already runs a shell string from that layer — because on the hosts this
+    # exists for, four of five reviewers run with the operator's shell rights
+    # anyway (muse always `--disable-sandbox`, pi/cursor-agent/claude-code never
+    # had one), so a repo that can already set `verify_command` gains nothing new
+    # from it. `docs/configuration.md` §Safety names both carve-outs.
     return data
 
 
