@@ -680,6 +680,91 @@ class TestPrepareBatchedValidationTasks:
 
         assert "[VALIDATION_CONTEXT_TRUNCATED]" not in capsys.readouterr().err
 
+    def test_a_cut_plan_names_the_sections_that_went(
+        self, sample_groups, tmp_path, capsys
+    ):
+        """The char count said how much was lost; the sections say what.
+
+        Measured 2026-09-17: a 336 026-char plan cut at 60 000 printed
+        ``276143 chars over`` and nothing else, while every verdict cited §2,
+        §4, §6 or the implementation notes at the tail — none of which any
+        validator had been shown. The line now names the section the cut
+        landed in and the ones that never made it, so a reader of the log can
+        tell whether the part this review is about survived.
+        """
+        from utils.validation import VALIDATION_CONTEXT_LIMIT
+
+        section = "\n".join(["lorem ipsum"] * 1500) + "\n"  # ~18 KB each
+        plan = "# A plan\n\nintro\n\n" + "".join(
+            f"## Phase {n} — {'the ' * 12}thing {n}\n\n{section}\n" for n in range(6)
+        )
+        assert len(plan) > VALIDATION_CONTEXT_LIMIT
+
+        prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context=plan,
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+
+        err = capsys.readouterr().err
+        line = next(ln for ln in err.splitlines() if "[VALIDATION_CONTEXT_TRUNCATED] context" in ln)
+        # The old prefix is intact — the number is still there for anyone
+        # comparing runs — and the detail rides behind it on the same line.
+        assert f"context {len(plan) - VALIDATION_CONTEXT_LIMIT} chars over;" in line
+        # 60 000 chars hold three ~18 KB phases whole and land inside the fourth.
+        assert "kept 3 of 6 sections whole" in line
+        assert "cut '## Phase 3" in line and "mid-section" in line
+        assert "dropped 2: '## Phase 4" in line and "'## Phase 5" in line
+        # The single `#` title is not a section: `##` is the level that recurs.
+        assert "'# A plan'" not in line
+        # Long titles are shortened, never allowed to run the line off the log.
+        assert "…'" in line
+
+    def test_a_cut_with_many_dropped_sections_folds_the_tail(self):
+        from utils.validation import describe_context_cut
+
+        plan = "".join(f"## S{n}\n{'x' * 100}\n" for n in range(12))
+        detail = describe_context_cut(plan, 250)
+        assert "kept 2 of 12 sections whole" in detail
+        assert "cut '## S2' mid-section" in detail
+        assert "dropped 9: '## S3', '## S4', '## S5' (+6 more)" in detail
+
+    def test_shell_comments_in_a_code_fence_are_not_sections(self):
+        """A plan's ```bash blocks are full of `# comment` lines; two of them
+        would outnumber the one real title and become "the sections"."""
+        from utils.validation import describe_context_cut
+
+        plan = (
+            "# Title\n\n## Phase A\n```bash\n# install\n# then run\n```\n"
+            + "y" * 200 + "\n## Phase B\n" + "z" * 200 + "\n"
+        )
+        detail = describe_context_cut(plan, 150)
+        assert "of 2 sections" in detail
+        assert "install" not in detail and "then run" not in detail
+        assert "dropped 1: '## Phase B'" in detail
+
+    def test_a_cut_context_without_headings_keeps_the_bare_count(
+        self, sample_groups, tmp_path, capsys
+    ):
+        """A diff or plain text has no sections to name; the line is unchanged."""
+        from utils.validation import VALIDATION_CONTEXT_LIMIT, describe_context_cut
+
+        assert describe_context_cut("x" * (VALIDATION_CONTEXT_LIMIT + 5), VALIDATION_CONTEXT_LIMIT) == ""
+        assert describe_context_cut("# only\n## two\n", VALIDATION_CONTEXT_LIMIT) == ""
+
+        prepare_batched_validation_tasks(
+            groups=sample_groups,
+            context="x" * (VALIDATION_CONTEXT_LIMIT + 5),
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+        line = next(
+            ln for ln in capsys.readouterr().err.splitlines()
+            if "[VALIDATION_CONTEXT_TRUNCATED] context" in ln
+        )
+        assert line.endswith("context 5 chars over")
+
     def test_code_review_records_carry_the_location_the_guidance_promises(
         self, tmp_path
     ):
