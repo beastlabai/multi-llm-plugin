@@ -1991,6 +1991,32 @@ class TestAResultFileThatLandedAfterGroupingIsFoldedIn:
         )
         assert "[VALIDATION_BATCHES_PENDING]" in out or "[VALIDATION_PENDING]" in out
 
+    def test_the_checkpoint_records_the_late_model_as_completed(
+        self, tmp_path, capsys
+    ):
+        """`.status.json` is what `status` and `build_unsanitize_map` read, and it
+        used to keep the sandbox error under `models_failed` beside a report that
+        listed the model."""
+        plan, phase_dir = _completed_round_with_a_failed_slot(tmp_path)
+        (phase_dir / f"{_LATE_STEM}.json").write_text(
+            json.dumps(_late_issues()), encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+        out = capsys.readouterr().out
+
+        assert (
+            f"[{_LATE_SPEC}] result file present; recorded as completed (was failed)"
+        ) in out
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == _REAL_SPECS + [_LATE_SPEC]
+        assert status["models_failed"] == {}
+        # A foreground run publishes no `progress` object (`detach.report_progress`
+        # is a no-op without a run handle); the detached leg's `models_done`
+        # follow-through is pinned in `TestRecordModelsPresent`.
+        assert "progress" not in status
+
     def test_the_documented_flow_then_completes_with_every_model_in_the_report(
         self, tmp_path, capsys
     ):
@@ -2229,3 +2255,52 @@ class TestARetiredBatchIsNotValidationInProgress:
         _set_mtime(retired, 1_700_000_000 + 120)
 
         assert validation_mod.stale_validation_reason(legacy, grouped) is None
+
+
+class TestRecordModelsPresent:
+    def _checkpoint(self, tmp_path, **over):
+        data = {
+            "phase": "code-review",
+            "state": "complete",
+            "models_requested": ["a:x", "b:y", "c:z"],
+            "models_completed": ["a:x", "b:y"],
+            "models_failed": {"c:z": "c exited with code 1"},
+            "progress": {"models_total": 3, "models_done": 2, "step": "complete"},
+        }
+        data.update(over)
+        write_status(str(tmp_path), data)
+        return tmp_path
+
+    def test_a_present_failed_model_moves_to_completed(self, tmp_path):
+        phase_dir = self._checkpoint(tmp_path)
+
+        moved = rob.record_models_present(str(phase_dir), ["a:x", "b:y", "c:z"])
+
+        assert moved == ["c:z"]
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == ["a:x", "b:y", "c:z"]
+        assert status["models_failed"] == {}
+        assert status["progress"]["models_done"] == 3
+        assert status["progress"]["step"] == "complete"
+
+    def test_a_completed_model_whose_file_is_gone_keeps_its_entry(self, tmp_path):
+        phase_dir = self._checkpoint(tmp_path)
+
+        assert rob.record_models_present(str(phase_dir), ["a:x"]) == []
+
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == ["a:x", "b:y"]
+        assert status["models_failed"] == {"c:z": "c exited with code 1"}
+        assert status["progress"]["models_done"] == 2
+
+    def test_a_checkpoint_without_outcomes_gains_nothing(self, tmp_path):
+        write_status(str(tmp_path), {"phase": "code-review", "state": "complete"})
+        before = (tmp_path / ".status.json").read_text(encoding="utf-8")
+
+        assert rob.record_models_present(str(tmp_path), ["a:x"]) == []
+
+        assert (tmp_path / ".status.json").read_text(encoding="utf-8") == before
+
+    def test_no_checkpoint_at_all_writes_none(self, tmp_path):
+        assert rob.record_models_present(str(tmp_path), ["a:x"]) == []
+        assert not (tmp_path / ".status.json").exists()
