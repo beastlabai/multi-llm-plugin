@@ -1255,7 +1255,11 @@ async def run_single_review(
         }
 
     print(f"[{display_name}] Log saved to: {log_file}")
-    if output_file:
+    # Only for a slot that answered: a failed invocation carries `output_file`
+    # and no `source`, and "Result will be saved to: <path> (source: unknown)"
+    # two lines above "Agent failed" promised a file nothing would write
+    # (measured 2026-09-17, on every one of a run's three dead slots).
+    if output_file and result["success"]:
         print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
     if not result["success"]:

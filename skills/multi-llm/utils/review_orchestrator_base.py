@@ -1752,7 +1752,10 @@ async def run_single_model(
                 ),
             )
 
-            if output_file:
+            # Only for an attempt that answered — same rule as the code-review
+            # fan-out: a failed attempt carries `output_file` and no `source`,
+            # and the line then promised a file nothing would write.
+            if output_file and result.get("success"):
                 print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
             # §7.1.a/§7.2: ONE classification per failed slot, read off the
