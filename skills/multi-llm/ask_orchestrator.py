@@ -70,10 +70,15 @@ from utils.llm_client import invoke_with_provider
 from utils.git_utils import get_project_root
 from utils.detach import record_output_files, report_progress
 from utils.review_orchestrator_base import (
+    bypass_ignore_prefixes,
+    bypass_write_violation,
     maybe_detach,
+    porcelain_snapshot,
     read_plan,
     run_models_concurrent,
+    sandbox_fallback_kwargs,
     sandbox_refusal,
+    unexpected_writes,
     update_status,
     write_status,
 )
@@ -218,13 +223,17 @@ FILE_OUTPUT_LOCATION = (
 #: What an adapter that declares ``supports_file_output = False`` is asked for
 #: instead: stdout is the channel it *does* have, it is the one
 #: :func:`recover_answer_text` already falls back to, and the answer lands in
-#: exactly the same ``answer_<model>.md`` either way.
+#: exactly the same ``answer_<model>.md`` either way. Worded like
+#: ``llm_client.STDOUT_OUTPUT_LOCATION``: "refused by the sandbox where one
+#: runs", because a codex slot under ``sandbox_fallback: external`` (D6,
+#: 2026-09-17) runs with no sandbox and a write there would succeed — the
+#: prompt may not claim otherwise.
 STDOUT_OUTPUT_LOCATION = (
     "## Output Location\n"
     "Print your full answer to stdout as your final message, in MARKDOWN (not JSON).\n"
-    "Do NOT write it to a file — you are running in a read-only mode and any file\n"
-    "write will be refused. Print the answer itself and nothing else: no JSON\n"
-    "wrapper, no code-fence around the whole answer."
+    "Do NOT write it to a file — this is a read-only task, and a file write is\n"
+    "refused by the sandbox where one runs. Print the answer itself and nothing\n"
+    "else: no JSON wrapper, no code-fence around the whole answer."
 )
 
 
@@ -925,11 +934,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # open — an answer file, and therefore a success. Refused here, ahead of
         # `--rerun-all`'s delete, because a slot that never runs may not destroy
         # the previous run's answer.
-        refusal = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-        if refusal is not None:
-            print(f"[{model_spec}] {refusal}")
-            return {"model": model_spec, "success": False, "error": refusal,
+        #
+        # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`
+        # when the probe said `unavailable` AND `providers.<name>.sandbox_fallback`
+        # is `external`. One `[SANDBOX_BYPASSED]` line, the flag on the invoker,
+        # and a porcelain snapshot so a write the model makes can be named.
+        sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+        if sandbox.refused:
+            print(f"[{model_spec}] {sandbox.reason}")
+            return {"model": model_spec, "success": False, "error": sandbox.reason,
                     "source": "not-dispatched"}
+        tree_before = None
+        if sandbox.bypass:
+            print(f"[{model_spec}] {sandbox.reason}")
+            tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
 
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
@@ -976,7 +994,36 @@ async def main(argv: Optional[List[str]] = None) -> int:
             log_file=log_file,
             cwd=project_root,
             anchor=plan_path,
+            **sandbox_fallback_kwargs(sandbox),
         )
+
+        # D6 override: the detective check, ahead of the answer-file policy
+        # below — a bypassed slot that changed the working tree is failed by
+        # path even when it also left an answer file, because "an answer file
+        # is success regardless of how the subprocess exited" was written for
+        # a slot that could not write anything else. The question dir itself
+        # is the plugin's own tree and is excluded (`bypass_ignore_prefixes`).
+        if sandbox.bypass:
+            tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
+            touched = unexpected_writes(
+                tree_before, tree_after,
+                ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+            )
+            if touched:
+                violation = bypass_write_violation(provider_name, touched)
+                print(f"[{model_spec}] {violation}")
+                write_error_log(question_dir, model_spec, violation, result)
+                # `collect_completed` reads the answer files, not this return,
+                # so an answer this slot wrote is set aside (never deleted: it
+                # is still the operator's evidence) under a name the scan does
+                # not read, or the failed slot would be counted as completed.
+                if os.path.exists(answer_path):
+                    try:
+                        os.replace(answer_path, answer_path + ".violated")
+                    except OSError:
+                        pass
+                return {"model": model_spec, "success": False,
+                        "error": violation, "source": "failed"}
 
         # 1. Primary + hard-failure-with-file policy: a non-empty answer file is
         #    success regardless of how the subprocess exited (agentic CLIs often

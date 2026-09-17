@@ -20,11 +20,12 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import detach as _detach
 from . import status_file as _status_file
@@ -60,6 +61,7 @@ from .json_extractor import (
     sanitize_model_name,
 )
 from .llm_client import (
+    SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
     describe_output_file,
     invoke_with_provider,
@@ -73,6 +75,8 @@ from .providers.base import (
     CATEGORY_SANDBOX_UNAVAILABLE,
     CATEGORY_SERVER_ERROR,
     PROFILE_GENERATE,
+    SANDBOX_BYPASSED_MARKER,
+    SANDBOX_FALLBACK_EXTERNAL,
     LLMProvider,
     classify_streams,
     context_length_message,
@@ -1322,36 +1326,95 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     claude-code, and every claude-code run under the shipped empty
     ``fallback_models`` — and the record then has exactly the keys it has
     always had.
+
+    The D6 override's provenance (2026-09-17) rides the same seam: a slot
+    ``invoke_with_provider`` ran under ``sandbox_fallback`` carries
+    ``details["sandbox"] == "bypassed"``, and the record gets a ``sandbox``
+    key for it — independent of whether a served model was claimed, so the
+    two facts can travel alone or together.
     """
+    fields: Dict[str, Any] = {}
     served = (details or {}).get("served_model")
-    if not served:
-        return {}
-    return {
-        "served_model": served,
-        "served_model_is_fallback": bool(details.get("served_model_is_fallback")),
-    }
+    if served:
+        fields["served_model"] = served
+        fields["served_model_is_fallback"] = bool(
+            details.get("served_model_is_fallback")
+        )
+    if (details or {}).get("sandbox") == SANDBOX_BYPASSED:
+        fields["sandbox"] = SANDBOX_BYPASSED
+    return fields
 
 
 def collect_served_models(
     results: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Dict[str, Any]]:
-    """``{model_spec: {"served_model", "fallback"}}`` for a fan-out's results.
+    """``{model_spec: {"served_model", "fallback"[, "sandbox"]}}`` for a fan-out.
 
     The report-side shape of the same fact, built from the per-model records
     :func:`run_single_model` returns. Empty for a default run, which is what
-    keeps every downstream artifact unchanged.
+    keeps every downstream artifact unchanged. A bypassed slot contributes an
+    entry with ``sandbox: "bypassed"`` even when nothing served it by fallback
+    — ``served_model_label`` renders either half, or both.
     """
     served: Dict[str, Dict[str, Any]] = {}
     for model_spec, result in (results or {}).items():
         if not isinstance(result, dict):
             continue
+        entry: Dict[str, Any] = {}
         name = result.get("served_model")
         if name:
-            served[model_spec] = {
-                "served_model": name,
-                "fallback": bool(result.get("served_model_is_fallback")),
-            }
+            entry["served_model"] = name
+            entry["fallback"] = bool(result.get("served_model_is_fallback"))
+        if result.get("sandbox") == SANDBOX_BYPASSED:
+            entry["sandbox"] = SANDBOX_BYPASSED
+        if entry:
+            served[model_spec] = entry
     return served
+
+
+def record_sandbox_bypassed(
+    phase_dir: Union[str, Path], served_models: Dict[str, Dict[str, Any]]
+) -> List[str]:
+    """Mirror the bypassed slots into ``progress.sandbox_bypassed`` — detached
+    runs only — and return the specs recorded.
+
+    ``models_served`` (top-level, written by the phase's own ``update_status``)
+    is the durable copy reaggregate reads; this is the poller's copy, under the
+    reserved ``progress`` object ``status --view run`` renders, so a host that
+    never reads the log still learns which slots ran without a sandbox. The
+    ``run`` object is process state and is not touched (``status_file``).
+    ``report_progress`` is a no-op in the foreground, which is what keeps a
+    default run's checkpoint free of the key.
+    """
+    bypassed = sorted(
+        spec for spec, entry in (served_models or {}).items()
+        if isinstance(entry, dict) and entry.get("sandbox") == SANDBOX_BYPASSED
+    )
+    if bypassed:
+        _detach.report_progress(str(phase_dir), sandbox_bypassed=bypassed)
+    return bypassed
+
+
+def recorded_served_models(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """``models_served`` as the fan-out wrote it to ``.status.json``, or ``None``.
+
+    What lets ``--reaggregate`` keep the provenance the fan-out recorded: the
+    per-model ``{model}.json`` is a bare suggestion list, so the served-model
+    and sandbox facts live in the checkpoint's ``models_served`` and are read
+    back from there rather than re-derived. ``None`` when the checkpoint has
+    no such key (a default run), which is what every reaggregate got before —
+    and a stale or hand-edited checkpoint is read through the same best-effort
+    ``read_status`` every other reaggregate field comes through.
+    """
+    try:
+        recorded = _status_file.read_status(str(phase_dir)).get("models_served")
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        return None
+    if not isinstance(recorded, dict) or not recorded:
+        return None
+    return {
+        spec: entry for spec, entry in recorded.items() if isinstance(entry, dict)
+    } or None
 
 
 #: ``(state, tail)`` per ``provider|profile|cwd`` for the fan-out's sandbox
@@ -1437,22 +1500,229 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str
         return verdict
 
 
-def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> Optional[str]:
-    """The reason to refuse this slot before dispatch, or ``None`` to dispatch.
+#: The three answers :func:`sandbox_refusal` can give a fan-out slot.
+SANDBOX_DISPATCH = "dispatch"
+SANDBOX_REFUSE = "refuse"
+SANDBOX_DISPATCH_UNSANDBOXED = "dispatch_unsandboxed"
+
+
+class SandboxVerdict(NamedTuple):
+    """What the pre-dispatch sandbox gate decided for one fan-out slot.
+
+    ``verdict`` is one of :data:`SANDBOX_DISPATCH` (run as the adapter renders
+    it — the answer for ``ok``, ``unknown`` and ``not-required`` alike),
+    :data:`SANDBOX_REFUSE` (``reason`` is the ``[SANDBOX_UNAVAILABLE]`` line
+    the slot is failed with) or :data:`SANDBOX_DISPATCH_UNSANDBOXED` (``reason``
+    is the ``[SANDBOX_BYPASSED]`` line the lane prints once, and ``bypass`` is
+    the flag it hands the invoker). A NamedTuple rather than a str so a call
+    site cannot take the third answer for the first by truthiness.
+    """
+
+    verdict: str
+    reason: Optional[str]
+
+    @property
+    def refused(self) -> bool:
+        return self.verdict == SANDBOX_REFUSE
+
+    @property
+    def bypass(self) -> bool:
+        return self.verdict == SANDBOX_DISPATCH_UNSANDBOXED
+
+
+def sandbox_bypassed_notice(provider_name: str) -> str:
+    """The one line a lane prints for a slot dispatched under the D6 override.
+
+    Verbatim the sentence the design fixed (2026-09-17), because it is the
+    whole of what the operator is told at the moment it matters: which runner,
+    why its own sandbox is not in the path, which config line let it through,
+    and — the clause that cannot be left out — that nothing stands between the
+    model's shell and this machine. Read-only phase or not, the model runs
+    with the operator's rights; 4 of the 5 reviewers on the host this was
+    measured on already do (muse always, under ``--disable-sandbox``), and
+    the sentence is what keeps codex's case from being the quiet one.
+    """
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: bubblewrap cannot start; "
+        f"running --sandbox danger-full-access under "
+        f"providers.{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_EXTERNAL} "
+        f"(read-only phase; no OS boundary between the model's shell and this "
+        f"machine)"
+    )
+
+
+def _fanout_sandbox_fallback(provider_name: str, cwd: Optional[str]) -> Optional[str]:
+    """The adapter's resolved ``sandbox_fallback`` policy for ``generate``, or
+    ``None`` for an adapter that declares no fallback at all.
+
+    ``cwd`` is the repo root the dispatch is pinned to, and it is a valid
+    discovery anchor (``load_config`` takes a directory), so the policy is
+    read from the same ``.multi-llm/providers.yaml`` the slot's own env and
+    timeout come from. A test's stand-in adapter may not declare the hook —
+    ``getattr``, and any failure reads as "no fallback": a config read may
+    never end a fan-out, and the safe reading of a broken one is the default.
+    """
+    provider = get_provider(provider_name)
+    hook = getattr(provider, "sandbox_fallback_policy", None)
+    if not callable(hook):
+        return None
+    try:
+        policy = hook(PROFILE_GENERATE, anchor=cwd)
+    except Exception:  # noqa: BLE001 - a config read may never end a fan-out
+        return None
+    return policy if isinstance(policy, str) else None
+
+
+def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
+    """The pre-dispatch sandbox verdict for one fan-out slot.
 
     The one gate all three fan-out lanes ask — :func:`run_single_model` for
     review-plan/review-tasks, ``code_review_orchestrator.run_single_review``
     and ``ask_orchestrator``'s ``ask_one`` — so they share one cache, one
     probe and one wording. Blocking (it may spawn the probe), so each lane
     hands it to ``asyncio.to_thread``. ``ok``, ``unknown`` and ``not-required``
-    all answer ``None``: a probe that could not be read is a diagnostic and
+    all answer ``dispatch``: a probe that could not be read is a diagnostic and
     never a gate, and a sandbox that dies mid-dispatch still lands on the D3k
     ladder as rung 1.
+
+    ``unavailable`` answers ``refuse`` — exactly as before — unless **all** of
+    the D6 override's conditions hold (2026-09-17): the adapter declares a
+    fallback for ``generate`` and the operator resolved it to ``external``.
+    The verdict itself is the third condition (``unavailable``, never
+    ``unknown``: the override widens nothing on a probe that was not read),
+    and ``generate`` is the profile this gate exists for, so the fourth holds
+    by construction. Then the answer is ``dispatch_unsandboxed`` with the
+    ``[SANDBOX_BYPASSED]`` line, and the lane runs the slot with the flag.
     """
     state, tail = _fanout_sandbox_verdict(provider_name, cwd)
     if state != "unavailable":
+        return SandboxVerdict(SANDBOX_DISPATCH, None)
+    if _fanout_sandbox_fallback(provider_name, cwd) == SANDBOX_FALLBACK_EXTERNAL:
+        return SandboxVerdict(
+            SANDBOX_DISPATCH_UNSANDBOXED, sandbox_bypassed_notice(provider_name)
+        )
+    return SandboxVerdict(
+        SANDBOX_REFUSE, sandbox_unavailable_reason(provider_name, tail)
+    )
+
+
+def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, bool]:
+    """``{"sandbox_fallback": True}`` for a bypassed slot, else ``{}``.
+
+    Splatted into the invoker call rather than passed as a positional default,
+    because the invokers (``invoke_with_provider``, ``invoke_with_file_output``)
+    are stood in for by a dozen test fakes with fixed signatures, and a kwarg
+    that travels only when it is load-bearing leaves every one of them — and
+    every default fan-out — byte-for-byte as it was.
+    """
+    return {"sandbox_fallback": True} if verdict.bypass else {}
+
+
+def porcelain_snapshot(cwd: Optional[str]) -> Optional[FrozenSet[str]]:
+    """``git status --porcelain -z`` of ``cwd`` as a set of entries, or ``None``.
+
+    The detective half of the D6 override (2026-09-17): a bypassed slot has no
+    sandbox to *prevent* a write, so the fan-out takes this before the slot and
+    again after it, and any entry that appeared or changed fails the slot by
+    name. ``-z`` so a path comes back raw, unquoted; an entry is the whole
+    ``XY path`` record, so a tracked file going from clean to modified counts
+    and so does a new untracked file. What it cannot see, stated plainly: a
+    write to a file that was *already* modified or untracked before the slot
+    (its porcelain line does not change), a write outside the repository, and
+    anything under ``$HOME``. It is a cheap, honest check, not a boundary.
+    ``None`` when git cannot answer (no repo, no ``git``), and the caller then
+    skips the comparison rather than failing a slot on a check it never ran.
+    """
+    if not cwd:
         return None
-    return sandbox_unavailable_reason(provider_name, tail)
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "-z"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=cwd, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return frozenset(entry for entry in completed.stdout.split("\0") if entry)
+
+
+def unexpected_writes(
+    before: Optional[FrozenSet[str]],
+    after: Optional[FrozenSet[str]],
+    *,
+    ignore_prefixes: Sequence[str] = (),
+) -> List[str]:
+    """The porcelain entries ``after`` has that ``before`` did not, minus the
+    plugin's own artifact trees, as repo-relative paths sorted for the record.
+
+    ``ignore_prefixes`` is where the *plugin* writes during a slot — the
+    plan's output directory (logs, result files, ``.status.json``, salvage
+    requests, a sibling slot's answer) and ``.multi-llm/`` (the batch snapshot
+    tmp files) — because those are this process's writes, made while the slot
+    ran, and a check that blamed the model for them would fire on every run.
+    A write there by the model is indistinguishable from the plugin's, and is
+    also the one place ``FILE_OUTPUT_LOCATION`` would have asked it to write,
+    so it is not what this check is for. Either snapshot ``None`` means the
+    check was not run, and the answer is "nothing to report".
+    """
+    if before is None or after is None:
+        return []
+    prefixes = tuple(
+        p.rstrip("/") + "/" for p in ignore_prefixes if p and p.rstrip("/")
+    )
+    paths: List[str] = []
+    for entry in after - before:
+        # `XY path`, or `XY new -> old` for a rename under `-z` (git prints the
+        # new name first, then a NUL, then the old one as a separate record —
+        # so a rename's old path arrives as its own entry with no status and
+        # is kept as-is: it still names a path the slot changed).
+        path = entry[3:] if len(entry) > 3 and entry[2] == " " else entry
+        if any(path.startswith(prefix) or path == prefix.rstrip("/") for prefix in prefixes):
+            continue
+        paths.append(path)
+    # Sorted by path, not by porcelain entry: `" M"` sorts ahead of `"??"`, and
+    # the reader of the reason line wants the files, not git's status columns.
+    return sorted(set(paths))
+
+
+def bypass_write_violation(provider_name: str, paths: Sequence[str]) -> str:
+    """The reason a bypassed slot is failed with when the detective check fires."""
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name} wrote outside its read-only "
+        f"contract: {', '.join(paths)}"
+    )
+
+
+def bypass_ignore_prefixes(
+    plan_path: Union[str, Path], project_root: Optional[str]
+) -> List[str]:
+    """The repo-relative trees the plugin itself writes during a slot.
+
+    The plan's output directory (``output_dir_path``: logs, per-model results,
+    ``.status.json``, salvage requests, an ask's answer files) and
+    ``.multi-llm/`` (batch snapshot tmp files, the write-safety snapshots). A
+    plan outside the repository, or no repository, contributes nothing —
+    the check then reports every delta, which is the conservative reading.
+    """
+    prefixes = [".multi-llm"]
+    if not project_root:
+        return prefixes
+    # `output_dir_path`, not `get_output_dir`: the latter `mkdir`s, and a
+    # detective check must not create the directory it is about to exclude.
+    try:
+        from .output_handler import output_dir_path
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.output_handler import output_dir_path  # type: ignore[no-redef]
+    try:
+        out_dir = os.path.realpath(str(output_dir_path(Path(plan_path))))
+        relative = os.path.relpath(out_dir, os.path.realpath(project_root))
+    except (OSError, ValueError):
+        return prefixes
+    if relative and not relative.startswith(".."):
+        prefixes.append(relative.replace(os.sep, "/"))
+    return prefixes
 
 
 async def run_single_model(
@@ -1570,8 +1840,15 @@ async def run_single_model(
     # exactly as before: a probe that could not be read is a diagnostic and never
     # a gate, and a sandbox that then dies mid-dispatch still lands on the D3k
     # ladder as rung 1.
-    reason = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-    if reason is not None:
+    #
+    # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`, only
+    # when the probe said `unavailable` AND the operator wrote
+    # `providers.<name>.sandbox_fallback: external`. The slot then runs with
+    # the flag, prints the one `[SANDBOX_BYPASSED]` line, and is bracketed by
+    # the porcelain detective check below — nothing else about the lane moves.
+    sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+    if sandbox.refused:
+        reason = sandbox.reason
         print(f"[{display_name}] {reason}")
         return {
             "success": False, "output": None,
@@ -1585,6 +1862,36 @@ async def run_single_model(
             "model_spec": model_spec,
             "source": "not-dispatched",
         }
+    tree_before: Optional[FrozenSet[str]] = None
+    if sandbox.bypass:
+        print(f"[{display_name}] {sandbox.reason}")
+        tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
+
+    async def _bypass_write_check() -> Optional[str]:
+        """The reason to fail a bypassed slot whose run changed the tree, or ``None``.
+
+        Runs once, after the last attempt. A delta fails the slot whatever the
+        attempt reported — a review that also edited the repository is not a
+        review this phase may count — and nothing is restored: no snapshot was
+        taken of the files, so the operator is told which paths and left to
+        decide. The caller drops ``output`` so ``save_model_result`` never
+        parses it. ``None`` for every slot that was not bypassed, so the
+        default lane makes no git call at all. The ``git status`` runs in a
+        thread like the one before the slot: on a large repository it is not
+        instant, and the sibling slots share this event loop.
+        """
+        if not sandbox.bypass:
+            return None
+        tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
+        touched = unexpected_writes(
+            tree_before, tree_after,
+            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+        )
+        if not touched:
+            return None
+        violation = bypass_write_violation(provider_name, touched)
+        print(f"[{display_name}] {violation}")
+        return violation
 
     # Fall back to old method if no out_dir provided
     if not out_dir:
@@ -1608,10 +1915,20 @@ async def run_single_model(
                 log_file=log_file,
                 cwd=project_root,
                 anchor=plan_path,
+                **sandbox_fallback_kwargs(sandbox),
             )
             duration = time.time() - start_time
             details = result.get("details", {})
             stderr_text = details.get("stderr", "")
+
+            violation = await _bypass_write_check()
+            if violation is not None:
+                return {
+                    "success": False, "output": None, "error": violation,
+                    "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                    "stderr": stderr_text, "duration_seconds": duration,
+                    "model_spec": model_spec, "source": "stdout",
+                }
 
             if result["success"]:
                 output_data = result.get("data", "")
@@ -1733,6 +2050,7 @@ async def run_single_model(
                 prefer_arrays=True,
                 cwd=project_root,
                 anchor=plan_path,
+                **sandbox_fallback_kwargs(sandbox),
             )
 
             details = result.get("details", {})
@@ -1824,6 +2142,21 @@ async def run_single_model(
                 "prompt": prompt, "stdout": "", "stderr": "",
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": "not-dispatched",
+            }
+
+        # D6 override: the detective check, once, after the last attempt and
+        # ahead of every branch below — a bypassed slot that changed the tree
+        # is failed with the paths whatever its last attempt reported, and the
+        # `output` is dropped so `save_model_result` never parses it. Placed
+        # after the `result is None` return because nothing ran on that path.
+        violation = await _bypass_write_check()
+        if violation is not None:
+            return {
+                "success": False, "output": None, "error": violation,
+                "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                "stderr": stderr_text,
+                "duration_seconds": duration, "model_spec": model_spec,
+                "source": source,
             }
 
         # The ladder granted a retry and `next_attempt()` then refused it: what
@@ -3501,7 +3834,10 @@ async def reaggregate_from_existing_files(
     successful_models = list(models_found)
     failed_models_map: Dict[str, str] = {}
 
-    # Generate report
+    # Generate report. `served_models` is what the fan-out recorded in the
+    # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
+    # 2026-09-17): the per-model files carry neither, so without this read a
+    # reaggregated report named a bypassed slot as if it had run sandboxed.
     report_path = aggregate_results(
         prefix, out_dir, phase_dir, phase_name,
         successful_models, failed_models_map, validated_groups_for_report,
@@ -3510,6 +3846,7 @@ async def reaggregate_from_existing_files(
         tasks_path=tasks_path,
         template_style=template_style,
         diff_data=diff_data,
+        served_models=recorded_served_models(phase_dir),
     )
 
     print("\nReaggregation complete!")
@@ -3873,7 +4210,10 @@ async def run_review_orchestration(
     # is a bare suggestion list reaggregation re-reads, so the attribution is
     # recorded once here and carried to the report rather than stamped into an
     # artifact whose shape another phase depends on. Empty for a default run.
+    # The D6 override's `sandbox: bypassed` rides the same dict (2026-09-17),
+    # and `--reaggregate` reads both back off `.status.json`'s `models_served`.
     served_models = collect_served_models(results)
+    record_sandbox_bypassed(phase_dir, served_models)
 
     # D3b: a salvage task exists for every model whose output would not parse.
     # With --exec-subagents this run repairs them itself; a model whose result

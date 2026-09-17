@@ -809,6 +809,92 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         assert again[0] is False and again[2] == error
         assert len(probes) == 1
 
+    # -- the D6 override (2026-09-17): the third answer of the gate --------
+
+    class _Attested(_Probed):
+        """The probing adapter plus the operator's `external` attestation."""
+
+        def sandbox_fallback_policy(self, profile, anchor=None):
+            from utils.providers.base import PROFILE_GENERATE
+
+            return "external" if profile == PROFILE_GENERATE else None
+
+    BYPASS_LINE = (
+        "[SANDBOX_BYPASSED] fakebwrap: bubblewrap cannot start; running --sandbox "
+        "danger-full-access under providers.fakebwrap.sandbox_fallback=external "
+        "(read-only phase; no OS boundary between the model's shell and this "
+        "machine)"
+    )
+
+    def _attested_lane(self, tmp_path, monkeypatch, dispatch):
+        from utils import review_orchestrator_base as rob
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# Plan\n", encoding="utf-8")
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
+        monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
+        return plan_path
+
+    def test_the_code_review_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        seen = []
+
+        def dispatch(**kwargs):
+            seen.append(kwargs)
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out" / "o.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        plan_path = self._attested_lane(tmp_path, monkeypatch, dispatch)
+        served = {}
+        success, issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out", served_models=served,
+        ))
+        assert (success, issues, error) == (True, [], None)
+        assert len(seen) == 1 and seen[0]["sandbox_fallback"] is True
+        # The provenance lands in the collector without a served model beside it.
+        assert served == {"fakebwrap:m1": {"sandbox": "bypassed"}}
+        out = capsys.readouterr().out
+        assert out.count("[SANDBOX_BYPASSED]") == 1
+        assert f"[fakebwrap:m1] {self.BYPASS_LINE}" in out
+
+    def test_a_bypassed_code_review_slot_that_writes_is_failed_by_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import os
+        import subprocess
+
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+        (tmp_path / "src.py").write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src.py"], cwd=tmp_path, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True, env=env)
+
+        def dispatch(**kwargs):
+            (tmp_path / "src.py").write_text("v2\n", encoding="utf-8")
+            return {
+                "success": True, "data": [{"title": "x"}], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out" / "o.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        plan_path = self._attested_lane(tmp_path, monkeypatch, dispatch)
+        success, issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out",
+        ))
+        assert success is False and issues is None
+        assert error == (
+            "[SANDBOX_BYPASSED] fakebwrap wrote outside its read-only contract: src.py"
+        )
+        assert error in capsys.readouterr().out
+        assert (tmp_path / "src.py").read_text(encoding="utf-8") == "v2\n"
+
 
 class TestTheReportReconcilesItsIssueCountWithItsGroupCount:
     """`generate_review_report` numbers issues and validates groups.

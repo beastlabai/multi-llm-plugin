@@ -1175,3 +1175,106 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         assert "multi_llm.py doctor" in reason
         # The failed-model section of answers.md carries the same sentence.
         assert reason in read_answers(d)
+
+    # -- the D6 override (2026-09-17): the third answer of the gate --------
+
+    BYPASS_LINE = (
+        "[SANDBOX_BYPASSED] codex: bubblewrap cannot start; running --sandbox "
+        "danger-full-access under providers.codex.sandbox_fallback=external "
+        "(read-only phase; no OS boundary between the model's shell and this "
+        "machine)"
+    )
+
+    def _broken_and_attested(self, monkeypatch):
+        from utils import provider_registry as registry
+        from utils import review_orchestrator_base as rob
+        from utils.providers import codex as codex_module
+        from utils.providers.base import PROFILE_GENERATE
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            lambda _self, profile: broken if profile == PROFILE_GENERATE else None,
+        )
+        # The accessor, not the config file: `run_ask` reads the shipped base
+        # config, and what this test pins is the gate, not the YAML layering
+        # (`test_subagent_executor` reads the key through the real file).
+        monkeypatch.setattr(
+            codex_module, "sandbox_fallback_policy", lambda anchor=None: "external"
+        )
+
+    def test_the_ask_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
+        self, plan, monkeypatch, capsys
+    ):
+        self._broken_and_attested(monkeypatch)
+
+        class Invoker(FakeInvoker):
+            seen = []
+
+            def __call__(self, prompt, model_spec, timeout=None, log_file=None,
+                         cwd=None, anchor=None, **kwargs):
+                self.seen.append(kwargs)
+                return super().__call__(prompt, model_spec, timeout, log_file, cwd, anchor)
+
+        inv = Invoker()
+        inv.configure("codex:gpt-5.2-codex", write_file=True, content="An answer.")
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "codex:gpt-5.2-codex"], inv)
+        assert rc == 0
+        assert inv.calls == ["codex:gpt-5.2-codex"]
+        assert inv.seen == [{"sandbox_fallback": True}]
+        out = capsys.readouterr().out
+        assert out.count("[SANDBOX_BYPASSED]") == 1
+        assert f"[codex:gpt-5.2-codex] {self.BYPASS_LINE}" in out
+        d = qdir(plan, "Q")
+        assert read_status(d)["models_completed"] == ["codex:gpt-5.2-codex"]
+
+    def test_a_bypassed_ask_slot_that_writes_is_failed_by_path_and_its_answer_set_aside(
+        self, plan, monkeypatch, capsys
+    ):
+        """The answer-file policy ("a non-empty answer file is success") was
+        written for a slot that could not write anything else, so the check
+        runs ahead of it and the answer is set aside, not counted."""
+        import os
+        import subprocess
+
+        root = os.path.dirname(str(plan))
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
+        self._broken_and_attested(monkeypatch)
+        d = qdir(plan, "Q")
+        answer_file = os.path.join(d, "answer_codex_gpt-5_2-codex.md")
+
+        class Invoker(FakeInvoker):
+            def __call__(self, prompt, model_spec, timeout=None, log_file=None,
+                         cwd=None, anchor=None, **kwargs):
+                # A model with no sandbox can write wherever it likes: outside
+                # the repo's contract, and — though asked for stdout — its own
+                # answer file too. Both are what the check has to handle.
+                with open(os.path.join(root, "leak.md"), "w", encoding="utf-8") as f:
+                    f.write("notes\n")
+                os.makedirs(d, exist_ok=True)
+                with open(answer_file, "w", encoding="utf-8") as f:
+                    f.write("An answer written straight to disk.\n")
+                return super().__call__(prompt, model_spec, timeout, log_file, cwd, anchor)
+
+        inv = Invoker()
+        inv.configure("codex:gpt-5.2-codex", write_file=True, content="An answer.")
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "codex:gpt-5.2-codex"], inv)
+        assert rc == 3  # zero answers counted → nothing to aggregate
+        reason = read_status(d)["models_failed"]["codex:gpt-5.2-codex"]
+        assert reason == (
+            "[SANDBOX_BYPASSED] codex wrote outside its read-only contract: leak.md"
+        )
+        assert reason in read_answers(d)
+        assert read_status(d)["models_completed"] == []
+        # The answer it wrote is set aside, never counted and never deleted.
+        assert not os.path.exists(answer_file)
+        assert os.path.exists(answer_file + ".violated")
+        assert os.path.exists(os.path.join(root, "leak.md"))  # never restored

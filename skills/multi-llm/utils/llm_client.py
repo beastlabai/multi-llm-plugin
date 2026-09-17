@@ -41,6 +41,13 @@ ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 ERROR_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
 ERROR_PROMPT_UNSAFE = "PROMPT_UNSAFE"
 
+#: ``details["sandbox"]`` for a slot that ran under the D6 fallback (2026-09-17):
+#: the runner's own OS sandbox could not start and the operator's
+#: ``sandbox_fallback: external`` let the read-only dispatch run without it.
+#: Absent means "ran as the adapter's default argv renders it" — never written
+#: as any other value, so a reader tests for presence.
+SANDBOX_BYPASSED = "bypassed"
+
 # Windows-only concern: POSIX exec passes argv verbatim (no reparsing) and
 # has generous per-arg limits, so prompt length is never enforced there.
 _IS_WINDOWS = os.name == "nt"
@@ -675,6 +682,7 @@ def invoke_with_provider(
     anchor: Optional[Union[str, Path]] = None,
     schema_phase: Optional[str] = None,
     _defer_parse_failure_log: bool = False,
+    sandbox_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -751,6 +759,16 @@ def invoke_with_provider(
             failure (binary not found, timeout, non-zero exit) still logs
             immediately, unaffected by this flag — there is no channel choice
             to wait for.
+        sandbox_fallback: The fan-out's D6 override (2026-09-17). ``True``
+            only when ``review_orchestrator_base.sandbox_refusal`` answered
+            ``dispatch_unsandboxed`` for this slot — the runner's own sandbox
+            probe said ``unavailable``, ``providers.<name>.sandbox_fallback``
+            is ``external``, and this is a ``generate`` dispatch. It is
+            forwarded to the adapter's ``build_command_for_transport`` (which
+            every adapter but codex ignores) and, on success, recorded as
+            ``details["sandbox"] = "bypassed"`` so the provenance rides the
+            same dict ``served_model`` does. The default renders every argv
+            byte-for-byte as before and adds no key.
 
     Returns:
         Dict with 'success' key and either:
@@ -888,7 +906,8 @@ def invoke_with_provider(
         # dropping the keyword restores every rendered argv byte-for-byte.
         try:
             cmd, stdin_text = provider.build_command_for_transport(
-                prompt, model, transport, timeout_s=effective_timeout, schema=schema
+                prompt, model, transport, timeout_s=effective_timeout, schema=schema,
+                sandbox_fallback=sandbox_fallback,
             )
         except StructuredOutputUnavailable as exc:
             # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
@@ -1099,6 +1118,12 @@ def invoke_with_provider(
             "model": model,
             "duration_seconds": duration
         }
+        # D6 override (2026-09-17): a slot that ran without the runner's own
+        # sandbox says so on the same dict, so `served_model_fields` carries it
+        # to the result record, `.status.json`'s `models_served` and the report
+        # label. Only when the override fired — a default run adds no key.
+        if sandbox_fallback:
+            parsed["details"]["sandbox"] = SANDBOX_BYPASSED
 
         # §3.6: a fallback that fired rides out on the same details dict the
         # provider/model pair travels on, so every downstream record that names
@@ -1372,10 +1397,19 @@ FILE_OUTPUT_LOCATION = (
 #: the parsed array lands in exactly the same per-model result file either way —
 #: ``save_model_result`` writes it from the returned data, not from the model's
 #: own file.
+#:
+#: "Refused by the sandbox where one runs", not "will be refused": until D6's
+#: fallback (2026-09-17) every adapter on this roster really did refuse the
+#: write — a chat mode, a zero tool budget, a missing tool, or codex's own
+#: bubblewrap. A codex slot dispatched under ``sandbox_fallback: external``
+#: runs with no sandbox at all, so a write there would *succeed*, and a prompt
+#: that promised otherwise would be lying to the model about the one thing it
+#: is being asked not to do. The instruction is the same either way (return the
+#: array on stdout); only the claim about what happens on disobedience moved.
 STDOUT_OUTPUT_LOCATION = (
     "CRITICAL: Return your JSON output on stdout as your final message. Do NOT "
-    "write it to a file — you are running in a read-only mode and any file "
-    "write will be refused.\n"
+    "write it to a file — this is a read-only task, and a file write is "
+    "refused by the sandbox where one runs.\n"
     "Your final message must be ONLY the raw JSON array - no markdown, no code "
     "blocks, no explanation, no preamble and no closing remarks."
 )
@@ -1491,6 +1525,7 @@ def invoke_with_file_output(
     prefer_arrays: bool = True,
     cwd: Optional[str] = None,
     anchor: Optional[Union[str, Path]] = None,
+    sandbox_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -1518,6 +1553,11 @@ def invoke_with_file_output(
         prefer_arrays: If True, prefer array candidates when extracting JSON
         anchor: Optional discovery anchor (the run's plan-file path), forwarded
             verbatim to :func:`invoke_with_provider` (§9.3.c)
+        sandbox_fallback: The D6 override, forwarded verbatim to
+            :func:`invoke_with_provider`; the prompt's ``{output_location}``
+            block is unchanged by it (a bypassed codex still answers on
+            stdout, measured 2026-09-17 — its final ``agent_message`` was the
+            array, exactly the ``stdout_fallback`` shape this reads).
 
     Returns:
         Dict with keys:
@@ -1570,7 +1610,8 @@ def invoke_with_file_output(
     # channel below, and the immediate write inside invoke_with_provider
     # cannot know that yet.
     result = invoke_with_provider(prompt, model_spec, timeout, log_file, cwd=cwd,
-                                  anchor=anchor, _defer_parse_failure_log=True)
+                                  anchor=anchor, _defer_parse_failure_log=True,
+                                  sandbox_fallback=sandbox_fallback)
     deferred_log = result.get("details", {}).pop("_deferred_log", None)
 
     # Check for hard failures that mean the command didn't run properly

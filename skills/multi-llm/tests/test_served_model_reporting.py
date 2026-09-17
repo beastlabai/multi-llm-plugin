@@ -528,3 +528,192 @@ class TestServedModelLabel:
             },
         })
         assert label == "claude-code:sonnet (served by claude-sonnet-4-5-20250929)"
+
+
+# ---------------------------------------------------------------------------
+# D6 override (2026-09-17) — `sandbox: bypassed` rides the same carriage
+# ---------------------------------------------------------------------------
+
+BYPASS_LABEL = "ran unsandboxed: sandbox_fallback=external"
+
+#: The JSONL a codex slot answers with under the fallback: the array as the
+#: final `agent_message`, which is the `stdout_fallback` shape the measured
+#: by-hand run produced (2026-09-17) and `parse_output` already reads.
+CODEX_STREAM = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "t1"}),
+    json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": json.dumps(ISSUES),
+    }}),
+    json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 10, "output_tokens": 5,
+    }}),
+])
+
+
+class TestTheBypassProvenanceRidesTheServedModelCarriage:
+    """adapter argv → `invoke_with_provider` → the result record → the label."""
+
+    def test_the_flag_reaches_the_argv_and_the_details_dict(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["argv"] = list(cmd)
+            return _completed(CODEX_STREAM)
+
+        with patch("shutil.which", return_value="/usr/bin/codex"), \
+             patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+            result = invoke_with_provider("p", "codex:gpt-5.5", sandbox_fallback=True)
+
+        assert result["success"] is True
+        assert result["details"]["sandbox"] == "bypassed"
+        argv = seen["argv"]
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+
+    def test_without_the_flag_the_argv_and_the_details_are_unchanged(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["argv"] = list(cmd)
+            return _completed(CODEX_STREAM)
+
+        with patch("shutil.which", return_value="/usr/bin/codex"), \
+             patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+            result = invoke_with_provider("p", "codex:gpt-5.5")
+
+        assert set(result["details"]) == {"provider", "model", "duration_seconds"}
+        argv = seen["argv"]
+        assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+
+    def test_a_failed_attempt_carries_no_provenance(self):
+        """Like `served_model`: the key belongs to an answer, and a slot that
+        failed is failed — its record does not need to say how it ran."""
+        proc = _completed(CODEX_STREAM)
+        proc.returncode = 1
+        with patch("shutil.which", return_value="/usr/bin/codex"), \
+             patch("utils.llm_client.subprocess.run", return_value=proc):
+            result = invoke_with_provider("p", "codex:gpt-5.5", sandbox_fallback=True)
+        assert result["success"] is False
+        assert "sandbox" not in result["details"]
+
+    def test_the_file_output_wrapper_forwards_the_flag_and_the_provenance(self, tmp_path):
+        seen = {}
+
+        def fake_invoke(prompt, model_spec, timeout, log_file, **kwargs):
+            seen.update(kwargs)
+            return {
+                "success": True, "data": ISSUES,
+                "details": {"provider": "codex", "model": "gpt-5.5",
+                            "duration_seconds": 1.0, "sandbox": "bypassed"},
+            }
+
+        with patch("utils.llm_client.invoke_with_provider", side_effect=fake_invoke):
+            result = invoke_with_file_output(
+                "review {output_json_path}", "codex:gpt-5.5", {}, tmp_path,
+                "plan_review", sandbox_fallback=True,
+            )
+        assert seen["sandbox_fallback"] is True
+        assert result["success"] is True
+        assert result["details"]["sandbox"] == "bypassed"
+
+    def test_served_model_fields_carries_the_sandbox_key_alone_or_together(self):
+        from utils.review_orchestrator_base import (
+            collect_served_models, served_model_fields,
+        )
+
+        alone = served_model_fields({"sandbox": "bypassed"})
+        assert alone == {"sandbox": "bypassed"}
+        both = served_model_fields({
+            "served_model": SERVED, "served_model_is_fallback": True,
+            "sandbox": "bypassed",
+        })
+        assert both == {
+            "served_model": SERVED, "served_model_is_fallback": True,
+            "sandbox": "bypassed",
+        }
+        assert served_model_fields({"sandbox": "anything-else"}) == {}
+        assert served_model_fields({}) == {}
+
+        collected = collect_served_models({
+            "codex:gpt-5.5": {"success": True, "sandbox": "bypassed"},
+            "claude-code:sonnet": {"success": True},
+        })
+        assert collected == {"codex:gpt-5.5": {"sandbox": "bypassed"}}
+
+    def test_the_label_names_the_bypass_alone_and_beside_a_fallback(self):
+        from utils.html_report_generator import served_model_label
+
+        assert served_model_label("codex:gpt-6-astra:xhigh", {
+            "codex:gpt-6-astra:xhigh": {"sandbox": "bypassed"},
+        }) == f"codex:gpt-6-astra:xhigh ({BYPASS_LABEL})"
+        assert served_model_label("claude-code:sonnet", {
+            "claude-code:sonnet": {
+                "served_model": SERVED, "fallback": True, "sandbox": "bypassed",
+            },
+        }) == f"claude-code:sonnet (served by {SERVED}, fallback; {BYPASS_LABEL})"
+
+    def test_the_models_line_carries_the_label_on_a_fresh_run(self, tmp_path):
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+
+        aggregate_results(
+            "plan", str(tmp_path), str(phase_dir), "review-plan",
+            ["codex:gpt-5.5"], {}, [],
+            plan_path=str(plan),
+            served_models={"codex:gpt-5.5": {"sandbox": "bypassed"}},
+        )
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert f"**Models:** codex:gpt-5.5 ({BYPASS_LABEL})" in report
+
+    def test_reaggregate_reads_the_provenance_back_off_the_checkpoint(
+        self, tmp_path, capsys
+    ):
+        """`{model}.json` is a bare list, so the label survives a
+        `--reaggregate` only because `models_served` was written to
+        `.status.json` and is read back from it."""
+        import argparse
+
+        from utils import review_orchestrator_base as rob
+        from utils.status_file import write_status
+
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+        phase_dir = out_dir / "review-plan"
+        phase_dir.mkdir(parents=True)
+        # `sanitize_model_name("codex:gpt-5.5")`: the dot collapses too.
+        (phase_dir / "codex_gpt-5_5.json").write_text(json.dumps([{
+            "title": "Finding", "desc": "d", "importance": "MEDIUM",
+            "reference": "Step 1", "type": "addition",
+        }]), encoding="utf-8")
+        write_status(str(phase_dir), {
+            "phase": "review-plan", "state": "models_complete",
+            "started_at": "2026-09-17T00:00:00",
+            "models_requested": ["codex:gpt-5.5"],
+            "models_completed": ["codex:gpt-5.5"],
+            "models_failed": {}, "error": None, "plan_hash": "deadbeef",
+            "models_served": {"codex:gpt-5.5": {"sandbox": "bypassed"}},
+        })
+        assert rob.recorded_served_models(str(phase_dir)) == {
+            "codex:gpt-5.5": {"sandbox": "bypassed"},
+        }
+
+        asyncio.run(rob.reaggregate_from_existing_files(
+            prefix="plan", out_dir=str(out_dir), phase_dir=str(phase_dir),
+            phase_name="review-plan", plan_path=str(plan),
+            args=argparse.Namespace(
+                skip_validation=True, validation_model="auto", timeout=None,
+                internal_validation=False, force=False,
+            ),
+            orchestrator_script="review_plan_orchestrator.py",
+        ))
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert f"codex:gpt-5.5 ({BYPASS_LABEL})" in report
+
+    def test_reaggregate_without_a_recorded_provenance_is_unchanged(self, tmp_path):
+        from utils import review_orchestrator_base as rob
+
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        assert rob.recorded_served_models(str(phase_dir)) is None

@@ -86,7 +86,14 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    bypass_ignore_prefixes,
+    bypass_write_violation,
+    porcelain_snapshot,
+    record_sandbox_bypassed,
+    recorded_served_models,
+    sandbox_fallback_kwargs,
     sandbox_refusal,
+    unexpected_writes,
     update_status,
     write_status,
 )
@@ -130,6 +137,7 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.llm_client import (
+    SANDBOX_BYPASSED,
     describe_output_file,
     describe_usage,
     invoke_with_file_output,
@@ -1141,10 +1149,19 @@ async def run_single_review(
     # being able to open them, which scores as a completed review. Refused
     # before the phase dir is claimed and before anything an earlier attempt
     # left is retired, because a refused slot replaces nothing.
-    refusal = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-    if refusal is not None:
-        print(f"[{display_name}] {refusal}")
-        return False, None, refusal
+    #
+    # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed` when
+    # the probe said `unavailable` AND `providers.<name>.sandbox_fallback` is
+    # `external`. One `[SANDBOX_BYPASSED]` line, the flag on the invoker, and a
+    # porcelain snapshot taken now so a write the model makes can be named.
+    sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
+    if sandbox.refused:
+        print(f"[{display_name}] {sandbox.reason}")
+        return False, None, sandbox.reason
+    tree_before = None
+    if sandbox.bypass:
+        print(f"[{display_name}] {sandbox.reason}")
+        tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
 
     # Generate log file path for debugging
     sanitized_model = sanitize_model_name(model_spec)
@@ -1238,6 +1255,7 @@ async def run_single_review(
         prefer_arrays=True,
         cwd=project_root,
         anchor=str(plan_path),
+        **sandbox_fallback_kwargs(sandbox),
     )
 
     duration = time.time() - start_time
@@ -1247,12 +1265,33 @@ async def run_single_review(
     # §3.6: record which model served this slot before any of the branches
     # below return, so a fallback that fired is attributed even on the paths
     # that end in salvage. Only ever populated when a fallback is configured.
+    # The D6 override's provenance (2026-09-17) lands in the same collector,
+    # with or without a served model beside it.
     details = result.get("details", {}) or {}
-    if served_models is not None and details.get("served_model"):
-        served_models[model_spec] = {
-            "served_model": details["served_model"],
-            "fallback": bool(details.get("served_model_is_fallback")),
-        }
+    if served_models is not None:
+        entry: Dict[str, Any] = {}
+        if details.get("served_model"):
+            entry["served_model"] = details["served_model"]
+            entry["fallback"] = bool(details.get("served_model_is_fallback"))
+        if details.get("sandbox") == SANDBOX_BYPASSED:
+            entry["sandbox"] = SANDBOX_BYPASSED
+        if entry:
+            served_models[model_spec] = entry
+
+    # D6 override: the detective check, ahead of every branch below. A bypassed
+    # slot that changed the working tree is failed by path whatever the
+    # invocation reported — nothing is restored, and nothing it returned is
+    # parsed as a review. Skipped entirely (no git call) for a sandboxed slot.
+    if sandbox.bypass:
+        tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
+        touched = unexpected_writes(
+            tree_before, tree_after,
+            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+        )
+        if touched:
+            violation = bypass_write_violation(provider_name, touched)
+            print(f"[{display_name}] {violation}")
+            return False, None, violation
 
     print(f"[{display_name}] Log saved to: {log_file}")
     # Only for a slot that answered: a failed invocation carries `output_file`
@@ -2366,10 +2405,15 @@ async def reaggregate_from_existing_files(
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 
-        # Generate report
+        # Generate report. `served_models` is what the fan-out recorded in the
+        # checkpoint (§3.6's attribution and the D6 override's `sandbox:
+        # bypassed`, 2026-09-17): the per-model files carry neither, so without
+        # this read a reaggregated report named a bypassed slot as if it had
+        # run sandboxed.
         report = generate_review_report(
             plan_path, results, changed_files, validated_groups_for_report,
             phase_dir=phase_dir, base_ref=base_ref, template_style=template_style,
+            served_models=recorded_served_models(str(phase_dir)),
         )
 
         # Save report
@@ -2866,6 +2910,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # `.status.json` gains no key.
             **({"models_served": served_models} if served_models else {}),
         })
+        # D6 override (2026-09-17): the poller's copy, under `progress`.
+        record_sandbox_bypassed(str(phase_dir), served_models)
         # The base fan-out's `models_done`, on the same truth: the fanout
         # step above wrote `models_done=0` and nothing here advanced it, so
         # `status --view run` printed `models 0/3` beside three completed
