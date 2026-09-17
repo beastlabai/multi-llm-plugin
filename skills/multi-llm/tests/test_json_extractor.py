@@ -2,6 +2,8 @@
 
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,7 +13,60 @@ from utils.json_extractor import (
     extract_json_from_text,
     generate_output_path,
     has_salvageable_json,
+    is_answer_shaped,
+    is_refused_result_envelope,
     sanitize_model_name,
+)
+
+CLAUDE_CODE_FIXTURES = Path(__file__).parent / "fixtures" / "claude-code"
+
+#: The 2026-09-17 envelope, re-keyed. ``claude-code:claude-fable-5-1:high``
+#: reviewed for 491 s, spawned four subagents, spent $25.05 and 137 348 output
+#: tokens, and then hit the account's usage cap: ``api_error_status: 429`` with
+#: the vendor's sentence in ``result`` and **no** ``API Error:`` prefix, no
+#: ``429`` and no "rate limit" anywhere in the text — the text ladder cannot
+#: read it and only the status rung can. The session and event ids are fresh;
+#: nothing else is changed, because the bookkeeping shape (``iterations: []``,
+#: ``permission_denials: []``, the four-entry ``subagent_stats``) is what the
+#: gate misread. The top-level ``usage`` block being all zeros beside a
+#: populated ``modelUsage`` is measured too, not an edit.
+USAGE_CAP_ENVELOPE = (
+    '{"duration_api_ms":1738676,"stop_reason":"stop_sequence",'
+    '"session_id":"00000000-0000-4000-8000-000000000001",'
+    '"total_cost_usd":25.05318824999999,'
+    '"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,'
+    '"cache_creation_input_tokens":0,"cache_read_input_tokens":0,'
+    '"output_tokens":0,"server_tool_use":{"web_search_requests":0,'
+    '"web_fetch_requests":0},"service_tier":"standard",'
+    '"cache_creation":{"ephemeral_1h_input_tokens":0,'
+    '"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],'
+    '"speed":"standard"},'
+    '"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":1944,'
+    '"outputTokens":13,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
+    '"webSearchRequests":0,"costUSD":0.002009,"contextWindow":200000,'
+    '"maxOutputTokens":32000,"thinkingTokens":0,'
+    '"canonicalModel":"claude-haiku-4-5","provider":"firstParty",'
+    '"costBasis":"list"},"claude-fable-5-1":{"inputTokens":1936,'
+    '"outputTokens":137348,"cacheReadInputTokens":37205114,'
+    '"cacheCreationInputTokens":1065254,"webSearchRequests":0,'
+    '"costUSD":25.051179249999993,"contextWindow":1000000,'
+    '"maxOutputTokens":64000,"thinkingTokens":75679,'
+    '"canonicalModel":"claude-fable-5-1","provider":"firstParty",'
+    '"costBasis":"list"}},"permission_denials":[],'
+    '"terminal_reason":"api_error","fast_mode_state":"off",'
+    '"fast_mode_disabled_reason":"sdk_opt_in_required",'
+    '"origin":{"kind":"task-notification"},'
+    '"subagent_stats":{"spawned":4,"requested":{"background":4,'
+    '"foreground":0,"unset":0},"started_in_background":4,"max_depth":1,'
+    '"spawned_by_subagents":0,"completed":2,"failed":2,'
+    '"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,'
+    '"concurrency_limit":0,"budget":0},"by_type":{"general-purpose":4}},'
+    '"is_error":true,"num_turns":1,"subtype":"success","api_error_status":429,'
+    '"result":"You\'ve reached your Fable limit. Switch to another model, or '
+    'manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, '
+    'to continue.","type":"result","duration_ms":409,'
+    '"uuid":"00000000-0000-4000-8000-000000000002","queued_turn_count":0,'
+    '"result_index":3}'
 )
 
 
@@ -365,6 +420,71 @@ class TestHasSalvageableJson:
         assert has_salvageable_json(
             '{"title": "Race in worker", "desc": "Two writers", "importance": "high"}'
         ) is True
+
+    def test_the_usage_cap_envelope_is_not_salvageable(self):
+        """The 2026-09-17 defect: a 429 usage cap offered to the host as a document.
+
+        ``permission_denials: []`` makes the envelope "an object with an
+        array-valued key", and ``usage.iterations: []`` is a nested candidate
+        that parses to ``[]`` — two independent routes to ``True``, and the
+        orchestrator printed ``[SALVAGE_NEEDED]`` over a run that produced no
+        review at all.
+        """
+        assert json.loads(USAGE_CAP_ENVELOPE)["is_error"] is True
+        assert has_salvageable_json(USAGE_CAP_ENVELOPE) is False
+
+    def test_the_usage_cap_envelope_is_not_answer_shaped_either(self):
+        """The persist end (``_salvage_gave_up``) asks the same predicate."""
+        assert is_answer_shaped(json.loads(USAGE_CAP_ENVELOPE)) is False
+        assert is_refused_result_envelope(json.loads(USAGE_CAP_ENVELOPE)) is True
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "rate-limit",
+            "auth-error",
+            "error-envelope",
+            "invalid-model",
+            "stdout-error",
+            "context-overflow",
+            "truncated",
+            "zero-byte-response",
+        ],
+    )
+    def test_every_committed_claude_code_failure_is_refused(self, row):
+        """All eight ``is_error: true`` captures carry the same empty arrays."""
+        text = (CLAUDE_CODE_FIXTURES / f"{row}.stdout.txt").read_text(encoding="utf-8")
+        assert has_salvageable_json(text) is False
+
+    @pytest.mark.parametrize("row", ["success", "ephemeral-only", "multi-assistant"])
+    def test_every_committed_claude_code_success_still_qualifies(self, row):
+        """The verdict, not the envelope shape, is what the gate reads."""
+        text = (CLAUDE_CODE_FIXTURES / f"{row}.stdout.txt").read_text(encoding="utf-8")
+        assert has_salvageable_json(text) is True
+
+    def test_a_refused_envelope_followed_by_a_truncated_array_still_qualifies(self):
+        """Scoping the refusal to the envelope's own span is what keeps this."""
+        assert has_salvageable_json(
+            USAGE_CAP_ENVELOPE + '\n[{"title": "Race in worker", "severity": "high"'
+        ) is True
+
+    def test_an_ordinary_turned_down_object_still_lets_its_children_speak(self):
+        """Only a *refused envelope* silences its nested candidates."""
+        assert has_salvageable_json(
+            '{"status": "partial", "data": {"issues": [{"title": "x"}]}}'
+        ) is True
+
+    def test_only_the_verdict_changes_the_outcome(self):
+        """The same bookkeeping with ``is_error: false`` reads exactly as before.
+
+        An envelope that was *not* refused still qualifies on its array-valued
+        key: the shape rule is untouched, and it is the CLI's own verdict — not
+        the presence of ``permission_denials`` — that turns the gate.
+        """
+        served = {"type": "result", "is_error": False, "permission_denials": []}
+        assert is_refused_result_envelope(served) is False
+        assert is_answer_shaped(served) is True
+        assert has_salvageable_json(json.dumps(served)) is True
 
 
 class TestBuildUnsanitizeMapReportsStemCollisions:
