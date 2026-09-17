@@ -344,9 +344,15 @@ class TestATokenCountIsNotAToken:
         assert json.loads(redact_text(self.ENVELOPE))["usage"]["cache_read_input_tokens"] == 12345678
 
     def test_a_token_that_carries_letters_is_still_redacted(self):
-        """The floor is "bare integer", not "starts with a digit"."""
-        out = redact_text("token=1234567890abcdef1234567890abcdef")
-        assert "1234567890abcdef1234567890abcdef" not in out
+        """The floor is "bare integer", not "starts with a digit".
+
+        The value is ``_TOKEN_HEX`` for the reason its comment gives: a 32-hex
+        literal beside ``token=`` is exactly what ``generic-api-key`` fires
+        on, and writing one out here made this file the tracked tree's one
+        finding (``test_no_committed_secrets``, 2026-09-17).
+        """
+        out = redact_text(f"token={_TOKEN_HEX}")
+        assert _TOKEN_HEX not in out
         assert "<redacted:secret-kv>" in out
 
 
