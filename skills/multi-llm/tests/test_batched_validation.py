@@ -680,6 +680,47 @@ class TestPrepareBatchedValidationTasks:
 
         assert "[VALIDATION_CONTEXT_TRUNCATED]" not in capsys.readouterr().err
 
+    def test_code_review_records_carry_the_location_the_guidance_promises(
+        self, tmp_path
+    ):
+        """`CODE_REVIEW_VALIDATION_GUIDANCE` tells the validator each record
+        carries `file` and `line_range`; since D2 no record did.
+
+        Measured 2026-09-17: six groups over five files, a code block naming
+        all five, and records that named none — the validator located every
+        finding by reading the repository, which `context_mode: inline` does
+        not promise. A plan-review record (no location) is unchanged.
+        """
+        located = make_group("HIGH", "Badge seed")
+        located["suggestions"][0].update({
+            "file": "apps/web/app/[locale]/home/(user)/layout.tsx",
+            "line_range": [127, 135],
+        })
+        unlocated = make_group("MEDIUM", "Cross-cutting")
+
+        result = prepare_batched_validation_tasks(
+            groups=[located, unlocated],
+            context="plan",
+            output_dir=str(tmp_path),
+            plan_file="/path/to/plan.md",
+        )
+
+        by_theme = {}
+        for batch in result["batches"]:
+            records = json.loads(
+                batch["prompt"].split("## Suggestion groups to validate")[1]
+                .split("\n\n", 1)[1].split("\n\n## Task")[0]
+            )
+            for record in records:
+                by_theme[record["theme"]] = record["suggestions"][0]
+
+        assert by_theme["Badge seed"]["file"] == (
+            "apps/web/app/[locale]/home/(user)/layout.tsx"
+        )
+        assert by_theme["Badge seed"]["line_range"] == [127, 135]
+        assert "file" not in by_theme["Cross-cutting"]
+        assert "line_range" not in by_theme["Cross-cutting"]
+
 
 # ============================================================================
 # Tests for merge_batched_validation_results()
