@@ -748,10 +748,14 @@ def stale_validation_reason(
         validation_mtime = validation_path.stat().st_mtime
     except OSError as exc:
         return f"could not stat {validation_path.name}: {exc}"
+    # A retired round's `validation_batch_<n>.<stamp>.stale.json` (D7) matches
+    # the glob too; it keeps its mtime through the rename and belongs to no
+    # round this file could have come from.
     newer = sorted(
         batch.name
         for batch in validation_path.parent.glob("validation_batch_*.json")
-        if batch.stat().st_mtime > validation_mtime
+        if not batch.name.endswith(".stale.json")
+        and batch.stat().st_mtime > validation_mtime
     )
     if newer:
         return (

@@ -76,6 +76,7 @@ from utils.review_orchestrator_base import (
     dispatch_subagent_tasks,
     exec_subagents_requested,
     fanout_slot_counter,
+    grouped_coverage_gap,
     maybe_detach,
     merge_validation_batches,
     record_high_priority_groups,
@@ -83,6 +84,7 @@ from utils.review_orchestrator_base import (
     resolve_result_files_by_model,
     retire_salvage_artifacts,
     retire_stale_validation,
+    retire_stale_validation_round,
     sandbox_refusal,
     update_status,
     write_status,
@@ -2137,11 +2139,40 @@ async def reaggregate_from_existing_files(
             or validation_tasks_path.exists()
         )
 
-        if all_issues and has_existing_validation and grouped_path.exists():
-            print("Using existing grouped.json (preserves validation alignment)")
+        reuse_bound_grouping = (
+            all_issues and has_existing_validation and grouped_path.exists()
+        )
+        if reuse_bound_grouping:
             with open(grouped_path, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
             grouped = load_groups_payload(raw_data)
+            # The premise of reuse is that the bound file still describes the
+            # results on disk. A per-model file that landed after grouping — a
+            # salvage the host ran once the fan-out had returned at the
+            # validation marker, or a result obtained out of band for a slot
+            # the fan-out recorded as failed — falsifies it, and reusing the
+            # file then excluded that model from every group while `results`
+            # still listed it (measured 2026-09-17: three of eight issues in no
+            # group, and no line on screen saying so). The round is retired,
+            # not deleted, and the regroup branch below re-materializes
+            # validation for the grouping that does cover the dir.
+            gap = grouped_coverage_gap(
+                grouped, {m: issues for m, (_ok, issues, _err) in results.items()}
+            )
+            if gap:
+                print(
+                    "grouped.json does not cover the model results on disk; "
+                    "regrouping and retiring the validation round bound to it:"
+                )
+                for line in gap:
+                    print(f"  {line}")
+                retire_stale_validation_round(
+                    str(phase_dir), reason="grouped.json did not cover the results on disk"
+                )
+                reuse_bound_grouping = False
+
+        if reuse_bound_grouping:
+            print("Using existing grouped.json (preserves validation alignment)")
         else:
             raw_grouped = group_similar_suggestions(all_issues)
             # The two branches are made to agree on shape *here* rather than at
@@ -2412,8 +2443,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  Run: --reaggregate to regenerate the report.")
                 sys.exit(3)
             else:
-                # Check for batch files
-                batch_files = list(phase_dir_check.glob("validation_batch_*.json"))
+                # Check for batch files. A retired round's
+                # `validation_batch_<n>.<stamp>.stale.json` (D7) still matches
+                # the glob and is not validation in progress.
+                batch_files = [
+                    path for path in phase_dir_check.glob("validation_batch_*.json")
+                    if not path.name.endswith(".stale.json")
+                ]
                 if batch_files:
                     print("ERROR: Partial completion detected for 'code-review'.")
                     print(f"  Found {len(batch_files)} validation batch file(s).")
