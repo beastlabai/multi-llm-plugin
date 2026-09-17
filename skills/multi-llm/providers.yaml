@@ -367,6 +367,50 @@ providers:
       - gpt-5.6-terra
       - gpt-5.6-sol
       - gpt-5.6-sol:xhigh
+    # sandbox_fallback: off | external   (default: off)
+    #
+    # D6 (2026-09-17) — the ONE dispatch-time override of a sandbox refusal.
+    # `codex exec` runs the model's shell through bubblewrap, and on a stock
+    # Ubuntu 24.04 (kernel.apparmor_restrict_unprivileged_userns=1) bwrap
+    # cannot start: `bwrap: loopback: Failed RTM_NEWADDR: Operation not
+    # permitted`. Under `off` the D6 probe refuses every codex slot and phase
+    # on such a machine and `multi_llm.py doctor` prints the AppArmor repair —
+    # that is the fix, and it stays the fix.
+    #
+    #   off      (default) refuse; codex is left out of the fan-out and every
+    #            read/write batch until the repair is installed.
+    #   external YOUR attestation that something outside this process — a
+    #            container, a VM, a throwaway account — is the boundary. Then,
+    #            ONLY when the probe verdict is `unavailable` (never `unknown`)
+    #            and ONLY for the read-only profiles (the review/ask fan-out
+    #            and the executor's read kinds: validation, revalidation,
+    #            consolidation, salvage, task generation, the human-decision
+    #            judge), codex runs `--sandbox danger-full-access` in the real
+    #            repo root. Every artifact of such a slot says so: one
+    #            `[SANDBOX_BYPASSED]` line on stdout, `models_served` in
+    #            `.status.json`, `(ran unsandboxed: sandbox_fallback=external)`
+    #            on the report's model labels, and a `git status` taken before
+    #            and after the slot that fails it by path if the tree changed.
+    #            The write profile (`agent-write`, every apply/implement kind)
+    #            is refused exactly as under `off`, whatever this key says.
+    #
+    # What `external` gives up, in plain words: no OS boundary of any kind
+    # between the model's shell and this machine — reads and writes anywhere
+    # you can, network from model commands, and no prompt-injection resistance
+    # for a validation batch. The plugin cannot verify the boundary you assert
+    # (measured 2026-09-17: the host's own shell tool runs in the same
+    # namespaces as your terminal), so the word is what it is. Measured on
+    # the same day: a by-hand `danger-full-access` review over a worktree
+    # snapshot escaped the snapshot in 6 commands to read the real repo, and
+    # found 2 unique validated-high issues the sandboxed reviewers did not —
+    # which is the whole reason this key exists and the whole reason it is
+    # spelled `external` rather than `on`. A bare boolean is ignored with a
+    # warning; write the word.
+    #
+    # This key is read through the normal layering, so a cloned repository's
+    # `.multi-llm/providers.yaml` can set it: treat an untrusted repo's
+    # override the way docs/configuration.md already says to.
+    sandbox_fallback: "off"
 
   kilocode:
     default_timeout: 1200

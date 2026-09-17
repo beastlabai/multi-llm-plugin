@@ -466,7 +466,34 @@ REVIEWED_STILL_WRITES = {
 }
 
 
-def _argv_for(name):
+#: Atoms an adapter renders ONLY under a dispatch-time override, never in its
+#: default argv — so the two tables above (which read the default) cannot see
+#: them, and `test_no_adjudication_row_is_stale` would rightly refuse them there.
+#: A row here is adjudicated the same way: does the atom stop the CLI writing
+#: the result file? The D6 override's answer is "no, the opposite" — and the
+#: declaration does not move because of it, because `supports_file_output` is
+#: a property of the adapter, not of one dispatch, and the fan-out keeps asking
+#: a bypassed codex for stdout (measured 2026-09-17: the array was the final
+#: `agent_message`, the `stdout_fallback` shape `parse_output` already reads).
+#: `TestDispatchTimeOverrideAtoms` checks each row is really rendered under
+#: the override and really absent from the default.
+DISPATCH_TIME_OVERRIDES = {
+    ("codex", "--sandbox danger-full-access"): (
+        "D6 override (2026-09-17). Rendered only by `apply_sandbox_fallback` "
+        "for `generate`/`agent-readonly`, behind `providers.codex."
+        "sandbox_fallback: external` plus a probe verdict of `unavailable`. "
+        "The word is `sandbox` but the value REMOVES one: `codex sandbox -c "
+        "'sandbox_mode=\"danger-full-access\"' -- sh -c 'exit 0'` runs with no "
+        "bwrap at all (rc 0, codex-cli 0.154.0) where `read-only` and "
+        "`workspace-write` both die on `bwrap: loopback: Failed RTM_NEWADDR`. "
+        "Under it a file write would SUCCEED, so `STDOUT_OUTPUT_LOCATION` no "
+        "longer claims a write \"will be refused\"; the channel stays stdout "
+        "and `supports_file_output` stays False."
+    ),
+}
+
+
+def _argv_for(name, *, sandbox_fallback=False):
     """The argv an adapter renders, host-independently.
 
     cursor's §5.4.1 gate reads the *installed* binary's --help before it will
@@ -474,7 +501,19 @@ def _argv_for(name):
     `TestDeclaredOutputChannel` stubs it — this reads the adapter, not the
     developer's cursor build. Since M14 the gate has one implementation
     (`base.read_help_tokens`), so that is what is stubbed.
+
+    ``sandbox_fallback=True`` renders through ``build_command_for_transport``
+    with the D6 override set — the same stub, so the override class reads the
+    adapter and not the machine either.
     """
+    def render():
+        if sandbox_fallback:
+            argv, _ = _PROVIDERS[name].build_command_for_transport(
+                PROMPT, MODELS[name], "argv", sandbox_fallback=True
+            )
+            return argv
+        return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
+
     if name == "cursor-agent":
         with mock.patch.object(
             base_module,
@@ -483,11 +522,11 @@ def _argv_for(name):
         ), mock.patch.object(
             cursor_agent_module.shutil, "which", lambda _n: sys.executable
         ):
-            return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
-    return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
+            return render()
+    return render()
 
 
-def restrictive_atoms(name):
+def restrictive_atoms(name, argv=None):
     """Every restriction-shaped atom in this adapter's rendered argv.
 
     An *atom* is one argv element, or a `--flag value` pair when the flag takes
@@ -495,8 +534,11 @@ def restrictive_atoms(name):
     `--agent plan`) rather than in the flag. The prompt and the model slug are
     stripped out of every element first: both are data this test chose, and a
     prompt that happens to contain the word "plan" is not a mode selector.
+    ``argv`` defaults to the adapter's rendered default; the override class
+    below hands in the argv a dispatch-time rewrite produced.
     """
-    argv = _argv_for(name)
+    if argv is None:
+        argv = _argv_for(name)
     model = MODELS[name]
     scrubbed = [arg.replace(PROMPT, "").replace(model, "") for arg in argv]
 
@@ -605,3 +647,46 @@ class TestReadOnlyArgvMatchesTheDeclaration:
             f"{name} no longer renders {atom!r} — the mode it adjudicates is "
             f"gone, so this row is describing a build that no longer ships."
         )
+
+
+class TestDispatchTimeOverrideAtoms:
+    """`DISPATCH_TIME_OVERRIDES` — adjudicated from both sides (D6, 2026-09-17)."""
+
+    @staticmethod
+    def _override_argv(name):
+        return _argv_for(name, sandbox_fallback=True)
+
+    @pytest.mark.parametrize("key", sorted(DISPATCH_TIME_OVERRIDES))
+    def test_the_row_is_rendered_under_the_override_and_absent_by_default(self, key):
+        name, atom = key
+        assert name in _PROVIDERS, f"{name} is not a registered adapter"
+        assert atom in restrictive_atoms(name, self._override_argv(name)), (
+            f"{name} no longer renders {atom!r} under `sandbox_fallback=True` — "
+            f"the override this row adjudicates is gone, so delete the row."
+        )
+        assert atom not in restrictive_atoms(name), (
+            f"{name} renders {atom!r} in its DEFAULT argv. A dispatch-time "
+            f"override that leaked into a default is a bypass on every run; "
+            f"`tests/test_read_only_modes.py` should already be red on this."
+        )
+
+    @pytest.mark.parametrize("name", sorted(_PROVIDERS))
+    def test_every_override_atom_an_adapter_renders_is_adjudicated(self, name):
+        """A new override nobody classified fails by name, like a new flag."""
+        default = set(restrictive_atoms(name))
+        for atom in restrictive_atoms(name, self._override_argv(name)):
+            if atom in default:
+                continue
+            assert (name, atom) in DISPATCH_TIME_OVERRIDES, (
+                f"{name} renders {atom!r} only under `sandbox_fallback=True`, and "
+                f"no one has said what it does to the CLI's writes. Add the row to "
+                f"DISPATCH_TIME_OVERRIDES with the measurement."
+            )
+
+    @pytest.mark.parametrize("key", sorted(DISPATCH_TIME_OVERRIDES))
+    def test_the_override_moves_no_declaration(self, key):
+        """`supports_file_output` is per adapter; the fan-out keeps asking a
+        bypassed slot for stdout, and the row says why."""
+        name, _atom = key
+        assert _PROVIDERS[name].supports_file_output is False
+        assert "stdout" in DISPATCH_TIME_OVERRIDES[key]

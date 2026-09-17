@@ -56,6 +56,47 @@ PROFILE_AGENT_READONLY = "agent-readonly"
 PROFILE_AGENT_WRITE = "agent-write"
 
 # ---------------------------------------------------------------------------
+# The sandbox fallback (D6, 2026-09-17) — the one dispatch-time override
+# ---------------------------------------------------------------------------
+
+#: ``providers.<name>.sandbox_fallback`` — the closed policy set. ``off`` is the
+#: shipped default: a runner whose own OS sandbox cannot start is refused, and
+#: ``multi_llm.py doctor`` prints the repair. ``external`` is the operator's
+#: *attestation* that something outside this process (a container, a VM, a
+#: throwaway account) is the boundary, so a **read-only** dispatch may run
+#: without the runner's own sandbox rather than being left out of the fan-out.
+#: It is a standing property of the machine and its operator, which is why it
+#: is a config key and never a CLI flag or an ``unattended`` row: the decision
+#: does not vary per run. The plugin cannot verify the boundary it is told
+#: about (measured 2026-09-17: the Claude Code Bash tool's ``mnt``/``net``/
+#: ``user``/``pid`` namespaces are identical to the outer terminal's), so the
+#: word is what it is — an assertion the operator owns.
+SANDBOX_FALLBACK_OFF = "off"
+SANDBOX_FALLBACK_EXTERNAL = "external"
+SANDBOX_FALLBACK_POLICIES: Tuple[str, ...] = (
+    SANDBOX_FALLBACK_OFF,
+    SANDBOX_FALLBACK_EXTERNAL,
+)
+
+#: The only profiles the fallback may ever widen. ``generate`` is the review/ask
+#: fan-out (review-plan, review-tasks, review-code, ask — every one consumes a
+#: document); ``agent-readonly`` is every executor READ kind (validation,
+#: revalidation, consolidation, salvage, task generation, the human-decision
+#: judge). ``agent-write`` is absent by construction and stays absent: a runner
+#: with no honoured write sandbox is refused for ``agent-write`` today, and the
+#: fallback exists to keep read-only work flowing, not to hand a model
+#: pre-approved edit access with the boundary removed. An adapter's
+#: :meth:`LLMProvider.apply_sandbox_fallback` raises on anything outside this
+#: tuple rather than rendering it.
+SANDBOX_FALLBACK_PROFILES: Tuple[str, ...] = (PROFILE_GENERATE, PROFILE_AGENT_READONLY)
+
+#: What every artifact of a bypassed slot says, verbatim — the fan-out's
+#: stdout line, the executor's preflight line, ``models_served`` in
+#: ``.status.json``, the report label. One string so the reader can grep one
+#: marker across the run, the way ``[SANDBOX_UNAVAILABLE]`` reads today.
+SANDBOX_BYPASSED_MARKER = "[SANDBOX_BYPASSED]"
+
+# ---------------------------------------------------------------------------
 # Non-interactive git env (§2.2)
 # ---------------------------------------------------------------------------
 
@@ -2367,6 +2408,42 @@ class LLMProvider(ABC):
         """
         return None
 
+    def sandbox_fallback_policy(
+        self, profile: str, anchor: Optional[str] = None
+    ) -> Optional[str]:
+        """The resolved ``sandbox_fallback`` policy this adapter honours for
+        ``profile``, or ``None`` (D6, 2026-09-17).
+
+        ``None`` — the default, and the answer for every adapter without an OS
+        sandbox of its own — means "no fallback exists here": a dispatch under
+        this profile either runs sandboxed or is refused, and no config key can
+        change that. An adapter that overrides this answers one of
+        :data:`SANDBOX_FALLBACK_POLICIES`, read through the normal config
+        layering, and **only for a profile in**
+        :data:`SANDBOX_FALLBACK_PROFILES` — ``agent-write`` must come back
+        ``None`` whatever the config says. Every gate that consults this
+        (``review_orchestrator_base.sandbox_refusal``,
+        ``subagent_executor._detect_sandbox``) requires *all four* of: the
+        probe verdict ``unavailable`` (never ``unknown`` — a probe that could
+        not be read must not widen anything), this answer ``external``, a
+        read-only profile, and the adapter declaring the hook at all.
+        """
+        return None
+
+    def apply_sandbox_fallback(self, argv: List[str], profile: str) -> List[str]:
+        """Rewrite a rendered ``argv`` to run **without** this adapter's own
+        sandbox, for a ``profile`` in :data:`SANDBOX_FALLBACK_PROFILES`.
+
+        Called by the transport builders only when a gate has already decided
+        the four conditions above hold, so the default — ``argv`` unchanged —
+        is what every adapter without a fallback does with a flag it was never
+        going to be handed. An adapter that answers a policy from
+        :meth:`sandbox_fallback_policy` must override this, and must raise on a
+        profile outside the tuple rather than render it: the write profiles are
+        never widened, structurally, not by policy.
+        """
+        return argv
+
     #: Model tokens this CLI serves with **no credential of any kind present**
     #: (D3 step 2) — declared, never sniffed, and measured before it is written
     #: down. "Needs a credential" is a property of the *model* on a CLI that
@@ -2714,6 +2791,7 @@ class LLMProvider(ABC):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
+        sandbox_fallback: bool = False,
     ) -> Tuple[List[str], Optional[str]]:
         """``build_agent_command`` plus the text to write to the child's stdin.
 
@@ -2721,10 +2799,19 @@ class LLMProvider(ABC):
         default implementation assumes the prompt is the **last** argv element
         (which every profile command this repo ships builds that way), so a
         ``stdin`` transport simply drops it and returns it as the child's input.
+
+        ``sandbox_fallback`` is the executor's D6 override (2026-09-17): ``True``
+        only when ``_detect_sandbox`` recorded ``bypassed`` for this runner and
+        profile, and it reaches the argv through :meth:`apply_sandbox_fallback`
+        *before* the prompt is split off — so the rewrite sees the same
+        positions ``build_agent_command`` rendered. Ignored by every adapter
+        that keeps the default hook.
         """
         argv = self.build_agent_command(
             prompt, model, profile, timeout_s=timeout_s, schema=schema
         )
+        if sandbox_fallback:
+            argv = self.apply_sandbox_fallback(argv, profile)
         if transport == "argv":
             return argv, None
         if transport == "stdin" and self.supports_prompt_transport("stdin"):
@@ -2891,6 +2978,7 @@ class LLMProvider(ABC):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
+        sandbox_fallback: bool = False,
     ) -> Tuple[List[str], Optional[str]]:
         """Build argv plus the text to write to the child's stdin.
 
@@ -2906,6 +2994,13 @@ class LLMProvider(ABC):
                 :meth:`build_command` (§9.6.a/b). This is the Lane A leg:
                 ``invoke_with_provider`` computes ``effective_timeout`` before it
                 builds anything, so the adapter never re-derives it.
+            sandbox_fallback: The fan-out's D6 override (2026-09-17). ``True``
+                only when ``sandbox_refusal`` answered ``dispatch_unsandboxed``
+                for this slot — probe ``unavailable``, policy ``external``,
+                profile ``generate`` — and it reaches the argv through
+                :meth:`apply_sandbox_fallback`. Keyword-only, default
+                ``False``, and ignored by every adapter that keeps the default
+                hook, so every existing argv is rendered byte-for-byte.
 
         Returns:
             ``(argv, stdin_text)``; ``stdin_text`` is ``None`` unless the
@@ -2915,12 +3010,12 @@ class LLMProvider(ABC):
             ValueError: when this adapter does not support ``transport``.
         """
         if transport == "argv":
-            return (
-                self.build_command(
-                    prompt, model, timeout_s=timeout_s, schema=schema
-                ),
-                None,
+            argv = self.build_command(
+                prompt, model, timeout_s=timeout_s, schema=schema
             )
+            if sandbox_fallback:
+                argv = self.apply_sandbox_fallback(argv, PROFILE_GENERATE)
+            return argv, None
         raise ValueError(
             f"{self.name} does not support the {transport!r} prompt transport "
             f"(supported: {', '.join(self.supported_prompt_transports)})"

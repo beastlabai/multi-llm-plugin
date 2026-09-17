@@ -94,3 +94,19 @@ over base, exactly like the `MULTI_LLM_PROVIDERS_CONFIG` env layer — but since
 ignored at runtime. A present-but-malformed explicit override fails fast with a
 clear error naming the file; set `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to
 warn-and-skip instead.
+
+One provider key does change *how* a binary executes, and it is the one to
+read before merging a stranger's override: `providers.codex.sandbox_fallback`
+(`off` by default). `codex exec` runs the model's shell through bubblewrap, and
+on a stock Ubuntu 24.04 bwrap cannot start (`multi_llm.py doctor` prints the
+AppArmor repair). `external` is *your* statement that something outside this
+process — a container, a VM, a throwaway account — is the boundary; with it
+set, and only once the sandbox probe has failed, codex's **read-only** work (the
+review/ask fan-out and the executor's validation/consolidation/salvage kinds)
+runs `--sandbox danger-full-access` in the real repo root, i.e. with the same
+rights as your shell, and every artifact of such a slot says so
+(`[SANDBOX_BYPASSED]` on stdout, `ran unsandboxed: sandbox_fallback=external`
+on the report's model labels, a `git status` check that fails the slot by path
+if the tree changed). The write phases are refused under a broken sandbox
+whatever the key says. See the key's comment in `providers.yaml` for what it
+gives up.

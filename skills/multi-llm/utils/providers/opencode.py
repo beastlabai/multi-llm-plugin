@@ -898,12 +898,14 @@ class OpenCodeProvider(LLMProvider):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
+        sandbox_fallback: bool = False,
     ) -> Tuple[List[str], Optional[str]]:
         """Deliver the prompt on argv or on stdin (prompt omitted from argv)."""
         if transport != "stdin":
             return super().build_command_for_transport(
                 prompt, model, transport, prompt_file, timeout_s=timeout_s,
                 schema=schema,
+                sandbox_fallback=sandbox_fallback,
             )
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         return cmd[:-1], prompt
