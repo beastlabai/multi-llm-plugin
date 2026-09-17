@@ -629,12 +629,16 @@ def _fanout_state():
 
 
 def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
-                    extra_patches=()):
+                    extra_patches=(), failed=None):
     """Drive `code_review_orchestrator.main()` with the providers mocked out.
 
     Only the model invocation and the report renderer are stubbed — the phase
     dir, `save_model_result`, grouping and `grouped.json` are the real ones, so
     what lands on disk is what a real fan-out leaves for `--reaggregate` to read.
+
+    ``failed`` (``{spec: reason}``) adds slots the fan-out records as failed —
+    no result file, an entry under ``.status.json``'s ``models_failed`` — which
+    is the dir the documented salvage flow, and an out-of-band result, land in.
 
     Returns the plan, the phase dir and **what `main()` returned**, because two
     of the questions below are about the run surviving something: a checkpoint
@@ -646,8 +650,10 @@ def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
     plan = tmp_path / "auth-feature.md"
     plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
 
-    models = list(issues_by_model)
-    results = {m: (True, issues_by_model[m], None) for m in models}
+    models = list(issues_by_model) + list(failed or {})
+    results = {m: (True, issues_by_model[m], None) for m in issues_by_model}
+    for spec, reason in (failed or {}).items():
+        results[spec] = (False, None, reason)
     args = _fanout_args(plan, models, skip_validation=skip_validation)
 
     with contextlib.ExitStack() as stack:
@@ -1855,3 +1861,371 @@ class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
         assert _validation_summary(phase_dir) == (
             "**Validation:** 0 valid, 3 invalid, 0 needs human review"
         )
+
+
+# ---------------------------------------------------------------------------
+# A result file that landed after grouping is folded in, not silently excluded
+# ---------------------------------------------------------------------------
+#
+# The reuse branch above ("preserves validation alignment") presumes the bound
+# `grouped.json` still describes the results on disk. The documented salvage
+# flow falsifies that by construction — the fan-out groups without the failed
+# model, materializes validation and returns at the marker; the salvage lands
+# afterwards; `--reaggregate` found a bound grouping and reused it — and so does
+# a result obtained out of band for a slot the fan-out could not run. Measured
+# 2026-09-17 on a real `review-code --quick`: codex's three findings would have
+# reached no group while `**Models:**` listed it, and folding them in took a
+# hand-rolled rename of `validation.json`, `validation_tasks.json` and every
+# `validation_batch_*.json` to `*.<stamp>.stale.json` plus two reaggregates.
+# Reaggregation now detects the gap by content, retires the whole round under
+# D7's naming, regroups, and re-materializes validation for the grouping that
+# does cover the dir.
+
+_LATE_SPEC = "codex:gpt-6-astra"
+_LATE_STEM = "codex_gpt-6-astra"
+
+
+def _late_issues():
+    """One finding that joins the shared `Delta` group, one that is new."""
+    return _unrelated_issues(["Delta", "Golf"])
+
+
+def _completed_round_with_a_failed_slot(tmp_path):
+    """A validated, reported review-code phase whose third slot failed.
+
+    Fan-out (validation on) → batches completed → reaggregate merges them and
+    writes the report. `.status.json` carries the third spec under
+    `models_failed`, exactly as the sandbox-refused codex slot was recorded.
+    """
+    plan, phase_dir, _exit_code = _run_cro_fanout(
+        tmp_path,
+        _two_model_findings(),
+        skip_validation=False,
+        failed={_LATE_SPEC: "[SANDBOX_UNAVAILABLE] codex's sandbox cannot start here"},
+    )
+    _complete_validation_batches(phase_dir)
+    _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+    assert (phase_dir / "validation.json").exists()
+    status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+    assert _LATE_SPEC in status["models_failed"]
+    assert _LATE_SPEC not in status["models_completed"]
+    return plan, phase_dir
+
+
+def _retired_round_files(phase_dir):
+    return sorted(p.name for p in phase_dir.glob("*.stale.json"))
+
+
+def _stamp_of(stale_name):
+    """`validation_batch_0.20260917-025330.stale.json` -> `20260917-025330`."""
+    return stale_name[: -len(".stale.json")].rsplit(".", 1)[1]
+
+
+class TestAResultFileThatLandedAfterGroupingIsFoldedIn:
+    def test_the_bound_round_is_retired_and_the_dir_is_regrouped(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _completed_round_with_a_failed_slot(tmp_path)
+        old_grouped = phase_dir / "grouped.json"
+        old_hash = subagent_tasks_mod.file_content_hash(str(old_grouped))
+        old_validation = (phase_dir / "validation.json").read_bytes()
+        old_tasks = (phase_dir / "validation_tasks.json").read_bytes()
+
+        # The result obtained out of band, written where the fan-out would
+        # have written it.
+        (phase_dir / f"{_LATE_STEM}.json").write_text(
+            json.dumps(_late_issues()), encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+        out = capsys.readouterr().out
+
+        # Named, by content, before anything is moved.
+        assert "grouped.json does not cover the model results on disk" in out
+        assert (
+            f"  {_LATE_SPEC}: 2 issue(s) on disk not in grouped.json, "
+            "0 in grouped.json not on disk"
+        ) in out
+        assert "Using existing grouped.json" not in out
+
+        # The whole round retired under one stamp — renamed, byte-identical —
+        # and nothing of it left under its live name.
+        retired = _retired_round_files(phase_dir)
+        assert [n.split(".")[0] for n in retired] == [
+            "validation", "validation_batch_0", "validation_batch_1",
+            "validation_tasks",
+        ]
+        assert len({_stamp_of(n) for n in retired}) == 1
+        for name in retired:
+            assert (
+                f"[VALIDATION_RETIRED] {name} "
+                "(grouped.json did not cover the results on disk)"
+            ) in out
+        assert (phase_dir / retired[0]).read_bytes() == old_validation
+        assert (phase_dir / retired[-1]).read_bytes() == old_tasks
+        assert not (phase_dir / "validation.json").exists()
+        assert not [
+            p for p in phase_dir.glob("validation_batch_*.json")
+            if not p.name.endswith(".stale.json")
+        ]
+
+        # Regrouped over all three models: Delta now has three members, and
+        # Golf is a group of its own.
+        groups = _groups_on_disk(phase_dir)
+        assert subagent_tasks_mod.file_content_hash(str(old_grouped)) != old_hash
+        attributed = {m for g in groups for m in g["models"]}
+        assert attributed == set(_REAL_SPECS) | {_LATE_SPEC}
+        by_theme = {g["theme"]: g for g in groups}
+        assert set(by_theme["Delta"]["models"]) == set(_REAL_SPECS) | {_LATE_SPEC}
+        assert by_theme["Golf"]["models"] == [_LATE_SPEC]
+        assert len(groups) == 7
+
+        # A fresh round, bound to the grouping that covers the dir, handed to
+        # the host at the marker the fan-out itself uses.
+        tasks = json.loads(
+            (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+        )
+        assert tasks["inputs"]["grouped_sha256"] == (
+            subagent_tasks_mod.file_content_hash(str(old_grouped))
+        )
+        assert "[VALIDATION_BATCHES_PENDING]" in out or "[VALIDATION_PENDING]" in out
+
+    def test_the_documented_flow_then_completes_with_every_model_in_the_report(
+        self, tmp_path, capsys
+    ):
+        """Validate the fresh round, reaggregate: the report's numbers reconcile."""
+        plan, phase_dir = _completed_round_with_a_failed_slot(tmp_path)
+        (phase_dir / f"{_LATE_STEM}.json").write_text(
+            json.dumps(_late_issues()), encoding="utf-8"
+        )
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+        _complete_validation_batches(phase_dir)
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, render_report=True
+        )
+        out = capsys.readouterr().out
+
+        assert "does not cover" not in out
+        assert "Using existing grouped.json" in out
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        models_line = next(
+            ln for ln in report.splitlines() if ln.startswith("**Models:**")
+        )
+        assert _LATE_SPEC in models_line
+        assert "**Total Issues:** 9" in report
+        assert "**Groups:** 7 " in report
+        assert (
+            "**Validation:** 7 valid, 0 invalid, 0 needs human review (of 7 groups)"
+        ) in report
+        data = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+        assert data["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+
+    def test_a_round_that_covers_the_dir_is_never_retired(self, tmp_path, capsys):
+        """The regression guard on the check: the plain validate-then-reaggregate
+        round trip moves nothing and prints no retirement."""
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        capsys.readouterr()
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+        out = capsys.readouterr().out
+
+        assert "[VALIDATION_RETIRED]" not in out
+        assert "does not cover" not in out
+        assert _retired_round_files(phase_dir) == []
+
+    def test_the_base_lane_folds_a_late_model_in_the_same_way(
+        self, tmp_path, capsys
+    ):
+        """review-plan/review-tasks reuse the bound grouping through the same
+        branch, and the salvage flow lands the late file there the same way."""
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {"claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo", "Charlie"])},
+            models_requested=["claude-code:sonnet", "codex:gpt-6"],
+        )
+        first = _validated_round(plan, out_dir, phase_dir, status="valid")
+        assert first["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        (phase_dir / "codex_gpt-6.json").write_text(
+            json.dumps(_distinct_suggestions(["Delta", "Echo"])), encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        _reaggregate(plan, out_dir, phase_dir)
+        out = capsys.readouterr().out
+
+        assert "grouped.json does not cover the model results on disk" in out
+        assert (
+            "  codex:gpt-6: 2 issue(s) on disk not in grouped.json, "
+            "0 in grouped.json not on disk"
+        ) in out
+        retired = _retired_round_files(phase_dir)
+        assert [n.split(".")[0] for n in retired] == [
+            "validation", "validation_batch_0", "validation_tasks",
+        ]
+        assert len(_groups_on_disk(phase_dir)) == 5
+        assert _grouped_hash(phase_dir) != first["metadata"]["grouped_sha256"]
+        tasks = json.loads(
+            (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+        )
+        assert tasks["inputs"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        assert "[VALIDATION_BATCHES_PENDING]" in out or "[VALIDATION_PENDING]" in out
+
+        # And the round then completes: verdicts for all five, bound to the
+        # grouping they were made against.
+        _complete_validation_batches(phase_dir, status="invalid")
+        _reaggregate(plan, out_dir, phase_dir)
+        merged = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
+        assert merged["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
+        assert [g["status"] for g in merged["groups"]] == ["invalid"] * 5
+        assert _validation_summary(phase_dir) == (
+            "**Validation:** 0 valid, 5 invalid, 0 needs human review"
+        )
+
+
+class TestGroupedCoverageGap:
+    """The pure comparison behind the branch, one case per way it must not lie."""
+
+    def _grouped(self, issues_by_model):
+        from utils import group_similar_suggestions
+        from utils.state_manager import stamp_stable_ids
+
+        flat = []
+        for model, issues in issues_by_model.items():
+            for issue in issues:
+                flat.append({**issue, "source_model": model, "model": model})
+        grouped = [g.to_dict() for g in group_similar_suggestions(flat)]
+        stamp_stable_ids(grouped)
+        return grouped
+
+    def test_agreement_is_no_gap(self):
+        findings = _two_model_findings()
+        assert rob.grouped_coverage_gap(self._grouped(findings), findings) == []
+
+    def test_a_model_named_by_stem_on_disk_still_agrees(self):
+        """No checkpoint: `resolve_result_files_by_model` names the model by
+        its stem while `grouped.json` carries the spec. Same model."""
+        findings = _two_model_findings()
+        by_stem = {cro.sanitize_model_name(m): v for m, v in findings.items()}
+        assert rob.grouped_coverage_gap(self._grouped(findings), by_stem) == []
+
+    def test_a_key_a_later_release_stamped_is_not_a_gap(self):
+        findings = _two_model_findings()
+        grouped = self._grouped(findings)
+        drifted = {
+            m: [{**issue, "serializer_drift": "added later"} for issue in issues]
+            for m, issues in findings.items()
+        }
+        assert rob.grouped_coverage_gap(grouped, drifted) == []
+
+    def test_a_model_with_no_group_is_named_with_its_count(self):
+        findings = _two_model_findings()
+        on_disk = {**findings, _LATE_SPEC: _late_issues()}
+        assert rob.grouped_coverage_gap(self._grouped(findings), on_disk) == [
+            f"{_LATE_SPEC}: 2 issue(s) on disk not in grouped.json, "
+            "0 in grouped.json not on disk"
+        ]
+
+    def test_a_file_that_lost_or_changed_an_issue_is_named_too(self):
+        findings = _two_model_findings()
+        grouped = self._grouped(findings)
+        edited = {m: list(issues) for m, issues in findings.items()}
+        edited[_REAL_SPECS[0]] = edited[_REAL_SPECS[0]][:-1]
+        edited[_REAL_SPECS[1]] = [
+            {**edited[_REAL_SPECS[1]][0], "desc": "a rewritten description"},
+            *edited[_REAL_SPECS[1]][1:],
+        ]
+        assert rob.grouped_coverage_gap(grouped, edited) == [
+            f"{_REAL_SPECS[0]}: 0 issue(s) on disk not in grouped.json, "
+            "1 in grouped.json not on disk",
+            f"{_REAL_SPECS[1]}: 1 issue(s) on disk not in grouped.json, "
+            "1 in grouped.json not on disk",
+        ]
+
+    def test_a_grouping_with_no_attribution_is_inconclusive(self):
+        """Older than anything this can reason about: keep today's behaviour."""
+        findings = _two_model_findings()
+        grouped = self._grouped(findings)
+        for group in grouped:
+            for suggestion in group["suggestions"]:
+                suggestion.pop("source_model")
+                suggestion.pop("model")
+        on_disk = {**findings, _LATE_SPEC: _late_issues()}
+        assert rob.grouped_coverage_gap(grouped, on_disk) == []
+
+
+class TestRetireStaleValidationRound:
+    def test_renames_every_artifact_of_the_round_under_one_stamp(
+        self, tmp_path, capsys
+    ):
+        for name in (
+            "validation.json", "validation_tasks.json",
+            "validation_batch_0.json", "validation_batch_1.json",
+            "validation_batch_10.json",
+        ):
+            (tmp_path / name).write_text(name, encoding="utf-8")
+        # An earlier retirement, which must be neither re-retired nor clobbered.
+        (tmp_path / "validation_batch_0.20260101-000000.stale.json").write_text(
+            "older", encoding="utf-8"
+        )
+
+        retired = rob.retire_stale_validation_round(str(tmp_path), reason="why")
+        out = capsys.readouterr().out
+
+        names = [Path(p).name for p in retired]
+        assert [n.split(".")[0] for n in names] == [
+            "validation", "validation_tasks",
+            "validation_batch_0", "validation_batch_1", "validation_batch_10",
+        ]
+        assert len({_stamp_of(n) for n in names}) == 1
+        for name in names:
+            assert name.endswith(".stale.json")
+            assert f"[VALIDATION_RETIRED] {name} (why)" in out
+        # Content travels with the rename.
+        assert (tmp_path / names[0]).read_text(encoding="utf-8") == "validation.json"
+        assert (tmp_path / names[-1]).read_text(encoding="utf-8") == (
+            "validation_batch_10.json"
+        )
+        assert (
+            tmp_path / "validation_batch_0.20260101-000000.stale.json"
+        ).read_text(encoding="utf-8") == "older"
+        live = [p.name for p in tmp_path.glob("*.json") if not p.name.endswith(".stale.json")]
+        assert live == []
+
+    def test_nothing_on_disk_is_nothing_retired(self, tmp_path, capsys):
+        assert rob.retire_stale_validation_round(str(tmp_path), reason="why") == []
+        assert capsys.readouterr().out == ""
+
+    def test_the_single_file_helper_still_retires_only_validation_json(self, tmp_path):
+        (tmp_path / "validation.json").write_text("v", encoding="utf-8")
+        (tmp_path / "validation_tasks.json").write_text("t", encoding="utf-8")
+
+        target = rob.retire_stale_validation(str(tmp_path), reason="why")
+
+        assert Path(target).name.startswith("validation.")
+        assert target.endswith(".stale.json")
+        assert (tmp_path / "validation_tasks.json").exists()
+
+
+class TestARetiredBatchIsNotValidationInProgress:
+    def test_the_legacy_mtime_check_ignores_a_retired_batch(self, tmp_path):
+        """`stale_validation_reason`'s legacy leg counts batch files newer than
+        a key-less `validation.json`; a retired one keeps its mtime and belongs
+        to no round that file could have come from."""
+        from utils import validation as validation_mod
+
+        grouped = tmp_path / "grouped.json"
+        grouped.write_text("[]", encoding="utf-8")
+        legacy = tmp_path / "validation.json"
+        legacy.write_text(json.dumps({"groups": [], "metadata": {}}), encoding="utf-8")
+        retired = tmp_path / "validation_batch_0.20260917-025330.stale.json"
+        retired.write_text("{}", encoding="utf-8")
+        _set_mtime(legacy, 1_700_000_000)
+        _set_mtime(retired, 1_700_000_000 + 120)
+
+        assert validation_mod.stale_validation_reason(legacy, grouped) is None

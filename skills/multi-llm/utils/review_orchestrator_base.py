@@ -779,26 +779,164 @@ def retire_stale_validation(phase_dir: str, *, reason: str) -> Optional[str]:
         The new path, or ``None`` when there was nothing to retire (or the
         rename failed).
     """
-    source = os.path.join(phase_dir, "validation.json")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return _retire_stale_file(phase_dir, "validation.json", reason=reason, stamp=stamp)
+
+
+def _retire_stale_file(
+    phase_dir: str, name: str, *, reason: str, stamp: str
+) -> Optional[str]:
+    """Rename one validation artifact to ``<stem>.<stamp>.stale.json`` (D7).
+
+    The naming rule :func:`retire_stale_validation` established, factored out
+    so the task file and the batch files retire under the same shape as the
+    merged file — an operator who knows what ``validation.<stamp>.stale.json``
+    means reads ``validation_batch_0.<stamp>.stale.json`` without a second
+    convention. Every such name keeps ``validation`` in its basename, which is
+    what every reaggregation glob's ``exclude_patterns`` keys on.
+    """
+    source = os.path.join(phase_dir, name)
     if not os.path.exists(source):
         return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = os.path.join(phase_dir, f"validation.{stamp}.stale.json")
+    stem = name[: -len(".json")] if name.endswith(".json") else name
+    target = os.path.join(phase_dir, f"{stem}.{stamp}.stale.json")
     suffix = 2
     while os.path.exists(target):
-        target = os.path.join(phase_dir, f"validation.{stamp}-{suffix}.stale.json")
+        target = os.path.join(phase_dir, f"{stem}.{stamp}-{suffix}.stale.json")
         suffix += 1
     try:
         os.replace(source, target)
     except OSError as rename_error:
         print(
-            f"Warning: could not retire validation.json ({rename_error}); it is "
+            f"Warning: could not retire {name} ({rename_error}); it is "
             f"still in {phase_dir} and does not belong to the current grouping",
             file=sys.stderr,
         )
         return None
     print(f"[VALIDATION_RETIRED] {os.path.basename(target)} ({reason})")
     return target
+
+
+def retire_stale_validation_round(phase_dir: str, *, reason: str) -> List[str]:
+    """Retire every artifact of one validation round: the merged file, the task
+    file and the batch replies (D7, extended 2026-09-17).
+
+    :func:`retire_stale_validation` moves ``validation.json`` alone, which is
+    the right scope at the fan-out's regroup: the fresh ``validation_tasks.json``
+    is written a few lines later and overwrites the old one. It is the wrong
+    scope for a reaggregate that has to regroup a dir *already* carrying a
+    materialized round, because the task file is hash-bound to the grouping
+    being replaced (``inputs.grouped_sha256``) and the batch files are that
+    grouping's verdicts, joined by ``group_hash``. Leave either behind and the
+    very next step refuses itself — ``read_task_file`` sees the moved hash and
+    exits 3 — or a stale ``validation_batch_<n>.json`` is read back into the
+    new round's batch of the same index. Measured 2026-09-17 on a real
+    ``review-code --quick``: a model result that landed after grouping could
+    only be folded in by renaming all three by hand (``validation.json``,
+    ``validation_tasks.json``, ``validation_batch_*.json`` →
+    ``*.20260917-025330.stale.json``) and reaggregating twice.
+
+    One stamp for the whole round, so ``ls`` groups them. A rename, never a
+    delete; non-fatal per file, as the single-file helper is.
+
+    Returns:
+        The new paths, in ``validation.json``, ``validation_tasks.json``,
+        batch-index order. Empty when nothing was on disk.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    names = ["validation.json", "validation_tasks.json"]
+    batch_names = sorted(
+        (
+            os.path.basename(path)
+            for path in Path(phase_dir).glob("validation_batch_*.json")
+            if not os.path.basename(path).endswith(".stale.json")
+        ),
+        key=lambda name: (len(name), name),
+    )
+    retired: List[str] = []
+    for name in names + batch_names:
+        target = _retire_stale_file(phase_dir, name, reason=reason, stamp=stamp)
+        if target:
+            retired.append(target)
+    return retired
+
+
+def grouped_coverage_gap(
+    grouped: List[Dict[str, Any]],
+    results_by_model: Dict[str, List[Dict[str, Any]]],
+) -> List[str]:
+    """Where ``grouped.json`` and the per-model result files disagree, or ``[]``.
+
+    The reaggregate paths reuse a ``grouped.json`` that validation artifacts
+    are bound to ("preserves validation alignment") on the premise that it
+    still describes the results on disk. It does not when a per-model file
+    landed *after* grouping — a salvage written by the host after the fan-out
+    returned at ``[VALIDATION_BATCHES_PENDING]``, or a result obtained out of
+    band for a model the fan-out recorded as failed. Reusing the file then
+    excludes that model from every group while ``results`` still lists it:
+    measured 2026-09-17, the report would have said ``Total Issues: 8`` over
+    ``Groups: 4`` covering five of them, and ``apply-code-fixes`` could place
+    none of the other three.
+
+    The comparison is by content, not by count or by filename: the multiset of
+    ``(model stem, suggestion content hash)`` pairs on each side, the hash
+    being :func:`state_manager.generate_suggestion_id`'s plain (undiscriminated)
+    form and the stem ``sanitize_model_name`` of the spec, so a dir whose
+    checkpoint is missing — where ``resolve_result_files_by_model`` names the
+    model by its stem while ``grouped.json`` carries the canonical spec — still
+    compares equal. Extra keys a later release stamps on an issue do not enter
+    the hash, so a byte-divergent round trip (the case
+    ``TestReaggregateReusesTheGroupedFileValidationIsBoundTo`` pins) is not a
+    gap either.
+
+    A ``grouped.json`` whose suggestions carry no model attribution at all is
+    older than anything this can reason about; the comparison is inconclusive
+    and the caller keeps today's behaviour rather than regrouping on a guess.
+
+    Args:
+        grouped: The groups as loaded from ``grouped.json`` (plain dicts).
+        results_by_model: ``{model: [issue, ...]}`` for every result file the
+            reaggregate read — one entry per logical model.
+
+    Returns:
+        One line per model that differs, naming what is on disk and not in
+        the file and the reverse; empty when the two agree.
+    """
+    from collections import Counter
+
+    from .state_manager import generate_suggestion_id
+
+    in_file: Dict[str, Counter] = {}
+    spec_by_stem: Dict[str, str] = {}
+    for group in grouped:
+        for suggestion in group.get("suggestions", group.get("issues", [])) or []:
+            spec = suggestion.get("source_model") or suggestion.get("model")
+            if not spec:
+                return []
+            stem = sanitize_model_name(str(spec))
+            spec_by_stem.setdefault(stem, str(spec))
+            in_file.setdefault(stem, Counter())[generate_suggestion_id(suggestion)] += 1
+
+    on_disk: Dict[str, Counter] = {}
+    for spec, issues in results_by_model.items():
+        stem = sanitize_model_name(str(spec))
+        spec_by_stem[stem] = str(spec)
+        counter = on_disk.setdefault(stem, Counter())
+        for issue in issues or []:
+            counter[generate_suggestion_id(issue)] += 1
+
+    lines: List[str] = []
+    for stem in sorted(set(in_file) | set(on_disk)):
+        disk = on_disk.get(stem, Counter())
+        bound = in_file.get(stem, Counter())
+        added = sum((disk - bound).values())
+        gone = sum((bound - disk).values())
+        if added or gone:
+            lines.append(
+                f"{spec_by_stem[stem]}: {added} issue(s) on disk not in "
+                f"grouped.json, {gone} in grouped.json not on disk"
+            )
+    return lines
 
 
 def dispatch_salvage_tasks(
@@ -3028,6 +3166,7 @@ async def reaggregate_from_existing_files(
     # Collect all suggestions
     all_suggestions = []
     models_found = set()
+    results_by_model: Dict[str, List[Dict[str, Any]]] = {}
 
     # Restore original model specs (with colons) from .status.json
     unsanitize = build_unsanitize_map(phase_dir)
@@ -3039,6 +3178,7 @@ async def reaggregate_from_existing_files(
         for s in suggestions:
             s["source_model"] = model
         all_suggestions.extend(suggestions)
+        results_by_model[model] = suggestions
         print(f"  Loaded {len(suggestions)} suggestions from {model}")
 
     print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
@@ -3057,11 +3197,34 @@ async def reaggregate_from_existing_files(
         os.path.exists(validation_tasks_path_check)
     )
 
-    if has_existing_validation and os.path.exists(grouped_path):
-        print(f"Using existing grouped.json (preserves validation alignment)")
+    reuse_bound_grouping = has_existing_validation and os.path.exists(grouped_path)
+    if reuse_bound_grouping:
         with open(grouped_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
         grouped = load_groups_payload(raw_data)
+        # Reuse presumes the bound file still describes the results on disk.
+        # The documented salvage flow breaks that presumption by design: the
+        # fan-out groups without the failed model, materializes validation and
+        # returns at the marker; the salvage lands afterwards; `--reaggregate`
+        # then found a bound grouping and reused it, so the salvaged model's
+        # findings never reached a group (see `grouped_coverage_gap` for the
+        # measured review-code instance, 2026-09-17). Retire the round and
+        # regroup below.
+        gap = grouped_coverage_gap(grouped, results_by_model)
+        if gap:
+            print(
+                "grouped.json does not cover the model results on disk; "
+                "regrouping and retiring the validation round bound to it:"
+            )
+            for line in gap:
+                print(f"  {line}")
+            retire_stale_validation_round(
+                phase_dir, reason="grouped.json did not cover the results on disk"
+            )
+            reuse_bound_grouping = False
+
+    if reuse_bound_grouping:
+        print(f"Using existing grouped.json (preserves validation alignment)")
     else:
         raw_grouped = group_similar_suggestions(all_suggestions)
         grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
