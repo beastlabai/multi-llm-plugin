@@ -81,8 +81,44 @@ NEGATIVE_FLAG_TOKENS = frozenset(
 NEGATIVE_TOKEN_PREFIXES = ("--dangerously",)
 
 #: Bypasses that ride as a *value* rather than as a flag
-#: (`--permission-mode bypassPermissions`), so they are matched wherever they sit.
-NEGATIVE_VALUE_TOKENS = frozenset({"bypassPermissions"})
+#: (`--permission-mode bypassPermissions`, `--sandbox danger-full-access`), so
+#: they are matched wherever they sit. `danger-full-access` joined the set with
+#: the D6 override (2026-09-17): it is codex's own third sandbox policy, and
+#: before it was here the guard was blind to it — a value, not a `--dangerously`
+#: prefix. The default argv of every profile must still never carry it; the one
+#: place it may appear is the dispatch-time rewrite `DISPATCH_TIME_OVERRIDE`
+#: declares below, and that class checks the rewrite from both sides.
+NEGATIVE_VALUE_TOKENS = frozenset({"bypassPermissions", "danger-full-access"})
+
+#: The ONE dispatch-time override of the negative set, declared as data with the
+#: same four fields a `bypass_exception:` row carries — token, profile(s), why it
+#: survives, what retires it — because §3.5's rule is "never a silent
+#: precedent", and this is not a `read_only_modes:` row: codex's row is a
+#: *probed* mechanism (`--sandbox read-only`), and the table's own invariant
+#: (`test_an_exception_row_is_a_null_row`) rightly refuses a row that claims
+#: both a mechanism and an exception. What differs from a `bypass_exception:`
+#: is where the token lives: never in a rendered default, only behind a kwarg
+#: (`sandbox_fallback=True`) that a gate sets after all four of its conditions
+#: hold. `TestTheOneDispatchTimeOverride` reads it from both sides — the
+#: default argv stays clean, the override renders exactly this token on
+#: exactly these profiles, and the write profile raises rather than renders.
+DISPATCH_TIME_OVERRIDE = {
+    "provider": "codex",
+    "token": "danger-full-access",
+    "profiles": (PROFILE_GENERATE, PROFILE_AGENT_READONLY),
+    "reason": (
+        "D6 (2026-09-17): on a machine where bubblewrap cannot start, the "
+        "operator's `providers.codex.sandbox_fallback: external` attests an "
+        "external boundary; the D6 probe verdict must be `unavailable` (never "
+        "`unknown`) and the profile read-only. A by-hand run under this value "
+        "found 2 unique validated-high issues the sandboxed reviewers did not."
+    ),
+    "retires_when": (
+        "the AppArmor repair `multi_llm.py doctor` prints is the norm on the "
+        "hosts this runs on, or codex ships a sandbox that does not need a "
+        "user namespace — then the key and the rewrite go together."
+    ),
+}
 
 #: The env case: a variable whose value is the bypass.
 NEGATIVE_ENV = {"GOOSE_MODE": "auto"}
@@ -547,6 +583,113 @@ class TestTheYoloClassNegativeSet:
             f"offers is a vendor's to change. The advisory route for the latter "
             f"already exists — cli-surface.yaml's container help probe."
         )
+
+
+class TestTheOneDispatchTimeOverride:
+    """`DISPATCH_TIME_OVERRIDE`, checked from both sides (D6, 2026-09-17).
+
+    The sweeps above prove the default argv of every profile is bypass-free —
+    `danger-full-access` is in `NEGATIVE_VALUE_TOKENS`, so they would go red
+    the day it leaked into a default. This class proves the other half: the
+    rewrite exists, renders exactly the declared token on exactly the declared
+    profiles, is unreachable from the write profile, and is a no-op on every
+    adapter that is not the declared one — so the override cannot quietly grow
+    a second adapter or a third profile without this file changing.
+    """
+
+    @staticmethod
+    def _override_argv(name, profile):
+        provider = _PROVIDERS[name]
+        if profile == PROFILE_GENERATE:
+            argv, _ = provider.build_command_for_transport(
+                PROMPT, _model_for(name), "argv", sandbox_fallback=True
+            )
+            return argv
+        if profile not in provider.agent_profiles:
+            return None
+        argv, _ = provider.build_agent_command_for_transport(
+            PROMPT, _model_for(name), profile, "argv", sandbox_fallback=True
+        )
+        return argv
+
+    def test_the_declared_token_is_in_the_negative_set(self):
+        """The guard has to be able to see the thing it is excusing."""
+        assert DISPATCH_TIME_OVERRIDE["token"] in NEGATIVE_VALUE_TOKENS
+
+    def test_the_declaration_carries_every_field_of_a_disposition(self):
+        assert set(DISPATCH_TIME_OVERRIDE) == {
+            "provider", "token", "profiles", "reason", "retires_when",
+        }
+        for key in ("provider", "token", "reason", "retires_when"):
+            value = DISPATCH_TIME_OVERRIDE[key]
+            assert isinstance(value, str) and value.strip(), key
+        assert set(DISPATCH_TIME_OVERRIDE["profiles"]) == {
+            PROFILE_GENERATE, PROFILE_AGENT_READONLY,
+        }, "the override may only ever cover the two read-only profiles"
+
+    def test_the_declaration_matches_the_base_class_tuple(self):
+        """One tuple, declared once: the adapters read it, this file pins it."""
+        assert tuple(DISPATCH_TIME_OVERRIDE["profiles"]) == tuple(
+            base_module.SANDBOX_FALLBACK_PROFILES
+        )
+        assert PROFILE_AGENT_WRITE not in base_module.SANDBOX_FALLBACK_PROFILES
+
+    @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
+    def test_the_override_renders_the_declared_token_on_a_read_only_profile(self, profile):
+        name = DISPATCH_TIME_OVERRIDE["provider"]
+        argv = self._override_argv(name, profile)
+
+        assert negative_tokens_in_argv(argv) == [DISPATCH_TIME_OVERRIDE["token"]]
+        # And ONLY as the `--sandbox` value: the same slot the profile's own
+        # row occupies, so the override is a value change and not a new flag.
+        assert argv[argv.index("--sandbox") + 1] == DISPATCH_TIME_OVERRIDE["token"]
+
+    @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
+    def test_the_default_argv_of_the_same_profile_stays_clean(self, profile):
+        """Mutation-shaped: drop the kwarg and the token must vanish."""
+        name = DISPATCH_TIME_OVERRIDE["provider"]
+        if profile == PROFILE_GENERATE:
+            argv = _generate_argv(name)
+        else:
+            argv = _profile_argv(name, profile)
+        assert negative_tokens_in_argv(argv) == []
+
+    def test_the_write_profile_raises_rather_than_rendering_it(self):
+        name = DISPATCH_TIME_OVERRIDE["provider"]
+        with pytest.raises(ValueError, match="never runs the 'agent-write' profile unsandboxed"):
+            self._override_argv(name, PROFILE_AGENT_WRITE)
+        # And the policy hook answers None for it whatever the config says.
+        assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
+
+    @pytest.mark.parametrize("name", _registered_provider_names())
+    def test_no_other_adapter_changes_its_argv_under_the_flag(self, name):
+        """The kwarg is accepted everywhere and acted on in exactly one place."""
+        if name == DISPATCH_TIME_OVERRIDE["provider"]:
+            pytest.skip("the declared adapter — covered above")
+        assert self._override_argv(name, PROFILE_GENERATE) == _generate_argv(name)
+        readonly = self._override_argv(name, PROFILE_AGENT_READONLY)
+        assert readonly == _profile_argv(name, PROFILE_AGENT_READONLY)
+        assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_GENERATE) is None
+
+    def test_the_policy_defaults_to_off_and_refuses_a_bare_boolean(self, monkeypatch):
+        """`off` ships; `on`/`true` is not a spelling of the attestation."""
+        from utils.providers import codex as codex_module
+
+        base_module.reset_env_policy_warnings()
+        monkeypatch.setattr(
+            codex_module, "_provider_block", lambda name, anchor=None: {}
+        )
+        assert codex_module.sandbox_fallback_policy() == "off"
+        for value, expected in (
+            ("external", "external"), ("EXTERNAL", "external"), (False, "off"),
+            (True, "off"), ("on", "off"), ("yes", "off"), ("garbage", "off"),
+        ):
+            base_module.reset_env_policy_warnings()
+            monkeypatch.setattr(
+                codex_module, "_provider_block",
+                lambda name, anchor=None, v=value: {"sandbox_fallback": v},
+            )
+            assert codex_module.sandbox_fallback_policy() == expected, value
 
 
 class TestAgentsMdCarriesTheProfileScopedRule:

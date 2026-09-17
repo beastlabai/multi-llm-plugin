@@ -9,6 +9,10 @@ from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
+    SANDBOX_FALLBACK_EXTERNAL,
+    SANDBOX_FALLBACK_OFF,
+    SANDBOX_FALLBACK_POLICIES,
+    SANDBOX_FALLBACK_PROFILES,
     USAGE_FULL,
     REASONING_LADDER,
     InternalRetryEnvelope,
@@ -16,6 +20,9 @@ from .base import (
     ReasoningLadder,
     StructuredOutputUnavailable,
     StructuredSchema,
+    _provider_block,
+    _resolve_policy,
+    _warn_policy_once,
     split_reasoning_effort,
 )
 
@@ -77,6 +84,64 @@ _SANDBOX_BY_PROFILE = {
     PROFILE_AGENT_WRITE: "workspace-write",
     PROFILE_AGENT_READONLY: "read-only",
 }
+
+#: The one `--sandbox` value this adapter renders that is NOT a row of the table
+#: above, and the only way it is ever rendered is `_apply_sandbox(...,
+#: fallback=True)` — a dispatch-time override no default argv carries (D6,
+#: 2026-09-17). `danger-full-access` is codex's own third documented policy
+#: (`codex exec --help`: `-s, --sandbox {read-only, workspace-write,
+#: danger-full-access}`), chosen over `--dangerously-bypass-approvals-and-sandbox`
+#: because approvals are already `never` in exec mode (see `build_command`) and
+#: because it lands in the slot the positional rewrite already owns, so the
+#: fallback is a value change and not a new flag. Measured on codex-cli 0.154.0
+#: with the adapter's own probe shape: `codex sandbox -c 'sandbox_mode=
+#: "read-only"' -- sh -c 'exit 0'` dies on `bwrap: loopback: Failed
+#: RTM_NEWADDR: Operation not permitted` (rc 1); under `danger-full-access` the
+#: same command runs (rc 0) with no bwrap started at all. `verified_version`
+#: stays 0.146.0: 0.154.0 is where this one value was measured, and one
+#: flag's measurement is not a re-verification of the whole adapter.
+#:
+#: What it costs, stated once here and again in every artifact of a slot that
+#: ran under it: no OS boundary of any kind between the model's shell and this
+#: machine — reads and writes anywhere the user can, and network from model
+#: commands (workspace-write unshares it). `agent-readonly`'s "real denial
+#: mechanism" does not exist under it; a prompt-injected validator could write.
+#: That is why the value is reachable only behind `sandbox_fallback: external`,
+#: only after the probe said `unavailable`, and only for the two read-only
+#: profiles in `SANDBOX_FALLBACK_PROFILES`.
+SANDBOX_FALLBACK_VALUE = "danger-full-access"
+
+
+def sandbox_fallback_policy(anchor: Optional[str] = None) -> str:
+    """Resolve ``providers.codex.sandbox_fallback`` (default ``off``).
+
+    Same shape as ``opencode.hermetic_policy``: read through the normal layering
+    (base → ``<git-root>/.multi-llm/providers.yaml`` → ``MULTI_LLM_PROVIDERS_CONFIG``)
+    via the shared ``_provider_block``, an unrecognised value warns once naming
+    the key and falls back to the default. YAML 1.1 resolves a bare ``off`` to
+    ``False``, so a user who wrote the documented word gets the documented
+    behaviour rather than a warning about their YAML loader. A bare ``True``
+    (``on``/``yes``) is deliberately **not** read as ``external``: the
+    attestation has to be spelled with the word that says what it does, so a
+    boolean warns and stays ``off``.
+    """
+    value = _provider_block("codex", anchor).get("sandbox_fallback")
+    if value is False:
+        return SANDBOX_FALLBACK_OFF
+    if value is True:
+        _warn_policy_once(
+            "providers.codex.sandbox_fallback:true",
+            "multi-llm config warning: ignoring providers.codex.sandbox_fallback="
+            f"{value!r} (a boolean; the attestation must be spelled "
+            f"{SANDBOX_FALLBACK_EXTERNAL!r}); using {SANDBOX_FALLBACK_OFF}",
+        )
+        return SANDBOX_FALLBACK_OFF
+    return _resolve_policy(
+        value,
+        SANDBOX_FALLBACK_POLICIES,
+        SANDBOX_FALLBACK_OFF,
+        "providers.codex.sandbox_fallback",
+    )
 
 
 def _sandbox_for(profile: str) -> str:
@@ -468,15 +533,54 @@ class CodexProvider(LLMProvider):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
+        sandbox_fallback: bool = False,
     ) -> Tuple[List[str], Optional[str]]:
-        """Deliver the prompt on argv or on stdin (prompt omitted from argv)."""
+        """Deliver the prompt on argv or on stdin (prompt omitted from argv).
+
+        ``sandbox_fallback`` is applied on the stdin leg here and on the argv leg
+        by the base class — both through :meth:`apply_sandbox_fallback`, and
+        both **before** the prompt is dropped, so the positional rewrite sees
+        the argv exactly as :meth:`build_command` laid it out.
+        """
         if transport != "stdin":
             return super().build_command_for_transport(
                 prompt, model, transport, prompt_file, timeout_s=timeout_s,
-                schema=schema,
+                schema=schema, sandbox_fallback=sandbox_fallback,
             )
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
+        if sandbox_fallback:
+            cmd = self.apply_sandbox_fallback(cmd, PROFILE_GENERATE)
         return cmd[:-1], prompt
+
+    def sandbox_fallback_policy(
+        self, profile: str, anchor: Optional[str] = None
+    ) -> Optional[str]:
+        """``providers.codex.sandbox_fallback`` for a read-only profile; else ``None``.
+
+        The profile gate is answered *here*, in the adapter, and not only at
+        the call sites: ``agent-write`` comes back ``None`` whatever the config
+        says, so no gate that consults this hook can be talked into widening a
+        write dispatch by a config line. The two read-only profiles return the
+        resolved policy (``off`` by default), which the gates then require to
+        be ``external`` — beside the probe verdict ``unavailable``.
+        """
+        if profile not in SANDBOX_FALLBACK_PROFILES:
+            return None
+        return sandbox_fallback_policy(anchor)
+
+    def apply_sandbox_fallback(self, argv: List[str], profile: str) -> List[str]:
+        """Point ``argv``'s ``--sandbox`` slot at ``danger-full-access`` (D6 override).
+
+        Structural, not policy: a profile outside ``SANDBOX_FALLBACK_PROFILES``
+        raises rather than rendering, so the write profile cannot reach this
+        value even from a caller that got every other gate wrong.
+        """
+        if profile not in SANDBOX_FALLBACK_PROFILES:
+            raise ValueError(
+                f"codex never runs the {profile!r} profile unsandboxed (the "
+                f"fallback covers: {', '.join(SANDBOX_FALLBACK_PROFILES)})"
+            )
+        return self._apply_sandbox(argv, profile, fallback=True)
 
     def build_agent_command(
         self,
@@ -508,6 +612,21 @@ class CodexProvider(LLMProvider):
         ``agent-write``, so fabricating a bypass here would delete the very
         boundary that makes the profile eligible. Network access is left at
         codex's own workspace-write default rather than being widened here.
+
+        **The one override** (D6, 2026-09-17): nothing this method renders is
+        ever a bypass, and the default argv of every profile stays that way —
+        but a *dispatch-time* rewrite exists, :meth:`apply_sandbox_fallback`,
+        which points the same ``--sandbox`` slot at ``danger-full-access`` for
+        ``generate`` and ``agent-readonly`` only. It is reachable through
+        exactly one gate, applied by ``sandbox_refusal`` (fan-out) and
+        ``_detect_sandbox`` (executor): the D6 probe verdict is ``unavailable``
+        (bubblewrap cannot start here; never ``unknown``), the operator wrote
+        ``providers.codex.sandbox_fallback: external``, and the profile is one
+        of the two read-only ones. Under it the read-only profile's own denial
+        mechanism is gone — the model's shell has the operator's rights — which
+        every artifact of such a slot says in so many words. ``agent-write``
+        is refused under a broken sandbox exactly as before; the override
+        raises on it rather than rendering.
         """
         if profile not in (PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE):
             return super().build_agent_command(
@@ -517,7 +636,9 @@ class CodexProvider(LLMProvider):
         return self._apply_sandbox(cmd, profile)
 
     @staticmethod
-    def _apply_sandbox(cmd: List[str], profile: str) -> List[str]:
+    def _apply_sandbox(
+        cmd: List[str], profile: str, *, fallback: bool = False
+    ) -> List[str]:
         """Point ``cmd``'s ``--sandbox`` value at ``profile``'s policy (M5).
 
         The rewrite is *positional* — the element right after the first
@@ -530,9 +651,25 @@ class CodexProvider(LLMProvider):
         ``argv[-1]``). ``cmd`` is mutated in place and returned; every caller
         hands over a list :meth:`build_command` just built, so nothing shared is
         touched.
+
+        ``fallback=True`` writes :data:`SANDBOX_FALLBACK_VALUE` into the slot
+        instead of the profile's row (D6 override, 2026-09-17) — keyword-only,
+        default ``False``, so every existing caller renders the row it always
+        did. ``_sandbox_for`` still runs first: an unknown profile raises the
+        same way on both paths, and a profile outside
+        ``SANDBOX_FALLBACK_PROFILES`` is refused here too, one level below
+        :meth:`apply_sandbox_fallback`, because two callers rendering the
+        value is one too many places for a write profile to slip through.
         """
         sandbox_at = cmd.index("--sandbox")
-        cmd[sandbox_at + 1] = _sandbox_for(profile)
+        policy = _sandbox_for(profile)
+        if fallback:
+            if profile not in SANDBOX_FALLBACK_PROFILES:
+                raise ValueError(
+                    f"codex never runs the {profile!r} profile unsandboxed"
+                )
+            policy = SANDBOX_FALLBACK_VALUE
+        cmd[sandbox_at + 1] = policy
         return cmd
 
     def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
