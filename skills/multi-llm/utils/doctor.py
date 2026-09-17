@@ -208,9 +208,38 @@ def _probe_auth(provider: Any, timeout: float) -> Dict[str, Any]:
     return row
 
 
+def _sandbox_fallback_for(provider: Any, cwd: Optional[str]) -> str:
+    """The adapter's resolved ``sandbox_fallback`` policy for the read-only
+    profiles, or ``""`` for an adapter that declares none (D6, 2026-09-17).
+
+    Read the way the fan-out reads it — through the adapter's own hook, for
+    ``generate``, anchored on the repo root — so ``doctor`` reports the policy
+    the next run will actually apply. ``""`` and ``off`` both render the row
+    as today; only ``external`` adds the note.
+    """
+    from .providers.base import PROFILE_GENERATE
+
+    hook = getattr(provider, "sandbox_fallback_policy", None)
+    if not callable(hook):
+        return ""
+    try:
+        policy = hook(PROFILE_GENERATE, anchor=cwd)
+    except Exception:  # noqa: BLE001 - a config read never breaks the report
+        return ""
+    return policy if isinstance(policy, str) else ""
+
+
 def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[str, Any]:
     """The adapter's own runner first; the bwrap self-test for a bubblewrap
-    user without one; ``none`` for everything else."""
+    user without one; ``none`` for everything else.
+
+    The row also carries ``fallback``: the adapter's resolved
+    ``sandbox_fallback`` policy (``""`` where none is declared). It changes
+    neither the verdict nor the exit code — ``agent-write`` stays refused under
+    a broken sandbox whatever the key says, and the repair is still the fix —
+    it is rendered beside ``BROKEN`` so the operator sees that read-only
+    phases will run unsandboxed on this machine.
+    """
     from .providers.base import PROFILE_AGENT_WRITE
     from .subagent_executor import sandbox_verdict
 
@@ -219,6 +248,7 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
     row: Dict[str, Any] = {
         "state": "none", "detail": "", "ok": True, "mechanism": mechanism,
         "bypassed_by": bypassed, "probe": "",
+        "fallback": _sandbox_fallback_for(provider, cwd),
     }
     if timeout <= 0:
         row.update(state="unprobed", detail="slow: the report budget was exhausted")
@@ -374,6 +404,14 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
             s = ("broken, bypassed by " + sandbox["bypassed_by"]) if sandbox["bypassed_by"] else "BROKEN"
             if sandbox["detail"]:
                 s += f": {sandbox['detail']}"
+            # D6 override (2026-09-17): the row stays BROKEN and the repair is
+            # still printed — the write profile is refused regardless — but the
+            # operator who wrote the attestation is told what it buys here.
+            if sandbox.get("fallback") == "external":
+                s += (
+                    f" (fallback: external — {row['provider']} runs unsandboxed "
+                    f"for read-only phases)"
+                )
         elif s == "ok":
             s = f"ok ({sandbox['probe']})"
         elif s == "none":

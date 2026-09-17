@@ -134,6 +134,48 @@ class TestDoctorOnABrokenSandbox:
         assert "FAIL:" not in out
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
 
+    def test_the_external_fallback_is_named_beside_broken_and_changes_nothing_else(
+        self, clinic, monkeypatch, capsys
+    ):
+        """D6 override (2026-09-17): `providers.codex.sandbox_fallback: external`
+        renders its note on the BROKEN row so the operator who wrote it sees
+        what it buys on this machine — and nothing else moves: the row is
+        still a failure (the write profile is refused whatever the key says),
+        the repair is still printed, the exit is still 3."""
+        from utils.providers import codex as codex_module
+
+        monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
+        _broken_bwrap(monkeypatch)
+        monkeypatch.setattr(
+            codex_module, "sandbox_fallback_policy", lambda anchor=None: "external"
+        )
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        assert (
+            "sandbox BROKEN: " + BWRAP_BROKEN_LINE
+            + " (fallback: external — codex runs unsandboxed for read-only phases)"
+        ) in out
+        assert "FAIL: codex: sandbox" in out
+        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+
+        assert doctor.main(["--json", "--budget", "10"]) == 3
+        report = json.loads(capsys.readouterr().out)
+        codex = _row(report, "codex")
+        assert codex["sandbox"]["state"] == "unavailable"
+        assert codex["sandbox"]["fallback"] == "external"
+        assert codex["sandbox"]["ok"] is False
+
+    def test_off_renders_the_broken_row_exactly_as_before(
+        self, clinic, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
+        _broken_bwrap(monkeypatch)
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        assert "sandbox BROKEN: " + BWRAP_BROKEN_LINE + "\n" in out
+        assert "fallback:" not in out
+        assert "unsandboxed" not in out
+
     def test_a_bypassed_sandbox_is_reported_never_failed(self, clinic, monkeypatch, capsys):
         """muse names bubblewrap but runs `--disable-sandbox`: the broken
         self-test is on the row, the repair is printed, the exit stays 0."""
@@ -194,6 +236,9 @@ class TestDoctorOnAHealthyMachine:
         assert codex["sandbox"] == {
             "state": "ok", "detail": codex["sandbox"]["detail"], "ok": True,
             "mechanism": "bubblewrap", "bypassed_by": "", "probe": "runner",
+            # D6 override (2026-09-17): the resolved policy rides the row; the
+            # shipped default is `off`, and a healthy sandbox renders no note.
+            "fallback": "off",
         }
         # The mock's `codex sandbox` really ran the shell script here, and the
         # script left nothing behind.
