@@ -76,6 +76,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
+        SANDBOX_BYPASSED_MARKER,
+        SANDBOX_FALLBACK_EXTERNAL,
+        SANDBOX_FALLBACK_PROFILES,
         ProfileUnsupported,
         StructuredOutputUnavailable,
         availability_from_failure,
@@ -150,6 +153,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
+        SANDBOX_BYPASSED_MARKER,
+        SANDBOX_FALLBACK_EXTERNAL,
+        SANDBOX_FALLBACK_PROFILES,
         ProfileUnsupported,
         StructuredOutputUnavailable,
         availability_from_failure,
@@ -1402,10 +1408,33 @@ _NESTED_CACHE: Dict[str, str] = {}
 _MODEL_CACHE: Dict[str, str] = {}
 
 #: The same, for the D6 sandbox self-test: ``ok`` | ``unknown`` |
-#: ``not-required`` per ``<host id>|<runner spec>|<profile>`` — the profile is
-#: part of the key because the adapter answers a different command (or none)
-#: per profile. A refusal is never cached — it raises.
+#: ``not-required`` | ``bypassed`` per ``<host id>|<runner spec>|<profile>`` —
+#: the profile is part of the key because the adapter answers a different
+#: command (or none) per profile. A refusal is never cached — it raises.
+#: ``bypassed`` (D6 override, 2026-09-17) is the one ``unavailable`` that did
+#: not raise: an ``agent-readonly`` runner whose operator wrote
+#: ``sandbox_fallback: external``. It is cached so the marker prints once per
+#: runner rather than once per batch, and so :func:`sandbox_bypassed` can hand
+#: the flag to every dispatch of that runner under that profile.
 _SANDBOX_CACHE: Dict[str, str] = {}
+
+#: The cache state that carries the D6 override to the spawn.
+SANDBOX_STATE_BYPASSED = "bypassed"
+
+
+def sandbox_bypassed(spec: str, profile: str) -> bool:
+    """Whether the preflight recorded ``bypassed`` for this runner and profile.
+
+    Read by :func:`dispatch_task` to hand ``sandbox_fallback=True`` to the
+    argv build. Strictly the cache, never a fresh probe or a config read: the
+    decision was taken once, in :func:`_detect_sandbox`, with all four gates
+    in hand, and a dispatch may only replay it. A runner the preflight never
+    saw (or saw under another profile) is ``False`` and renders the argv it
+    always did.
+    """
+    return _SANDBOX_CACHE.get(f"{_current_host_id()}|{spec}|{profile}") == (
+        SANDBOX_STATE_BYPASSED
+    )
 
 
 def reset_version_cache() -> None:
@@ -1693,6 +1722,33 @@ def _current_host_id() -> str:
     return resolved[0] if resolved else "unknown-host"
 
 
+def _sandbox_fallback_attested(
+    provider: Any, profile: str, *, anchor: Optional[str]
+) -> bool:
+    """Whether the operator's ``sandbox_fallback: external`` covers this dispatch.
+
+    Two of the four gates, answered by the adapter: it declares the hook at all
+    (``None`` for every adapter without a fallback — a stand-in in a test may
+    not declare it, hence ``getattr``), and it resolves the key to ``external``
+    for *this* profile — which the adapter answers ``None`` for outside
+    ``SANDBOX_FALLBACK_PROFILES``, so ``agent-write`` cannot pass here. The
+    profile check is repeated locally all the same: two places have to agree
+    before a write profile could slip through. The probe verdict is the
+    caller's gate; ``anchor`` is the plan path, so the key is read from the
+    same ``.multi-llm/providers.yaml`` the dispatch's env and timeout come from.
+    A config read that raises is "not attested" — the safe reading.
+    """
+    if profile not in SANDBOX_FALLBACK_PROFILES:
+        return False
+    hook = getattr(provider, "sandbox_fallback_policy", None)
+    if not callable(hook):
+        return False
+    try:
+        return hook(profile, anchor=anchor) == SANDBOX_FALLBACK_EXTERNAL
+    except Exception:  # noqa: BLE001 - a config read may never end a preflight
+        return False
+
+
 def _detect_sandbox(
     provider_name: str,
     *,
@@ -1704,12 +1760,20 @@ def _detect_sandbox(
     """Run the adapter's model-free sandbox self-test once per host/spec/profile
     and refuse a runner whose own sandbox cannot run (D6 step 3).
 
-    Returns ``ok`` | ``unknown`` | ``not-required``; a non-zero exit raises,
-    because bubblewrap failing to start is a property of the machine — every
-    sibling on this runner would fail identically, and the fix (an AppArmor
-    profile ``multi_llm.py doctor`` prints) is never a retry. A timeout or a
-    command that could not run records ``unknown`` and dispatches, exactly
-    like the nested-exec probe's inconclusive branch.
+    Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed``; a non-zero
+    exit raises, because bubblewrap failing to start is a property of the
+    machine — every sibling on this runner would fail identically, and the fix
+    (an AppArmor profile ``multi_llm.py doctor`` prints) is never a retry. A
+    timeout or a command that could not run records ``unknown`` and
+    dispatches, exactly like the nested-exec probe's inconclusive branch.
+
+    ``bypassed`` is the D6 override (2026-09-17), and it is the *only* way an
+    ``unavailable`` verdict does not raise here: the adapter declares a
+    fallback for this profile and the operator resolved it to ``external``,
+    and the profile is ``agent-readonly`` — the one executor profile in
+    ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
+    for which the adapter's hook answers ``None`` whatever the config says,
+    so a write batch under a broken sandbox is exit 3 exactly as before.
     """
     provider = get_provider(provider_name)
     cache_key = f"{_current_host_id()}|{spec}|{profile}"
@@ -1717,6 +1781,22 @@ def _detect_sandbox(
         return _SANDBOX_CACHE[cache_key]
 
     state, tail = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
+    if state == "unavailable" and _sandbox_fallback_attested(
+        provider, profile, anchor=anchor
+    ):
+        # One line per runner per process, on stdout beside the other
+        # preflight lines, in the same words the fan-out prints — the reader
+        # greps one marker across the run. `unknown` never reaches here: the
+        # override widens nothing on a probe that was not read.
+        print(
+            f"[exec-subagents] {SANDBOX_BYPASSED_MARKER} {provider_name}: "
+            f"bubblewrap cannot start; running --sandbox danger-full-access "
+            f"under providers.{provider_name}.sandbox_fallback="
+            f"{SANDBOX_FALLBACK_EXTERNAL} (read-only phase; no OS boundary "
+            f"between the model's shell and this machine)"
+        )
+        _SANDBOX_CACHE[cache_key] = SANDBOX_STATE_BYPASSED
+        return SANDBOX_STATE_BYPASSED
     if state == "unavailable":
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: "
@@ -3069,6 +3149,7 @@ def _spawn(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
+    sandbox_fallback: bool = False,
 ) -> _Capture:
     """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
 
@@ -3105,11 +3186,12 @@ def _spawn(
                 provider=provider, model=model, prompt=prompt, profile=profile,
                 transport=transport, timeout=timeout, cwd=cwd,
                 schema=materialized, anchor=anchor,
+                sandbox_fallback=sandbox_fallback,
             )
     return _spawn_child(
         provider=provider, model=model, prompt=prompt, profile=profile,
         transport=transport, timeout=timeout, cwd=cwd, schema=schema,
-        anchor=anchor,
+        anchor=anchor, sandbox_fallback=sandbox_fallback,
     )
 
 
@@ -3124,6 +3206,7 @@ def _spawn_child(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
+    sandbox_fallback: bool = False,
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -3167,7 +3250,7 @@ def _spawn_child(
         return _spawn_in_context(
             provider=provider, model=model, prompt=prompt, profile=profile,
             transport=transport, timeout=timeout, cwd=cwd, schema=schema,
-            anchor=anchor,
+            anchor=anchor, sandbox_fallback=sandbox_fallback,
         )
 
 
@@ -3182,11 +3265,19 @@ def _spawn_in_context(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
+    sandbox_fallback: bool = False,
 ) -> _Capture:
-    """:func:`_spawn_child`'s body, inside the adapter's dispatch context."""
+    """:func:`_spawn_child`'s body, inside the adapter's dispatch context.
+
+    ``sandbox_fallback`` is the D6 override (2026-09-17), ``True`` only when
+    :func:`dispatch_task` read ``bypassed`` off the preflight's cache for this
+    runner and profile; the adapter's ``apply_sandbox_fallback`` is what turns
+    it into argv, and every adapter without one ignores it.
+    """
     capture = _Capture()
     argv, stdin_text = provider.build_agent_command_for_transport(
-        prompt, model, profile, transport, schema=schema
+        prompt, model, profile, transport, schema=schema,
+        sandbox_fallback=sandbox_fallback,
     )
     # The batch-shim flag is consumed pre-dispatch by `_prompt_over_budget`, which
     # resolves argv[0] the same way: it applies cmd.exe's 8,191-unit cap and
@@ -3472,6 +3563,10 @@ def dispatch_task(
     effective_timeout = timeout or get_subagent_timeout(provider_name, anchor=anchor)
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
     napper = sleep or time.sleep
+    # D6 override (2026-09-17): replay the preflight's decision, never re-take
+    # it here. `bypassed` is only ever recorded for `agent-readonly`, so a
+    # WRITE kind reads `False` by construction and renders its argv unchanged.
+    fallback = sandbox_bypassed(runner, profile)
 
     # §4.2.2's "the caller reads the flag before dispatch", on this lane and once
     # per dispatch — the schema file is read here, not per attempt, and the
@@ -3604,6 +3699,7 @@ def dispatch_task(
                 cwd=cwd,
                 schema=schema,
                 anchor=anchor,
+                sandbox_fallback=fallback,
             )
         except (
             StructuredOutputUnavailable, structured_output.SchemaConfigError
@@ -5115,6 +5211,7 @@ def _preview_argv(
     profile: str,
     schema: Optional[Any],
     anchor: Optional[str] = None,
+    sandbox_fallback: bool = False,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """The argv a dispatch WOULD render, built the way a dispatch builds it.
 
@@ -5141,7 +5238,18 @@ def _preview_argv(
 
     ``schema=None`` — every kind with no schema phase, and every adapter that
     declined the flag — renders exactly what this preview rendered before.
+    ``sandbox_fallback`` is the D6 override the preflight just recorded (or
+    not): a dry run's argv has to show the ``danger-full-access`` a real
+    dispatch would carry, or the preview would be the one artifact that hid it.
     """
+    def _render(materialized_schema: Optional[Any]) -> List[str]:
+        argv = provider.build_agent_command(
+            prompt, model, profile, schema=materialized_schema
+        )
+        if sandbox_fallback:
+            argv = provider.apply_sandbox_fallback(argv, profile)
+        return argv
+
     with provider_dispatch_context(
         provider, model, profile, anchor=anchor
     ) as dispatch:
@@ -5151,12 +5259,8 @@ def _preview_argv(
             provider, "structured_output_transport", "inline"
         ) == "file":
             with structured_output.schema_sidecar(schema) as materialized:
-                return provider.build_agent_command(
-                    prompt, model, profile, schema=materialized
-                ), None
-        return provider.build_agent_command(
-            prompt, model, profile, schema=schema
-        ), None
+                return _render(materialized), None
+        return _render(schema), None
 
 
 def dry_run_report(
@@ -5290,6 +5394,7 @@ def dry_run_report(
             argv, refusal = _preview_argv(
                 provider, prompt=prompt, model=model, profile=entry["profile"],
                 schema=schema, anchor=anchor,
+                sandbox_fallback=sandbox_bypassed(runner, entry["profile"]),
             )
         except Exception as exc:  # noqa: BLE001 - a preflight must not raise
             entry["would_dispatch"] = False

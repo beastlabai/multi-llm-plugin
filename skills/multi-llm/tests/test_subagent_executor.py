@@ -4531,6 +4531,148 @@ class TestSandboxUnavailable:
         assert rejected.exit_code == 3
         assert _BWRAP_BROKEN_LINE in rejected.detail
 
+    # -- the D6 override (2026-09-17): the one `unavailable` that dispatches --
+
+    @staticmethod
+    def _attest_external(runner_env, monkeypatch):
+        """`providers.codex.sandbox_fallback: external`, through the real config
+        layering — the same `MULTI_LLM_PROVIDERS_CONFIG` file `runner_env.use`
+        wrote the driver block into, so the key is read the way an operator's
+        would be and not through a patched accessor."""
+        path = runner_env.config_path
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "providers:\n  codex:\n    sandbox_fallback: external\n",
+            encoding="utf-8",
+        )
+        registry._config = None
+        registry._config_key = None
+
+    @staticmethod
+    def _broken_probe_for(profile):
+        def command(self, requested):
+            if requested != profile:
+                return None
+            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+        return command
+
+    def test_a_read_only_batch_dispatches_unsandboxed_under_the_external_attestation(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """All four gates hold — `unavailable`, `external`, `agent-readonly`,
+        codex — so the preflight records `bypassed`, prints the marker once,
+        and the dispatch's argv carries `--sandbox danger-full-access`."""
+        runner_env.use("codex:gpt-5.5")
+        self._attest_external(runner_env, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._broken_probe_for(PROFILE_AGENT_READONLY),
+        )
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        assert info["sandbox"] == "bypassed"
+        out = capsys.readouterr().out
+        assert out.count("[SANDBOX_BYPASSED]") == 1
+        assert (
+            "[SANDBOX_BYPASSED] codex: bubblewrap cannot start; running --sandbox "
+            "danger-full-access under providers.codex.sandbox_fallback=external "
+            "(read-only phase; no OS boundary between the model's shell and this "
+            "machine)"
+        ) in out
+        assert executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_READONLY)
+        assert not executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_WRITE)
+        # Cached: the second preflight neither re-probes nor re-prints.
+        again = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        assert again["sandbox"] == "bypassed"
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+
+        # The flag reaches the spawn, and the argv it renders is the override.
+        spawned = []
+
+        def fake_spawn(**kwargs):
+            spawned.append(kwargs)
+            return self._Capture("", "boom\n", exit_code=1)
+
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        task = _validation_batch(phase_dir)
+        executor.dispatch_task(
+            task, phase_dir=str(phase_dir), runner="codex:gpt-5.5", retries=0,
+        )
+        assert len(spawned) == 1
+        assert spawned[0]["sandbox_fallback"] is True
+        argv, refusal = executor._preview_argv(
+            provider, prompt="p", model="gpt-5.5", profile=PROFILE_AGENT_READONLY,
+            schema=None, sandbox_fallback=True,
+        )
+        assert refusal is None
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+
+    def test_a_write_batch_is_refused_under_the_external_attestation_exactly_as_before(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """WRITE_KINDS run `agent-write`, and the attestation never reaches it:
+        exit 3, nothing cached, no marker."""
+        runner_env.use("codex:gpt-5.5")
+        self._attest_external(runner_env, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._broken_probe_for(PROFILE_AGENT_WRITE),
+        )
+        self._no_dispatch(monkeypatch)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
+        assert excinfo.value.reason_code == "sandbox_unavailable"
+        assert excinfo.value.exit_code == 3
+        assert executor._SANDBOX_CACHE == {}
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+        assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
+
+    def test_an_unknown_verdict_never_widens_even_under_the_attestation(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """A probe that could not be read dispatches sandboxed, as today —
+        the override needs `unavailable`, not the absence of `ok`."""
+        runner_env.use("codex:gpt-5.5")
+        self._attest_external(runner_env, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+
+        def slow(self, requested):
+            return ["sh", "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
+
+        monkeypatch.setattr(type(provider), "sandbox_probe_command", slow)
+        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        assert info["sandbox"] == "unknown"
+        assert not executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_READONLY)
+        captured = capsys.readouterr()
+        assert "[SANDBOX_BYPASSED]" not in captured.out
+        assert "recording sandbox 'unknown'" in captured.err
+
+    def test_off_refuses_a_read_only_batch_exactly_as_before(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """The shipped default: `providers.yaml` says `off`, and the refusal
+        is the one the read-only row test above pins."""
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        assert provider.sandbox_fallback_policy(PROFILE_AGENT_READONLY) == "off"
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._broken_probe_for(PROFILE_AGENT_READONLY),
+        )
+        self._no_dispatch(monkeypatch)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
+        assert excinfo.value.reason_code == "sandbox_unavailable"
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+
     def test_a_failing_self_test_refuses_before_dispatch(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -4841,6 +4983,218 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         result = self._run_slot(rob, tmp_path, "fakeplain:m1")
         assert result["success"] is True
         assert runs == []
+
+    # -- the D6 override (2026-09-17): the third answer of the gate --------
+
+    class _Attested(_Probed):
+        """The probing adapter plus the operator's `external` attestation."""
+
+        def sandbox_fallback_policy(self, profile, anchor=None):
+            return "external" if profile in (PROFILE_GENERATE, PROFILE_AGENT_READONLY) else None
+
+    class _AttestedOff(_Probed):
+        def sandbox_fallback_policy(self, profile, anchor=None):
+            return "off" if profile == PROFILE_GENERATE else None
+
+    @staticmethod
+    def _bypass_line(provider_name):
+        return (
+            f"[SANDBOX_BYPASSED] {provider_name}: bubblewrap cannot start; running "
+            f"--sandbox danger-full-access under providers.{provider_name}."
+            f"sandbox_fallback=external (read-only phase; no OS boundary between "
+            f"the model's shell and this machine)"
+        )
+
+    def test_the_verdict_is_three_way_and_never_truthy_by_accident(self, monkeypatch):
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        verdict = rob.sandbox_refusal("fakebwrap", None)
+        assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
+        assert verdict.bypass and not verdict.refused
+        assert verdict.reason == self._bypass_line("fakebwrap")
+        assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": True}
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AttestedOff())
+        verdict = rob.sandbox_refusal("fakebwrap", None)
+        assert verdict.verdict == rob.SANDBOX_REFUSE
+        assert verdict.refused and not verdict.bypass
+        assert verdict.reason.startswith("[SANDBOX_UNAVAILABLE]")
+        assert rob.sandbox_fallback_kwargs(verdict) == {}
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
+        verdict = rob.sandbox_refusal("fakeplain", None)
+        assert verdict.verdict == rob.SANDBOX_DISPATCH
+        assert verdict.reason is None
+        assert not verdict.refused and not verdict.bypass
+
+    def test_the_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+        seen = []
+
+        def dispatch(**kwargs):
+            seen.append(kwargs)
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is True
+        assert result["sandbox"] == "bypassed"
+        assert len(seen) == 1 and seen[0]["sandbox_fallback"] is True
+        out = capsys.readouterr().out
+        assert out.count("[SANDBOX_BYPASSED]") == 1
+        assert f"[fakebwrap:m1] {self._bypass_line('fakebwrap')}" in out
+        assert "[SANDBOX_UNAVAILABLE]" not in out
+
+    def test_off_refuses_exactly_as_before(self, tmp_path, monkeypatch, capsys):
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AttestedOff())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+
+        def no_dispatch(**kwargs):
+            raise AssertionError("a slot was dispatched past a refused probe")
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", no_dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is False
+        assert result["source"] == "not-dispatched"
+        assert result["error"].startswith("[SANDBOX_UNAVAILABLE]")
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+
+    def test_an_unknown_verdict_dispatches_sandboxed_even_under_the_attestation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`unknown` is a diagnostic, never a gate — in either direction: the
+        slot runs as before, and the override does not fire on it."""
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+        # The probe could not be run at all → `unknown`.
+        monkeypatch.setattr(executor, "_run_sandbox_probe", lambda argv, **kw: None)
+        seen = []
+
+        def dispatch(**kwargs):
+            seen.append(kwargs)
+            return {
+                "success": True, "data": [], "source": "file",
+                "output_file": str(tmp_path / "out.json"), "details": {},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is True
+        assert "sandbox" not in result
+        assert len(seen) == 1 and "sandbox_fallback" not in seen[0]
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+
+    @staticmethod
+    def _git_repo(root: Path) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env)
+        (root / "tracked.txt").write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
+
+    def test_a_bypassed_slot_that_writes_outside_its_contract_is_failed_by_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The detective half: `git status --porcelain` before and after. A
+        new file and a modified tracked file are both named; nothing is
+        restored; the answer the slot returned is dropped."""
+        from utils import review_orchestrator_base as rob
+
+        self._git_repo(tmp_path)
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+
+        def dispatch(**kwargs):
+            (tmp_path / "leak.md").write_text("notes\n", encoding="utf-8")
+            (tmp_path / "tracked.txt").write_text("v2\n", encoding="utf-8")
+            return {
+                "success": True, "data": [{"title": "x"}], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is False
+        assert result["output"] is None
+        assert result["error"] == (
+            "[SANDBOX_BYPASSED] fakebwrap wrote outside its read-only contract: "
+            "leak.md, tracked.txt"
+        )
+        assert result["error"] in capsys.readouterr().out
+        # Nothing was restored.
+        assert (tmp_path / "leak.md").exists()
+        assert (tmp_path / "tracked.txt").read_text(encoding="utf-8") == "v2\n"
+
+    def test_the_plugins_own_artifact_trees_are_not_blamed_on_the_model(
+        self, tmp_path, monkeypatch
+    ):
+        """Logs, result files and `.status.json` land under the plan's output
+        dir during the slot, and `.multi-llm/` holds the batch snapshots: the
+        check excludes both, or it would fire on every bypassed run."""
+        from utils import review_orchestrator_base as rob
+        from utils.output_handler import output_dir_path
+
+        self._git_repo(tmp_path)
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._Attested())
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+        plan_out = output_dir_path(tmp_path / "plan.md")
+
+        def dispatch(**kwargs):
+            plan_out.mkdir(parents=True, exist_ok=True)
+            (plan_out / "log_fakebwrap_m1.txt").write_text("log\n", encoding="utf-8")
+            (tmp_path / ".multi-llm" / "tmp").mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".multi-llm" / "tmp" / "snap.md").write_text("s\n", encoding="utf-8")
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is True, result["error"]
+        assert plan_out != tmp_path  # the exclusion is the plan dir, not the root
+
+    def test_unexpected_writes_reads_porcelain_entries_not_paths(self):
+        from utils import review_orchestrator_base as rob
+
+        before = frozenset({"?? plans/", " M already.txt"})
+        after = frozenset({
+            "?? plans/", " M already.txt", "?? new.md", " M tracked.txt",
+            "?? .multi-llm/", "?? plans/x/report.md",
+        })
+        assert rob.unexpected_writes(before, after, ignore_prefixes=[".multi-llm", "plans/x"]) == [
+            "new.md", "tracked.txt",
+        ]
+        # A snapshot that was never taken reports nothing.
+        assert rob.unexpected_writes(None, after) == []
+        assert rob.unexpected_writes(before, None) == []
+        # A repo-less cwd has no snapshot at all.
+        assert rob.porcelain_snapshot(None) is None
 
 
 # ---------------------------------------------------------------------------
