@@ -81,6 +81,15 @@ skills/multi-llm/tests/container/runs/*
 # Personal scratch kept beside the checkout, not a repo artifact. Anchored, so a
 # `note.md` that a subdirectory ever means to track is unaffected.
 /note.md
+# Same rule, one directory up in size: the probe bench. Throwaway Dockerfiles,
+# capture scripts and multi-hundred-megabyte build logs from working out what a
+# new CLI does before its adapter exists (`scratch/aider-capture/`,
+# `scratch/copilot-probe/`, the `Dockerfile.probe-*` set). The *findings* land in
+# an adapter, a fixture row and a plan note; the bench they were found on is not
+# a repo artifact and at 406 MB would dwarf the tree that is. Anchored to the
+# root for the same reason as `/note.md`: a `scratch/` a subdirectory ever means
+# to track is unaffected.
+/scratch/
 
 # The opencode npm package's build artifacts. All three are produced by
 # packaging/opencode/build.py, and a staged 4.1 MB skill copy committed by
