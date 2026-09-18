@@ -394,7 +394,16 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: refusal code to the capability field it reports about, and the only
     #: thing credential-shaped in it is the word. Recorded here so nobody
     #: re-derives any of them as a regression.
-    KNOWN_SOURCE_HITS = 5
+    #:
+    #: A **fifth and sixth** arrived with the omp adapter, both the same class
+    #: again: ``OMP_CREDENTIAL_ENV = "OPENROUTER_API_KEY"`` names the variable
+    #: omp's own ``$env`` chain reads — a *name*, never a value, and the reason
+    #: the constant exists at all is that this is the one adapter whose
+    #: credential is not foreign to it — and
+    #: ``credential_helper=credential_helper`` is a keyword forwarded to
+    #: ``super().resolve_env``. Neither is a pattern that got looser, and
+    #: neither line has ever been a redaction input: this tree is source.
+    KNOWN_SOURCE_HITS = 7
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -409,7 +418,9 @@ class TestNoFalsePositivesOnBenignCorpora:
             f"redact_text now fires on {len(hits)} lines of the harness's own source, "
             f"above the {self.KNOWN_SOURCE_HITS} known ones (`token = group_id` in "
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
-            "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py). This corpus is a "
+            "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py, `nested_exec_credentials` in "
+            "subagent_executor.py, and `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
+            "in providers/omp.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)
         )

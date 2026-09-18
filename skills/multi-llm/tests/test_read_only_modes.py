@@ -81,14 +81,26 @@ NEGATIVE_FLAG_TOKENS = frozenset(
 NEGATIVE_TOKEN_PREFIXES = ("--dangerously",)
 
 #: Bypasses that ride as a *value* rather than as a flag
-#: (`--permission-mode bypassPermissions`, `--sandbox danger-full-access`), so
-#: they are matched wherever they sit. `danger-full-access` joined the set with
-#: the D6 override (2026-09-17): it is codex's own third sandbox policy, and
-#: before it was here the guard was blind to it — a value, not a `--dangerously`
-#: prefix. The default argv of every profile must still never carry it; the one
-#: place it may appear is the dispatch-time rewrite `DISPATCH_TIME_OVERRIDE`
-#: declares below, and that class checks the rewrite from both sides.
-NEGATIVE_VALUE_TOKENS = frozenset({"bypassPermissions", "danger-full-access"})
+#: (`--permission-mode bypassPermissions`, `--sandbox danger-full-access`,
+#: `--approval-mode yolo`), so they are matched wherever they sit.
+#: `danger-full-access` joined the set with the D6 override (2026-09-17): it is
+#: codex's own third sandbox policy, and before it was here the guard was blind
+#: to it — a value, not a `--dangerously` prefix. The default argv of every
+#: profile must still never carry it; the one place it may appear is the
+#: dispatch-time rewrite `DISPATCH_TIME_OVERRIDE` declares below, and that class
+#: checks the rewrite from both sides.
+#:
+#: `yolo` joined on the same reading (2026-09-17, the omp adapter): it is the
+#: value half of `--approval-mode yolo`, and without it in this set the pair
+#: would have passed the scan unseen — `--approval-mode` is in neither
+#: `NEGATIVE_FLAG_TOKENS` nor `NEGATIVE_TOKEN_PREFIXES`, and a guard that cannot
+#: see the token is not a guard. Unlike `danger-full-access` it is rendered in a
+#: DEFAULT argv, which is exactly why it owes a declared
+#: `read_only_modes.omp.bypass_exception` naming the value rather than the flag:
+#: both halves of the machinery key on this one string.
+NEGATIVE_VALUE_TOKENS = frozenset(
+    {"bypassPermissions", "danger-full-access", "yolo"}
+)
 
 #: The ONE dispatch-time override of the negative set, declared as data with the
 #: same four fields a `bypass_exception:` row carries — token, profile(s), why it
@@ -292,6 +304,24 @@ class TestTheTableIsOneRowPerRegisteredAdapter:
         )
 
 
+#: The one measured mechanism flag whose meaning is not fixed across CLIs, and
+#: therefore the only one the borrow guard below reads as a whole
+#: `(flag, value)` atom rather than as a bare flag.
+#:
+#: `--mode` is overloaded: cursor-agent's `--mode ask` is a PERMISSION TIER,
+#: omp's `--mode json` is an OUTPUT FORMAT selector, and they share nothing but
+#: the four characters. Matching the bare flag would have refused omp's argv for
+#: borrowing a mechanism it does not have. Every other measured flag keeps the
+#: bare-flag check, which is strictly the stricter reading: `--sandbox`'s only
+#: measured use is a permission tier (codex's `read-only`), so an unprobed
+#: adapter rendering `--sandbox` under ANY value has borrowed another CLI's
+#: containment mechanism and should be probed before it ships — pairing it with
+#: `read-only` would let `--sandbox <anything-else>` through unseen. A flag is
+#: added here only once a second CLI is measured using it for something that is
+#: not a read-only mode.
+OVERLOADED_MECHANISM_FLAGS = frozenset({"--mode"})
+
+
 class TestAnUnprobedRowIsNull:
     """§3.5's rule of record: a row is measured or it is `null`."""
 
@@ -338,36 +368,96 @@ class TestAnUnprobedRowIsNull:
             f"true."
         )
 
+    @staticmethod
+    def _borrowable(table, name):
+        """Every other row's mechanism, as bare flags plus the one exception.
+
+        A mechanism is recorded as the argv tokens the adapter renders, and two
+        of the three measured rows are a flag with the *value* that selects the
+        mode: `--mode ask`, `--sandbox read-only`. The flag alone is the borrow
+        this guard looks for, because a permission tier's *other* values are
+        the ones nobody measured: an unprobed adapter rendering `--sandbox`
+        under any value at all has copied codex's containment mechanism, and
+        pairing the flag with `read-only` would wave every other value through.
+
+        `OVERLOADED_MECHANISM_FLAGS` is the narrow carve-out, and it holds one
+        flag. omp forced it: it renders `--mode json`, an OUTPUT FORMAT
+        selector with nothing of cursor-agent's `--mode ask` permission tier in
+        it but the four characters, so matching the bare flag would have
+        refused an argv that borrowed nothing. The relaxation is scoped to that
+        flag alone rather than applied registry-wide, so every other measured
+        flag — claude-code's bare pair included — is matched exactly as
+        strictly as it was before omp arrived.
+        """
+        atoms = set()
+        for other, row in table.items():
+            if other == name or not row["mechanism"]:
+                continue
+            tokens = list(row["mechanism"])
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if not token.startswith("-"):
+                    index += 1
+                    continue
+                nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+                if token in OVERLOADED_MECHANISM_FLAGS and (
+                    nxt is not None and not nxt.startswith("-")
+                ):
+                    atoms.add((token, nxt))
+                    index += 2
+                else:
+                    atoms.add((token,))
+                    index += 1
+        return atoms
+
+    @staticmethod
+    def _atoms_in(argv):
+        """The rendered argv as `(flag,)` and `(flag, value)` atoms.
+
+        Both forms for every flag, deliberately: which of the two a borrow is
+        judged on is `_borrowable`'s decision, and recording both here is what
+        lets one intersection answer for a bare-flag row and for an overloaded
+        one without the caller branching per flag.
+        """
+        atoms = set()
+        for index, token in enumerate(argv):
+            if not token.startswith("-"):
+                continue
+            atoms.add((token,))
+            nxt = argv[index + 1] if index + 1 < len(argv) else None
+            if nxt is not None and not nxt.startswith("-"):
+                atoms.add((token, nxt))
+        return atoms
+
     @pytest.mark.parametrize("name", _registered_provider_names())
     def test_a_null_row_did_not_acquire_an_invented_read_only_flag(self, name):
         """An unprobed CLI keeps its current argv rather than borrowing a flag.
 
-        The vocabulary checked here is the *other* rows' measured flag tokens —
-        `--mode`, `--sandbox`, `--allowed-tools`, `--disallowed-tools` today. An
-        unprobed adapter that suddenly renders one of them has had another CLI's
-        mechanism copied onto it, which is the specific failure §3.5 names: a
-        flag invented for a row nobody measured. If the flag is genuinely this
-        CLI's own, probe it and move the row — that is the whole point of the
-        queue.
+        The vocabulary checked here is the *other* rows' measured mechanisms —
+        `--sandbox`, `--allowed-tools`, `--disallowed-tools` as bare flags, and
+        `--mode ask` as a whole atom because `--mode` is the one flag two CLIs
+        measurably use for different things (see :meth:`_borrowable` and
+        `OVERLOADED_MECHANISM_FLAGS`). An unprobed adapter that suddenly renders
+        one of them has had another CLI's mechanism copied onto it, which is the
+        specific failure §3.5 names: a flag invented for a row nobody measured.
+        If the mechanism is genuinely this CLI's own, probe it and move the row
+        — that is the whole point of the queue.
         """
         table = read_only_modes()
         if table[name]["mechanism"] is not None:
             pytest.skip(f"{name} is a probed row and owns its own mechanism")
 
-        borrowed = {
-            token
-            for other, row in table.items()
-            if other != name and row["mechanism"]
-            for token in row["mechanism"]
-            if token.startswith("-")
-        }
-
-        argv = list(_generate_argv(name))
+        # Each profile's argv is read on its own rather than concatenated: a
+        # join would invent a `(flag, value)` pair straddling the seam between
+        # the last token of one and the first of the next.
+        rendered = set(self._atoms_in(_generate_argv(name)))
         readonly = _profile_argv(name, PROFILE_AGENT_READONLY)
         if readonly is not None:
-            argv += readonly
+            rendered |= self._atoms_in(readonly)
 
-        found = sorted(borrowed.intersection(argv))
+        borrowed = self._borrowable(table, name)
+        found = sorted(" ".join(atom) for atom in borrowed & rendered)
         assert not found, (
             f"{name} is an unprobed (`null`) row but its argv carries {found}, "
             f"which is another adapter's measured read-only mechanism. Probe this "

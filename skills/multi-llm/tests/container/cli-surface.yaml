@@ -407,3 +407,37 @@ clis:
       - "--max-turns"
       - "--output"
       - "-p"
+
+  # omp. `pi --help` and this one describe two different products now: omp's is
+  # 13,533 bytes against pi's 9,125, and every flag this adapter adds over pi's
+  # argv (`--mode`, `--config`, `--approval-mode`, `--tools`, `--cwd`) is
+  # documented there, so the seeder reported `missing_options: []` and this row
+  # needs no forced-full-help invocation.
+  #
+  # TWO FLAGS THE ADAPTER EMITS ARE DELIBERATELY ABSENT from this list, and their
+  # absence is the seeder's rule rather than an oversight: the contract is
+  # derived from `build_command(prompt, model)` with no slot timeout and no
+  # effort, so `--max-time` and `--thinking` — both CONDITIONAL emissions, both
+  # documented at 18.2.2 — never appear in the derivation. They are not
+  # unguarded: `OmpProvider.build_command` runs `missing_flags` over exactly the
+  # set THAT call will emit before it assembles anything, and refuses the
+  # dispatch by the name of the flag a build lacks (`OmpFlagsUnconfirmed`). So a
+  # rename upstream is a named launch failure rather than a silent argv, which is
+  # the same guarantee this row gives for the eight below.
+  - cli: omp
+    binary: omp
+    version: "omp/18.2.2"
+    probe: ok
+    help_invocation: "omp --help"
+    help_sha256: 05b7d6be7b9eba1e3919d93021e3f08b7d4269aa445580375dbdbc720e150a16
+    help_bytes: 13533
+    profiles: [generate]
+    options:
+      - "--approval-mode"
+      - "--config"
+      - "--cwd"
+      - "--mode"
+      - "--model"
+      - "--no-session"
+      - "--tools"
+      - "-p"

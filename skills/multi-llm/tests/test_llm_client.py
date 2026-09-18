@@ -2816,3 +2816,615 @@ class TestBatchShimMetacharGuard:
 
         assert result["success"] is True
         mock_run.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Stage U — `details["usage"]` on every path out of this module
+# ---------------------------------------------------------------------------
+#
+# `_attach_usage` used to run on the losing paths only, so the run that
+# *worked* was the one nothing could report the cost of. It now runs on the
+# exit-0 path too, which means the key has to survive three more things: the
+# schema verdict that REPLACES the parsed dict, the four ways
+# `invoke_with_file_output` can end, and an exit-0 run that its adapter calls a
+# hard failure — the shape that also has a deferred log nobody was writing.
+
+
+def _usage_envelope(result_text, *, is_error=False):
+    """A claude-code result envelope carrying usage, around any `result`."""
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": is_error,
+        "result": result_text,
+        "usage": {
+            "input_tokens": 900,
+            "output_tokens": 300,
+            "cache_read_input_tokens": 50,
+        },
+        "total_cost_usd": 0.42,
+    })
+
+
+#: What `ClaudeCodeProvider.parse_usage` makes of the envelope above.
+ENVELOPE_USAGE = {
+    "input_tokens": 900,
+    "output_tokens": 300,
+    "cached_input_tokens": 50,
+    "cost_usd": 0.42,
+    "total_tokens": 1200,
+}
+
+from utils.providers.base import LLMProvider as _BaseProvider  # noqa: E402
+
+_USAGE_ISSUES = [{
+    "title": "Boundary check missing", "desc": "d", "importance": "HIGH",
+    "reference": "Step 1", "type": "bug",
+}]
+
+
+def _usage_completed(stdout, returncode=0, stderr=""):
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.stdout = stdout
+    proc.stderr = stderr
+    return proc
+
+
+class TestExitZeroCarriesUsage:
+    """The exit-0 half of `_attach_usage`, on all three of its outcomes."""
+
+    @staticmethod
+    def _invoke(stdout, **kwargs):
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("utils.llm_client.subprocess.run",
+                   return_value=_usage_completed(stdout)):
+            return invoke_with_provider("p", "claude-code:sonnet", **kwargs)
+
+    def test_a_clean_parse_carries_what_the_run_spent(self):
+        result = self._invoke(_usage_envelope(json.dumps(_USAGE_ISSUES)))
+
+        assert result["success"] is True
+        assert result["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_a_parse_failure_carries_it_too(self):
+        """Nothing usable came back; that is not the same as nothing was spent."""
+        result = self._invoke(_usage_envelope("The plan looks fine to me."))
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_the_schema_verdict_replaces_the_dict_and_keeps_the_key(self):
+        """§4.2.1's refusal builds a NEW envelope; its `details` spread is the
+        only reason the numbers attached a few lines earlier survive it."""
+        result = self._invoke(
+            _usage_envelope(json.dumps(_USAGE_ISSUES)),
+            schema_phase="generate-tasks",
+        )
+
+        assert result["success"] is False
+        assert result["details"]["failure_reason"]
+        assert result["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_an_adapter_that_reports_nothing_still_adds_no_key(self):
+        """The absent-means-unreported rule, unchanged by the new call site."""
+        wrapper = json.dumps({"type": "result", "result": json.dumps(_USAGE_ISSUES)})
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+             patch("utils.llm_client.subprocess.run",
+                   return_value=_usage_completed(wrapper)):
+            result = invoke_with_provider("p", "cursor-agent:auto")
+
+        assert result["success"] is True
+        assert "usage" not in result["details"]
+
+
+class TestFileOutputCarriesUsage:
+    """All four ways `invoke_with_file_output` returns, one key to survive."""
+
+    @staticmethod
+    def _details():
+        return {
+            "provider": "claude-code", "model": "sonnet",
+            "duration_seconds": 1.0, "usage": dict(ENVELOPE_USAGE),
+        }
+
+    def _call(self, tmp_path, stub, **kwargs):
+        with patch("utils.llm_client.invoke_with_provider", **stub):
+            return invoke_with_file_output(
+                prompt_template="write to {output_json_path}",
+                model_spec="claude-code:sonnet",
+                prompt_context={"prefix": "p"},
+                output_dir=tmp_path,
+                phase="code_review",
+                **kwargs,
+            )
+
+    def test_the_file_channel_forwards_it(self, tmp_path):
+        def _write_the_file(prompt, *args, **kwargs):
+            # The path the caller asked for is in the rendered prompt, which is
+            # the only place this stub can learn it.
+            path = prompt.rsplit("write to ", 1)[1].strip().splitlines()[0]
+            Path(path).write_text(json.dumps(_USAGE_ISSUES), encoding="utf-8")
+            return {"success": False, "error": "no stdout JSON", "data": None,
+                    "error_code": ERROR_PARSE_ERROR, "details": self._details()}
+
+        out = self._call(tmp_path, {"side_effect": _write_the_file})
+
+        assert out["success"] is True
+        assert out["source"] in ("file", "file_extracted")
+        assert out["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_the_stdout_fallback_forwards_it(self, tmp_path):
+        stub = {"return_value": {
+            "success": True, "data": _USAGE_ISSUES, "details": self._details(),
+        }}
+        out = self._call(tmp_path, stub)
+
+        assert out["source"] == "stdout_fallback"
+        assert out["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_both_channels_failing_forwards_it(self, tmp_path):
+        stub = {"return_value": {
+            "success": False, "error": "unparseable", "data": None,
+            "error_code": ERROR_PARSE_ERROR, "details": self._details(),
+        }}
+        out = self._call(tmp_path, stub)
+
+        assert out["success"] is False
+        assert out["error_code"] == ERROR_PARSE_ERROR
+        assert out["details"]["usage"] == ENVELOPE_USAGE
+
+    def test_a_hard_failure_forwards_it(self, tmp_path):
+        """The return that spreads `**result` rather than rebuilding it."""
+        stub = {"return_value": {
+            "success": False, "error": "claude exited 1", "data": None,
+            "error_code": ERROR_SUBPROCESS_FAILED, "details": self._details(),
+        }}
+        out = self._call(tmp_path, stub)
+
+        assert out["success"] is False
+        assert out["details"]["usage"] == ENVELOPE_USAGE
+
+
+class TestHardFailureOnAnExitZeroRunWritesItsLog:
+    """An adapter may call an exit-0 stream a hard failure. Then the run has
+    BOTH a hard error code and a deferred log, which the hard-failure return
+    used to drop on the floor — the whole log for that slot, not a line of it.
+    """
+
+    class _TerminalProvider(_BaseProvider):
+        """The smallest adapter whose exit-0 parse is a hard failure."""
+
+        usage_support = "full"
+
+        @property
+        def name(self):
+            return "terminalparse"
+
+        @property
+        def default_timeout(self):
+            return 60
+
+        def is_available(self):
+            return True
+
+        def build_command(self, prompt, model, **_kwargs):
+            return ["terminalparse-cli", prompt]
+
+        def parse_output(self, stdout, stderr):
+            return {
+                "success": False,
+                "error": "the stream reported a terminal error",
+                "error_code": ERROR_SUBPROCESS_FAILED,
+                "data": None,
+            }
+
+        def parse_usage(self, stdout, stderr):
+            return dict(ENVELOPE_USAGE)
+
+    def test_the_log_is_written_and_names_the_failure(self, tmp_path, monkeypatch):
+        from utils import provider_registry
+
+        monkeypatch.setitem(
+            provider_registry._PROVIDERS, "terminalparse", self._TerminalProvider()
+        )
+        log_file = tmp_path / "log_terminalparse.txt"
+
+        with patch("shutil.which", return_value="/usr/bin/terminalparse-cli"), \
+             patch("utils.llm_client.subprocess.run",
+                   return_value=_usage_completed("stream-bytes")):
+            out = invoke_with_file_output(
+                prompt_template="write to {output_json_path}",
+                model_spec="terminalparse:m",
+                prompt_context={"prefix": "p"},
+                output_dir=tmp_path,
+                phase="code_review",
+                log_file=log_file,
+            )
+
+        assert out["success"] is False
+        assert out["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert out["details"]["usage"] == ENVELOPE_USAGE
+        assert log_file.exists(), "the slot's only log entry was dropped"
+        written = log_file.read_text(encoding="utf-8")
+        assert "stream-bytes" in written
+        assert "the stream reported a terminal error" in written
+
+
+# --------------------------------------------------------------------------- #
+# omp — the production path, with a real fake binary on PATH
+#
+# These are the three things about omp that a unit test over `build_command` and
+# `parse_output` cannot reach, because each of them is a property of the road
+# between them: which transport `invoke_with_file_output` actually takes, what a
+# pre-spawn refusal does to a slot, and whether a findings file written beside a
+# failed parse is read. All three run against a fake `omp` EXECUTABLE rather than
+# a patched `subprocess.run`, because the flag gate spawns `--help` itself and a
+# patched runner would answer that too.
+# --------------------------------------------------------------------------- #
+
+#: Every long option `OmpProvider.build_command` can emit, so the gate passes.
+_OMP_FULL_HELP = (
+    "Usage: omp [options] [message]\n"
+    "  -p, --print              print the answer and exit\n"
+    "      --no-session         write no session files\n"
+    "      --mode <mode>        output mode: text | json\n"
+    "      --config <path>      config overlay\n"
+    "      --approval-mode <m>  always-ask | write | yolo\n"
+    "      --tools <list>       comma-separated allow-list\n"
+    "      --cwd <dir>          working directory\n"
+    "      --model <model>      model selector\n"
+    "      --thinking <level>   reasoning effort\n"
+    "      --max-time <n>       deadline in seconds\n"
+)
+
+
+def _omp_stream(*, stop_text=None, stop_reason="stop", tool_error=None,
+                tool_name="write", assistant_content=None):
+    """A minimal omp JSONL stream, in the measured event order.
+
+    Only the events `parse_output` reads: `session` (for the version), an
+    optional `tool_execution_end`, the terminal assistant `message_end` and
+    `agent_end`. The committed fixtures are the real streams; this builds the
+    handful of variants these tests need to vary one field at a time.
+    """
+    events = [{"type": "session", "version": 3, "id": "01a0", "cwd": "/work"}]
+    if tool_error is not None:
+        events.append({
+            "type": "tool_execution_end",
+            "toolCallId": "call_1",
+            "toolName": tool_name,
+            "result": {"content": [{"type": "text", "text": tool_error}], "details": {}},
+            "isError": True,
+        })
+        events.append({
+            "type": "tool_execution_end",
+            "toolCallId": "call_2",
+            "toolName": tool_name,
+            "result": {"content": [{"type": "text", "text": "ok"}], "details": {}},
+            "isError": False,
+        })
+    content = assistant_content
+    if content is None:
+        content = [] if stop_text is None else [{"type": "text", "text": stop_text}]
+    events.append({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "content": content,
+            "stopReason": stop_reason,
+            "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
+                      "totalTokens": 12,
+                      "cost": {"input": 0, "output": 0, "cacheRead": 0,
+                               "cacheWrite": 0, "total": 0.01}},
+        },
+    })
+    events.append({"type": "agent_end", "messages": [], "isTerminal": True})
+    return "".join(json.dumps(e) + "\n" for e in events)
+
+
+def _install_fake_omp(tmp_path, monkeypatch, *, script_body, help_text=_OMP_FULL_HELP,
+                      version="omp/18.2.2"):
+    """Put a fake `omp` on PATH and reset the memoised help probe.
+
+    ``script_body`` is shell run for every invocation that is neither ``--help``
+    nor ``--version``; it may read stdin and write to ``$OMP_FAKE_DIR``.
+    """
+    import os
+
+    from utils.providers import base as providers_base
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "omp"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        f"    --help) cat <<'HELP'\n{help_text}HELP\n"
+        "            exit 0 ;;\n"
+        f"    --version) echo '{version}'; exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        f"{script_body}\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("OMP_FAKE_DIR", str(tmp_path))
+    # The gate memoises `read_help_tokens` on (binary, help argv), and the binary
+    # path is the same string across tests in one session.
+    providers_base.reset_flag_gate_cache()
+    return fake
+
+
+class TestOmpPromptTransport:
+    """§2.5 — the prompt reaches omp **once, over stdin**, and none of it on argv.
+
+    The declaration is the whole change, and this is the test that it took:
+    `invoke_with_file_output` — the function every Lane A review phase goes
+    through — takes no transport argument and forwards none, so an adapter
+    default of `argv` would leave every review prompt on the path measured
+    failing (200 KB on argv is `E2BIG` from the kernel before omp starts). Only
+    the adapter's own `prompt_transport` decides it, and only a run through the
+    production entry point can show that it did.
+    """
+
+    SENTINEL = "SENTINEL-c0ffee-9f3a"
+
+    def _fake(self, tmp_path, monkeypatch):
+        # Reads stdin TO EOF, records the byte count and an `eof` marker, writes
+        # a findings array to the --output path the prompt named, and prints a
+        # `stop` stream. A stdin that never reached EOF would hang here and the
+        # test's own timeout would fail rather than pass quietly.
+        body = (
+            'printf "%s\\n" "$@" > "$OMP_FAKE_DIR/argv.txt"\n'
+            'cat > "$OMP_FAKE_DIR/stdin.txt"\n'
+            'printf eof > "$OMP_FAKE_DIR/eof.marker"\n'
+            'cat "$OMP_FAKE_DIR/findings.json" > "$OMP_FAKE_DIR/out.json" 2>/dev/null\n'
+            'if [ -n "$OMP_FAKE_OUTPUT" ]; then\n'
+            '  cp "$OMP_FAKE_DIR/findings.json" "$OMP_FAKE_OUTPUT"\n'
+            'fi\n'
+            'cat "$OMP_FAKE_DIR/stream.jsonl"\n'
+        )
+        return _install_fake_omp(tmp_path, monkeypatch, script_body=body)
+
+    def test_a_200kb_prompt_travels_on_stdin_exactly_once(self, tmp_path, monkeypatch):
+        self._fake(tmp_path, monkeypatch)
+        (tmp_path / "findings.json").write_text(json.dumps([{"title": "t"}]))
+        (tmp_path / "stream.jsonl").write_text(_omp_stream(stop_text="[]"))
+
+        # The fake needs the path the caller generated; it is deterministic, so
+        # compute it the way `invoke_with_file_output` does and hand it over.
+        out_dir = tmp_path / "phase"
+        from utils.json_extractor import generate_output_path
+        monkeypatch.setenv(
+            "OMP_FAKE_OUTPUT",
+            generate_output_path(out_dir, "output", "review_plan", "omp:stub/stub-model"),
+        )
+
+        padding = "x" * 100_000
+        template = padding + "\n" + self.SENTINEL + "\n" + padding + "\n{output_location}"
+        result = invoke_with_file_output(
+            prompt_template=template,
+            model_spec="omp:stub/stub-model",
+            prompt_context={},
+            output_dir=out_dir,
+            phase="review_plan",
+            timeout=60,
+        )
+
+        assert result["success"] is True, result.get("error")
+        assert result["source"] == "file"
+
+        argv = (tmp_path / "argv.txt").read_text().splitlines()
+        assert self.SENTINEL not in "\n".join(argv), "the prompt reached argv"
+        assert "--" not in argv, "the stdin rendering must drop `--` as well as the prompt"
+        assert argv[-2:] == ["--model", "stub/stub-model"], argv
+
+        stdin_text = (tmp_path / "stdin.txt").read_text()
+        assert stdin_text.count(self.SENTINEL) == 1, "the prompt arrived twice"
+        assert len(stdin_text.encode()) > 200_000
+        assert (tmp_path / "eof.marker").exists(), "the child never saw EOF on stdin"
+
+    def test_the_argv_transport_still_renders_the_prompt_last_after_a_dash_dash(
+        self, tmp_path, monkeypatch
+    ):
+        self._fake(tmp_path, monkeypatch)
+        (tmp_path / "findings.json").write_text("[]")
+        (tmp_path / "stream.jsonl").write_text(_omp_stream(stop_text="[]"))
+
+        result = invoke_with_provider(
+            self.SENTINEL, "omp:stub/stub-model", timeout=60,
+            prompt_transport="argv",
+        )
+
+        assert result["success"] is True, result.get("error")
+        argv = (tmp_path / "argv.txt").read_text().splitlines()
+        assert argv[-1] == self.SENTINEL
+        assert argv[-2] == "--", "`--` is what stops a leading `-` being read as a flag"
+        assert (tmp_path / "stdin.txt").read_text() == "", "argv transport wrote stdin"
+
+
+class TestOmpFlagGateRefusesBeforeSpawning:
+    """§2.11 — a build whose help lacks a required flag starts no generation.
+
+    The point of the load-bearing form is that nothing is spawned and nothing is
+    retried: the raise escapes `build_command` before an argv exists, propagates
+    out of the ladder loop into `run_single_model`'s per-model `except`, and the
+    slot ends with that one named error while its siblings run.
+    """
+
+    def _fake(self, tmp_path, monkeypatch, *, help_text, version="omp/18.2.2"):
+        body = (
+            'printf spawned > "$OMP_FAKE_DIR/spawned.marker"\n'
+            'cat "$OMP_FAKE_DIR/stream.jsonl" 2>/dev/null\n'
+        )
+        return _install_fake_omp(
+            tmp_path, monkeypatch, script_body=body, help_text=help_text, version=version
+        )
+
+    def test_a_help_missing_tools_refuses_and_no_generation_process_starts(
+        self, tmp_path, monkeypatch
+    ):
+        from utils.providers.omp import OmpFlagsUnconfirmed
+
+        self._fake(
+            tmp_path, monkeypatch,
+            help_text=_OMP_FULL_HELP.replace(
+                "      --tools <list>       comma-separated allow-list\n", ""
+            ),
+            version="omp/17.0.0",
+        )
+        (tmp_path / "stream.jsonl").write_text(_omp_stream(stop_text="[]"))
+
+        with pytest.raises(OmpFlagsUnconfirmed) as excinfo:
+            invoke_with_provider("hello", "omp:stub/stub-model", timeout=60)
+
+        assert excinfo.value.missing == ("--tools",)
+        assert "--tools" in str(excinfo.value)
+        assert not (tmp_path / "spawned.marker").exists(), (
+            "a refused slot spawned a generation process"
+        )
+
+    def test_a_build_below_the_verified_version_still_dispatches_on_lane_a(
+        self, tmp_path, monkeypatch
+    ):
+        """The repo's own rule: only BINARY_MISSING refuses a launch.
+
+        A too-old build is a *label* on Lane A — doctor's row, the preflight
+        report — and a refusal only in the executor's own version gate. omp adds
+        no third gate: what refuses here is the missing flag, by name, not the
+        number.
+        """
+        self._fake(tmp_path, monkeypatch, help_text=_OMP_FULL_HELP, version="omp/0.0.1")
+        (tmp_path / "stream.jsonl").write_text(_omp_stream(stop_text="[]"))
+
+        result = invoke_with_provider("hello", "omp:stub/stub-model", timeout=60)
+
+        assert result["success"] is True, result.get("error")
+        assert (tmp_path / "spawned.marker").exists()
+
+
+class TestOmpFileRecoveryHonoursTheTerminalCode:
+    """§2.6 — the findings file is read only beside a stream that vouches for it.
+
+    Lane A's review prompts write `{output_json_path}` **before** the model's
+    later tool calls, so a run whose findings landed and whose `git diff` was
+    then cut by `--max-time` — exit 0, `toolUse`-final — would otherwise be a
+    failed parse followed by a recovered file: reported as success, with a
+    cut-off review passed downstream as complete. The hard `error_code` is what
+    stops `invoke_with_file_output` from looking.
+    """
+
+    def _run(self, tmp_path, stream, *, write_file=True, log=True):
+        out_dir = tmp_path / "phase"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        from utils.json_extractor import generate_output_path
+        path = Path(generate_output_path(out_dir, "output", "review_plan", "omp:stub/stub-model"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        findings = [{"title": "a finding the model really did write"}]
+        if write_file:
+            path.write_text(json.dumps(findings), encoding="utf-8")
+        log_file = tmp_path / "run.log" if log else None
+
+        with patch("utils.llm_client.invoke_with_provider") as mock_invoke:
+            from utils.provider_registry import get_provider
+            provider = get_provider("omp")
+            parsed = provider.parse_output(stream, "")
+            # The deferred log is what `invoke_with_provider` hands over on an
+            # exit-0 run so the caller can name the channel that answered; the
+            # mock stands in for it, because the branch under test is the one
+            # that has to settle it on a HARD failure — which, before omp, no
+            # exit-0 parse could produce.
+            mock_invoke.return_value = {
+                **parsed,
+                "details": {
+                    "provider": "omp",
+                    "model": "stub/stub-model",
+                    "_deferred_log": {
+                        "stdout": stream,
+                        "stderr": "",
+                        "returncode": 0,
+                        "duration_seconds": 0.3,
+                    },
+                },
+            }
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="omp:stub/stub-model",
+                prompt_context={},
+                output_dir=out_dir,
+                phase="review_plan",
+                log_file=log_file,
+            )
+        return result, path, findings
+
+    def test_a_toolUse_final_stream_refuses_a_valid_file(self, tmp_path):
+        stream = _omp_stream(stop_reason="toolUse", tool_error="Command aborted",
+                             tool_name="bash")
+        result, path, findings = self._run(tmp_path, stream)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert "run ended inside a tool call" in result["error"]
+        assert "bash" in result["error"] and "Command aborted" in result["error"]
+        assert result.get("data") in (None, {}, [])
+        assert result["output_file"] == str(path)
+        assert json.loads(path.read_text()) == findings, "the file was rewritten"
+
+    def test_the_same_file_beside_a_clean_stop_is_still_recovered(self, tmp_path):
+        result, path, findings = self._run(tmp_path, _omp_stream(stop_text="not json"))
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert result["data"] == findings
+
+    def test_an_approval_denial_refuses_the_file_even_under_a_clean_stop(self, tmp_path):
+        stream = _omp_stream(
+            stop_text=json.dumps([{"title": "fabricated"}]),
+            tool_error="Tool bash requires approval but no interactive UI available",
+            tool_name="bash",
+        )
+        result, path, findings = self._run(tmp_path, stream)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "was denied approval" in result["error"]
+        assert json.loads(path.read_text()) == findings
+
+    def test_an_ordinary_tool_error_the_model_recovered_from_is_not_a_denial(self, tmp_path):
+        stream = _omp_stream(
+            stop_text=json.dumps([{"title": "a real review"}]),
+            tool_error="fatal: bad revision 'HEAD~99'",
+            tool_name="bash",
+        )
+        result, path, findings = self._run(tmp_path, stream)
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert "bad revision" not in (result.get("error") or "")
+
+    def test_an_unrecognized_stop_reason_refuses_the_file(self, tmp_path):
+        stream = _omp_stream(stop_text=json.dumps([{"title": "x"}]), stop_reason="maxTokens")
+        result, path, findings = self._run(tmp_path, stream)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "unrecognized stopReason 'maxTokens'" in result["error"]
+        assert json.loads(path.read_text()) == findings
+
+    def test_the_run_log_is_written_for_a_hard_exit_zero_failure(self, tmp_path):
+        """The comment at the hard-failure return said `deferred_log` is always
+        None there, because a hard failure never reached the exit-0 branch that
+        sets it. omp is the first adapter for which that is false."""
+        stream = _omp_stream(stop_reason="toolUse", tool_error="Command aborted",
+                             tool_name="bash")
+        result, _path, _findings = self._run(tmp_path, stream)
+        log_file = tmp_path / "run.log"
+
+        assert log_file.exists(), "the slot's only log entry was dropped"
+        written = log_file.read_text(encoding="utf-8")
+        assert "Success: False" in written
+        assert "run ended inside a tool call" in written

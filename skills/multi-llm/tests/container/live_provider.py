@@ -358,6 +358,27 @@ def main() -> int:
                              "shadow the real key. The host driver decides; the "
                              "per-row measurement lives in SEED_DROP in the test "
                              "module.")
+    parser.add_argument("--seed-link", action="append", default=[],
+                        metavar="REL=TARGET",
+                        help="a symlink to create inside this row's HOME before "
+                             "the CLI runs (repeatable), from the row's own "
+                             "`seed_links` — the SAME declaration `wrapper.py` "
+                             "reads on the provider lane, so one row says it "
+                             "once and both lanes obey it. It exists for a "
+                             "vendor tree the image already carries and the "
+                             "run must not re-create: omp extracts 346 MB of "
+                             "Bun addons into $HOME/.omp/natives on its first "
+                             "agent run, and this lane's HOME is a **noexec** "
+                             "tmpfs (`--tmpfs /work/live:rw,...`, to which "
+                             "docker adds nosuid,nodev,noexec), so the addon "
+                             "lands and then cannot be mapped: `failed to map "
+                             "segment from shared object`, exit 1 in 1.05 s, "
+                             "before a single request. Pointing HOME at the "
+                             "image's read-only extract fixes the cost and the "
+                             "failure at once. NOT a seed file: nothing here is "
+                             "rendered, nothing is templated, and `seed_guards` "
+                             "never sees it — which is why it survives "
+                             "`--no-seed`.")
     parser.add_argument("--endpoint-in-env", action="store_true",
                         help="this row's endpoint does not travel in its seed — "
                              "the CLI routes itself, or the base URL is an "
@@ -466,6 +487,30 @@ def main() -> int:
         home = workdir / "home"
         workdir.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
+
+        # The row's `seed_links`, before anything else touches HOME: a config
+        # root or a credential under a linked subtree has to resolve THROUGH the
+        # link, not land beside it. Same declaration, same failure mode and the
+        # same hard refusal as `wrapper.py`'s copy — a declared target missing
+        # from the image is the image being stale, and running anyway would
+        # reproduce the very extraction the link exists to avoid.
+        for spec in args.seed_link:
+            rel, _, target = spec.partition("=")
+            if not rel or not target:
+                return bail(f"--seed-link {spec!r} is not REL=TARGET",
+                            EXIT_CONTROL_UNAVAILABLE)
+            if not Path(target).exists():
+                return bail(
+                    f"{args.cli} declares seed_links[{rel}] -> {target}, which "
+                    f"does not exist in this image. Rebuild it "
+                    f"(`make e2e-image`): the layer that installs this CLI is "
+                    f"what produces that tree.",
+                    EXIT_CONTROL_UNAVAILABLE)
+            link = home / rel
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if not (link.is_symlink() or link.exists()):
+                os.symlink(target, link)
+        evidence["seed_links"] = list(args.seed_link)
 
         # The row's config roots, BEFORE resolve_env: `get_env` reads os.environ
         # to decide whether a root is already pinned, so this has to land here

@@ -7,7 +7,7 @@ multi-llm talks to. Back to the [README](../README.md).
 
 ## Not affiliated
 
-BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any kind. BeastLab.ai is not affiliated with, endorsed by, or sponsored by any of the code harnesses (Cursor, Claude Code, Codex, OpenCode, Gemini CLI, Grok Build, Kilo Code, Cline, goose, Aider, Antigravity CLI, Pi, Muse Code, Kimi Code, Qwen Code, GitHub Copilot CLI, Mistral Vibe, etc.) or third-party LLM providers (Anthropic, OpenAI, Google, xAI, Moonshot AI, Z.ai/Zhipu, MiniMax, NVIDIA, Alibaba/Qwen, DeepSeek, Mistral AI, Xiaomi, Arcee, etc.) referenced in this project. Trademarks and product names belong to their respective owners.
+BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any kind. BeastLab.ai is not affiliated with, endorsed by, or sponsored by any of the code harnesses (Cursor, Claude Code, Codex, OpenCode, Gemini CLI, Grok Build, Kilo Code, Cline, goose, Aider, Antigravity CLI, Pi, Muse Code, Kimi Code, Qwen Code, GitHub Copilot CLI, Mistral Vibe, oh-my-pi, etc.) or third-party LLM providers (Anthropic, OpenAI, Google, xAI, Moonshot AI, Z.ai/Zhipu, MiniMax, NVIDIA, Alibaba/Qwen, DeepSeek, Mistral AI, Xiaomi, Arcee, etc.) referenced in this project. Trademarks and product names belong to their respective owners.
 
 ## One harness is not open source
 

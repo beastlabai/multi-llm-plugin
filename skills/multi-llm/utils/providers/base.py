@@ -522,6 +522,15 @@ ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
     # muse is XDG-only too, but its launcher reads a MUSE_* family and
     # self-updates at launch unless MUSE_NO_AUTO_UPDATE is set.
     "muse": RunnerEnvProfile(CA_FAMILY_NATIVE, ("MUSE_",), ()),
+    # omp is a Bun single-file binary whose TLS is BoringSSL, so whether it
+    # honours NODE_EXTRA_CA_CERTS or the OpenSSL names is unmeasured. The cell
+    # is a **label**, not a filter — `env_allowlist_for` admits both families for
+    # every adapter and this field only names the load-bearing variable for the
+    # `ca_bundle` matrix cell — so pi's row is taken on the shared-lineage
+    # argument and a wrong guess costs a wrong comment, never a dispatch.
+    # It shares pi's PI_* family (including PI_CODING_AGENT_DIR, which redirects
+    # the default profile only) and adds its own OMP_*.
+    "omp": RunnerEnvProfile(CA_FAMILY_NODE, ("PI_", "OMP_"), ("PI_CODING_AGENT_DIR",)),
     "opencode": RunnerEnvProfile(
         CA_FAMILY_NODE,
         ("OPENCODE_",),
@@ -1600,6 +1609,20 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
         r"is not recognized as an internal or external command",
         r"cannot execute binary file",
         r"\bexec format error\b",
+        # omp 18.2.2, both measured, both exit 1 at **zero requests** because
+        # the CLI validates its own argv and its config overlay before it
+        # resolves a model: a rejected `--tools` name raises `CliUsageError`,
+        # and a `--config` path that does not resolve is `error: Config overlay
+        # not found: <abs path>` in 0.13 s. Neither is a failed *spawn* in the
+        # literal sense — the binary ran — but the disposition is the one this
+        # rung exists for: a property of the install, identical for every
+        # sibling slot on that runner, and no retry can fix it. The alternative
+        # was `None`, which offers a transport retry of a run that cannot
+        # change its mind.
+        # Lowercase, like every other row here: `_markers` compiles without
+        # re.I and `classify_streams` lowercases the haystack first.
+        r"\bcliusageerror\b",
+        r"config overlay not found",
     )),
     (CATEGORY_PERMISSION_DENIED, _markers(
         r"permission denied",
@@ -1687,7 +1710,48 @@ TIMEOUT_MARKERS = _markers(
 )
 
 CONNECTION_ERROR_MARKERS = _markers(
-    r"connection (?:refused|reset|closed|aborted|error|failed)",
+    # **Separable on purpose — this row's widening plus its two fixture re-pins
+    # are the whole change, and they land as their own commit**, not folded into
+    # the adapter work that found them. Its file list is this row,
+    # ``tests/fixtures/cline/manifest.yaml``'s ``zero-body`` row (with the
+    # matching item 4 of ``tests/fixtures/cline/README.md``) and
+    # ``tests/fixtures/omp/manifest.yaml``'s ``empty`` row — no adapter module,
+    # and no other provider's verdict (``"connection was"`` greps to those two
+    # fixture trees and this line only; the whole grader run confirms it). It is
+    # ``plans/add-omp-provider.md``'s follow-up item 1, deferred there for
+    # exactly this reason: re-pinning a committed verdict belongs to whoever
+    # reviews that provider, so it is put where they can read it on its own
+    # terms. If it is ever squashed into a larger commit, that commit's message
+    # names the cline re-pin, because the moved verdict — not the regex — is the
+    # part a reviewer has to agree with.
+    #
+    # ``(?:was )?`` is one word wide, and it is there because two adapters emit
+    # the SAME Bun/undici sentence for a server that accepted the request and
+    # then closed the socket after ZERO body bytes — "The socket connection was
+    # closed unexpectedly …" — which the unwidened row missed for the single
+    # reason that it says "connection **was** closed". cline's committed
+    # `zero-body` row carries it on stderr with `(ECONNRESET)` appended (exit 1,
+    # 3 requests over 7.85 s); omp's `empty` row carries it as a terminal
+    # `stopReason: "error"` with **no** `errorStatus` (exit 1, 21 requests over
+    # 31.9 s). A dropped socket is exactly what this row means, so the widening
+    # is a better reading of the same bytes rather than a behaviour change in
+    # either CLI. Taken 2026-09-18, with both fixture manifests re-pinned in the
+    # same change: cline `runner_error` → `connection_error` (it had been
+    # falling through to `exit_zero_markers`, the rung below this one) and omp
+    # `None` → `connection_error`.
+    #
+    # Measured on those same bytes, what moves downstream is the `Reason:` line
+    # — "the runner reported a failure" and "Unknown (see tail output below)"
+    # both become "Connection/network error" — and, for omp alone, Lane A's
+    # retry decision. Lane A classifies its own `"<cli> exited with code N:
+    # <describe_failure>"` string rather than the streams: omp's
+    # `describe_failure` quotes the sentence into it, so that slot goes from
+    # `None` ("never retried") to one transport retry, while cline declares no
+    # `describe_failure` at all, so its Lane A string stays the bare exit line
+    # and its retry behaviour is byte-for-byte what it was. Lane B is unmoved
+    # for both: its re-classification hook only upgrades a slot to auth, rate
+    # limit, invalid model or sandbox, and `connection_error` is none of those.
+    r"connection (?:was )?(?:refused|reset|closed|aborted|error|failed)",
     r"could not connect",
     r"unable to connect",
     r"failed to connect",
@@ -1721,6 +1785,14 @@ INVALID_MODEL_MARKERS = _markers(
     r"unknown model",
     r"\bmodel .{0,40}(?:does not exist|is not available)",
     r"unsupported model",
+    # omp 18.2.2, measured pre-flight against its own local catalog:
+    # `Model "stub/nonexistent" not found` — exit 1, zero bytes on stdout, zero
+    # requests. The existing `model not found` row does not reach it because the
+    # quoted selector sits between the two words, and `\bmodel .{0,40}…` wants a
+    # different verb. Written with the quotes optional and the gap bounded, so
+    # the row is the shape ("model <name> not found") rather than one vendor's
+    # punctuation — a cost line or a token count cannot satisfy it.
+    r"\bmodel [\"'`]?[\w./:-]{1,60}[\"'`]? not found",
 )
 
 
@@ -2982,6 +3054,7 @@ class LLMProvider(ABC):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
         sandbox_fallback: bool = False,
+        cwd: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Build argv plus the text to write to the child's stdin.
 
@@ -3004,6 +3077,23 @@ class LLMProvider(ABC):
                 :meth:`apply_sandbox_fallback`. Keyword-only, default
                 ``False``, and ignored by every adapter that keeps the default
                 hook, so every existing argv is rendered byte-for-byte.
+            cwd: The directory the child will really be spawned in (``None``
+                means "inherit this process's"), threaded from the spawn site on
+                exactly the terms :meth:`resolve_env` already takes it — this and
+                that hook are the only two that see the real workspace, and an
+                adapter whose **argv** carries a workspace-scoped token needs it
+                for the same reason an adapter's env delta does. omp is that
+                adapter: launched from ``$HOME`` without ``--cwd`` it silently
+                relocates to ``/tmp``, with nothing on either channel to say so,
+                and a reviewer that moved there reads none of the repo's files
+                while still exiting 0.
+
+                **This composition ignores it**, exactly as
+                :meth:`resolve_env`'s does, and does *not* forward it to
+                :meth:`build_command` — so the abstract signature is unchanged
+                and seventeen adapters render argv byte-for-byte. An adapter that
+                wants it overrides this method and declares ``cwd`` on its own
+                ``build_command``.
 
         Returns:
             ``(argv, stdin_text)``; ``stdin_text`` is ``None`` unless the

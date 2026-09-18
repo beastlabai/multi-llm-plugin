@@ -97,6 +97,7 @@ from .git_utils import get_project_root
 from .html_report_generator import (
     generate_html_report,
     write_html_report,
+    model_label,
     served_model_label,
     sort_raw_groups_by_priority,
     compute_max_importance,
@@ -1345,6 +1346,103 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     return fields
 
 
+def usage_fields(details: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``usage`` key from an invocation's ``details``, or ``{}``.
+
+    The sibling of :func:`served_model_fields`, and for the same reason: the
+    per-model record's shape is one function's, not a literal repeated at each
+    of ``run_single_model``'s returns, so a slot that succeeded and a slot that
+    failed cannot disagree about what a recorded run looks like.
+
+    Absent means the adapter reported nothing — either it declares
+    ``usage_support = "none"``, or this particular stream carried no usage
+    block. It never means "free": an empty dict or a zeroed one would average
+    into a run total and read as a run that cost nothing, which is the one
+    reading these numbers exist to prevent.
+
+    For **one** invocation's ``details``. A slot that retried spent what every
+    attempt spent, so the retry lane folds its attempts together with
+    :func:`accumulate_usage` and renders the aggregate through
+    :func:`usage_total_fields`, which is the same shape this returns.
+    """
+    return usage_total_fields((details or {}).get("usage"))
+
+
+def usage_total_fields(spent: Any) -> Dict[str, Any]:
+    """:func:`usage_fields`' shape, from a block already summed over attempts.
+
+    The single owner of "what a usage key looks like on a per-model record",
+    which is why :func:`usage_fields` delegates to it rather than spelling the
+    dict a second time: a slot that answered on its first attempt and one that
+    answered on its third must produce the same shape, and the two call sites
+    differ only in where the numbers came from.
+    """
+    return {"usage": spent} if isinstance(spent, dict) and spent else {}
+
+
+def accumulate_usage(
+    total: Optional[Dict[str, Any]], details: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """This slot's usage so far, with one more attempt's block folded in.
+
+    The outer retry loop REPLACES ``details`` on every attempt, so reading the
+    last one reports what the winning attempt spent and silently drops every
+    attempt before it. A reproduced failure that burned $1 and was then retried
+    into a $2 success reported $2 — understating the slot, the checkpoint's
+    ``usage`` block and the report header by exactly the cost of the attempts
+    an operator is most likely to be asking about. Lane B has always summed
+    them (``subagent_executor._accumulate_usage``); this is that rule for
+    Lane A.
+
+    Numbers add. Anything else — claude-code files ``served_model`` among its
+    token counts — is carried from the attempt that reported it last, which is
+    the one whose answer travelled, and ``bool`` is excluded because in Python
+    it is an ``int`` and "1 tool use" is not what ``True`` meant. Float sums
+    are rounded to six places for the reason :func:`~utils.html_report_generator.sum_usage`
+    rounds them: ``0.01 + 0.02`` is ``0.030000000000000002`` in binary floating
+    point.
+
+    ``None`` in and nothing reported out stays ``None``: absent must remain
+    distinguishable from a measured zero all the way to the record.
+    """
+    spent = (details or {}).get("usage")
+    if not isinstance(spent, dict) or not spent:
+        return total
+    merged: Dict[str, Any] = dict(total or {})
+    for key, value in spent.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            merged[key] = value
+            continue
+        running = merged.get(key)
+        if isinstance(running, (int, float)) and not isinstance(running, bool):
+            value = running + value
+        merged[key] = round(value, 6) if isinstance(value, float) else value
+    return merged
+
+
+def collect_usage(
+    results: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """``{model_spec: usage}`` for a fan-out, from its per-model records.
+
+    The report-side shape of what :func:`usage_fields` put on each record, built
+    exactly as :func:`collect_served_models` builds its own — including for the
+    slots that FAILED. A failed slot is the one whose cost an operator most
+    wants named: a review that died on a usage cap after 491 s had spent $25 and
+    137 348 output tokens, and every artifact of that run reported a duration.
+    Empty when no adapter in the fan-out reported anything, which is what leaves
+    a duration-only run's ``.status.json`` and report unchanged.
+    """
+    spent: Dict[str, Dict[str, Any]] = {}
+    for model_spec, result in (results or {}).items():
+        if not isinstance(result, dict):
+            continue
+        entry = result.get("usage")
+        if isinstance(entry, dict) and entry:
+            spent[model_spec] = entry
+    return spent
+
+
 def collect_served_models(
     results: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Dict[str, Any]]:
@@ -1408,6 +1506,32 @@ def recorded_served_models(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]
     """
     try:
         recorded = _status_file.read_status(str(phase_dir)).get("models_served")
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        return None
+    if not isinstance(recorded, dict) or not recorded:
+        return None
+    return {
+        spec: entry for spec, entry in recorded.items() if isinstance(entry, dict)
+    } or None
+
+
+def recorded_usage(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """``usage`` as the fan-out wrote it to ``.status.json``, or ``None``.
+
+    The twin of :func:`recorded_served_models`, and needed for the same reason:
+    the per-model ``{model}.json`` a reaggregation re-reads is a bare suggestion
+    list, so what each slot spent survives only because it was written to the
+    checkpoint. Without this read a ``--reaggregate`` produced a report whose
+    badges had lost every number the original run recorded — and a reaggregated
+    report is the one a human reads after a partial run, which is to say after
+    the run whose cost they are most likely to be asking about.
+
+    ``None`` when the checkpoint has no such key (every run of duration-only
+    adapters), read through the same best-effort ``read_status`` every other
+    reaggregate field comes through.
+    """
+    try:
+        recorded = _status_file.read_status(str(phase_dir)).get("usage")
     except Exception:  # noqa: BLE001 - read_status is documented not to raise
         return None
     if not isinstance(recorded, dict) or not recorded:
@@ -1777,7 +1901,11 @@ async def run_single_model(
 
     Returns:
         Dict with keys: success, output, error, prompt, stdout, stderr,
-        duration_seconds, model_spec, source.
+        duration_seconds, model_spec, source — plus, when the invocation
+        reported them, :func:`served_model_fields`' attribution keys and
+        :func:`usage_fields`' ``usage``. Both are built by a function rather
+        than spelled at each return, so the record a winning slot produces and
+        the record a losing one produces cannot drift apart.
 
         ``output`` and ``stdout`` are **not** two names for one thing, and the
         failure returns below are the only place the difference is load-bearing.
@@ -1935,6 +2063,7 @@ async def run_single_model(
                     "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
                     "stderr": stderr_text, "duration_seconds": duration,
                     "model_spec": model_spec, "source": "stdout",
+                    **usage_fields(details),
                 }
 
             if result["success"]:
@@ -1954,6 +2083,15 @@ async def run_single_model(
                     "model_spec": model_spec,
                     "source": "stdout",
                     **served_model_fields(details),
+                    # Stage U: and what it spent. Every record built from THIS
+                    # invocation's `details` carries it — the win, the loss, and
+                    # the harness verdicts above — because a slot that failed
+                    # spent real money too, and the run that ends without an
+                    # answer is the one an operator asks the cost of. The two
+                    # `except` handlers below are the exception, and only
+                    # because `details` is not bound on the path that reaches
+                    # them: they catch OUR failure, not the child's.
+                    **usage_fields(details),
                 }
             else:
                 return {
@@ -1971,7 +2109,8 @@ async def run_single_model(
                     "stderr": stderr_text,
                     "duration_seconds": duration,
                     "model_spec": model_spec,
-                    "source": "stdout"
+                    "source": "stdout",
+                    **usage_fields(details),
                 }
         except Exception as e:
             duration = time.time() - start_time
@@ -1998,6 +2137,12 @@ async def run_single_model(
 
     result: Optional[Dict[str, Any]] = None
     details: Dict[str, Any] = {}
+    # What the slot has spent across EVERY attempt, not the last one's
+    # `details`: the loop below rebinds that on each pass, so a record
+    # built from it reports the winning attempt alone. `None` until an
+    # adapter reports something, which is what keeps "never reported"
+    # distinguishable from a measured zero.
+    slot_usage: Optional[Dict[str, Any]] = None
     stderr_text = ""
     source = "unknown"
     status: Optional[str] = None
@@ -2061,6 +2206,7 @@ async def run_single_model(
             )
 
             details = result.get("details", {})
+            slot_usage = accumulate_usage(slot_usage, details)
             stderr_text = details.get("stderr", "")
             source = result.get("source", "unknown")
             output_file = result.get("output_file", "")
@@ -2164,6 +2310,7 @@ async def run_single_model(
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
+                **usage_total_fields(slot_usage),
             }
 
         # The ladder granted a retry and `next_attempt()` then refused it: what
@@ -2186,6 +2333,9 @@ async def run_single_model(
             return {
                 "success": False, "output": None,
                 "error": f"Rate limited (429) - {action.reason}{budget_note}",
+                # Stage U: a 429 chain is not free — the attempts before the
+                # last one were served and billed — so the record names what
+                # the slot spent getting nowhere.
                 # A 429 is usually announced before a byte of answer, but "usually"
                 # is not "always": a CLI that streamed most of a review and was then
                 # cut off by the vendor mid-response ends the slot here, and the
@@ -2195,7 +2345,8 @@ async def run_single_model(
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
-                "source": source
+                "source": source,
+                **usage_total_fields(slot_usage),
             }
 
         # §7.6(a): a context overflow is TERMINAL. Splitting the prompt is open
@@ -2218,7 +2369,8 @@ async def run_single_model(
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
-                "source": source
+                "source": source,
+                **usage_total_fields(slot_usage),
             }
 
         if result.get("success"):
@@ -2237,6 +2389,8 @@ async def run_single_model(
                 "source": source,
                 # §3.6: the served model rides out with the answer it produced.
                 **served_model_fields(details),
+                # Stage U: so does what producing it cost.
+                **usage_total_fields(slot_usage),
             }
         else:
             error_details = f"{result.get('error', 'Unknown error')}{budget_note}"
@@ -2262,7 +2416,8 @@ async def run_single_model(
                 "stdout": details.get("stdout_excerpt", ""),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
-                "source": source
+                "source": source,
+                **usage_total_fields(slot_usage),
             }
 
     except Exception as e:
@@ -2567,6 +2722,7 @@ async def run_all_models(
     out_dir: Optional[str] = None,
     prefix: Optional[str] = None,
     skip_existing: bool = True,
+    prior_usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run all models with concurrency limit and staggered starts.
 
@@ -2589,6 +2745,12 @@ async def run_all_models(
         out_dir: Optional output directory for log files
         prefix: Optional prefix for log file names
         skip_existing: If True, skip models that already have result files
+        prior_usage: What an earlier attempt of this phase recorded (read off
+            the checkpoint before this run replaced it).  A model answered from
+            its existing ``{model}.json`` invokes no adapter and so reports no
+            usage of its own, so its entry is put back on the skip result here
+            — the one place that knows a result was reused.  A model that
+            really re-runs is never seeded from it.
 
     Returns:
         Dict mapping model spec to result dict
@@ -2630,7 +2792,18 @@ async def run_all_models(
                         "stdout": "", "stderr": "",
                         "duration_seconds": 0.0,
                         "model_spec": model_spec,
-                        "source": "existing_file"
+                        "source": "existing_file",
+                        # Stage U: the result is reused, so what it cost is
+                        # reused with it — through the same `usage_fields`
+                        # shape a real invocation's record carries, so
+                        # `collect_usage` cannot tell the two apart and the
+                        # `models_complete` write keeps a number an earlier
+                        # attempt really paid for. Absent when that attempt
+                        # reported none, which is what leaves a duration-only
+                        # fan-out's checkpoint exactly what it was.
+                        **usage_fields(
+                            {"usage": (prior_usage or {}).get(model_spec)}
+                        ),
                     }
             except (json.JSONDecodeError, IOError):
                 print(f"[{display_name}] Existing result file corrupt, re-running...")
@@ -3007,6 +3180,7 @@ def aggregate_results(
     template_style: str = 'pr',
     diff_data: Optional[Dict] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """Aggregate all model results into a consolidated markdown report.
 
@@ -3033,6 +3207,11 @@ def aggregate_results(
             configured fallback is named as such on the ``**Models:**`` line and
             in the HTML report; with nothing configured this is empty and the
             report is byte-for-byte what it was.
+        usage: Optional per-model usage (``{model_spec: usage}``, from
+            :func:`collect_usage`).  Each reporting model's clause joins its
+            entry on the ``**Models:**`` line and its badge in the HTML report;
+            a model that reported nothing renders nothing, so a run of
+            duration-only adapters is byte-for-byte what it was.
 
     Returns:
         Path to the generated report
@@ -3078,7 +3257,11 @@ def aggregate_results(
         "",
         f"**Original plan:** {prefix}.md",
         f"**Generated:** {timestamp}",
-        f"**Models:** {', '.join(served_model_label(m, served_models) for m in successful_models)}",
+        # `model_label`, not `served_model_label`: this line names each model
+        # once, which is the one place a cost belongs. (The per-issue
+        # `**Model:**` field in the code-review report repeats per finding and
+        # keeps the bare attribution label.)
+        f"**Models:** {', '.join(model_label(m, served_models, usage) for m in successful_models)}",
         f"**Groups:** {len(groups_to_display) if groups_to_display else 0}",
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
@@ -3135,6 +3318,7 @@ def aggregate_results(
             template_style=template_style,
             diff_data=diff_data,
             served_models=served_models,
+            usage=usage,
         )
         write_html_report(html_content, Path(phase_dir))
         print(f"HTML report written to: {os.path.join(phase_dir, 'report.html')}")
@@ -3854,6 +4038,9 @@ async def reaggregate_from_existing_files(
         template_style=template_style,
         diff_data=diff_data,
         served_models=recorded_served_models(phase_dir),
+        # …and what it spent, read back off the same checkpoint for the same
+        # reason: the per-model files never held it.
+        usage=recorded_usage(phase_dir),
     )
 
     print("\nReaggregation complete!")
@@ -4150,6 +4337,16 @@ async def run_review_orchestration(
     if outcome is not None:
         sys.exit(outcome)
 
+    # Stage U: what an earlier attempt of this phase recorded, read *before*
+    # the write below — `write_status` replaces every key but the two reserved
+    # objects, so the `usage` the last attempt wrote is gone the instant it
+    # lands, and a resume's skipped models (which invoke no adapter) never
+    # refill it. Without this the regenerated report and every `--reaggregate`
+    # after it lost the numbers the first attempt paid for. Handed to the
+    # fan-out rather than merged into `collect_usage`'s result wholesale, so
+    # only a REUSED slot is restored: a model that really re-ran is reported on
+    # what this attempt spent.
+    prior_usage = recorded_usage(phase_dir) or {}
     write_status(phase_dir, {
         "phase": phase_name,
         "state": "models_running",
@@ -4184,6 +4381,7 @@ async def run_review_orchestration(
         out_dir=out_dir,
         prefix=prefix,
         skip_existing=not getattr(args, "rerun_all", False),
+        prior_usage=prior_usage,
     )
 
     # Save per-model results
@@ -4221,6 +4419,11 @@ async def run_review_orchestration(
     # and `--reaggregate` reads both back off `.status.json`'s `models_served`.
     served_models = collect_served_models(results)
     record_sandbox_bypassed(phase_dir, served_models)
+    # Stage U, the same argument one field over: what each slot spent is on its
+    # record and nowhere else, and `{model}.json` is a bare suggestion list, so
+    # a reaggregation would lose every number unless the checkpoint carries it.
+    # Collected for the failed slots too — `collect_usage` says why.
+    usage = collect_usage(results)
 
     # D3b: a salvage task exists for every model whose output would not parse.
     # With --exec-subagents this run repairs them itself; a model whose result
@@ -4274,6 +4477,10 @@ async def run_review_orchestration(
         # Added only when something was attributed, so a default run's
         # `.status.json` gains no key.
         **({"models_served": served_models} if served_models else {}),
+        # Same rule for what the fan-out spent: absent unless some adapter
+        # reported it, so "no key" keeps meaning "nothing was reported" rather
+        # than "this run was free".
+        **({"usage": usage} if usage else {}),
     })
     # Restates the count rather than adding to it: `run_all_models` advanced it
     # per finished *slot*, and this is the same number re-derived from the
@@ -4457,6 +4664,7 @@ async def run_review_orchestration(
         template_style=template_style,
         diff_data=diff_data,
         served_models=served_models or None,
+        usage=usage or None,
     )
 
     # Handle consolidation recommendation (only for phases that support it)

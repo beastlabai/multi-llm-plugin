@@ -569,6 +569,35 @@ changes:
       isolated HIGH-risk batches now dispatch first ([password, zero-downtime,
       mixed]) instead of after the mixed MEDIUM batch. The batches' contents
       did not change; see the block comment above.
+  # ---------------------------------------------------------------------------
+  # Stage U — the fan-out records what each slot spent.
+  #
+  # `.status.json` gains a `usage` object beside `models_served`: one entry per
+  # model whose adapter could say what its slot cost, written from the same
+  # per-model records `models_served` is built from and read back by
+  # `--reaggregate` (`recorded_usage`), because the per-model `{model}.json` is a
+  # bare suggestion list and would lose every number otherwise. Before this, a
+  # completed slot's usage was parsed out of the provider envelope for the answer
+  # and then discarded, so no artifact of a *successful* run named a token count
+  # or a cost anywhere.
+  #
+  # The fixture drives `--models cursor-agent` against the mock provider, and
+  # cursor-agent declares `usage_support = "partial"`: it reports the four token
+  # counts and no `cost_usd`, which is exactly the four leaves below. The phase's
+  # own instructions, its artifacts and every other key of the checkpoint are
+  # untouched — this is an added key, not a changed one, which is why the
+  # pointer names the new subtree rather than the checkpoint.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/review-plan/status_shape/usage
+    rationale: >
+      Stage U, 2026-09-17 — the fan-out now writes `usage` to `.status.json`
+      next to `models_served`: `{model_spec: {input_tokens, output_tokens,
+      cached_input_tokens, total_tokens[, cost_usd, tool_uses]}}` for each slot
+      whose adapter reported any, so the report and a later `--reaggregate` can
+      name what the run cost. The mock fixture's `cursor-agent` is a
+      `usage_support: "partial"` adapter, hence these four token leaves and no
+      `cost_usd`. Nothing else in the checkpoint moved, and an adapter that
+      reports nothing still writes no key at all.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

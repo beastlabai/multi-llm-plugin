@@ -785,6 +785,67 @@ providers:
     models:
       - openai/gpt-5.6-luna
 
+  omp:
+    default_timeout: 1200
+    # oh-my-pi, binary `omp`. Measured against 18.2.2 (plans/add-omp-provider.md).
+    #
+    # Model names are omp model SELECTORS passed VERBATIM to --model. Run
+    # `omp models openrouter --json` for the catalog — the field to copy is
+    # `selector` (openrouter/openai/gpt-5.6-luna), not `id`
+    # (openai/gpt-5.6-luna). The lookup is local (~/.omp/agent/models.db) and
+    # needs no network.
+    #
+    # AUTH — omp's own $env chain, in the order omp reads it:
+    #   1. the process environment. THIS adapter passes OPENROUTER_API_KEY
+    #      through explicitly (utils/providers/omp.py get_env), so the key
+    #      survives a run with `env_allowlist: on`, which would otherwise drop
+    #      it — nothing in omp's allowlist profile admits a name outside the
+    #      PI_/OMP_ family. It is passed through only when the process has one;
+    #      an empty value would shadow the file sources below.
+    #   2. a `.env` in the directory the run starts from. A checked-out repo
+    #      carrying its own OPENROUTER_API_KEY therefore OUTRANKS the key you
+    #      exported — see docs/configuration.md §Safety.
+    #   3. ~/.omp/agent/.env      <- the source that depends on nothing in the
+    #   4. ~/.omp/.env, then ~/.env   parent environment; use it when the key is
+    #                                 not exported in the shell the run starts in.
+    # No login state, no keyring, and no auth-status subcommand — so `doctor`
+    # reports omp's auth row as `unprobed`, which is not a fault.
+    #
+    # ":effort" suffix -> "--thinking <level>". Valid: off, minimal, low,
+    # medium, high, xhigh, max. omp does NOT validate the flag (it accepts and
+    # ignores anything), so this whitelist is the only guard. The suffix is
+    # stripped before --model; unknown suffixes (":free" ids, bedrock
+    # "...-v1:0", and omp's own ":auto") stay part of the model name, which is
+    # how omp:<model>:auto still reaches omp's native parser.
+    #
+    # TOOL TIER: `--approval-mode yolo`, BOUNDED BY AN EXPLICIT ALLOW-LIST
+    # (`--tools read,grep,glob,find,bash,edit,write`). Every narrower mode
+    # denies `bash` headless, and the measured consequence is worse than a slow
+    # failure: under `--approval-mode write` the model answered
+    # `git version 2.43.0` after three denials without ever running the command.
+    # A reviewer that invents `git diff` output is a wrong review that looks
+    # right. Tools outside the allow-list are ABSENT rather than denied, which
+    # is the shape that produced an honest refusal. See read_only_modes.omp
+    # below for the declared bypass.
+    #
+    # The prompt travels on STDIN by default, not argv: a 200 KB review prompt
+    # is E2BIG from the kernel before omp starts, while the same prompt over
+    # stdin is answered in one call.
+    #
+    # Every dispatch loads assets/omp/overlay.yml with --config (retry bound,
+    # project-MCP suppression). It is read at an absolute path and a missing
+    # file is a fast, named launch failure rather than a silent fallback to
+    # omp's defaults.
+    #
+    # NOTE: this repo's AGENTS.md / CLAUDE.md are injected into every omp
+    # dispatch and `--no-rules` does not stop it. Kept on for parity with
+    # claude-code; the opt-out is a commented block in that overlay.
+    models:
+      - openrouter/openai/gpt-5.6-luna
+      - openrouter/z-ai/glm-5.2
+      - openrouter/moonshotai/kimi-k2.7-code
+      - openrouter/openai/gpt-5.5
+
 
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent
@@ -936,6 +997,49 @@ read_only_modes:
   muse:
     mechanism: null
     probed: null
+  omp:
+    # `generate` renders NO read-only mode, so this stays null. Two read-only
+    # mechanisms ARE measured at 18.2.2 and are recorded here for the
+    # agent-readonly follow-up rather than guessed at then:
+    #   * `--tools read,grep,glob,find` — the write-class tools are ABSENT, and
+    #     asked to create a file the model answered "file-writing tools are
+    #     unavailable" and none appeared. PREFERRED: an honest refusal, and the
+    #     only candidate compatible with the parser's denial policy.
+    #   * `--approval-mode always-ask` — read/grep run unapproved, every
+    #     write-class tool is denied with "requires approval but no interactive
+    #     UI available". Under that mode every denied write is a FAILED run by
+    #     construction (utils/providers/omp.py parse_output step 3).
+    # Either moves into `mechanism:` on the day a profile renders it, with its
+    # own probe transcript in `probed:`.
+    mechanism: null
+    probed: null
+    bypass_exception:
+      token: "yolo"
+      profile: generate
+      reason: >-
+        `--approval-mode yolo` is what this adapter renders on `generate`, and
+        `yolo` is the one token negative_tokens_in_argv reports for that pair
+        (the flag element is in neither NEGATIVE_FLAG_TOKENS nor
+        NEGATIVE_TOKEN_PREFIXES). It is not inherited and not a default this
+        adapter fell back to: omp's FACTORY default is already `yolo` over every
+        tool, so there is no safe default to inherit and the explicit flag is
+        what makes both the factory value and the user's config.yml irrelevant.
+        Measured at 18.2.2: every narrower mode denies `bash` headless, and
+        prompts/code_review.txt tells the model to run `git diff`. Under
+        `--approval-mode write` the model answered `git version 2.43.0` after
+        three denials without ever running the command — a fabricated tool
+        output inside a review that looks right. The actual bound is the
+        allow-list `--tools read,grep,glob,find,bash,edit,write`, under which
+        every other tool is absent rather than denied. ACCEPTED BY THE
+        REPOSITORY OWNER, 2026-09-17, for the `generate` profile only: an
+        agent-write executor profile is a separate decision on its own
+        measurement.
+      retires_when: >-
+        omp grants a per-tool allow ON ARGV — `tools.approval.bash: allow`
+        exists today only as a config key (the denial text advertises it), and
+        putting it in the overlay would be the same bypass moved out of the
+        guard's sight, so that is rejected rather than deferred — or the
+        code-review prompt stops shelling out.
   opencode:
     # CANDIDATE, DELIBERATELY NOT WRITTEN AS A VALUE: `--agent plan` is already
     # this adapter's agent-readonly leg and AGENTS.md names it. No probe on
@@ -1145,6 +1249,7 @@ defaults:
     #- aider:openrouter/z-ai/glm-5.2
     #- "agy:Gemini 3.1 Pro (High)"
     #- pi:openrouter/z-ai/glm-5.2
+    #- omp:openrouter/openai/gpt-5.6-luna
     #- muse:muse-spark-1.2:xhigh
     #- kimi:moonshotai/kimi-k2-thinking
     #- qwen-code:qwen/qwen3.8-max

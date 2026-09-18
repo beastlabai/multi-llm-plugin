@@ -201,6 +201,42 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
         )
         assert "ARG GROK_VERSION=1.0.3" in dockerfile
 
+    def test_the_omp_row_moves_its_three_args_and_its_url_together(
+            self, container_dir, evidence, tmp_path):
+        """The second download row, and the one whose URL carries a `v` prefix.
+
+        `retarget_url` substitutes the bare version inside the recorded URL and
+        refuses anything but an exactly-once match, so a tag spelled `v18.2.2`
+        against a row version of `18.2.2` is the case worth pinning: the tag is
+        where the only occurrence lives.
+        """
+        import hashlib
+
+        root = evidence({"omp": "19.0.1"})
+        expected = hashlib.sha256(b"omp-19.0.1").hexdigest()
+        assert _apply(container_dir, root, tmp_path) == 0
+
+        lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
+        artifact = lock["artifacts"]["omp"]
+        assert artifact["version"] == "19.0.1"
+        assert artifact["sha256"] == expected, (
+            "the digest must be recomputed from /opt/mllm/real/omp, which is the "
+            "artifact itself only while `install: download` copies it unchanged"
+        )
+        assert artifact["url"].endswith("/v19.0.1/omp-linux-x64")
+        assert "18.2.2" not in artifact["url"]
+        assert artifact["releases_url"].endswith("/releases/latest"), (
+            "the channel pointer carries no version and must not be rewritten"
+        )
+
+        dockerfile = (container_dir / "Dockerfile").read_text("utf-8")
+        assert "ARG OMP_VERSION=19.0.1" in dockerfile
+        assert f"ARG OMP_SHA256={expected}" in dockerfile
+        assert f"ARG OMP_URL={artifact['url']}" in dockerfile, (
+            "all three ARGs move together or the build verifies bytes the lock "
+            "does not name; tests/test_dockerfile_pins.py asserts they agree"
+        )
+
     def test_muses_manifest_url_follows_its_version(
             self, container_dir, evidence, tmp_path):
         _apply(container_dir, evidence({"muse": "0.1.0-R900.2"}), tmp_path)

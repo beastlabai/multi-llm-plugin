@@ -114,10 +114,22 @@ records what changed rather than being deleted.
    `base.SERVER_ERROR_MARKERS`, whose entries all want the literal "server
    error", "internal server error" or "api error". Both categories are retryable
    so the ladder still behaves; the `Reason:` line a user acts on is wrong.
-4. **`ECONNRESET` classifies as `runner_error`, not `connection_error`.**
-   `CONNECTION_ERROR_MARKERS` matches `connection (?:refused|reset|closed|…)` as
-   one token and cline writes *"connection was closed"*; the table carries
-   `ECONNREFUSED` but not `ECONNRESET`.
+4. **`ECONNRESET` classified as `runner_error`, not `connection_error` —
+   FIXED.** `CONNECTION_ERROR_MARKERS` matched `connection (?:refused|reset|
+   closed|…)` as one token and cline writes *"connection was closed"*, so the
+   sentence fell past the connection table and was caught one rung lower by
+   `exit_zero_failure_markers` — the last-resort "this run failed at all"
+   verdict rather than a reading of the cause. The shared row is now
+   `connection (?:was )?(?:refused|reset|closed|…)`, driven by this row's own
+   bytes, and `zero-body` reads `connection_error`. The widening was deferred
+   while omp landed, because omp's `empty` row carries the **identical**
+   Bun/undici sentence and re-pinning two adapters at once is the whole change;
+   both were re-pinned together on 2026-09-18. The table still carries
+   `ECONNREFUSED` and not `ECONNRESET`, which no longer matters here: the
+   sentence in front of it matches. Retry behaviour for this row did not move —
+   cline declares no `describe_failure`, so Lane A's haystack is the bare
+   `cline exited with code 1` either way — but the `Reason:` line a user acts on
+   went from *"the runner reported a failure"* to *"Connection/network error"*.
 
 ## Reproducing
 

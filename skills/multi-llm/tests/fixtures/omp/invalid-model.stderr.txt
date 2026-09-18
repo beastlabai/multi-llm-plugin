@@ -1,0 +1,6 @@
+Model "stub/nonexistent" not found
+
+Set an API key environment variable:
+  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.
+
+Or create /home/e2e/.omp/agent/models.yml

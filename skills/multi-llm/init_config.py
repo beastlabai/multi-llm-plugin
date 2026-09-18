@@ -1020,7 +1020,7 @@ def _write_config(
             ".multi-llm/providers.yaml that inherits the built-in defaults.\n"
             "Install one of: claude, cursor-agent, gemini, grok, opencode, "
             "codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, "
-            "vibe and "
+            "vibe, omp and "
             "re-run `--init`."
         )
     else:

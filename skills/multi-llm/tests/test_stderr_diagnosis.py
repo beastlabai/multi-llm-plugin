@@ -70,6 +70,7 @@ classes — so an override cannot land without declaring the stream it reads, an
 kilocode's row is ``stderr``.
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -88,6 +89,8 @@ from utils.providers.muse import MuseProvider  # noqa: E402
 from utils.providers.gemini import _MAX_DIAGNOSIS_CHARS as GEMINI_CAP  # noqa: E402
 from utils.providers.kilocode import KiloCodeProvider  # noqa: E402
 from utils.providers.kilocode import _MAX_DIAGNOSIS_CHARS as KILOCODE_CAP  # noqa: E402
+from utils.providers.omp import OmpProvider  # noqa: E402
+from utils.providers.omp import stderr_diagnosis as omp_stderr_diagnosis  # noqa: E402
 from utils.providers.pi import PiProvider  # noqa: E402
 from utils.providers.pi import _MAX_DIAGNOSIS_CHARS as PI_CAP  # noqa: E402
 
@@ -331,6 +334,189 @@ def _kilocode_streams(row):
 
 
 # --------------------------------------------------------------------------- #
+# omp's pre-flight captures — literals, for kilocode's reason
+# --------------------------------------------------------------------------- #
+#
+# `tests/fixtures/omp/` is the §6.2 rig's business and holds the JSONL STREAMS
+# the parser is graded on. These are the other channel: the pre-flight faults,
+# which are the one shape omp puts on stderr at all. In `--mode json` a
+# run that reached the backend writes a JSONL stream to stdout and ZERO bytes to
+# stderr — on success and on an API failure alike — so everything below is a
+# fault that happened before the first request, at zero spend, with an empty
+# stdout. They are written here as literals because that is where the rule they
+# grade lives: `stderr_diagnosis` is a module-level function in `omp.py` with
+# three reductions and no tier machinery, and the bytes are short enough to read
+# in place.
+#
+# Captured 2026-09-17 against omp 18.2.2 by running the real binary with
+# `stdin` at /dev/null (an inherited non-EOF pipe blocks omp forever at startup
+# phase `readPipedInput`, which is its own §1.6 measurement). One edit, and it is
+# marked here rather than left to be noticed: the capturing user's home path is
+# rewritten to `/home/e2e`. Nothing else was touched.
+
+#: A bad `--model`: exit 1, 0 B stdout, four lines of plain text. No stack trace
+#: at all — omp only dumps one when the failure came out of its own code.
+OMP_MODEL_NOT_FOUND = (
+    'Model "openrouter/nope/does-not-exist" not found\n'
+    "\n"
+    "Set an API key environment variable:\n"
+    "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n"
+    "\n"
+    "Or create /home/e2e/.omp/agent/models.yml\n"
+)
+
+#: No credential on the `$env` chain: the diagnosis, then the Bun frames. Both
+#: indentations `omp._BUN_NOISE` knows about appear here on purpose — the binary
+#: emitted the six-space form, and the four-space one is the shape a frame with
+#: no source position takes — so the strip is graded on both rather than on
+#: whichever the capture happened to carry.
+OMP_NO_API_KEY = (
+    "error: No API key found for openrouter.\n"
+    "\n"
+    "Use /login, set an API key environment variable, or create "
+    "/home/e2e/.omp/agent/agent.db\n"
+    "      at #xo (/$bunfs/root/omp-linux-x64:466354:15)\n"
+    "      at async #in (/$bunfs/root/omp-linux-x64:466139:25)\n"
+    "    at write (unknown)\n"
+    "    at <anonymous> (/$bunfs/root/omp-linux-x64:587578:27)\n"
+)
+
+#: A rejected `--tools` name. Validated BEFORE model resolution, so this costs
+#: nothing — and the "Valid tools:" list in it is incomplete and changes between
+#: runs, which is why nothing in this repo parses it.
+OMP_UNKNOWN_TOOL = (
+    "CliUsageError: Unknown tool in --tools: python. Valid tools: read, write, "
+    "goal, init_experiment, run_experiment, log_experiment, update_notes.\n"
+    "      at s8e (/$bunfs/root/omp-linux-x64:19535:9)\n"
+    "      at VU (/$bunfs/root/omp-linux-x64:603636:12)\n"
+)
+
+#: The SAME failure as :data:`OMP_NO_API_KEY`, as the binary really writes it:
+#: Bun prints a **source-context prelude** — numbered lines of the minified
+#: single-file binary's own source, then a caret column — *ahead* of the
+#: `error:` line, and only then the frames. Taken verbatim from
+#: `tests/fixtures/omp/auth-error-preflight.stderr.txt`, trimmed to two source
+#: lines because the shape is what matters and six is just more of it.
+#:
+#: This row is why the strip is three patterns and not one. The frames follow
+#: the diagnosis and cost nothing but noise; the prelude PRECEDES it, and pi's
+#: 300-character cap — which `stderr_diagnosis` reuses — was being spent
+#: entirely on minified source, ellipsing the one sentence a user acts on.
+OMP_SOURCE_CONTEXT_PRELUDE = (
+    "466353 |         const n = await this.#ge.getApiKey(this.model, this.sessionId);\n"
+    "466354 |           throw new Error(`No API key found for ${this.model.provider}.\n"
+    "                       ^\n"
+    "error: No API key found for openrouter.\n"
+    "\n"
+    "Use /login, set an API key environment variable, or create "
+    "/home/e2e/.omp/agent/agent.db\n"
+    "      at #xo (/$bunfs/root/omp-linux-x64:466354:15)\n"
+)
+
+#: Text mode's spinner, which precedes the diagnosis there
+#: (`Working...\n401 User not found.`). This adapter never renders text mode —
+#: it always passes `--mode json` — so the row is a guard against the day a
+#: degraded argv does, not a shape any current dispatch produces.
+OMP_TEXT_MODE_SPINNER = "Working...\n401 User not found.\n"
+
+
+def _omp_stderr(row):
+    """One omp capture's stderr; its stdout is 0 bytes on every pre-flight row.
+
+    ``vendor-json`` is the exception and is not omp's own output at all: it is
+    ``pi``'s committed ``auth-error`` capture, borrowed to state the negative
+    (see :data:`OMP_TIERS`).
+    """
+    if row == "vendor-json":
+        return _streams("pi", "auth-error")[1]
+    return {
+        "model-not-found": OMP_MODEL_NOT_FOUND,
+        "no-api-key": OMP_NO_API_KEY,
+        "source-context-prelude": OMP_SOURCE_CONTEXT_PRELUDE,
+        "unknown-tool": OMP_UNKNOWN_TOOL,
+        "text-mode-spinner": OMP_TEXT_MODE_SPINNER,
+        "json-mode-silence": "",
+    }[row]
+
+
+#: omp's rows are **all one tier**, and that is the measurement rather than an
+#: omission: `stderr_diagnosis` is pi's verbatim rung with two omp-specific
+#: strips in front of it, and pi's second rung has nothing to parse here because
+#: omp writes no `NNN: {json}` prefix.
+#:
+#: ``vendor-json`` is what makes that a claim and not a shrug. It is pi's own
+#: `auth-error` bytes — the exact shape pi's vendor-JSON tier exists for — and
+#: omp reports them VERBATIM where pi recomposes them into
+#: `401: Incorrect API key provided: … (invalid_api_key)`. A future edit that
+#: taught omp to parse a vendor body would move this cell, which is the point.
+#: ``json-mode-silence`` is rung 5: in json mode stderr is 0 bytes on success and
+#: on an API failure alike, and nothing is invented from that.
+OMP_TIERS = {
+    "model-not-found": PiProvider.TIER_VERBATIM,
+    "no-api-key": PiProvider.TIER_VERBATIM,
+    "source-context-prelude": PiProvider.TIER_VERBATIM,
+    "unknown-tool": PiProvider.TIER_VERBATIM,
+    "text-mode-spinner": PiProvider.TIER_VERBATIM,
+    "vendor-json": PiProvider.TIER_VERBATIM,
+    "json-mode-silence": None,
+}
+
+#: The vendor's own words, per row — what a reader has to be left holding.
+OMP_WORDS = {
+    "model-not-found": ('Model "openrouter/nope/does-not-exist" not found',),
+    "no-api-key": ("No API key found for openrouter.",),
+    "source-context-prelude": ("No API key found for openrouter.",),
+    "unknown-tool": ("Unknown tool in --tools: python",),
+    "text-mode-spinner": ("401 User not found.",),
+    "vendor-json": ("Incorrect API key provided", "invalid_api_key"),
+}
+
+#: What must NOT survive, per row. Each is a reduction with a reason:
+#: `Working...` is text mode's spinner and says nothing about the failure, and a
+#: Bun frame names an offset inside a 251 MB single-file binary, which is noise
+#: to everyone who is not upstream.
+OMP_DROPPED = {
+    "no-api-key": ("at #xo", "at async #in", "at write (unknown)", "$bunfs"),
+    # The prelude's own three shapes, plus the proof that the sentence behind it
+    # survives: before the strip reached these lines the diagnosis was
+    # `466353 | const n = await this.#ge.getApiKey(…` and the cap ate the rest.
+    "source-context-prelude": ("466353 |", "466354 |", "^", "at #xo", "$bunfs"),
+    "unknown-tool": ("at s8e", "at VU", "$bunfs"),
+    "text-mode-spinner": ("Working...",),
+}
+
+
+def _omp_tier(stderr):
+    """Which rung answered — and for omp, whether "verbatim" is really true.
+
+    There is no tier constant to read off `stderr_diagnosis`: it returns a
+    string. So the tier is *derived* from the answer, by asking the question the
+    word `verbatim` makes: is every word of the diagnosis one of the stderr's
+    own words, in the stderr's own order? pi's vendor-JSON rung fails that test
+    by construction — it lifts `message` and `code` out of a JSON body and
+    re-composes them with parentheses that appear nowhere in the bytes — so a
+    row that started being parsed here would come back `parsed` and move its
+    cell, rather than passing because the assertion was only "some string".
+    """
+    diagnosis = omp_stderr_diagnosis(stderr)
+    if not diagnosis:
+        return None
+    words = diagnosis.split()
+    if diagnosis.endswith("…"):
+        # The cap cuts mid-token; that last fragment is not a word to match.
+        words = words[:-1]
+    haystack = stderr.split()
+    index = 0
+    for word in words:
+        while index < len(haystack) and haystack[index] != word:
+            index += 1
+        if index == len(haystack):
+            return "parsed"
+        index += 1
+    return PiProvider.TIER_VERBATIM
+
+
+# --------------------------------------------------------------------------- #
 # Rungs 2 and 3 — which tier answered
 # --------------------------------------------------------------------------- #
 
@@ -352,6 +538,17 @@ class TestEveryCaptureLandsOnItsDeclaredTier:
         tier = None if diagnosis is None else diagnosis[0]
 
         assert tier == GEMINI_TIERS[row]
+
+    @pytest.mark.parametrize("row", sorted(OMP_TIERS))
+    def test_omp(self, row):
+        """omp's rung, derived rather than read off a constant (`_omp_tier`).
+
+        omp has no `_diagnose` and no tier machinery: `stderr_diagnosis` is one
+        function with three reductions, and every row lands on what pi calls its
+        verbatim rung. The derivation is what keeps that from being vacuous — a
+        row omp started PARSING would come back `parsed` and fail here.
+        """
+        assert _omp_tier(_omp_stderr(row)) == OMP_TIERS[row]
 
     @pytest.mark.parametrize("provider,table", [("pi", PI_TIERS), ("gemini", GEMINI_TIERS)])
     def test_the_table_names_every_committed_capture(self, provider, table):
@@ -416,6 +613,15 @@ class TestTheMessageCarriesTheVendorsWords:
 
         assert reason is not None
         for needle in GEMINI_WORDS[row]:
+            assert needle in reason
+
+    @pytest.mark.parametrize("row", sorted(OMP_WORDS))
+    def test_omp(self, row):
+        stderr = _omp_stderr(row)
+        reason = OmpProvider().describe_failure("", stderr)
+
+        assert reason is not None
+        for needle in OMP_WORDS[row]:
             assert needle in reason
 
     def test_every_pi_failure_row_gets_a_distinct_message(self):
@@ -831,6 +1037,28 @@ class TestGeminiAuthPatterns:
         assert matches_any((pattern,), haystack)
         assert not matches_any(LLMProvider.auth_error_patterns, haystack)
 
+    #: Capture-name prefixes the byte sweep below skips, each because carrying
+    #: these wordings is the row's WHOLE JOB rather than an accident.
+    #:
+    #: ``auth-error`` (and ``auth-error-preflight``) is the original: a 401 row
+    #: is the one place an auth wording is supposed to appear.
+    #:
+    #: ``markers-in-tool-result`` joined with omp's fixtures (2026-09-17) and is
+    #: the other shape entirely — a hazard this file had no example of before.
+    #: The markers sit inside a ``read`` ``tool_execution_end``: our own data
+    #: handed back to us, a reviewer that read a plan quoting ``401 User not
+    #: found.``, while the run really ended on a 429. Under ``classify_streams``'
+    #: fixed order (auth before rate limit) that quoted 401 would outrank the
+    #: real 429 and fail the whole batch ``auth_failed`` with no retry, and what
+    #: stops it is ``OmpProvider.vendor_text`` reducing the stream to the
+    #: terminal message's own sentence before any table is consulted. The
+    #: manifest grades exactly that on this row — ``classify_failure:
+    #: rate_limited`` over bytes whose ``raw_contains`` names the quoted 401 — so
+    #: the claim is asserted, and harder than here. A byte grep is asking a
+    #: different question of the same file, and the only way to answer it would
+    #: be to delete the evidence.
+    _CAPTURES_THAT_MAY_CARRY_THE_WORDS = ("auth-error", "markers-in-tool-result")
+
     def test_no_success_capture_anywhere_matches_the_new_patterns(self):
         """C1's hazard, checked the way C3 asks: against the ECHOING adapters.
 
@@ -864,8 +1092,8 @@ class TestGeminiAuthPatterns:
         for path in sorted(FIXTURES.glob("*/*")):
             if path.suffix not in (".txt", ".jsonl", ".json") or path.name == "manifest.yaml":
                 continue
-            if path.name.startswith("auth-error"):
-                continue  # the one place these words are supposed to appear
+            if path.name.startswith(self._CAPTURES_THAT_MAY_CARRY_THE_WORDS):
+                continue
             haystack = "\n" + path.read_text(encoding="utf-8", errors="replace").lower()
             for provider, patterns in added.items():
                 for pattern in patterns:
@@ -1109,6 +1337,155 @@ class TestKilocodeNamesTheAccountFailureInsteadOfItsExitCode:
         assert len(reason) <= KILOCODE_CAP
         assert reason.endswith("…")
         assert len(stderr) > 50 * len(reason)
+
+
+class TestOmpStripsTheSpinnerAndTheBunTrace:
+    """omp's pre-flight channel: three reductions, and what each one is for.
+
+    This is the half of omp's failure reporting that does NOT come off the
+    stream. In `--mode json` every failure that reached the backend rides
+    in-stream — `stopReason: "error"` with an `errorStatus` and an
+    `errorMessage` — and stderr is 0 bytes; `describe_failure` recovers those
+    through the shared terminal-verdict reader, and the §6.2 rig grades them
+    against committed captures. What is left for stderr is the pre-flight set:
+    a bad model, a missing key, a rejected `--tools` name, a missing overlay.
+    Those exit 1 with an empty stdout, and `stderr_diagnosis` is the only thing
+    standing between them and an operator reading `omp exited with code 1`.
+    """
+
+    def test_the_tier_table_names_every_capture(self):
+        """A new row forces a rung decision instead of going ungraded — the same
+        rule `test_the_table_names_every_committed_capture` applies to pi and
+        gemini, read against the literals above because that is where omp's
+        pre-flight bytes live."""
+        assert sorted(OMP_TIERS) == sorted(set(OMP_WORDS) | {"json-mode-silence"})
+
+    def test_there_is_no_vendor_json_tier_and_that_is_measured(self):
+        """The same bytes, read by the two adapters that share `parse_answer_text`.
+
+        pi's second rung parses the `NNN: {json}` body it was written for; omp
+        has no such rung, because omp never writes that prefix — so handed pi's
+        own `auth-error` capture it reports the line as it stands. Asserting it
+        over pi's real bytes is what makes "verbatim tier only" a measurement
+        rather than a description of code nobody exercised.
+        """
+        stderr = _omp_stderr("vendor-json")
+
+        assert PI._diagnose("", stderr)[0] == PiProvider.TIER_VENDOR_JSON
+        assert _omp_tier(stderr) == PiProvider.TIER_VERBATIM
+        assert omp_stderr_diagnosis(stderr) == " ".join(stderr.split())
+
+    @pytest.mark.parametrize("row", sorted(OMP_DROPPED))
+    def test_the_noise_is_dropped_by_name(self, row):
+        """Rung 4, omp's two members of it.
+
+        `Working...` is text mode's spinner and precedes the diagnosis there, so
+        keeping it would put a progress indicator at the front of every text-mode
+        failure. A Bun frame names a byte offset inside a 251 MB single-file
+        binary — `at <anonymous> (/$bunfs/root/omp-linux-x64:587578:27)` — which
+        is noise to everyone who is not upstream, and on the no-key row there are
+        four of them behind one sentence.
+        """
+        diagnosis = omp_stderr_diagnosis(_omp_stderr(row))
+
+        for needle in OMP_DROPPED[row]:
+            assert needle not in diagnosis
+        for needle in OMP_WORDS[row]:
+            assert needle in diagnosis
+
+    def test_a_frame_is_dropped_for_its_indentation_and_not_for_the_word_at(self):
+        """Both frame indentations `_BUN_NOISE` matches, and the negative.
+
+        The rule for the frame arm is the **leading whitespace**, which is what
+        keeps a real sentence containing the word "at" from being mistaken for
+        one — a diagnosis that lost `… at 18.2.2` would be the mirror-image bug,
+        and a sentence that BEGINS `at …` would be lost outright if the arm
+        matched at column zero. The prelude arms are different and deliberately
+        so: a numbered source line and a caret column are unambiguous wherever
+        they sit.
+        """
+        stderr = (
+            "error: something went wrong at startup\n"
+            "      at #xo (/$bunfs/root/omp-linux-x64:466354:15)\n"
+            "    at write (unknown)\n"
+        )
+
+        assert omp_stderr_diagnosis(stderr) == "error: something went wrong at startup"
+        # The mirror image: a diagnosis whose first word is "at" is a sentence,
+        # not a frame, and the arm's required indentation is what tells them
+        # apart at column zero.
+        assert omp_stderr_diagnosis("at the third attempt the model gave up\n") == (
+            "at the third attempt the model gave up"
+        )
+
+    def test_a_silent_channel_is_reported_as_silence(self):
+        """Rung 5. In json mode a 0-byte stderr is the NORMAL case — success and
+        API failure alike — so nothing may be invented from it, and the stream is
+        what speaks instead.
+        """
+        assert omp_stderr_diagnosis("") == ""
+        assert omp_stderr_diagnosis("\n \n\t\n") == ""
+        assert OmpProvider().describe_failure("", "") is None
+
+    @pytest.mark.parametrize("row", sorted(OMP_WORDS))
+    def test_no_message_is_long_multiline_or_noisy(self, row):
+        """Rung 4's bound. The caller keeps the full stream — `details["stderr"]`
+        and the log file — so this hook is the SUMMARY, and it reuses pi's own
+        `_cap` rather than declaring a second number.
+        """
+        diagnosis = omp_stderr_diagnosis(_omp_stderr(row))
+
+        assert diagnosis
+        assert "\n" not in diagnosis
+        assert len(diagnosis) <= PI_CAP
+        assert "    at " not in diagnosis
+
+    def test_a_long_stderr_is_capped_rather_than_copied(self):
+        """No captured pre-flight stderr is long; the cap is for the release that
+        is. Fabricated on purpose, and said so — the only honest way to assert a
+        bound none of the real bytes reach.
+        """
+        stderr = "error: " + ("the overlay could not be read; " * 200)
+
+        diagnosis = omp_stderr_diagnosis(stderr)
+
+        assert len(diagnosis) <= PI_CAP
+        assert diagnosis.endswith("…")
+        assert len(stderr) > 20 * len(diagnosis)
+
+    @pytest.mark.parametrize("row", sorted(OMP_WORDS))
+    def test_the_answer_channel_never_becomes_the_reason(self, row):
+        """Rung 1, asserted with a loud stdout every row is given for free.
+
+        omp's pre-flight stdout is empty, so the rung decides nothing on the
+        bytes alone — and that is exactly when it needs asserting. The stdout
+        used is a `stop` stream carrying a findings array, which is the thing
+        `parse_output` exists to read and the last thing a failure reason may
+        quote; `describe_failure` must answer with the stderr diagnosis, because
+        a `stop` stream carries no verdict of its own.
+        """
+        stderr = _omp_stderr(row)
+        answer = json.dumps(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '[{"title": "A finding", "desc": "…", '
+                                    '"importance": "low"}]',
+                        }
+                    ],
+                    "stopReason": "stop",
+                },
+            }
+        )
+
+        assert omp_stderr_diagnosis(stderr) == omp_stderr_diagnosis(stderr)
+        assert OmpProvider().describe_failure(answer, stderr) == \
+            omp_stderr_diagnosis(stderr)
+        assert OmpProvider().describe_failure(answer, "") is None
 
 
 class TestNoKilocodeClassifyCellMoved:

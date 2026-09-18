@@ -308,17 +308,34 @@ rows:
       after **zero** body bytes. Unlike aider, cline distinguishes this from a
       truncated body — it reports `Cannot connect to API: The socket connection
       was closed unexpectedly … (ECONNRESET)` — so the two are separate files
-      here. The classification is still `runner_error`, because
-      base.CONNECTION_ERROR_MARKERS matches `connection (?:refused|reset|closed|
-      …)` as one token and cline writes "connection was closed"; `ECONNRESET`
-      itself is not in the table (`ECONNREFUSED` is). Recorded, not fixed.
+      here. **Re-pinned `runner_error` → `connection_error` on 2026-09-18**, and
+      these bytes did not change: cline 3.0.55 wrote them in August and writes
+      them still. What changed is `base.CONNECTION_ERROR_MARKERS`, whose row was
+      `connection (?:refused|reset|closed|…)` as one token while cline writes
+      "connection **was** closed", so the sentence fell past the connection
+      table and was caught one rung lower by the adapter's own
+      `exit_zero_failure_markers` — the last-resort "this run failed at all"
+      verdict, not a reading of the cause. The row is now
+      `connection (?:was )?(?:refused|reset|closed|…)`, which is a better
+      reading of the same bytes: a socket dropped after zero body bytes is
+      precisely what `connection_error` means. (`ECONNRESET` itself is still not
+      in the table — `ECONNREFUSED` is — but it no longer has to be, because the
+      sentence in front of it now matches.) omp's `empty` row carries the
+      identical Bun/undici sentence and was re-pinned `null` →
+      `connection_error` in the same change. Retry behaviour for this row is
+      unchanged: cline declares no `describe_failure`, so Lane A's haystack is
+      the bare `cline exited with code 1` either way and the slot is not
+      retried; Lane B's re-classification hook upgrades only to auth, rate
+      limit, invalid model and sandbox, so it never saw the difference. The
+      `Reason:` line does move, "the runner reported a failure" →
+      "Connection/network error", which is the point.
     expect:
       success: false
       error_contains: ["Cannot connect to API"]
       raw_contains:
         - "ECONNRESET"
         - "The socket connection was closed unexpectedly"
-      classify_failure: "runner_error"
+      classify_failure: "connection_error"
 
   server-error:
     stdout: server-error.stdout.txt

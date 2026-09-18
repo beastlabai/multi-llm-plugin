@@ -18,11 +18,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 try:
     from .stream_bootstrap import bootstrap_streams
     from .json_extractor import sanitize_model_name
+    from .metrics import describe_usage
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
     from stream_bootstrap import bootstrap_streams
     from json_extractor import sanitize_model_name
+    from metrics import describe_usage
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,8 @@ _ICON_DEFS: Dict[str, tuple] = {
     "pi":         ("Pi.svg", "P", "#09090B"),
     # SVG sourced from Primer Octicons' copilot-16 icon (MIT)
     "copilot":    ("Copilot.svg", "C", "#24292F"),
+    # SVG sourced from omp.sh/favicon.svg (oh-my-pi's own docs site)
+    "omp":        ("OhMyPi.svg", "O", "#9B4DFF"),
     # No first-party SVG reachable — letter-icon fallback only
     "xiaomi":     (None, "M", "#FF6900"),
     "arcee":      (None, "T", "#3B82F6"),
@@ -137,6 +141,10 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "kimi":         "moonshotai",
     "qwen-code":    "qwen",
     "vibe":         "mistral",
+    # oh-my-pi keeps its own key rather than borrowing "pi": omp fans out
+    # across model families, so a borrowed mark would mislabel the CLI as one
+    # of them — the same reason "antigravity" above is not "google".
+    "omp":          "omp",
 }
 
 
@@ -464,28 +472,21 @@ def get_model_metadata(model_string: str) -> Dict[str, Any]:
     }
 
 
-def served_model_label(
-    model: str, served_models: Optional[Dict[str, Any]] = None
-) -> str:
-    """``model`` as a report label, carrying §3.6's served-model attribution.
+def _attribution_notes(model: str, entry: Any) -> List[str]:
+    """The provenance notes one ``served_models`` entry is worth, in order.
 
-    One renderer for every markdown surface that names a model (the aggregate's
-    ``**Models:**`` line, the code review's per-issue ``**Model:**`` field), so
-    a fallback reads the same wherever it surfaces. Without an entry — which is
-    every run under the shipped, empty ``fallback_models`` — the bare model
-    string is returned and the report is byte-for-byte what it was.
-
-    The D6 override's provenance (2026-09-17) renders on the same label:
-    ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
-    sandbox_fallback=auto``, so a report reader sees which slot's findings
-    came from a model that ran with the operator's shell rights — beside the
-    served-model note when both apply, alone when only one does.
+    Split out of :func:`served_model_label` so the usage clause can join the
+    *same* parenthesis rather than opening a second one after it: a line
+    reading ``model (served by X, fallback) ($0.04 est.)`` says the notes come
+    from two unrelated systems, which is exactly backwards — they are two
+    facts about one slot.
     """
-    entry = (served_models or {}).get(model)
     if not isinstance(entry, dict):
-        return model
-    notes = []
+        return []
+    notes: List[str] = []
     served = entry.get("served_model")
+    # A primary that served its own turn is not an attribution note: it is the
+    # model already printed at the head of the label.
     if served and served != model:
         notes.append(
             f"served by {served}, fallback" if entry.get("fallback")
@@ -493,9 +494,99 @@ def served_model_label(
         )
     if entry.get("sandbox") == "bypassed":
         notes.append(SANDBOX_BYPASSED_LABEL)
+    return notes
+
+
+def served_model_label(
+    model: str, served_models: Optional[Dict[str, Any]] = None
+) -> str:
+    """``model`` as a report label, carrying §3.6's served-model attribution.
+
+    One renderer for every markdown surface that names a model *without* a
+    cost beside it (the code review's per-issue ``**Model:**`` field, which
+    repeats per finding and where a token count would be noise), so a fallback
+    reads the same wherever it surfaces. Without an entry — which is every run
+    under the shipped, empty ``fallback_models`` — the bare model string is
+    returned and the report is byte-for-byte what it was. The summary lines
+    that *do* name a cost use :func:`model_label`, which is this plus the
+    usage clause in the same parenthesis.
+
+    The D6 override's provenance (2026-09-17) renders on the same label:
+    ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
+    sandbox_fallback=auto``, so a report reader sees which slot's findings
+    came from a model that ran with the operator's shell rights — beside the
+    served-model note when both apply, alone when only one does.
+    """
+    notes = _attribution_notes(model, (served_models or {}).get(model))
     if not notes:
         return model
     return f"{model} ({'; '.join(notes)})"
+
+
+def model_label(
+    model: str,
+    served_models: Optional[Dict[str, Any]] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> str:
+    """:func:`served_model_label` plus what the slot spent, in one parenthesis.
+
+    The renderer for the summary lines that name each model once — the
+    aggregate's ``**Models:**`` line in both lanes. ``usage`` is the fan-out's
+    ``{model_spec: usage}`` map (``.status.json``'s ``usage`` key); a model
+    with no entry renders exactly what it rendered before, which is the rule
+    that keeps a report from a duration-only adapter free of ``$0.00``.
+
+    ``describe_usage`` is the same clause the failed-slot error line and the
+    HTML badge carry, imported rather than re-spelled: a report that quoted a
+    cost in a second format would be a second answer to "what did this run
+    cost", and the two would drift apart at the first rounding change.
+    """
+    notes = _attribution_notes(model, (served_models or {}).get(model))
+    clause = describe_usage((usage or {}).get(model))
+    if clause:
+        notes.append(clause)
+    if not notes:
+        return model
+    return f"{model} ({'; '.join(notes)})"
+
+
+def sum_usage(usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Column-wise sum of a fan-out's per-model usage blocks, or ``{}``.
+
+    What the run cost in total, which is the number an operator looks for
+    first and the one no artifact carried before Stage U. Summed by key over
+    whichever models reported, so a fan-out of one reporting adapter and two
+    duration-only ones totals the one — the alternative, refusing to total a
+    mixed run, would report nothing for the common case.
+
+    **It is the run's total, not the badges' total.** The map handed in covers
+    every slot that reported, including the ones that FAILED and therefore have
+    no badge in this report at all, so the header figure can exceed the sum of
+    what is displayed. That is the intended reading: the question is what the
+    run cost, and the slot that burned a budget and returned nothing is the
+    most expensive kind of answer there is.
+
+    **Only numbers are added.** A usage block is an adapter's, and at least one
+    adapter files a string in it (claude-code's ``served_model``, which rides
+    the envelope its token counts came from). Anything that is not an ``int``
+    or ``float`` is skipped rather than coerced, and ``bool`` is excluded
+    because in Python it is an ``int`` and "1 tool use" is not what
+    ``True`` meant. Float sums are rounded to six places: ``0.01 + 0.02``
+    is ``0.030000000000000002`` in binary floating point, and a report
+    header is not the place to show it.
+    """
+    totals: Dict[str, Any] = {}
+    for entry in (usage or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for key, value in entry.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            totals[key] = totals.get(key, 0) + value
+    return {
+        key: round(value, 6) if isinstance(value, float) else value
+        for key, value in totals.items()
+    }
 
 
 #: The label a bypassed slot carries in every report surface. The config key
@@ -1161,6 +1252,7 @@ def generate_html_report(
     data_source: str = 'auto',
     file_snapshots: Optional[Dict[str, list]] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """Generate complete HTML report and return the HTML string.
 
@@ -1201,6 +1293,14 @@ def generate_html_report(
             badge with the model that actually served the turn and adds
             ``reportData.servedModels``.  Omitted (the shipped default) leaves
             ``report_data.json`` and the embedded data exactly as they were.
+        usage: Optional per-model usage, ``{model_spec: {"input_tokens", ...,
+            "cost_usd", "tool_uses"}}``, as the fan-out recorded it in
+            ``.status.json``.  Non-empty only for adapters that report usage at
+            all (``usage_support`` above ``none``) — a model with no entry gets
+            no ``usage`` key on its metadata and no clause on its badge, which
+            is what keeps a duration-only adapter from being reported as a free
+            run.  Adds ``reportData.usageTotal`` (the columnwise sum over the
+            models that reported) and its rendered label.
 
     Returns:
         Complete HTML string for the report
@@ -1315,6 +1415,22 @@ def generate_html_report(
             model_metadata[model]["model"] = (
                 f"{model_metadata[model]['model']} (unsandboxed)"
             )
+        # Stage U: what this slot spent, on the same metadata dict the badge is
+        # rendered from — the numbers for anything that wants to compute, and
+        # the rendered clause beside them because the *text* is settled here
+        # rather than in three templates. The templates then print a string
+        # instead of each carrying its own copy of "cost to the cent, drop it
+        # under half a cent, say est., thousands separators on the token count"
+        # — the rule that would drift three ways the first time it changed.
+        # `describe_usage` is the same function the failed-slot error line and
+        # the markdown `**Models:**` line call, so the three say the same words.
+        # Absent when the adapter reported nothing, never `{}` or `$0.00`.
+        model_usage = (usage or {}).get(model)
+        if isinstance(model_usage, dict) and model_usage:
+            model_metadata[model]["usage"] = model_usage
+            label = describe_usage(model_usage)
+            if label:
+                model_metadata[model]["usage_label"] = label
 
     # Extract plan title from markdown (first # heading), fallback to filename
     plan_title = ""
@@ -1649,6 +1765,18 @@ def generate_html_report(
     # report_data.json gains no key at all.
     if served_models:
         report_data["servedModels"] = served_models
+
+    # Stage U, the same rule: the run total is added only when some adapter
+    # reported something, so a fan-out of duration-only adapters leaves
+    # `report_data.json` exactly as it was — no `usageTotal`, no `$0.00` in the
+    # header. The label travels beside the numbers for the same reason the
+    # per-model one does: the templates render text, not a formatting rule.
+    usage_total = sum_usage(usage)
+    if usage_total:
+        report_data["usageTotal"] = usage_total
+        total_label = describe_usage(usage_total)
+        if total_label:
+            report_data["usageTotalLabel"] = total_label
 
     # Conditionally add diff data and file contexts
     if resolved_diff_data is not None:

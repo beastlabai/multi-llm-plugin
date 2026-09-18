@@ -364,6 +364,43 @@ def seed_invocation_root(cli: str, root: Path, row: dict) -> None:
             encoding="utf-8",
         )
 
+    # Vendor bytes the image already holds, POINTED AT rather than copied — and
+    # deliberately the last step, after the token pass has walked the tree.
+    #
+    # omp is the case that forced it: the binary extracts 346 MB of native addons
+    # (two ~181 MB .node files) into $HOME/.omp/natives/<version>/ on the first
+    # run that loads them, and its loader skips the extraction when they are
+    # already there at the expected size. The bytes are produced once in the image
+    # (/opt/mllm/omp-natives, under the read-only root); this points each
+    # per-invocation $HOME at them for the price of a symlink. Neither of the two
+    # obvious alternatives works: an image ENV cannot reach the child, because
+    # `build_child_env` composes its environment from scratch and omp has no
+    # variable that relocates the extraction anyway (OMP_NATIVE_LIBRARY_PATH only
+    # appends to the child's LD_LIBRARY_PATH — read off the binary, 18.2.2); and a
+    # symlink baked into the seed TREE would be dereferenced by the copytree
+    # above, which is 346 MB of tmpfs per exec and 346 MB read back by the token
+    # pass. A tracked seed cannot hold the bytes themselves either: the seed set
+    # is committed on purpose (.gitignore negates it), and `seed_invocation_root`
+    # runs per EXEC.
+    #
+    # A missing target is FATAL, in the shape `main` already uses for a missing
+    # real binary: a row that declares a link whose image path is absent would
+    # otherwise pay the full extraction on every exec and present as a merely slow
+    # row — and the image and the matrix disagreeing about what the image contains
+    # is the class of defect this rig fails loudly on.
+    for rel, target in (row.get("seed_links") or {}).items():
+        link = root / rel
+        if link.is_symlink() or link.exists():
+            continue
+        if not Path(target).exists():
+            sys.stderr.write(
+                f"mllm-wrapper: {cli} declares seed_links[{rel}] -> {target}, "
+                f"which does not exist in this image. Rebuild it (`make e2e-image`): "
+                f"the layer that installs this CLI is what produces that tree.\n")
+            raise SystemExit(127)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, link)
+
 
 def write_call_record(cli: str, argv: list[str], env: dict, exec_id: str,
                       invocation_root: Path) -> None:

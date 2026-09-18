@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import structured_output
+from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .providers.base import (
     PROFILE_GENERATE,
@@ -462,8 +463,18 @@ def _attach_usage(
     under the same never-raise rule ``subagent_executor._safe_parse_usage``
     applies (D3j): metrics must not break a run, and an adapter that reports
     nothing leaves the key **absent** — a ``{}`` would read as "reported,
-    free". Called on the losing paths only, because that is the lane's gap: a
-    completed slot's usage is a separate question this helper does not answer.
+    free".
+
+    Called on **every** outcome ``invoke_with_provider`` can reach — the
+    non-zero exit, the timeout kill, and (Stage U) the exit-0 parse, clean or
+    not. It began as a losing-paths-only helper, on the reasoning that a
+    completed slot's usage was "a separate question"; it was not a separate
+    question, it was the same one asked of the runs an operator is most
+    likely to pay for. A successful slot's envelope was parsed for the answer
+    and then discarded, so the fan-out could name what a *failed* $25 run
+    spent and nothing at all about the run that succeeded beside it. The rule
+    is now uniform: whatever the adapter can say about what a run spent
+    travels on ``details``, whichever way the run ended.
     """
     try:
         usage = provider.parse_usage(stdout or "", stderr or "")
@@ -473,27 +484,15 @@ def _attach_usage(
         details["usage"] = usage
 
 
-def describe_usage(usage: Optional[Dict[str, Any]]) -> str:
-    """One parenthetical clause naming what a run cost, or ``""``.
-
-    ``$25.05, 137,348 output tokens`` — the dollar figure first because it is
-    the number a human acts on, the output count second because it is the one
-    that says how far the run got. Input and cache counts are not rendered:
-    they are on ``details["usage"]`` for anything that wants them, and a
-    seven-figure cache-read count beside a failure reads as noise. Cost is
-    rendered to the cent and dropped when it rounds to nothing, so a duration-
-    only or free run says nothing rather than "$0.00".
-    """
-    if not isinstance(usage, dict) or not usage:
-        return ""
-    parts = []
-    cost = usage.get("cost_usd")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0.005:
-        parts.append(f"${cost:.2f}")
-    output = usage.get("output_tokens")
-    if isinstance(output, (int, float)) and not isinstance(output, bool) and output > 0:
-        parts.append(f"{int(output):,} output tokens")
-    return ", ".join(parts)
+#: What a run cost, as one clause (``$25.05 est., 137,348 output tokens``).
+#: Defined in :mod:`utils.metrics` — beside the other number formatters, and
+#: importable by the report generator, which cannot import this module at all
+#: (it also runs as a bare script, and everything here is a relative import).
+#: Re-exported under this name because the failed-slot error line has always
+#: reached it here, and because one renderer for every surface that names the
+#: number is the whole point of it: the log line, the ``**Models:**`` line and
+#: the HTML badge say the same words about the same run.
+describe_usage = _describe_usage
 
 
 def _save_log(
@@ -905,9 +904,19 @@ def invoke_with_provider(
         # be kept in sync by hand. Twelve of the thirteen adapters ignore it, and
         # dropping the keyword restores every rendered argv byte-for-byte.
         try:
+            # `cwd=cwd` on the same terms `resolve_env` already takes it, three
+            # lines below: these two hooks are the only ones that see the
+            # directory the child is really spawned in, and an adapter whose
+            # **argv** carries a workspace-scoped token needs it for the same
+            # reason an adapter's env delta does. omp is the one that does — it
+            # silently relocates to /tmp when its cwd is the user's home, with
+            # nothing on either channel to say so. `None` means "inherit this
+            # process's", which is what the adapter falls back to; the base
+            # composition ignores the keyword entirely, so seventeen adapters
+            # render argv byte-for-byte.
             cmd, stdin_text = provider.build_command_for_transport(
                 prompt, model, transport, timeout_s=effective_timeout, schema=schema,
-                sandbox_fallback=sandbox_fallback,
+                sandbox_fallback=sandbox_fallback, cwd=cwd,
             )
         except StructuredOutputUnavailable as exc:
             # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
@@ -1118,6 +1127,19 @@ def invoke_with_provider(
             "model": model,
             "duration_seconds": duration
         }
+        # EXTRACT BEFORE DISCARDING. `parse_output` above has just unwrapped the
+        # answer out of the provider's envelope and thrown the envelope away —
+        # and the envelope is where the token counts and the catalog cost live.
+        # Until Stage U this lane asked for them on the losing paths only, so a
+        # run that *worked* reported no numbers anywhere: not on the slot result,
+        # not in `.status.json`, not in the report. Asked here, right where
+        # `details` is born, every exit-0 outcome carries them — a clean parse, a
+        # parse failure, a schema violation, and an adapter whose `parse_output`
+        # calls an exit-0 stream a hard failure. There is no second call for the
+        # schema-verdict branch below: it replaces `parsed` with a new dict whose
+        # `details` spreads `**parsed.get("details", {})`, so the key rides
+        # across. An adapter that reports nothing still leaves it absent.
+        _attach_usage(parsed["details"], provider, result.stdout, result.stderr)
         # D6 override (2026-09-17): a slot that ran without the runner's own
         # sandbox says so on the same dict, so `served_model_fields` carries it
         # to the result record, `.status.json`'s `models_served` and the report
@@ -1297,6 +1319,16 @@ def invoke_with_provider(
         # attaching `""`, so this path and the non-zero-exit path answer
         # `details.get("stdout_excerpt")` the same way.
         _attach_stdout_excerpt(details, stdout)
+        # AND THE SAME PARTIAL STDOUT IS WHAT USAGE IS PARSED OUT OF. This is
+        # the third of the three outcomes `_attach_usage` is documented to
+        # cover, and it was the one that never called it — so the run killed at
+        # the deadline, the expensive failure class Stage U exists to report,
+        # reported no numbers at all while the excerpt beside it carried the
+        # very bytes an adapter reads them from. A provider that streamed a
+        # terminal usage event before the kill, or that reports cumulatively per
+        # step, has already said what it spent; best-effort like every other
+        # call, and absent rather than `{}` when the adapter can say nothing.
+        _attach_usage(details, provider, stdout, stderr)
 
         return {
             "success": False,
@@ -1627,9 +1659,25 @@ def invoke_with_file_output(
     )
 
     if not result.get("success") and is_hard_failure:
-        # `deferred_log` is always None here — a hard failure never reaches
-        # the exit-0 branch that sets it — so invoke_with_provider's own
-        # immediate write (or lack of one) already stands as final.
+        # `deferred_log` is USUALLY None here: the three classic hard failures
+        # (binary missing, timeout kill, non-zero exit) all return before
+        # `invoke_with_provider` reaches the exit-0 branch that defers, so
+        # nothing was deferred and there is nothing to settle.
+        #
+        # It is not always None. An adapter whose `parse_output` reads an exit-0
+        # stream and calls it a hard failure — a terminal in-stream verdict, the
+        # shape a JSON-streaming CLI uses to report an auth or context error it
+        # exited 0 on — lands here *with* a deferred log, because the run did
+        # reach the deferring branch. Returning without this call would silently
+        # drop that run's only log entry: the whole log for the slot, not a line
+        # of it. `success=False` and `result["error"]` because that is the
+        # outcome, and `result_source=None` because no channel answered — the
+        # same triple the "both failed" return below uses, which is the other
+        # way a run ends with nothing to show for it.
+        _finalize_file_output_log(
+            log_file, deferred_log, result, model_spec, prompt,
+            success=False, error=result.get("error"), result_source=None,
+        )
         return {
             **result,
             "output_file": str(output_json_path),

@@ -131,13 +131,22 @@ class TestInvocationResultCarriesServedModel:
     def test_the_shipped_empty_config_leaves_the_details_dict_untouched(
         self, capsys
     ):
-        """`fallback_models` ships empty ⇒ today's result dict, byte for byte."""
+        """`fallback_models` ships empty ⇒ no attribution key and no WARN.
+
+        ``usage`` is in the set because Stage U attaches it to every exit-0 run
+        whose adapter reports one, and this envelope carries claude-code's
+        (``tests/test_usage_reporting.py`` owns that rule). What this case pins
+        is the §3.6 half: nothing configured, nothing attributed.
+        """
         with patch("shutil.which", return_value="/usr/bin/claude"), \
              patch("utils.llm_client.subprocess.run",
                    return_value=_completed(_envelope({SERVED: {"outputTokens": 5}}))):
             result = invoke_with_provider("p", "claude-code:sonnet")
 
-        assert set(result["details"]) == {"provider", "model", "duration_seconds"}
+        assert set(result["details"]) == {
+            "provider", "model", "duration_seconds", "usage",
+        }
+        assert "served_model" not in result["details"]
         assert "[WARN]" not in capsys.readouterr().err
 
     def test_an_adapter_without_the_claim_reports_nothing(self, capsys):
@@ -580,7 +589,13 @@ class TestTheBypassProvenanceRidesTheServedModelCarriage:
              patch("utils.llm_client.subprocess.run", side_effect=fake_run):
             result = invoke_with_provider("p", "codex:gpt-5.5")
 
-        assert set(result["details"]) == {"provider", "model", "duration_seconds"}
+        # `usage` is Stage U's, attached to every exit-0 run whose adapter
+        # reports one; what is asserted here is that no D6 provenance key
+        # appeared without the override.
+        assert set(result["details"]) - {"usage"} == {
+            "provider", "model", "duration_seconds",
+        }
+        assert "sandbox" not in result["details"]
         argv = seen["argv"]
         assert argv[argv.index("--sandbox") + 1] == "workspace-write"
 
