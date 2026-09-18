@@ -34,7 +34,7 @@ override: starting from an inert template, it **uncomments** the full `providers
 block, `defaults.models` / `quick_models` entries, and `default_provider` for each
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
-grok, opencode, codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, vibe). With **no CLIs installed** it writes the inert
+grok, opencode, codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, vibe, omp). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file
@@ -86,6 +86,16 @@ subagent was just allowed to edit, and they run outside whatever sandbox the
 agent CLI had. The check runs with the host's own session variables stripped and,
 when `env_allowlist` is on, with the same deny-by-default environment a runner
 gets; otherwise it inherits the environment you launched the run with.
+One credential makes that filter's shape load-bearing for a user's own setup:
+`omp` is the first adapter whose key is admitted by neither its own `PI_`/`OMP_`
+prefix nor the shared base list, so the adapter passes `OPENROUTER_API_KEY`
+through **explicitly** — a filtered run still carries it — and omp then resolves
+it through its own chain: the process environment, then a `.env` in the directory
+the run starts from (a checked-out repo's own key therefore outranks the one you
+exported), then `~/.omp/agent/.env`, then `~/.omp/.env` or `~/.env`, of which
+`~/.omp/agent/.env` is the source that depends on nothing in the parent
+environment and the one to use when the key is not exported in the shell the run
+starts in.
 
 The override now deep-merges its full contents (including a `providers:` block)
 over base, exactly like the `MULTI_LLM_PROVIDERS_CONFIG` env layer — but since

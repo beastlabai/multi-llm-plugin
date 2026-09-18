@@ -56,6 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stub_server import (  # noqa: E402
     catalog,
+    refuse_probe_port,
     chat_body,
     chat_stream,
     extract_prompt,
@@ -365,6 +366,10 @@ def main(argv=None) -> int:
     # 127.0.0.1 only, like the stub: under `--network none` loopback is the only
     # address there is, and binding another is how a probe server eventually
     # answers something it should not.
+    # Same refusal as the stub's, from the same table: a failserver on one of
+    # omp's local-model discovery ports would be found by a CLI nobody pointed
+    # at it, and a capture session would record the wrong server's error.
+    refuse_probe_port(ARGS.port, "failserver")
     server = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)
     server.daemon_threads = True
     print(f"failserver[{ARGS.mode}] listening on 127.0.0.1:{ARGS.port}", flush=True)

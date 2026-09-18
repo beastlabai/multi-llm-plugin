@@ -1,0 +1,1064 @@
+# The §6.2 fixture manifest for omp. Graded by tests/test_provider_fixture_rows.py,
+# which owns the format (its module docstring is the spec).
+#
+# Captured 2026-09-17 by P10/P12 of plans/add-omp-provider.md §5, on the HOST rather
+# than in the §5 probe image (that image is Stage E's and does not exist yet). Every
+# byte is omp's own stdout/stderr; nothing here is hand-composed. What the host costs
+# is the §3 scrub gate: every row but `invalid-tool` carries `synthesized: true` and a
+# `provenance:` beginning `SCRUB ONLY:` naming the path replacements applied. No event
+# was added, dropped or reordered in any row, every line is still valid JSON, and the
+# replacement table is path-only — there is no credential and no OpenRouter generation
+# id anywhere in this set because nothing here ever touched the live service.
+schema_version: 1
+provider: omp
+cli_version: "18.2.2"
+captured: "2026-09-17"
+method: >-
+  All rows under the §2.2 argv — `--mode json`, the shipped
+  `assets/omp/overlay.yml` (`retry.enabled: false`, `mcp.enableProjectConfig: false`),
+  `--approval-mode yolo`, `--tools read,grep,glob,find,bash,edit,write` — on the host,
+  with **loopback servers only** and no API key for any real vendor anywhere in the
+  environment (`OPENAI_API_KEY`/`GEMINI_API_KEY` are unset per run; the only key in
+  play is the literal `stub-probe-key` in the probe HOME's `models.yml`, meaningful on
+  127.0.0.1 and nowhere else). stdin is `/dev/null` on every run: an inherited non-EOF
+  pipe makes omp block forever at `readPipedInput` (§1.6), which is the zero-byte-hang
+  artifact this set must not contain. The model is `stub/stub-model` on every row but the
+  three P13 ones, declared by a probe `~/.omp/agent/models.yml` whose `api` is
+  `openai-completions` and whose `baseUrl` is the loopback port — so those captures
+  drive the completions client, **not** the Responses path production's `openrouter`
+  provider uses. The three `rate-limit-*` rows added 2026-09-18 close that gap and ARE
+  the production protocol: the same kind of probe `models.yml`, but overriding the
+  **built-in** `openrouter` provider's `baseUrl` (§1.10) with `PI_OPENROUTER_RESPONSES`
+  unset and `--model openrouter/openai/gpt-5.6-luna`, so the wire is
+  `GET /api/v1/models` then `POST /api/v1/responses`. That was checked in the server's
+  own request log on every run, and it is legible in the committed bytes: those rows
+  carry `"api":"openrouter"` on every assistant message where the completions rows
+  carry `"api":"openai-completions"`.
+  THREE VEHICLES, named per row.
+  (a) `p12` — the ADAPTER's own argv, built by
+  `OmpProvider.build_command_for_transport(prompt, "stub/stub-model", "stdin",
+  timeout_s=…, cwd=<skill dir>)` with `build_child_env`, the prompt delivered on
+  **stdin**, `--cwd <skill dir>` and `--max-time` rendered by `max_time_value`. The
+  prompt is `prompts/plan_review.txt` rendered over `tests/fixtures/sample_plan.md`
+  with a real `{output_location}` block — a committed fixture, never a user document.
+  The server is a THROWAWAY tool-calling stub under `scratch/` (never
+  `stub_server.py`, whose docstring forbids driving a tool loop) that scripts a tool
+  call and then answers with the findings array.
+  (b) `rig` — the same flags assembled by hand with the prompt on argv after `--`,
+  `cwd` a scratch work dir, against `tests/container/failserver.py` run standalone on
+  the host (`--mode 500|429|401|404|ctx|empty|stall|trunc|errbody`). Its `--log` is
+  the `requests` evidence in every failserver row: the count is the measurement, never
+  a guess. One server per row, its own log, never wrapped in `timeout(1)`.
+  `wall_s` is the spawn-to-exit wall clock of that one run.
+  (c) `p13` — `rig`'s flags exactly, but HOME is a second probe tree whose `models.yml`
+  overrides the built-in `openrouter` provider's `baseUrl` instead of declaring a
+  `stub` provider, the model is `openrouter/openai/gpt-5.6-luna`, and **no
+  `--max-time` is rendered** — the chain is the measurement, not the deadline (a real
+  slot renders `--max-time 1195` at the shipped 1200 s default and would cut every one
+  of these rows early). `OPENROUTER_API_KEY` is the literal `omp-probe-key`, meaningful
+  on 127.0.0.1 and nowhere else. The server for `rate-limit-responses` is
+  `tests/container/failserver.py --mode 429` verbatim; for the other two it is a
+  THROWAWAY probe under `scratch/` that IMPORTS `failserver` — so the 429 status, body
+  and absent `Retry-After` are the same bytes — and adds only the two things failserver
+  has no mode for: a per-request server-side delay (`rate-limit-delayed`) and a first
+  request answered with a Responses-API `function_call` (`rate-limit-multi-turn`). That
+  probe logs ARRIVAL, before its delay, so its gaps are request gaps; `requests` is the
+  completion-request count in the log either way.
+notes: >-
+  SEVEN THINGS THIS SET MEASURED THAT §1 PREDICTED DIFFERENTLY, each recorded in its row:
+  (1) **`rate-limit` is 16 requests over 201 s, not 12 over 32 s.** omp parses the
+  vendor's own "Please try again in 20s." out of the 429 BODY (failserver sends no
+  `Retry-After` header) and sleeps 20 s five times before falling back to the
+  `500·2ⁿ` ladder. §1.9's "12 requests / ~32 s is the floor" holds only for the 500
+  row, which measured exactly that. §2.8/criterion 6's ≤ 40 s budget does not survive
+  a 429 whose message names a delay — note that the adapter's own `--max-time`
+  (115 s at `timeout_s=120`) was NOT in force on this row and would have cut it.
+  (2) **A pre-flight failure is not always 0 B on stdout.** §1.1 says pre-flight
+  failures write plain text to stderr with an empty stdout; that is true of
+  `invalid-model` and `invalid-tool` (validated before the session opens) but NOT of
+  `auth-error-preflight`, which flushes the `session` event first and then dies — 178
+  bytes of stdout under a Bun trace on stderr. This is precisely why the adapter's
+  `describe_failure` channel is `STDOUT_ELSE_STDERR` and not `STDOUT_THEN_STDERR`.
+  (3) **The empty-stop retry cap is visible, is four cycles, and emits an event type
+  §1.2 does not list.** `truncated` (default 60-byte cut) and `error-envelope` both
+  end in FOUR assistant `message_end`s with `stopReason: "stop"` and `content: []`,
+  then `{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"Assistant
+  returned empty stop after retry cap; …"}`, and **exit 0**. §1.9 predicted three
+  cycles and 0 B of stdout; in json mode the stream is fully written. The two rows are
+  the same shape, as §3 anticipated — and both reach the parser as `Empty output`.
+  (4) **failserver `--mode empty` is a connection error at omp, not an empty answer.**
+  Exit 1, 21 requests, 31.9 s, a terminal `stopReason: "error"` with NO `errorStatus`
+  and `errorMessage: "The socket connection was closed unexpectedly…"`. The canonical
+  `empty` cell therefore records what that vehicle produces; the shapes that really do
+  degenerate to "nothing to parse" are `truncated`/`error-envelope` (exit 0, `Empty
+  output`) and the two 0-byte-stdout pre-flight rows.
+  (5) **SIGTERM does not produce the all-noise stream.** §3 expected `--mode stall`
+  + SIGTERM at 2 s to leave the user-message prefix and no assistant event; measured,
+  omp catches SIGTERM and flushes a full `aborted` assistant `message_end`
+  (`errorMessage: "Request was aborted"`) plus `turn_end` before exiting 143. The real
+  all-noise prefix needs SIGKILL, which is what `ephemeral-only` is — exit 137, five
+  events, no assistant message, real bytes. No hand-composed fallback was needed.
+  (6) **`invalid-model` needed the shared table to grow a row, which §2.7
+  anticipated.** As captured, `classify_failure` returned None: omp's pre-flight
+  sentence is `Model "stub/nonexistent" not found`, and `INVALID_MODEL_MARKERS`'
+  existing `model not found` row cannot span the quoted selector sitting between
+  the two words. §2.7 says in as many words to "add the omp spelling if the
+  shared table's forms do not cover it", so the table gained the SHAPE
+  (`model <name> not found`, quotes optional, the gap bounded) rather than one
+  vendor's punctuation. No other adapter's row moved. Contrast
+  `invalid-model-api`, where the same verdict arrives from the API in-stream and
+  classified without any change. The same §2.7 sentence put `CliUsageError` and
+  `Config overlay not found` on `LAUNCH_FAILURE_MARKERS`' `spawn_failed` row,
+  which is what `invalid-tool` now classifies as.
+  (7) **The production chain is SIX requests, not the sixteen finding (1) measured.**
+  The 12 and the 16 above are the `openai-completions` client. On the Responses API —
+  the built-in `openrouter` provider, which is what every shipped model spec runs — the
+  chain of one failing model call is **6** for every status measured: a 500 is 6
+  requests over 16.0 s on the plain `500·2ⁿ` ladder (gaps 0.5, 1, 2, 4, 8) and a 429 is
+  6 over 100.5 s, still sleeping the 20 s it reads out of the BODY before each retry.
+  The doubling is the completions-only `withReplaySafeStreamRetry`
+  (`maxProviderErrorRetries: 1`), which does not wrap the Responses client; what is
+  left is the fetch wrapper's `maxAttempts: 6`. So §1.9's "12 requests / ~32 s is the
+  floor" and finding (1)'s 16 both describe a client production never dispatches on,
+  and `internal_retries.max_requests` moved 16 → 6 with them. Two further things the
+  three rows pin, each of which §1.9 flagged as unmeasured: **latency is linear and
+  does not change the count** (`rate-limit-delayed` — the same six requests take
+  220.5 s when the server takes 20 s to answer each one, i.e. `backoff + 6 × latency`,
+  and there is no client-side request timeout that would cut or retry them), and **a
+  dispatch's total is the chain plus the calls before it** (`rate-limit-multi-turn` —
+  one successful call returning a tool call, then a second 429'd forever, logs 7).
+  `max_wall_s` therefore stays `null`: 100.5 s and 220.5 s are the same chain against
+  two servers, so the wall is the upstream's property, not a ceiling omp enforces on
+  itself. The only ceiling is `--max-time`, and P13(d) settled what it does — it
+  INTERRUPTS a backoff sleep, an in-flight request and a running tool child alike, with
+  a spawn-to-exit overshoot of 0.16–0.21 s (0.72 s on a cold HOME that must extract the
+  natives first), which is why `OMP_SHUTDOWN_MARGIN_S` stays 5 rather than growing.
+
+rows:
+  # ----- the twelve canonical rows ------------------------------------------ #
+
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    wall_s: 0.34
+    requests: 2
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements, nothing else. The spawn cwd
+      /<user>/…/skills/multi-llm → /work (4 occurrences: the `session` event's `cwd`
+      and the echoed prompt's `{plan_path}`), and the capture dir holding the rendered
+      `{output_json_path}` → /work (36 occurrences: the write tool's `args.path`, its
+      result text and every repetition of that message inside `turn_end` and
+      `agent_end`). No event added, dropped or reordered; 244 lines in, 244 out; every
+      line still valid JSON. No credential and no generation id was present to remove.
+    notes: >-
+      **P12, the product path's own stream** (§1.11): the §2.2 argv through the
+      adapter, prompt on stdin, `--max-time 115` from `timeout_s=120`, the stub
+      scripting a `write` against the rendered `{output_json_path}` and then answering
+      with the findings array. Two assistant `message_end`s — `toolUse`, then `stop` —
+      one `tool_execution_end` with `isError: false`, `agent_end.isTerminal: true`,
+      stderr 0 B. `requests: 2` is the stub log's line count for this run and equals
+      the assistant `message_end` count, which is §1.2's rule.
+      The file channel was measured separately on the same rig and is recorded here
+      rather than in the bytes: through `invoke_with_file_output` the write lands and
+      the result is `source == "file"` with `details.usage` present and the run log
+      written; with the stub refusing the write the same review comes back
+      `source == "stdout_fallback"` from this row's `stop` text. `parse_usage` over
+      this stream sums to input 2268 / output 112 / cacheRead 200 / total 2580,
+      `tool_uses == 1`.
+    expect:
+      success: true
+      data:
+      - title: No testing strategy is stated
+        desc: The plan lists three tasks but names no acceptance criteria and no test harness, so
+          "Write tests" has nothing to be graded against.
+        importance: high
+        reference: '## Tasks'
+        type: gap
+      - title: The base class has no named responsibility
+        desc: Task 1 says "Create the base class in src/models/" without saying what it models or
+          what it is a base for.
+        importance: medium
+        reference: 1. Create the base class in src/models/
+        type: clarification
+      raw_contains:
+        - '"stopReason":"stop"'
+        - '"toolName":"write","result"'
+      classify_failure: null
+
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 0
+    wall_s: 6.50
+    requests: 20
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode trunc` at its DEFAULT `--trunc-bytes 60` and
+      `--trunc-answer OK` (the same parameters every other provider's `truncated` row
+      was taken with): 200 headers, 60 bytes of the SSE success body, socket closed.
+      Because `stub_server.chat_stream` emits the whole answer in ONE `data:` frame,
+      a 60-byte cut lands inside the first (role-only) frame and no content ever
+      reaches omp — so this vehicle cannot produce the "`stop` carrying the cut
+      prefix" shape §3 wanted the row to catch. What it produces instead is the
+      empty-stop retry cap: FOUR assistant `message_end`s, all `stopReason: "stop"`
+      with `content: []`, 20 requests in 6.5 s (four agent-level cycles × five fetch
+      attempts), then `auto_retry_end` with `finalError: "Assistant returned empty
+      stop after retry cap…"` and **exit 0**. Byte-shape-identical to
+      `error-envelope`, which is the measurement §3 anticipated. The cut-prefix shape
+      IS reachable — cut after a content frame instead — and is committed as the extra
+      row `truncated-partial` below, so the hazard is still graded.
+    expect:
+      success: false
+      # MEASURED: every assistant message is an empty `stop`, so the parser reports
+      # `Empty output` — and wraps omp's own give-up sentence
+      # (`auto_retry_end.finalError`) in the parentheses, which is the only place
+      # either channel says why an exit-0 run produced no text. Both halves are
+      # pinned, so the wrapper losing the diagnosis is a failure and not a silent
+      # regression to the bare `Empty output`.
+      error_contains:
+        - "Empty output"
+        - "Assistant returned empty stop after retry cap"
+      raw_contains:
+        - '"type":"auto_retry_end"'
+        - "Assistant returned empty stop after retry cap"
+      classify_failure: null
+
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 137
+    wall_s: 1.02
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode stall` (accept and never answer) with **SIGKILL** at
+      1.0 s. Real bytes, no composition: five events — `session`, `agent_start`,
+      `turn_start`, and the user `message_start`/`message_end` — 545 bytes, and **no
+      assistant event at all**, which is exactly the all-noise stream §6.2 asks for.
+      SIGTERM was tried first and does NOT produce it (§3 assumed it would): omp traps
+      it, flushes a complete `aborted` assistant message with `errorMessage: "Request
+      was aborted"` and a `turn_end`, and exits 143 with 1741 bytes. So the exit code
+      here is 137 rather than the predicted 143, and the fallback §4 held in reserve —
+      a hand-composed prefix of `success.stdout.txt` — was not needed.
+    expect:
+      success: false
+      error_contains: ["run ended before any assistant message", "message_end/user"]
+      classify_failure: null
+
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 0.43
+    requests: 3
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      /work (21 occurrences: the `session` event's `cwd`, the echoed `{plan_path}`,
+      and the `read` tool's `args.path` and result in every repetition of those
+      messages) and the capture dir holding the rendered `{output_json_path}` → /work
+      (36 occurrences). No event added, dropped or reordered; every line still valid
+      JSON. No credential or generation id was present.
+    notes: >-
+      `p12`, same argv and prompt as `success`, with the stub scripting TWO tool calls
+      before the answer: `read` the plan, then `write` the findings. Three assistant
+      `message_end`s — `toolUse`, `toolUse`, `stop` — two `tool_execution_end`s (both
+      `isError: false`), three `usage` blocks, three requests, stderr 0 B. This is the
+      selection-rule row: the first two messages' `content` ends in a tool call and
+      only the last carries text, so a first-or-concatenate rule fails it. It is also
+      the stream `parse_usage` is graded on — three blocks summed, `tool_uses == 2`.
+    expect:
+      success: true
+      data:
+      - title: No problem statement or objectives section
+        desc: The plan opens with an Overview that says only that it is a sample plan. Add a Problem
+          Statement naming the user-visible defect and the measurable objective the work is judged
+          against, so reviewers can tell whether the three tasks are sufficient.
+        importance: high
+        reference: '## Overview'
+        type: addition
+      - title: Tasks carry no dependencies or acceptance criteria
+        desc: Tasks 1-3 are one line each and do not say which must land first, what the base class
+          interface is, or what 'implement the processor logic' must satisfy. Give each task an
+          explicit dependency list and a done-condition.
+        importance: high
+        reference: '## Tasks'
+        type: modification
+      - title: Testing strategy is a goal, not a plan
+        desc: '''Write tests'' appears under Goals and ''Add unit tests'' under Tasks, but no test
+          framework, coverage target or fixture location is named. Specify the runner, where tests
+          live, and which behaviours of the processor are pinned.'
+        importance: medium
+        reference: '## Goals'
+        type: clarification
+      raw_contains:
+        - '"toolName":"read"'
+        - '"toolName":"write"'
+      classify_failure: null
+
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 0
+    wall_s: 6.63
+    requests: 12
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode errbody`: HTTP **200** whose body is a provider error
+      object carrying the 401 wording. omp's completions client cannot parse it as a
+      completion, so the run takes the same empty-stop path as `truncated` — four
+      assistant `message_end`s with `stopReason: "stop"` and `content: []`, 12
+      requests in 6.6 s, `auto_retry_end` with the retry-cap sentence, **exit 0** —
+      and the provider's own sentence ("Incorrect API key provided…") reaches NO
+      channel and no pattern table. §3 predicted this collapse and said to commit both
+      rows anyway; the two differ only in ids, timestamps and the request count (12
+      here versus 20, because a 200-with-JSON is not retried by the fetch wrapper the
+      way a cut stream is).
+    expect:
+      success: false
+      # Byte-shape-identical to `truncated`, and graded the same way: the parser's
+      # `Empty output` carries omp's retry-cap sentence in its parentheses. The
+      # provider's own 401 wording is in the 200 body and reaches no channel, so
+      # there is nothing else here to pin.
+      error_contains:
+        - "Empty output"
+        - "Assistant returned empty stop after retry cap"
+      raw_contains:
+        - '"type":"auto_retry_end"'
+      classify_failure: null
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    wall_s: 3.20
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      /work (4 occurrences) and the capture dir holding the rendered
+      `{output_json_path}` → /work (6 occurrences), both inside the `session` event
+      and the echoed prompt. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `p12` with `timeout_s=8`, which `max_time_value` renders as **`--max-time 3`**;
+      the stub scripts a `bash` call running `sleep 20`. §1.5's second shape, exactly
+      as predicted: **exit 0**, one request, 3.2 s; the last assistant `message_end`
+      is a `toolUse`; the `tool_execution_end` is `isError: true` with `Command
+      aborted`; a `tool_execution_update` carries `[Command cancelled]`; `turn_end`
+      and `agent_end` follow with no further assistant message; stderr 0 B. In TEXT
+      mode this run is exit 0 and zero bytes — byte-identical to a silent success —
+      which is why the adapter's success test is structural and never the exit code.
+      `exit_zero_failure_markers` stays empty: `Command aborted` is deliberately not a
+      marker, and this row is what pins the structural read instead.
+    expect:
+      success: false
+      error_contains: ["run ended inside a tool call", "bash", "Command aborted"]
+      raw_contains:
+        - '"isError":true'
+        - "[Command cancelled]"
+      classify_failure: "timeout"
+
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    stderr: stdout-error.stderr.txt
+    exit_code: 1
+    wall_s: 31.96
+    requests: 12
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode 500`, fail-forever — and the one row that confirms
+      §1.9's floor exactly: **12 requests in 31.96 s**, at +0, 0.5, 1.5, 3.5, 7.5,
+      15.5 s and then the same ladder again, i.e. the fetch wrapper's `maxAttempts: 6`
+      × `withReplaySafeStreamRetry`'s ×2, with the overlay's `retry.enabled: false`
+      holding the agent layer off. Then exit 1 with the terminal assistant
+      `message_end` carrying `stopReason: "error"`, `errorStatus: 500`, `content: []`
+      and usage all zero. **stderr is 0 bytes**: the whole diagnosis is on the success
+      channel, which is the opencode trap on omp's stdout.
+    expect:
+      success: false
+      error_contains: ["500", "The server had an error while processing your request"]
+      raw_contains:
+        - '"errorStatus":500'
+        - '"stopReason":"error"'
+      classify_failure: "server_error"
+
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: 1
+    wall_s: 31.94
+    requests: 21
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode empty`: the request is accepted and the socket closed
+      after ZERO body bytes. §1.9 predicted the empty-completion path (exit 0, 0 B
+      stdout); measured, omp treats a zero-byte response as a TRANSPORT failure
+      instead — 21 requests over 31.9 s, **exit 1**, and a terminal `stopReason:
+      "error"` with **no `errorStatus`** and `errorMessage: "The socket connection was
+      closed unexpectedly. For more information, pass `verbose: true` in the second
+      argument to fetch()"` — Bun's fetch wording, forwarded verbatim. So the row's
+      §6.2 question ("distinguishable from a valid empty answer, and classified?") is
+      answered yes on both halves at omp: it IS distinguishable — there are bytes, an
+      exit 1 and a sentence — and since 2026-09-18 it IS classified, as
+      `connection_error`. When these bytes were captured it classified as nothing,
+      because `base.CONNECTION_ERROR_MARKERS` spelled its row
+      `connection (?:refused|reset|closed|…)` as one token and Bun writes "connection
+      **was** closed"; that row is now `connection (?:was )?(?:refused|reset|closed|…)`
+      and reaches the sentence. cline's `zero-body` row carries the identical
+      Bun/undici sentence and moved `runner_error` → `connection_error` in the same
+      change. The rows that really do reduce to "no answer at all" are
+      `truncated`/`error-envelope` (exit 0, `Empty output`).
+    expect:
+      success: false
+      # MEASURED: the connection sentence, not "Empty output" — this row is NOT the
+      # zero-byte shape the canonical name suggests at omp. It is a dropped socket,
+      # and since the shared table learned "connection **was** closed" (2026-09-18)
+      # that is what it is called: a better reading of the same bytes, not a change in
+      # omp. The one thing it moves is Lane A's retry — the slot's error string is
+      # `omp exited with code 1: <describe_failure>`, and `describe_failure` quotes
+      # this sentence into it, so an unclassified ("never retried") slot becomes one
+      # transport retry.
+      error_contains: ["The socket connection was closed unexpectedly"]
+      raw_contains:
+        - "The socket connection was closed unexpectedly"
+      classify_failure: connection_error
+
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 0.38
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present; `sk-stub***` is
+      failserver's own literal, the same string aider's, cline's, goose's, grok's and
+      claude-code's committed `auth-error` rows carry.
+    notes: >-
+      `rig`, failserver `--mode 401`. **One request, terminal, no retry** — §3's
+      prediction confirmed: the fetch wrapper retries ≥500/408/429 only, so a 401 is
+      one shot and 0.38 s. The terminal assistant `message_end` is `stopReason:
+      "error"`, `errorStatus: 401`, `content: []`, usage all zero, and
+      `errorMessage` is the status, the vendor sentence, the sentence AGAIN and then
+      `(type=invalid_request_error param=invalid_api_key)` — omp's own composition,
+      not the vendor's JSON. stderr 0 B. Classification is structural on
+      `errorStatus`, so the stub's wording versus OpenRouter's live `401 User not
+      found.` is immaterial. The pre-flight half of auth (no key at all) is the extra
+      row `auth-error-preflight`.
+    expect:
+      success: false
+      error_contains: ["401", "Incorrect API key provided"]
+      raw_contains:
+        - '"errorStatus":401'
+        - "param=invalid_api_key"
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 200.97
+    requests: 16
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode 429`, fail-forever, **no `Retry-After` header** — and
+      the row that breaks §1.9's envelope. Measured: **16 requests over 200.97 s**,
+      not 12 over 32. The request log's gaps are 20.0, 20.0, 20.0, 20.0, 20.0, 0.5,
+      20.0, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5 — omp reads the delay out of
+      the vendor's own SENTENCE ("Please try again in 20s.", failserver's verbatim
+      OpenAI 429 wording) and honours it, five times, before the `500·2ⁿ` ladder takes
+      over. §2.8/criterion 6's "≤ 40 s" is therefore false for any 429 whose body
+      names a delay, and §1.9's "12 requests / ~32 s is the floor of one failing model
+      call" holds only for statuses with no delay hint (the `stdout-error` row).
+      Note this capture ran WITHOUT `--max-time`: the adapter renders `--max-time 115`
+      at `timeout_s=120`, which would have cut this run at 115 s with an `aborted`
+      terminal message instead of the `error` one committed here. Exit 1, stderr 0 B,
+      terminal `stopReason: "error"`, `errorStatus: 429`.
+    expect:
+      success: false
+      error_contains: ["429", "Rate limit reached for stub-model"]
+      raw_contains:
+        - '"errorStatus":429'
+        - "Please try again in 20s."
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 0.64
+    requests: 0
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the probe HOME → /home/e2e, once, in the
+      stderr hint's `…/.omp/agent/models.yml` path. stdout is zero bytes and was not
+      touched. No credential or generation id was present.
+    notes: >-
+      `rig` with `--model stub/nonexistent` and no server contacted: omp resolves the
+      spec against the LOCAL catalog before dispatch, so this is a pre-flight failure
+      — exit 1, **0 B stdout**, **zero requests** (the loopback stub was running and
+      its log stayed empty), 0.64 s. stderr names the model and then offers the
+      env-var / `models.yml` hint. The capture measured `classify_failure: None` —
+      no row of the shared `INVALID_MODEL_MARKERS` table matched `Model "…" not
+      found`, because the existing `model not found` row cannot span the quoted
+      selector between the two words. §2.7 anticipated exactly that ("add the omp
+      spelling if the shared table's forms do not cover it"), so the table gained
+      `\bmodel ["'`]?[\w./:-]{1,60}["'`]? not found` — written as the SHAPE rather
+      than as one vendor's punctuation, and bounded so a cost line or a token count
+      cannot satisfy it. No other adapter's row moved. Contrast `invalid-model-api`,
+      where the same verdict arrives from the API in-stream.
+    expect:
+      success: false
+      error_contains: ["Empty output", 'Model "stub/nonexistent" not found']
+      raw_contains:
+        - 'Model "stub/nonexistent" not found'
+        - "/home/e2e/.omp/agent/models.yml"
+      classify_failure: invalid_model
+
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 0.39
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements — the scratch spawn cwd → /work (once, the
+      `session` event's `cwd`) and the probe HOME → /home/e2e (4 occurrences: the
+      `raw-http-request=…/.omp/logs/http-400-requests/<id>.json` tail omp appends to
+      `errorMessage`, repeated in `message_start`, `message_end`, `turn_end` and
+      `agent_end`). No event added, dropped or reordered; every line still valid JSON.
+      No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode ctx` (HTTP 400, the verbatim OpenAI context-length
+      body). Exactly as §3 predicted: **one request** — 400 is outside the fetch
+      wrapper's retry set — exit 1 in 0.39 s, stderr 0 B, terminal `stopReason:
+      "error"` with `errorStatus: 400` and the vendor sentence in `errorMessage`. This
+      is the one omp row the SHARED `CONTEXT_OVERFLOW_MARKERS` table classifies, and
+      it is terminal rather than retryable. One thing to know before anyone reformats
+      that field: on a 400 omp DUMPS THE WHOLE OUTBOUND REQUEST to
+      `$HOME/.omp/logs/http-400-requests/<epoch>-<id>.json` and appends the path to
+      `errorMessage` — a HOME path on the success channel, on a code path that fires
+      whenever a provider 400s. It is the reason this row needed a second replacement,
+      and a live-lane capture would put the user's real home directory there.
+    expect:
+      success: false
+      error_contains: ["maximum context length"]
+      raw_contains:
+        - '"errorStatus":400'
+        - "raw-http-request=/home/e2e/.omp/logs/http-400-requests/"
+      classify_failure: "context_length_exceeded"
+
+  # ----- beyond §6.2's twelve, graded the same way --------------------------- #
+
+  truncated-partial:
+    stdout: truncated-partial.stdout.txt
+    stderr: truncated-partial.stderr.txt
+    exit_code: 1
+    wall_s: 0.40
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      **The shape the canonical `truncated` row exists to catch, which the default
+      60-byte cut cannot produce.** `rig`, failserver `--mode trunc
+      --trunc-bytes 435 --trunc-answer '[{"title": "Cut in the middle", "desc": "the
+      stream stops here"'` — a cut placed AFTER the content frame and before the
+      `finish_reason` frame. Then omp does not retry at all: **one request**, 0.40 s,
+      exit 1, and the terminal assistant `message_end` is `stopReason: "error"` with
+      no `errorStatus`, `errorMessage: "OpenAI completions stream closed before a
+      finish_reason was received"` — and its `content` HOLDS THE HALF-PARSED ARRAY as
+      text. So both halves of §3's disjunction are real at omp, selected by where the
+      socket closes: cut before any content → four empty `stop`s and exit 0
+      (`truncated`); cut after content → an `error` carrying the fragment and exit 1
+      (this row). The row's whole job is that no half-parsed object is ever returned
+      as the answer.
+    expect:
+      success: false
+      error_contains: ["stream closed before a finish_reason was received"]
+      raw_contains:
+        - '"text":"[{\"title\": \"Cut in the middle\"'
+        - '"stopReason":"error"'
+      classify_failure: null
+
+  aborted:
+    stdout: aborted.stdout.txt
+    stderr: aborted.stderr.txt
+    exit_code: 1
+    wall_s: 1.17
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode stall` with `--max-time 1` — §1.5's FIRST shape, the
+      clean one, and the other half of criterion 7. The deadline fires mid-generation
+      rather than inside a tool call: exit **1**, one request, 1.17 s, terminal
+      assistant `message_end` with `stopReason: "aborted"`, `errorMessage: "Deadline
+      exceeded"`, `content: []`, then `turn_end` and `agent_end`. stderr 0 B. Compare
+      `exit-zero-failure`, which is the same deadline landing one layer lower and
+      exiting 0 — the pair is why the parser may not read the exit code.
+    expect:
+      success: false
+      error_contains: ["Deadline exceeded"]
+      raw_contains:
+        - '"stopReason":"aborted"'
+        - '"errorMessage":"Deadline exceeded"'
+      classify_failure: "timeout"
+
+  auth-error-preflight:
+    stdout: auth-error-preflight.stdout.txt
+    stderr: auth-error-preflight.stderr.txt
+    exit_code: 1
+    wall_s: 0.34
+    requests: 0
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements — the scratch spawn cwd → /work (once, the
+      `session` event's `cwd`, which is the whole of stdout) and the probe HOME →
+      /home/e2e (once, in the stderr hint's `…/.omp/agent/agent.db` path). No event
+      added, dropped or reordered; the single stdout line is still valid JSON. No
+      credential or generation id was present — this run had no key by construction.
+    notes: >-
+      `rig` with `--model openrouter/openai/gpt-5.6-luna` and **no key anywhere** —
+      not in the process env, not in a cwd `.env`, not in `$HOME/.omp/agent/.env`.
+      Exit 1, zero requests, 0.34 s, and the diagnosis is a Bun source-context dump on
+      stderr whose payload line is `error: No API key found for openrouter.` followed
+      by the `/login … or create <HOME>/.omp/agent/agent.db` hint.
+      **The fact this row exists to pin**: stdout is NOT empty. omp flushes the
+      `session` event (178 bytes, one JSON line) before the key lookup fails, so a
+      `STDOUT_THEN_STDERR` diagnosis channel would report a one-event stream and never
+      reach the sentence that names the problem. `STDOUT_ELSE_STDERR` is what makes
+      this row legible, and this is the capture that says why.
+    expect:
+      success: false
+      # This capture is what made the Bun strip reach the right lines. It used to
+      # be worse than a trace-strip problem: omp puts a source-context PRELUDE
+      # (six numbered lines of minified source and a caret) AHEAD of its own
+      # `error:` line, so `parse_output`'s ~300-char summary was spent on the
+      # prelude and the diagnosis was ellipsed away entirely. `stderr_diagnosis`
+      # drops all three Bun shapes now, so the sentence is in `error_contains`
+      # where it belongs rather than only in the raw bytes.
+      error_contains:
+        - "run ended before any assistant message"
+        - "last event: session"
+        - "error: No API key found for openrouter."
+      raw_contains:
+        - "error: No API key found for openrouter."
+        - '"type":"session"'
+      classify_failure: "auth_failed"
+
+  invalid-tool:
+    stdout: invalid-tool.stdout.txt
+    stderr: invalid-tool.stderr.txt
+    exit_code: 1
+    wall_s: 0.35
+    requests: 0
+    notes: >-
+      **The one row in this set that needed no scrub at all** — it carries neither
+      `synthesized` nor `provenance`, because omp's bytes here name no path of ours.
+      `rig` with `--tools read,bogus`: `--tools` is validated BEFORE model resolution
+      and before the session opens, so this is exit 1, **0 B stdout**, zero requests,
+      0.35 s, at zero spend. stderr is a Bun source-context dump ending
+      `CliUsageError: Unknown tool in --tools: bogus. Valid tools: read, write, goal,
+      init_experiment, run_experiment, log_experiment, update_notes.` — note that the
+      "Valid tools:" list is INCOMPLETE and changes between runs (it names seven here
+      and omits `bash`, `grep`, `glob` and `find`, all of which the adapter passes and
+      all of which work), so nothing may parse it. This is the `LAUNCH_FAILURE_MARKERS`
+      row: the shape a mis-shipped adapter produces, distinguishable from a provider
+      failure by the zero requests and the `CliUsageError` word — and §2.7's
+      `LAUNCH_FAILURE_MARKERS += "CliUsageError"` is what makes that distinction a
+      verdict rather than an observation. It lands on `spawn_failed` (D3k rung 1,
+      never retried, fails the whole batch), which is the right disposition for
+      something that is a property of the INSTALL and identical for every sibling
+      slot on this runner; `None` would have offered a transport retry of a run that
+      cannot change its mind. `Config overlay not found` — the other pre-flight
+      refusal the adapter can produce, when `assets/omp/overlay.yml` is missing from
+      a packaged install — joined the same row for the same reason.
+    expect:
+      success: false
+      # The parser's error is `Empty output (stderr: …)`. The tool name survives the
+      # 300-char cap now that `stderr_diagnosis` drops Bun's SOURCE-CONTEXT PRELUDE
+      # (six numbered lines and a caret) as well as the stack frames that follow —
+      # the prelude comes FIRST, so before that fix the cap was spent on minified
+      # source and the diagnosis was ellipsed away entirely.
+      error_contains: ["Empty output", "CliUsageError: Unknown tool in --tools: bogus."]
+      raw_contains:
+        - "CliUsageError: Unknown tool in --tools: bogus."
+      classify_failure: spawn_failed
+
+  invalid-model-api:
+    stdout: invalid-model-api.stdout.txt
+    stderr: invalid-model-api.stderr.txt
+    exit_code: 1
+    wall_s: 0.39
+    requests: 1
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. No event added, dropped or reordered; every line still
+      valid JSON. No credential or generation id was present.
+    notes: >-
+      `rig`, failserver `--mode 404` — the model the local catalog knows and the API
+      rejects. §3 made this row conditional on omp forwarding the 404 in-stream; it
+      does. One request, terminal, no retry, exit 1 in 0.39 s, stderr 0 B, terminal
+      `stopReason: "error"` with `errorStatus: 404` (and `errorId: 404`, the one
+      `errorId` in this set that is not a large opaque integer) and an `errorMessage`
+      that NAMES THE MODEL. It classifies where the pre-flight `invalid-model` row
+      does not — the two rows together are the measurement that omp's model failures
+      are only categorised when they come back from the API.
+    expect:
+      success: false
+      error_contains: ["404", "does not exist or you do not have access to it"]
+      raw_contains:
+        - '"errorStatus":404'
+        - "The model `stub-model` does not exist"
+      classify_failure: "invalid_model"
+
+  tool-error-recovered:
+    stdout: tool-error-recovered.stdout.txt
+    stderr: tool-error-recovered.stderr.txt
+    exit_code: 0
+    wall_s: 0.41
+    requests: 2
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      /work (4 occurrences) and the capture dir holding the rendered
+      `{output_json_path}` → /work (6 occurrences). The denied write target
+      (`/omp-denied-findings.json`) is already root-relative and was NOT touched. No
+      event added, dropped or reordered; every line still valid JSON. No credential or
+      generation id was present.
+    notes: >-
+      **Captured, not hand-composed** — §4 listed this row as one to compose from the
+      `agentD/` captures, and it turned out to be reachable for real, so these are
+      omp's own bytes. `p12`, same argv and prompt as `success`, with the stub
+      scripting a `write` to an unwritable path: the `tool_execution_end` comes back
+      `isError: true` with `EACCES: permission denied, open
+      '/omp-denied-findings.json'`, the model then answers with the findings array,
+      and the run exits 0 having SUCCEEDED. The row's job is that a failed tool call
+      mid-stream is not a failed run: the terminal `stopReason` is `stop`, the answer
+      parses, and neither the `isError` flag nor the EACCES sentence may be read as
+      the run's verdict or reach `classify_failure`.
+    expect:
+      success: true
+      raw_contains:
+        - '"isError":true'
+        - "EACCES: permission denied"
+        - '"stopReason":"stop"'
+      classify_failure: null
+
+  # ------------------------------------------------------------------------ #
+  # The five SYNTHESIZED rows. Every other row above is omp's own bytes; these
+  # five are derived from `success.stdout.txt` by editing named fields of events
+  # that were already in it — no event added, dropped or reordered, every line
+  # still valid JSON — because each grades a shape a stub cannot drive. Three of
+  # them need a release that does not exist (a renamed enum, a dropped key); one
+  # needs an approval denial, which this adapter's argv is specifically built to
+  # prevent; one needs a model that emits visible reasoning. Composing them from
+  # the committed capture rather than from a scratch capture is what makes the
+  # edit auditable: `git diff` against `success.stdout.txt` is the provenance.
+  # ------------------------------------------------------------------------ #
+
+  approval-denied:
+    stdout: approval-denied.stdout.txt
+    stderr: approval-denied.stderr.txt
+    exit_code: 0
+    requests: 2
+    synthesized: true
+    provenance: >-
+      COMPOSED from success.stdout.txt: the one `tool_execution_end` has
+      `isError` set true and its `result.content[0].text` replaced by omp's
+      measured headless denial ("Tool write requires approval but no interactive
+      UI available. Set tools.approval.write: allow to auto-approve it."). Every
+      other byte, the `stop` that follows included, is the capture's.
+    notes: >-
+      The row the whole tool policy exists for. Under a narrower approval mode
+      omp denied `bash` three times and the model then answered `git version
+      2.43.0` — the output of a command it never ran — so a parser that read only
+      the final message would accept a fabricated review. Here the final message
+      IS a clean `stop` carrying a well-formed findings array, and the run must
+      still fail: `parse_output` matches the denial marker on the TOOL RESULT's
+      own text (never on assistant text, which may quote it), reports it with a
+      hard `error_code` so `invoke_with_file_output` will not recover a findings
+      file written beside it, and `classify_failure` answers `permission_denied`,
+      which is not in RETRYABLE_FAILURE_CATEGORIES.
+    expect:
+      success: false
+      error_contains:
+        - "was denied approval"
+        - "write"
+        - "the answer that followed is not trusted"
+      classify_failure: permission_denied
+
+  markers-in-tool-result:
+    stdout: markers-in-tool-result.stdout.txt
+    stderr: markers-in-tool-result.stderr.txt
+    exit_code: 1
+    requests: 2
+    synthesized: true
+    provenance: >-
+      COMPOSED from success.stdout.txt: the one `tool_execution_end` is renamed
+      to the `read` tool, kept `isError: false`, and its result text replaced by
+      a plan excerpt that quotes every marker in the classifier tables (401 User
+      not found., No API key found for openrouter, Deadline exceeded, Unable to
+      connect, Model "x" not found); the terminal assistant message's
+      `stopReason` becomes `error` with `errorStatus: 429`, `errorMessage: "429
+      Provider returned error"`, empty content and zeroed usage.
+    notes: >-
+      The `vendor_text` boundary, as a regression rather than a claim. A reviewer
+      that READS a plan discussing failure modes hands itself every auth marker
+      in the tables inside a successful tool result, and under
+      `classify_streams`' fixed order (auth before rate limit) a quoted 401 would
+      outrank the real 429 that ended the run — `auth_failed`, no retry, the
+      whole batch failed on a marker the vendor never emitted. The reduction
+      keeps only what omp itself wrote as a verdict: the terminal message's own
+      `errorMessage`. The `read` result is retained for diagnostics — it is still
+      in `details.stdout_excerpt` and in the run log — and is simply not in the
+      haystack.
+    expect:
+      success: false
+      error_contains:
+        - "429"
+      raw_contains:
+        - "401 User not found."
+        - "No API key found for openrouter"
+      classify_failure: rate_limited
+
+  unrecognized-stop-reason:
+    stdout: unrecognized-stop-reason.stdout.txt
+    stderr: unrecognized-stop-reason.stderr.txt
+    exit_code: 0
+    requests: 2
+    synthesized: true
+    provenance: >-
+      COMPOSED from success.stdout.txt: the terminal assistant message's
+      `stopReason` is `"maxTokens"` instead of `"stop"`. One field, nothing else
+      — its `content` is still the real findings array.
+    notes: >-
+      Stream-shape drift, failing by name. `_KNOWN_STOP_REASONS` is closed, and
+      an enum outside it may be a cut, a refusal or a rename — the parser cannot
+      tell which, so it fails closed and never calls `parse_answer_text`. That
+      the message's text is a perfectly good findings array is the point: a
+      parser that branched on content rather than on the enum would serve a
+      truncated review as a complete one. The raw value and the stream version
+      are quoted verbatim, so the report names the drift and the fix is a
+      re-measurement that grows the tuple with a row like this one.
+      `classify_failure` falls through to the tables over an empty `errorMessage`
+      and answers `null` — transport-shaped, which the ladder may retry a bounded
+      number of times before ending the slot with this same named error. Those
+      retries are accepted over inventing a category for a shape nobody has seen.
+    expect:
+      success: false
+      error_contains:
+        - "unrecognized stopReason 'maxTokens'"
+        - "stream version 3"
+      classify_failure: null
+
+  missing-stop-reason:
+    stdout: missing-stop-reason.stdout.txt
+    stderr: missing-stop-reason.stderr.txt
+    exit_code: 0
+    requests: 2
+    synthesized: true
+    provenance: >-
+      COMPOSED from success.stdout.txt: the terminal assistant message's
+      `stopReason` key is deleted. Nothing else differs.
+    notes: >-
+      The other half of the shape guard, and the one no flag gate can see: the
+      help text bounds the argv, `cli-surface.yaml`'s sha catches a release that
+      moves it, and nothing at all watches the JSONL. A release that renames a
+      field of the assistant message would otherwise reach
+      `parse_answer_text` as a message the parser silently mis-reads. Checked by
+      name, before anything reads the stream, with the same hard code as the enum
+      drift for the same reason: the parser cannot vouch for the terminal state
+      of a message it cannot read, so a findings file written beside it is not
+      read either.
+    expect:
+      success: false
+      error_contains:
+        - "assistant message_end without stopReason"
+        - "stream version 3"
+      classify_failure: null
+
+  thinking-then-text:
+    stdout: thinking-then-text.stdout.txt
+    stderr: thinking-then-text.stderr.txt
+    exit_code: 0
+    requests: 2
+    synthesized: true
+    provenance: >-
+      COMPOSED from success.stdout.txt: a `{"type": "thinking"}` content part
+      carrying a DECOY fenced findings array is prepended to the terminal
+      assistant message's existing `text` part. The real array is untouched and
+      still last.
+    notes: >-
+      Only `type == "text"` content parts are ever the answer. A `thinking` part
+      is the model's reasoning — visible with `--print-thoughts`, and present in
+      the stream whenever the model emits it — and concatenating it in would let
+      a fenced array inside a reasoning block become the findings, which is the
+      one place `parse_answer_text`'s prefer-arrays extractor would happily pick
+      the wrong document. The run succeeds, `data` is the REAL array, and `raw`
+      (the concatenated text parts, not the JSONL) holds no byte of the decoy.
+    expect:
+      success: true
+      classify_failure: null
+
+  # ----- P13: the three Responses-path rate-limit rows (2026-09-18) --------- #
+  # Vehicle `p13`. Everything above this line drove the `openai-completions`
+  # client; these three drive the Responses API, which is the only client a
+  # shipped model spec reaches. `"api":"openrouter"` in the bytes is the proof.
+
+  rate-limit-responses:
+    stdout: rate-limit-responses.stdout.txt
+    stderr: rate-limit-responses.stderr.txt
+    exit_code: 1
+    wall_s: 100.50
+    requests: 6
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`, which is the only absolute path omp wrote. The probe
+      HOME never appears in these bytes, so nothing was replaced for it. No event
+      added, dropped or reordered; 9 lines in, 9 out; every line still valid JSON. No
+      credential and no generation id was present — nothing here ever touched the live
+      service, and the `OPENROUTER_API_KEY` in force was the literal `omp-probe-key`,
+      which omp does not echo.
+    notes: >-
+      `p13`, `failserver.py --mode 429` verbatim, fail-forever, **no `Retry-After`
+      header**, instant failures, single turn, no `--max-time`. **6 requests over
+      100.50 s**, exit 1 — the production-protocol twin of the `rate-limit` row above,
+      and the row that moved `internal_retries.max_requests` from 16 to 6. The request
+      log's gaps are 20.0, 20.0, 20.0, 20.0, 20.0: omp still reads the delay out of the
+      vendor's own SENTENCE ("Please try again in 20s.") on this client, but the chain
+      that consumes it is only the fetch wrapper's `maxAttempts: 6` — the completions
+      client's `withReplaySafeStreamRetry` doubling is absent, so the ladder never gets
+      a turn and every gap is the body's 20 s. Contrast on the same server and the same
+      HOME: `--mode 500` runs 6 requests over 15.98 s with gaps 0.5, 1.0, 2.0, 4.0,
+      8.0 — the `500·2ⁿ` ladder alone, and half the completions path's 12/32 s.
+      Stderr is 0 B and the terminal `stopReason` is `error` with `errorStatus: 429`,
+      exactly as on the completions client; only the count and the wall differ.
+    expect:
+      success: false
+      error_contains: ["429", "Rate limit reached for stub-model"]
+      raw_contains:
+        - '"errorStatus":429'
+        - "Please try again in 20s."
+        # THE PROTOCOL PROOF, in the row's own bytes: the Responses client names
+        # itself `openrouter`; the completions rows name themselves
+        # `openai-completions`. A capture that silently fell back to
+        # /chat/completions could not carry this.
+        - '"api":"openrouter"'
+      classify_failure: "rate_limited"
+
+  rate-limit-delayed:
+    stdout: rate-limit-delayed.stdout.txt
+    stderr: rate-limit-delayed.stderr.txt
+    exit_code: 1
+    wall_s: 220.49
+    requests: 6
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. The probe HOME does not appear. No event added, dropped
+      or reordered; 9 lines in, 9 out; every line still valid JSON. No credential and
+      no generation id was present.
+    notes: >-
+      `p13` against the throwaway `failserver`-importing probe with a **20 s
+      server-side delay before each 429** — the same status, body and missing
+      `Retry-After` as the row above, answered slowly. This is §1.9's second open
+      question ("a request that takes 20 s to come back 429 adds its own latency to
+      every attempt — no client-side request timeout was found") and the answer is
+      yes, exactly and only that: **6 requests over 220.49 s**, exit 1, arrival gaps
+      40.0, 40.0, 40.0, 40.0, 40.0 — 20 s of latency plus the 20 s body-parsed sleep,
+      every time. The COUNT is unchanged, which is the load-bearing half: omp does not
+      time a slow request out and does not spend an extra attempt on it, so
+      `max_requests: 6` holds however slow the upstream is and the wall is
+      `backoff + requests × latency`. That is why `max_wall_s` is `null` rather than
+      the 100.5 s of the row above: the same chain measures twice the wall against a
+      slower server, so no observed total is a bound. The captured bytes are the row
+      above's but for ids and timestamps — two rows sharing a shape is a measurement,
+      and the two `wall_s` cells are what this one exists to record.
+    expect:
+      success: false
+      error_contains: ["429", "Rate limit reached for stub-model"]
+      raw_contains:
+        - '"errorStatus":429'
+        - "Please try again in 20s."
+        - '"api":"openrouter"'
+      classify_failure: "rate_limited"
+
+  rate-limit-multi-turn:
+    stdout: rate-limit-multi-turn.stdout.txt
+    stderr: rate-limit-multi-turn.stderr.txt
+    exit_code: 1
+    wall_s: 100.52
+    requests: 7
+    synthesized: true
+    provenance: >-
+      SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
+      `session` event's `cwd`. The tool this row runs is `echo p13`, whose result is
+      the three bytes `p13`, so no path reached the tool channel. No event added,
+      dropped or reordered; 22 lines in, 22 out; every line still valid JSON. No
+      credential and no generation id was present.
+    notes: >-
+      `p13` against the throwaway probe in its `toolthen429` shape: request 1 is a
+      Responses-API `function_call` (`bash`, `echo p13`) which omp executes under
+      `--approval-mode yolo`, and every request after it is 429'd forever with
+      failserver's own bytes. §1.9's third open question — "a run with tool calls is
+      one model call per turn, each with its own chain; a 429 on the fifth call sits
+      behind four successful calls" — measured: **7 requests over 100.52 s**, exit 1,
+      gaps 0.03, 20.0, 20.0, 20.0, 20.0, 20.0. One successful call, then the SAME
+      six-request chain as `rate-limit-responses` on the call that fails, and the
+      wall is that chain's 100.5 s plus 0.03 s of tool turn. So a dispatch's own total
+      is `6 + (successful calls before it)` and nothing this adapter sets bounds the
+      second term — the docstring on `internal_retries` says so in those words, and
+      this row is where the number comes from. The stream is two `turn_start`s, an
+      assistant `message_end` with `stopReason: "toolUse"`, one
+      `tool_execution_end` with `isError: false`, then the terminal `error` /
+      `errorStatus: 429` message: a successful tool turn ahead of the failure does not
+      change the verdict, the classification or the parser's error text.
+    expect:
+      success: false
+      error_contains: ["429", "Rate limit reached for stub-model"]
+      raw_contains:
+        - '"errorStatus":429'
+        - '"api":"openrouter"'
+        # the successful first turn, ahead of the 429'd second call
+        - '"type":"tool_execution_end"'
+        - '"isError":false'
+      classify_failure: "rate_limited"

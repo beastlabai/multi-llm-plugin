@@ -146,6 +146,41 @@ artifacts:
     # and cursor-agent greps its server-rendered installer: the release API's
     # `tag_name`. It is also where the `digest` above comes from.
     releases_url: "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
+  omp:
+    version: "18.2.2"
+    # oh-my-pi's release asset. Like agy's and muse's and unlike cursor-agent's,
+    # this sha256 is UPSTREAM'S OWN: the release page publishes a
+    # SHA256SUMS.txt naming this value against `omp-linux-x64`. Confirmed on
+    # 2026-09-17 to agree with `sha256sum` over the fetched file -- an upstream
+    # digest is a claim until --check --strict says otherwise, which is what the
+    # build layer does with it.
+    #
+    # WHY A DOWNLOAD AND NOT THE NPM LAYER: `@oh-my-pi/pi-coding-agent` requires
+    # Bun >= 1.3.14 and does not run under node at all, so `npm ci` cannot
+    # install it into this image. The release asset is a Bun single-file ELF
+    # linked against libc/libm/libdl/libpthread only, which bookworm-slim's
+    # glibc 2.36 runs with nothing added.
+    #
+    # COST: 251,786,720 bytes of binary -- second only to cursor-agent's 245 MiB
+    # unpacked -- PLUS 346 MB of native addons the binary extracts on its first
+    # agent run. Those are pre-extracted into /opt/mllm/omp-natives by the same
+    # build layer and pointed at per exec by redirect.yaml's `seed_links`,
+    # because the alternative is 346 MB of tmpfs and 3.6 s in every
+    # per-invocation $HOME. So this row is ~600 MB of image and needs the stated
+    # justification the way agy's does: it is the first CLI whose fan-out
+    # default delivers the prompt on STDIN, which is the transport a 200 KB
+    # review prompt needs and which no other row exercises.
+    #
+    # The version appears EXACTLY ONCE in the URL (`/v18.2.2/`), which is what
+    # lets `lock_update.retarget_url` move this row under
+    # `make e2e-image-latest`; `install: download` then keeps the fetched file
+    # unchanged, so `plan_artifacts` recovers the new digest by hashing
+    # /opt/mllm/real/omp out of the @latest image.
+    url: "https://github.com/can1357/oh-my-pi/releases/download/v18.2.2/omp-linux-x64"
+    sha256: "77c3520ab8ef8318dda02a0715e3b6e69589c427dc23f90a4bb97650caa72f72"
+    # Where `latest` mode re-reads the version: the release API's `tag_name`,
+    # which carries a leading `v` this row's version does not.
+    releases_url: "https://api.github.com/repos/can1357/oh-my-pi/releases/latest"
   python312:
     version: "3.12.11"
     # vibe's interpreter, NOT the product's -- `mistral-vibe` needs >=3.12 and
@@ -535,3 +570,30 @@ clis:
       probe reading stdout alone would have self-exempted it as `probe: none`,
       which would have been an honest-looking false statement about a binary
       that documents its flags perfectly well.
+
+  - id: omp
+    binary: omp
+    install: download
+    artifact: omp
+    version: "18.2.2"
+    verify:
+      # MEASURED: `omp --version` prints a bare `omp/18.2.2` on stdout with
+      # stderr EMPTY and exit 0, offline, with no credential -- and, unlike the
+      # first agent run, it triggers none of the native-addon extraction below.
+      command: ["omp", "--version"]
+      pattern: "^omp/(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      NPM IS NOT AN OPTION for this row: `@oh-my-pi/pi-coding-agent` needs
+      Bun >= 1.3.14 and does not run under node, so it cannot join the `npm ci`
+      layer whatever version is pinned -- see artifacts.omp. The binary also
+      EXTRACTS 346 MB of native addons -- two `pi_natives.linux-x64-*.node`
+      files at ~181 MB each -- into $HOME/.omp/natives/<version>/ on the first
+      run that loads them, and `--version` does not trigger it (50 ms, nothing
+      written) while `omp config list` does, in ~3 s, with no network, no model
+      and no credential. The build extracts them once into
+      /opt/mllm/omp-natives and redirect.yaml's `seed_links` symlinks each
+      per-invocation $HOME at that copy, because the wrapper copies the whole
+      per-CLI home into a tmpfs on EVERY exec.
+      Reads PI_CODING_AGENT_DIR ahead of $HOME, pi's trap exactly, and its
+      credential chain is its own $env ladder (process env, then a .env in the
+      run's cwd, then ~/.omp/agent/.env) rather than a login state.

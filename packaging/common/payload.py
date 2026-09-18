@@ -101,6 +101,13 @@ _BLOCK_END = "--- the rig that drives it ---"
 #:   ``utils/consolidation.py``;
 #: * ``references/`` — cited by ``instructions/*.md`` at run time;
 #: * ``assets/icons/`` — inlined by the HTML report.
+#: * ``assets/omp/overlay.yml`` — passed to ``--config`` on every omp
+#:   dispatch, at an absolute path resolved from the adapter's ``__file__``.
+#:   Absent, omp exits 1 in 0.13 s on ``Config overlay not found`` before it
+#:   makes a single request, so every omp slot in a packaged install dies at
+#:   launch — which is why it is named here and not left to the allowlist
+#:   pair alone: that pair is what *copies* the file, this is what fails the
+#:   build when a short payload ships without it.
 REQUIRED_INVENTORY: Tuple[str, ...] = (
     "multi_llm.py",
     "modes.py",
@@ -114,6 +121,7 @@ REQUIRED_INVENTORY: Tuple[str, ...] = (
     "hosts/codex/shim.md.tmpl",
     "templates/config/providers.override.yaml",
     "templates/consolidated_report_template.html",
+    "assets/omp/overlay.yml",
 )
 
 #: Directories the payload must not be missing. Checked as "at least one file
@@ -128,6 +136,7 @@ REQUIRED_TREES: Tuple[str, ...] = (
     "references/",
     "templates/",
     "assets/icons/",
+    "assets/omp/",
 )
 
 #: Filenames and suffixes that must never reach a distribution tree. This is the

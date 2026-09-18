@@ -91,6 +91,7 @@ from utils.review_orchestrator_base import (
     porcelain_snapshot,
     record_sandbox_bypassed,
     recorded_served_models,
+    recorded_usage,
     sandbox_fallback_kwargs,
     sandbox_refusal,
     unexpected_writes,
@@ -150,7 +151,7 @@ from utils.git_utils import (
     validate_git_ref,
     _run_git,
 )
-from utils.html_report_generator import generate_html_report, write_html_report, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
+from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -1100,6 +1101,7 @@ async def run_single_review(
     tracked_files: Optional[List[Dict]] = None,
     base_ref: str = "HEAD~1",
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
     """
     Run a single model code review using agent exploration with file-based output.
@@ -1126,6 +1128,11 @@ async def run_single_review(
             written into it, so the report can name the model that really
             answered.  The return tuple is deliberately unchanged — every caller
             of it destructures three values.
+        usage: Optional collector for what the slot spent, filled from
+            ``details["usage"]`` when the adapter reported any — the same
+            channel and the same absent-means-unreported rule as above, and a
+            collector for the same reason: the return tuple has no fourth slot.
+            This lane's twin of the base fan-out's :func:`collect_usage`.
 
     Returns:
         Tuple of (success, issues_list, error)
@@ -1278,6 +1285,14 @@ async def run_single_review(
             entry["sandbox"] = SANDBOX_BYPASSED
         if entry:
             served_models[model_spec] = entry
+    # Stage U: and what it spent, recorded here for the same reason and before
+    # the same branches — a slot that ends in salvage, or fails outright, spent
+    # what it spent. Absent when the adapter reported nothing; never `{}`, which
+    # would read as a free review.
+    if usage is not None:
+        spent = details.get("usage")
+        if isinstance(spent, dict) and spent:
+            usage[model_spec] = spent
 
     # D6 override: the detective check, ahead of every branch below. A bypassed
     # slot that changed the working tree is failed by path whatever the
@@ -1486,6 +1501,8 @@ async def run_all_reviews(
     base_ref: str = "HEAD~1",
     skip_existing: bool = True,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    prior_usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
     """
     Run code review across all models using agent exploration.
@@ -1510,6 +1527,13 @@ async def run_all_reviews(
         base_ref: Git reference to diff against
         served_models: Optional §3.6 attribution collector, forwarded to each
             :func:`run_single_review` (see its docstring)
+        usage: Optional per-slot usage collector, forwarded the same way
+        prior_usage: What an earlier attempt of this phase recorded, read off
+            the checkpoint before this run replaced it.  A slot answered from
+            its existing ``<model>.json`` invokes no adapter and so reports no
+            usage of its own; its entry here is copied into ``usage`` at the
+            skip, which is the one place that knows a result was reused.  A
+            slot that really re-runs is never seeded from it.
 
     Returns:
         Dict mapping model spec to tuple of (success, issues_list, error)
@@ -1547,6 +1571,15 @@ async def run_all_reviews(
                         existing_data = json.load(f)
                     if isinstance(existing_data, list):
                         print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
+                        # Stage U: the result is reused, so what it cost is
+                        # reused with it. Nothing else can refill this entry —
+                        # no adapter runs for a skipped slot — and without it
+                        # the run's own `models_complete` write drops a number
+                        # an earlier attempt really paid for.
+                        if usage is not None:
+                            spent = (prior_usage or {}).get(model_spec)
+                            if isinstance(spent, dict) and spent:
+                                usage[model_spec] = spent
                         # A slot answered from disk is a slot finished; a
                         # resumed run must not read `models 0/4` while it skips.
                         slot_finished()
@@ -1571,14 +1604,14 @@ async def run_all_reviews(
                     async with semaphore:
                         result = await run_single_review(
                             model_spec, plan_path, out_dir, timeout, tracked_files,
-                            base_ref, served_models=served_models,
+                            base_ref, served_models=served_models, usage=usage,
                         )
                         return (model_spec, result)
             else:
                 async with semaphore:
                     result = await run_single_review(
                         model_spec, plan_path, out_dir, timeout, tracked_files,
-                        base_ref, served_models=served_models,
+                        base_ref, served_models=served_models, usage=usage,
                     )
                     return (model_spec, result)
         finally:
@@ -1637,6 +1670,7 @@ def generate_review_report(
     base_ref: Optional[str] = None,
     template_style: str = 'pr',
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
     failed_models: Optional[Dict[str, str]] = None,
 ) -> str:
     """Generate a markdown review report.
@@ -1647,6 +1681,12 @@ def generate_review_report(
     the HTML report's badges — names the model that actually served the turn
     instead of silently crediting the primary. Empty (the shipped default, since
     ``fallback_models`` ships empty) leaves the report byte-for-byte what it was.
+
+    ``usage`` is ``{model_spec: usage}`` for the slots whose adapter reported
+    what they spent. It renders on the ``**Models:**`` summary line and on the
+    HTML badges — the two surfaces that name each model once — and nowhere
+    per issue, because a cost repeated under every finding is noise. Empty for
+    a fan-out of duration-only adapters, which leaves the report as it was.
 
     ``failed_models`` is main()'s authoritative post-salvage failure map
     (model -> reason), including any model F11 seeded for never returning at
@@ -1688,7 +1728,7 @@ def generate_review_report(
 
     lines.append(
         "**Models:** "
-        + ", ".join(served_model_label(m, served_models) for m in successful_models)
+        + ", ".join(model_label(m, served_models, usage) for m in successful_models)
     )
     lines.append(f"**Total Issues:** {len(all_issues)}")
 
@@ -1912,6 +1952,7 @@ def generate_review_report(
                 base_ref=base_ref,
                 template_style=template_style,
                 served_models=served_models,
+                usage=usage,
             )
             write_html_report(html_content, phase_dir)
             print(f"HTML report written to: {phase_dir / 'report.html'}")
@@ -2415,6 +2456,10 @@ async def reaggregate_from_existing_files(
             plan_path, results, changed_files, validated_groups_for_report,
             phase_dir=phase_dir, base_ref=base_ref, template_style=template_style,
             served_models=recorded_served_models(str(phase_dir)),
+            # …and what each slot spent, off the same checkpoint: `{model}.json`
+            # is a bare issue list here too, so a reaggregated report that did
+            # not read this lost every number the original run recorded.
+            usage=recorded_usage(str(phase_dir)),
         )
 
         # Save report
@@ -2709,6 +2754,19 @@ async def main(argv: Optional[List[str]] = None) -> int:
     if detach_outcome is not None:
         sys.exit(detach_outcome)
 
+    # Stage U: what an earlier attempt of this phase recorded, read *before* the
+    # write below — `write_status` replaces every key but the two reserved
+    # objects, so the `usage` the last attempt wrote is gone the instant it
+    # lands. A resume skips every model that already has a `<model>.json`
+    # (`run_all_reviews`'s skip branch) and a skipped slot invokes no adapter,
+    # so nothing refills those entries: the regenerated report, and every
+    # `--reaggregate` after it, lost the numbers the first attempt paid for.
+    # Handed to the fan-out rather than merged into the collector wholesale, so
+    # it is restored only for the slots whose results were REUSED — a model
+    # that really re-ran is reported on what *this* attempt spent, and a
+    # re-run that reported nothing keeps no stale number.
+    prior_usage = recorded_usage(str(detach_phase_dir)) or {}
+
     # The checkpoint this phase's *own* salvage path reads back (W3). Below the
     # boundary for the same reason the base fan-out writes it there — nothing
     # under that line runs in the invoker — and against `detach_phase_dir`,
@@ -2784,6 +2842,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # served the turn; empty under the shipped config, which is what keeps the
     # report identical.
     served_models: Dict[str, Dict[str, Any]] = {}
+    # Stage U: filled per slot by run_single_review from `details["usage"]`,
+    # for the slots that failed as much as the ones that answered. Empty for a
+    # fan-out of adapters that report nothing, which keeps this run's
+    # checkpoint and report exactly what they were.
+    usage: Dict[str, Dict[str, Any]] = {}
     with intent_to_add_untracked(changed_files):
         # Run reviews - agents receive tracked files list and base ref for git diff
         results = await run_all_reviews(
@@ -2796,6 +2859,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
             base_ref,
             skip_existing=not args.rerun_all,
             served_models=served_models,
+            usage=usage,
+            prior_usage=prior_usage,
         )
 
         # Get the phase directory for code review outputs
@@ -2910,6 +2975,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # Added only when something was attributed, so a default run's
             # `.status.json` gains no key.
             **({"models_served": served_models} if served_models else {}),
+            # Same rule, one field over: absent means no adapter reported a
+            # cost, never that the run was free. This is the copy
+            # `--reaggregate` reads back.
+            **({"usage": usage} if usage else {}),
         })
         # D6 override (2026-09-17): the poller's copy, under `progress`.
         record_sandbox_bypassed(str(phase_dir), served_models)
@@ -3083,6 +3152,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             plan_path, results, changed_files, validated_groups_for_report,
             phase_dir=phase_dir, base_ref=base_ref, template_style=args.report_style,
             served_models=served_models or None,
+            usage=usage or None,
             failed_models=failed_models,
         )
 

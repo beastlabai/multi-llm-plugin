@@ -42,6 +42,7 @@ from .providers.grok import GrokProvider
 from .providers.kilocode import KiloCodeProvider
 from .providers.kimi import KimiProvider
 from .providers.muse import MuseProvider
+from .providers.omp import OmpProvider
 from .providers.opencode import OpenCodeProvider
 from .providers.pi import PiProvider
 from .providers.qwen_code import QwenCodeProvider
@@ -63,6 +64,7 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "kilocode": KiloCodeProvider(),
     "kimi": KimiProvider(),
     "muse": MuseProvider(),
+    "omp": OmpProvider(),
     "opencode": OpenCodeProvider(),
     "pi": PiProvider(),
     "qwen-code": QwenCodeProvider(),

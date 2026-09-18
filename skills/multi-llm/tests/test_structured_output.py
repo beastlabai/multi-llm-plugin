@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import structured_output as so  # noqa: E402
 from utils.providers.base import (  # noqa: E402
+    LLMProvider,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     StructuredOutputUnavailable,
@@ -374,12 +375,33 @@ class TestClaudeJsonSchemaGate:
 
 
 class TestSchemaKeywordIsInertWhenUnset:
-    """The eleven adapters that never see a schema must not move one byte.
+    """Every adapter that never sees a schema must not move one byte.
+
+    Counted rather than spelled: the number was "eleven" when it was written and
+    is fifteen now, and a docstring that names a count is a docstring that goes
+    stale on the next registry entry while the assertion beside it stays right.
 
     Asserted against L5's frozen ``PRE_L5_ARGV`` capture rather than against a
     freshly-built argv, so "identical to today" cannot drift into "identical to
     itself".
     """
+
+    @pytest.fixture(autouse=True)
+    def ungated(self):
+        """Neutralize the flag gates, for the reason the L5 sweep does.
+
+        omp's §2.11 probe and cursor's `--trust`/`--mode` one read the
+        *installed* binary's `--help` before `build_command` emits anything, so
+        ungated this sweep raises `OmpFlagsUnconfirmed` on a machine carrying an
+        older omp rather than comparing argv -- machine-dependence in the sweep
+        that exists to prove these bytes are machine-independent. Both gates
+        resolve their binary through `LLMProvider.gate_binary`; with nothing to
+        read, `missing_flags` reports nothing missing and the argv is the
+        adapter's own. `TestClaudeJsonSchemaGate` above grades a gate the way a
+        gate is graded -- help text stubbed, lookup real.
+        """
+        with patch.object(LLMProvider, "gate_binary", lambda self, **_kw: None):
+            yield
 
     @staticmethod
     def _table():
@@ -396,12 +418,13 @@ class TestSchemaKeywordIsInertWhenUnset:
 
         table, _models, _prompt = self._table()
         assert set(table) == set(_PROVIDERS)
-        assert len(table) == 17
+        assert len(table) == 18
 
     @pytest.mark.parametrize("name", sorted(so.__dict__.get("_ADAPTERS", ())) or [
         "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
         "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
+        "qwen-code",
         "vibe",
     ])
     def test_explicit_none_renders_the_pre_m7_argv(self, name):
@@ -415,7 +438,8 @@ class TestSchemaKeywordIsInertWhenUnset:
     @pytest.mark.parametrize("name", [
         "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
         "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
+        "qwen-code",
         "vibe",
     ])
     def test_omitting_the_keyword_is_the_same_as_passing_none(self, name):
@@ -431,7 +455,8 @@ class TestSchemaKeywordIsInertWhenUnset:
     @pytest.mark.parametrize("name", [
         "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
         "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "opencode", "pi", "qwen-code",
+        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
+        "qwen-code",
         "vibe",
     ])
     def test_the_other_three_builders_are_inert_too(self, name):

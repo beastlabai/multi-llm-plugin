@@ -1170,6 +1170,101 @@ clis:
       measured exits 1 on stderr, so no exit-0 markers are declared.
 
   # -------------------------------------------------------------------------
+  - cli: omp
+    provenance: verified
+    lane: provider
+    # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
+    # the executor's runner is a second binary. It is DECLARED here rather than
+    # tolerated: the per-row single-CLI assertion compares the call log against
+    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
+    # key against the adapters' own `agent_profiles` so the two cannot drift.
+    chain_write_runner: codex
+    surface: chat
+    mechanism: "$HOME/.omp/agent/models.yml providers.<id> {baseUrl, api: openai-completions, apiKey, models[]}"
+    model_arg: "stub/stub-model"
+    # MEASURED: omp posts to the per-exec path prefix unchanged
+    # (`/s/<exec id>/v1/chat/completions`), so this row keys the stub's turn
+    # counter exactly rather than falling back to the coarse tuple.
+    session_prefix: true
+    config_roots:
+      # Reads PI_CODING_AGENT_DIR ahead of $HOME -- pi's trap, inherited whole.
+      PI_CODING_AGENT_DIR: ".omp/agent"
+    credential_vars: [STUB_API_KEY]
+    # The one variable OmpProvider.get_env() sets unconditionally. The wrapper
+    # builds its child's environment from scratch, so without this row the
+    # container would run omp under a configuration the product never ships —
+    # `tests/test_wrapper_env_contract.py` fails the row by name for exactly
+    # that. It is an opt-out with no vendor and no credential in it (the setup
+    # wizard does not run in print mode anyway; the pin makes that not depend on
+    # omp); the adapter's OTHER variable is OPENROUTER_API_KEY, which is
+    # conditional on the host having one and has no business on this lane.
+    env_extra:
+      OMP_SKIP_SETUP: "1"
+    seed_files: [".omp/agent/models.yml"]
+    # THE 346 MB THAT NEVER ENTER A $HOME. omp extracts its native addons into
+    # $HOME/.omp/natives/<version>/ on the first run that loads them (3.6 s;
+    # `--version` does not trigger it, `omp config get` does), and its loader
+    # skips the extraction outright when the files are already at that path with
+    # the expected size -- read off the binary at 18.2.2 and measured at 0.69 s
+    # per run through a symlink against 3.6 s without one. The bytes are produced
+    # ONCE in the image's own download layer, under the read-only root;
+    # `wrapper.seed_invocation_root` makes this link in each per-invocation $HOME
+    # after it has copied and templated the seed. Not an image ENV: the wrapper
+    # builds its child's environment from scratch, and omp has no variable that
+    # relocates the extraction anyway (OMP_NATIVE_LIBRARY_PATH only appends to a
+    # spawned subprocess's LD_LIBRARY_PATH). Not the seed tree: that tree is
+    # committed, and the wrapper copytrees it per EXEC onto a tmpfs.
+    seed_links:
+      ".omp/natives": "/opt/mllm/omp-natives"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    # MEASURED on the first green provider-lane run (2026-09-17, image-local,
+    # --network none, uid 10001, read-only root): `omp --version` in this image
+    # is 0.052 s; dispatch to the single POST reaching the stub is 0.486 s; the
+    # slot itself reported `Completed successfully in 0.7s`. The natives are
+    # inside those numbers rather than outside them — this row's `seed_links`
+    # points each exec at the image's extract, and the same run without it costs
+    # 2.7 s and 346 MB of tmpfs before omp answers anything.
+    startup_s: 0.052
+    first_call_s: 0.486
+    turn_s: 0.7
+    row_timeout_s: 300
+    # NOT measured: the chain lane cannot run on this host at all today. Every
+    # row's `chain_write_runner` is codex, and codex refuses its `agent-write`
+    # dispatch with `sandbox_unavailable` (bwrap cannot create a user namespace
+    # under Docker's default seccomp profile), so `full --exec-subagents` stops
+    # at apply-suggestions for all 16 rows — pi and grok included, both of which
+    # were green here on 2026-09-10. `chain_s` and the golden bundle land when
+    # that is unblocked.
+    chain_row_timeout_s: 600
+    version_measured: "18.2.2"
+    help_invocation: "omp --help"
+    version_offline: true
+    notes: >
+      THE PROMPT ARRIVES ON STDIN, and this is the first row where that is true:
+      OmpProvider declares `prompt_transport = "stdin"`, so the argv this row
+      records ends at `--model <model>` with no `--` and no positional, and the
+      wrapper passes the stream through untouched (it forks and execve's,
+      inheriting fds). The user message the stub sees therefore has TWO text
+      parts -- a `<system-reminder>` block carrying the date and the cwd, then the
+      prompt itself, once -- beside a ~10 KB system prompt; `extract_prompt`
+      joins every part, so the scenario matcher sees the prompt exactly once and
+      an argv+stdin regression would show up as a second copy.
+      ONE POST PER DISPATCH, `stream: true` with `stream_options.include_usage`,
+      `store: false`, `max_completion_tokens` and the tool schemas; no catalog
+      GET at any point. Every `-p` run also makes three best-effort loopback
+      probes (127.0.0.1:11434 / :8080 / :1234 -- ollama, llama.cpp, lm-studio)
+      and one TLS attempt to catalog.stencil.so; under `--network none` all of it
+      warns and the run still exits 0, and the stub deliberately listens on none
+      of those three ports.
+      The overlay `assets/omp/overlay.yml` is rendered on argv as an ABSOLUTE
+      path and is copied into the image by the skill layer; a missing overlay is
+      a launch failure by design (exit 1, `Config overlay not found`), so a row
+      that dies in 0.13 s with an empty stub log is that COPY, not the redirect.
+
+  # -------------------------------------------------------------------------
   # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE
   # about mock_llm.py (C5): cursor-agent is already one of its six identities;
   # `agy` is the only provider in this matrix that still needs the five mock parts.

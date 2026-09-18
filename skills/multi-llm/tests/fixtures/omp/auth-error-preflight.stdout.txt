@@ -1,0 +1,1 @@
+{"type":"session","version":3,"id":"01a0b0df-a46f-71d0-815e-fc6ceea90b89","timestamp":"2026-09-17T19:37:21.775Z","cwd":"/work"}

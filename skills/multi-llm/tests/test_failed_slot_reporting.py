@@ -279,9 +279,9 @@ class TestTheFanoutCarriesWhatAFailedSlotSpent:
         [
             (None, ""),
             ({}, ""),
-            ({"cost_usd": 25.053, "output_tokens": 137361}, "$25.05, 137,361 output tokens"),
+            ({"cost_usd": 25.053, "output_tokens": 137361}, "$25.05 est., 137,361 output tokens"),
             ({"cost_usd": 0.001, "output_tokens": 12}, "12 output tokens"),
-            ({"cost_usd": 3.0}, "$3.00"),
+            ({"cost_usd": 3.0}, "$3.00 est."),
             ({"output_tokens": 0, "input_tokens": 500}, ""),
         ],
     )
@@ -326,7 +326,7 @@ class TestTheReviewCodeLaneOnTheUsageCap:
         assert success is False and issues is None
         assert error.startswith("claude-code exited with code 1: [USAGE_LIMIT] HTTP 429:")
         assert FABLE_SENTENCE in error
-        assert error.endswith("(spent $25.05, 137,361 output tokens)")
+        assert error.endswith("(spent $25.05 est., 137,361 output tokens)")
 
         out = capsys.readouterr().out
         assert "[SALVAGE_NEEDED]" not in out

@@ -66,6 +66,20 @@ MODELS = {
     # keeps `TestDeclaredPromptIndex` checking that against the real argv.
     "kimi": "moonshotai/kimi-k2.5",
     "muse": "muse-spark-1.2",
+    # The real default SELECTOR (plans/add-omp-provider.md §1): omp matches the
+    # catalog on `selector` (openrouter/openai/gpt-5.6-luna), never on `id`
+    # (openai/gpt-5.6-luna), so a placeholder would render an argv shape no real
+    # dispatch has. omp owns NO adjudication row and that is deliberate:
+    # `RESTRICTIVE_ATOM_RE` matches nothing in its argv — `read,` is not
+    # `read-only` and `edit`/`write` are not `no-write` — so
+    # `restrictive_atoms("omp")` is empty and any row added below would fail
+    # `test_no_adjudication_row_is_stale` on sight. The regex is NOT widened to
+    # make one fit: this table is restriction-only, and a write-ENABLING flag
+    # cannot cause the failure it guards. The measurement such a row would have
+    # carried (under `--approval-mode yolo` with the seven-name allow-list,
+    # `write` and `edit` really created and edited files) is pinned in
+    # `tests/test_providers.py::TestOmpProvider` instead.
+    "omp": "openrouter/openai/gpt-5.6-luna",
     "opencode": "openai/gpt-5.5",
     "pi": "anthropic/claude-opus-4-8",
     # The real default slug (harness-expansion.md §6.1), not a placeholder: it is

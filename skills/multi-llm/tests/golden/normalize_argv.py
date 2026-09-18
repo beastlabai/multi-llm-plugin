@@ -92,6 +92,31 @@ _ROW_DERIVED = {
     # own timeout. Without that second half the placeholder would happily
     # normalize a wrong number to green.
     "--max-wall-time": PLACEHOLDER_TIMEOUT,
+    # omp's `--max-time` is the second, on exactly the same rule and for exactly
+    # the same reason — its value is `timeout_s - OMP_SHUTDOWN_MARGIN_S`, so the
+    # slot's length is in it. It is here rather than beside `--config`/`--cwd`
+    # below because it is derived from the ROW's timeout and not from the
+    # machine. Missing it was measured: the seconds normalized verbatim while
+    # `seed_expected_argv.py`'s reference is built with no slot timeout at all,
+    # so the two shapes could never match and omp's generate dispatch was filed
+    # `profile: probe` with a literal `"--max-time": "1195"` in the pinned row.
+    # The value's own correctness is pinned where `--max-wall-time`'s is:
+    # `test_providers.py`'s derivation table (`None → None`, `1200 → "1195"`,
+    # the floor, the omission and the WARNING).
+    "--max-time": PLACEHOLDER_TIMEOUT,
+    # omp renders two values that are neither policy nor row-derived but
+    # ENVIRONMENT-derived, and each gets its own placeholder for the reason the
+    # table's header gives: a shared `<value>` would compare equal across them,
+    # so a refactor that handed the overlay to `--cwd` would normalize the same
+    # and pass. `--config` is the absolute path of the overlay that ships beside
+    # the skill (`assets/omp/overlay.yml`), which moves with the skill dir and
+    # with the container's mount point; `--cwd` is the directory the dispatch
+    # was spawned in. In both cases the assertion is the flag's PRESENCE and its
+    # position — omp without `--config` loses the retry bound and the
+    # project-MCP suppression, and omp without `--cwd` silently relocates to
+    # /tmp when it is launched from $HOME.
+    "--config": "<overlay>",
+    "--cwd": "<cwd>",
 }
 
 #: `key=value` config overrides whose VALUE is row-derived but whose KEY is the

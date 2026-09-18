@@ -392,6 +392,17 @@ SAMPLE_ENV = {
 }
 
 
+def _own_credential_env(provider):
+    """The env name this adapter declares as its CLI's **own** credential.
+
+    Read off the adapter module's own constant rather than from a table here,
+    so the exemption above cannot be granted by editing this file: an adapter
+    claims it by declaring it beside the code that emits it.
+    """
+    module = sys.modules[type(provider).__module__]
+    return getattr(module, f"{provider.name.upper().replace('-', '_')}_CREDENTIAL_ENV", None)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_vendor_cli():
     """No sweep below may spawn the developer's own CLI, or read their login.
@@ -423,7 +434,13 @@ def _both_lanes(provider, source, *, delta=None, host_guards=(), passthrough=())
     must produce the same child environment.
     """
     if delta is None:
-        delta = provider.resolve_env("m", base.PROFILE_GENERATE)
+        # `base_env=source`, because `build_child_env` below is given the same
+        # source and the two must reason about one environment. An adapter that
+        # passes a credential THROUGH from what the child will inherit (omp, the
+        # only one whose CLI reads its key under the unprefixed name) reads it
+        # here; every adapter that ignores the keyword — which is all the others
+        # — composes exactly the delta it always did.
+        delta = provider.resolve_env("m", base.PROFILE_GENERATE, base_env=source)
     return (
         base.build_child_env(provider, provider_env=delta, base_env=source),
         base.build_child_env(
@@ -491,10 +508,34 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_no_lane_leaks_a_foreign_credential_when_the_allowlist_is_on(self, name):
+        """**Foreign** is the load-bearing word, and one adapter needed it said.
+
+        ``OPENROUTER_API_KEY`` is foreign to almost every adapter here: kimi,
+        qwen and copilot all carry the same key past the filter, but each under
+        its **own** prefixed spelling (``KIMI_MODEL_API_KEY``,
+        ``COPILOT_PROVIDER_API_KEY``), so the unprefixed name reaching their
+        child really would be a leak. omp is the one adapter whose CLI reads the
+        credential under that exact name — there is no other spelling for it to
+        use — so passing it through is what its ``get_env`` exists to do, and
+        the filter dropping it is the bug rather than the guard.
+
+        The carve-out is therefore **by the adapter's own declared constant**,
+        not by a name in a list here, and it is not a free pass: the value has
+        to be the SOURCE's, so an adapter minting a credential of its own still
+        fails. ``AWS_SESSION_TOKEN`` has no such exemption and never will —
+        nothing in this registry speaks to AWS.
+        """
+        provider = _PROVIDERS[name]
+        own = _own_credential_env(provider)
         with patch.object(base, "env_allowlist_enabled", return_value=True):
-            for env in _both_lanes(_PROVIDERS[name], SAMPLE_ENV):
+            for env in _both_lanes(provider, SAMPLE_ENV):
                 assert "AWS_SESSION_TOKEN" not in env
-                assert "OPENROUTER_API_KEY" not in env
+                if own == "OPENROUTER_API_KEY":
+                    assert env.get("OPENROUTER_API_KEY") == SAMPLE_ENV[
+                        "OPENROUTER_API_KEY"
+                    ], "a passed-through credential must be the source's own value"
+                else:
+                    assert "OPENROUTER_API_KEY" not in env
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_the_adapters_own_delta_always_wins_over_the_filter(self, name):

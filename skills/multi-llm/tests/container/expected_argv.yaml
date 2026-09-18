@@ -460,6 +460,71 @@ entries:
     prompt: argv
     min_records: 1
 
+  # omp's FLAG GATE, which is a real dispatch rather than a version probe:
+  # `OmpProvider.build_command` asks `missing_flags` for the exact set that call
+  # will emit BEFORE it assembles anything, so every process that builds an omp
+  # argv spawns `omp --help` once (memoised on the binary and the help argv) and
+  # a renamed flag upstream is a named refusal instead of a rejected argv.
+  - provider: omp
+    profile: probe
+    transport: stdin
+    binary: omp
+    subcommands: []
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  # THE `generate` DISPATCH — the first row on this table whose fan-out default
+  # is STDIN. `prompt: stdin` with an EMPTY tail is the assertion:
+  # `build_command_for_transport(..., "stdin")` returns `build_command(...)[:-2]`,
+  # dropping `--` AND the positional (omp's own override of the base helper's
+  # `[:-1]`, which would leave a bare `--`), and the prompt is written to the
+  # child's pipe and the pipe closed — the EOF omp blocks forever without. A
+  # record carrying the prompt on argv would be matched against the `argv` rows
+  # instead and fail as a crossed transport, which is what makes the pair
+  # discriminating.
+  #
+  # The policy values stay VERBATIM because they are the assertion: `yolo` is
+  # bounded by the explicit `--tools` allow-list and by nothing else (§2.3), and
+  # `--mode json` is what makes the stream parseable at all. `<overlay>` and
+  # `<cwd>` are environment-derived placeholders — the overlay's absolute path
+  # moves with the skill dir, and `--cwd` is the spawn cwd, rendered on EVERY
+  # dispatch because omp launched from `$HOME` without it relocates itself to
+  # /tmp in silence.
+  #
+  # `--max-time` is `<timeout>` and NOT a literal, which took a one-line fix to
+  # `tests/golden/normalize_argv.py`. It is row-derived argv under §7 step 6's
+  # rule ("a flag whose VALUE is derived from the slot's `timeout_s=`"), exactly
+  # like qwen-code's `--max-wall-time` — the value is `timeout_s -
+  # OMP_SHUTDOWN_MARGIN_S`, so the slot's own length is inside it. Left out of
+  # that map the seconds normalized verbatim while `seed_expected_argv.py`'s
+  # reference is built with no slot timeout at all, the two shapes could never
+  # match, and the seeder filed this dispatch as `profile: probe` with a literal
+  # `"--max-time": "1195"` — one slot length frozen into the pinned table, which
+  # would have reddened the day `providers.yaml`'s `default_timeout` moved. The
+  # placeholder pins the SHAPE (flag present, one value, right position); the
+  # value's own arithmetic is pinned in `test_providers.py`'s derivation table.
+  - provider: omp
+    profile: generate
+    transport: stdin
+    binary: omp
+    subcommands: []
+    options:
+      "--approval-mode": "yolo"
+      "--config": "<overlay>"
+      "--cwd": "<cwd>"
+      "--max-time": "<timeout>"
+      "--mode": "json"
+      "--model": "<model>"
+      "--no-session": null
+      "--tools": "read,grep,glob,find,bash,edit,write"
+      "-p": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   # `--pure` is M4's hermetic leg: it is emitted only inside an active dispatch
   # context, together with the run-scoped XDG_CONFIG_HOME redirect, so a run
   # cannot pick up the user's own opencode config. `generate` and

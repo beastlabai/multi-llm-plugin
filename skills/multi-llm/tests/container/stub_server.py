@@ -71,6 +71,30 @@ CATALOG_MODELS = [
 ]
 
 
+#: Ports this server must never bind, whatever it is asked for.
+#:
+#: MEASURED (omp 18.2.2, `plans/add-omp-provider.md` §1.8): every `omp -p` run
+#: probes 127.0.0.1:11434, :8080 and :1234 for a local ollama / llama.cpp /
+#: lm-studio before it dispatches, logging `model discovery failed for provider`
+#: when nothing answers. A stub listening on one of them would be discovered as a
+#: local model server by a CLI that was never redirected there — answering
+#: requests the row does not declare, on a session key nothing minted, and
+#: turning a redirection failure into a green row. It is a refusal rather than a
+#: comment because the port is an argument: the day somebody passes one of these,
+#: the failure should name the reason.
+LOCAL_MODEL_PROBE_PORTS = (8080, 1234, 11434)
+
+
+def refuse_probe_port(port: int, who: str) -> None:
+    if port in LOCAL_MODEL_PROBE_PORTS:
+        raise SystemExit(
+            f"{who}: refusing to listen on 127.0.0.1:{port} — omp (and any CLI "
+            f"with the same local-model discovery) probes "
+            f"{LOCAL_MODEL_PROBE_PORTS} on every run and would find this server "
+            f"without having been redirected to it. Pick another port."
+        )
+
+
 def _record(entry: dict) -> None:
     """One JSON object per line, flushed, so a killed container still leaves a log."""
     global _seq
@@ -613,6 +637,7 @@ def main(argv=None) -> int:
     # out to several provider CLIs concurrently and clients with connection
     # pooling hold keep-alive sockets open. A single-threaded server serializes
     # that fan-out at best and deadlocks a pooling client at worst.
+    refuse_probe_port(args.port, "stub")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     print(f"stub listening on 127.0.0.1:{args.port}", flush=True)

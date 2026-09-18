@@ -714,6 +714,102 @@ def test_stub_server_resolves_identically_to_the_matcher(
         assert answer == expected, f"{scenario_path.name}/{shape} disagrees"
 
 
+def _omp_shaped_request(prompt: str, *, system: str, reminder: str) -> dict:
+    """A chat/completions body in the shape omp 18.2.2 really sends.
+
+    MEASURED 2026-09-17 against the real binary, prompt on stdin: one
+    `POST /v1/chat/completions`, `stream: true` with
+    `stream_options.include_usage`, `store: false`, `max_completion_tokens`, six
+    tool schemas, a 10,179-byte `system` message, and a user message whose
+    `content` is a LIST OF TWO text parts — a `<system-reminder>` block carrying
+    the date and the cwd (237 B), then the prompt itself. Every other redirected
+    CLI on this lane sends the user prompt as one string.
+    """
+    return {
+        "model": "stub-model", "stream": True, "store": False,
+        "max_completion_tokens": 16384,
+        "stream_options": {"include_usage": True},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": [{"type": "text", "text": reminder},
+                                         {"type": "text", "text": prompt}]},
+        ],
+        "tools": [{"type": "function",
+                   "function": {"name": "read", "description": "Read a file."}}],
+    }
+
+
+def test_the_stub_reads_omps_two_part_user_message_as_one_prompt(stub_factory):
+    """omp is the first row whose user message is two parts, and it still resolves.
+
+    Three claims, and each one is a way a container row could go quietly wrong:
+
+    * the prompt is read AT ALL — `extract_prompt` walks `messages` and joins
+      every text part it finds, so a list-valued `content` must not fall through
+      to the unmatched branch (a 422 the CLI reports as a model error);
+    * the prompt is read ONCE. omp takes the prompt on stdin *or* on argv and
+      both together become TWO user messages, so the sentinel appearing twice in
+      one request is the regression that would mean the adapter had started
+      rendering both. The transport is declared (`prompt_transport = "stdin"`),
+      and this is what the assertion looks like on the wire;
+    * a ~10 KB vendor system prompt in front of the product's own text does not
+      change which fixture answers. The system message is part of the joined
+      prompt by design (claude-code's arrives as a top-level `system` key and is
+      joined the same way), so a pattern that matched only by accident of
+      position would break here first.
+    """
+    scenario_path = GENERIC_SCENARIOS[0]
+    scenario = scenario_matcher.load_scenario(scenario_path)
+    rule = next(r for r in scenario.rules if r.response.fixture)
+    sentinel = "MLLM-OMP-STDIN-SENTINEL-7f3a91"
+    prompt = f"{probe_for_branch(rule.pattern.split('|')[0])} Marker: {sentinel}"
+
+    # Stand-ins for the vendor bytes, at the measured sizes. The real system
+    # prompt is not committed here: it is 10 KB of another project's text, it
+    # moves with every omp release, and what this test needs from it is its
+    # SHAPE and its SIZE, not its wording.
+    system = ("You are a coding agent. " * 460)[:10_179]
+    reminder = ("<system-reminder>\nToday: 2026-09-17; current working "
+                "directory: '/work/sample-project'\n</system-reminder>")
+
+    base, log = stub_factory(scenario_path)
+    status, body = _post(base, "/s/omp-two-part/v1/chat/completions",
+                         _omp_shaped_request(prompt, system=system,
+                                             reminder=reminder))
+    assert status == 200, f"HTTP {status}: {body[:400]}"
+    answer = _chat_answer(body, True)
+
+    resolution = scenario.resolve(prompt, turn_index=1)
+    assert resolution is not None
+    assert answer == resolution.content, (
+        "the two-part user message resolved to a different fixture than the "
+        "same prompt sent as one string"
+    )
+
+    records = [json.loads(line) for line in
+               log.read_text(encoding="utf-8").splitlines()]
+    mine = [r for r in records if r.get("raw_path", "").startswith("/s/omp-two-part/")]
+    assert len(mine) == 1, f"expected exactly one request, got {len(mine)}"
+    assert not mine[0]["unmatched"], "the stub could not read the prompt at all"
+    assert mine[0]["has_tools"] is True
+
+    # The sentinel, counted over the whole joined prompt — every message, both
+    # parts. `prompt_len` is the stub's own measure of what it read, and the log
+    # deliberately never carries the body, so the count is asserted here on the
+    # bytes this test built and cross-checked against that length.
+    from .container import stub_server
+
+    joined = stub_server.extract_prompt(
+        _omp_shaped_request(prompt, system=system, reminder=reminder))
+    assert joined.count(sentinel) == 1, (
+        "the prompt reached the model twice — an argv+stdin regression"
+    )
+    assert mine[0]["prompt_len"] == len(joined)
+    assert len(system) < mine[0]["prompt_len"], (
+        "the system prompt is part of what the matcher sees, and it must be"
+    )
+
+
 def test_stub_server_records_the_fixture_that_answered(stub_factory):
     """The log names the fixture, which is what a row's evidence is graded on."""
     scenario_path = GENERIC_SCENARIOS[0]

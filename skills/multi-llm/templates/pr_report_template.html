@@ -2175,6 +2175,17 @@
                 escapeHtml(metadata.provider) + '</span>';
       }
       html += '<span class="badge badge-model" style="background: ' + (metadata.model_color || '#6B7280') + ';">' + escapeHtml(metadata.model || modelString) + '</span>';
+      // Stage U: what this slot spent, when the adapter reported it. The text
+      // is `usage_label`, rendered server-side by the one `describe_usage` the
+      // markdown report and the failed-slot log line also use — this template
+      // deliberately does not re-derive it from `metadata.usage` (the numbers
+      // are there for anything that wants to compute), because three templates
+      // each rounding a cost their own way is three answers to "what did this
+      // run cost". A model that reported nothing has no key and renders no
+      // badge — never `$0.00`, which would claim a free run.
+      if (metadata.usage_label) {
+        html += '<span class="badge badge-usage" style="background: #6B7280;" title="Estimated from the CLI\'s own price catalog, not a vendor invoice">' + escapeHtml(metadata.usage_label) + '</span>';
+      }
       html += '</span>';
       return html;
     }
@@ -2340,7 +2351,13 @@
         var total = 0;
         groups.forEach(function(g) { total += (g.suggestions || []).length; });
         statsEl.innerHTML = '<span><span class="stat-value">' + total + '</span> suggestions</span>' +
-          '<span><span class="stat-value">' + groups.length + '</span> groups</span>';
+          '<span><span class="stat-value">' + groups.length + '</span> groups</span>' +
+          // Stage U: the run total beside the counts, and only when something
+          // was reported — nothing at all for a fan-out of duration-only
+          // adapters, rather than a "$0.00" nobody measured.
+          (reportData.usageTotalLabel
+            ? '<span><span class="stat-value">' + escapeHtml(reportData.usageTotalLabel) + '</span></span>'
+            : '');
       }
     }
 

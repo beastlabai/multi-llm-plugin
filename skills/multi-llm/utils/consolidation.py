@@ -1647,6 +1647,7 @@ def generate_consolidated_html(
     models: List[str],
     validation: Optional[List[Dict[str, Any]]] = None,
     phase_name: str = "review-plan",
+    usage: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """
     Write ``consolidated-report.html`` to *phase_dir*.
@@ -1669,6 +1670,15 @@ def generate_consolidated_html(
             When provided, validation status badges are shown for each
             underlying group and an aggregate status is computed for each
             consolidated group.
+        usage: Optional per-model usage, ``{model_spec: {"input_tokens", ...,
+            "cost_usd", "tool_uses"}}``, as the fan-out recorded it in
+            ``.status.json`` and as ``recorded_usage()`` reads it back.  Stage
+            U: the consolidated report is a second front page for the same run,
+            so it names what the run spent the way the full report does — a
+            clause on the badge of every model that reported, and the
+            column-wise total in the header.  Omitted, or empty (the case for a
+            fan-out of duration-only adapters), leaves both out of the payload
+            entirely, which is what keeps the header from claiming a free run.
 
     Returns:
         The path (as a string) of the written ``consolidated-report.html``.
@@ -1685,13 +1695,17 @@ def generate_consolidated_html(
             get_model_metadata,
             derive_aggregate_validation_status,
             build_sort_config,
+            sum_usage,
         )
+        from .metrics import describe_usage
     except ImportError:
         from utils.html_report_generator import (
             get_model_metadata,
             derive_aggregate_validation_status,
             build_sort_config,
+            sum_usage,
         )
+        from utils.metrics import describe_usage
 
     phase_path = Path(phase_dir)
     plan_file = Path(plan_path)
@@ -1727,6 +1741,18 @@ def generate_consolidated_html(
     model_metadata: Dict[str, Any] = {}
     for model in models:
         model_metadata[model] = get_model_metadata(model)
+        # Stage U, the shape `generate_html_report` builds: the numbers for
+        # anything that wants to compute, and beside them the one clause
+        # `describe_usage` renders, because the *text* is settled server-side
+        # rather than separately in each template. A model the fan-out recorded
+        # nothing for gets no key and no badge — never `$0.00`, which would
+        # claim a free run.
+        model_usage = (usage or {}).get(model)
+        if isinstance(model_usage, dict) and model_usage:
+            model_metadata[model]["usage"] = model_usage
+            label = describe_usage(model_usage)
+            if label:
+                model_metadata[model]["usage_label"] = label
 
     # --- Build validation lookups ---
     # Primary: hash-based lookup (group_id/group_hash -> status info)
@@ -1859,6 +1885,17 @@ def generate_consolidated_html(
             "singletonCount": singleton_count,
         },
     }
+
+    # Stage U: the run total, added only when some adapter reported
+    # something. `sum_usage` totals whichever models reported, including slots
+    # that failed and so carry no badge here — the header answers "what did
+    # this run cost", not "what do these badges add up to".
+    usage_total = sum_usage(usage)
+    if usage_total:
+        report_data["usageTotal"] = usage_total
+        total_label = describe_usage(usage_total)
+        if total_label:
+            report_data["usageTotalLabel"] = total_label
 
     # --- Inject data into template ---
     json_payload = json.dumps(report_data, indent=2)

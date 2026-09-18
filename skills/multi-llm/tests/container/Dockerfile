@@ -109,6 +109,20 @@ ARG CURSOR_AGENT_SHA256=bfff4bf6f4e9dd30c1d0ef0a70b6077b074015dd2948e4c50685d53a
 ARG AGY_VERSION=1.1.15
 ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.15/agy_cli_linux_x64.tar.gz
 ARG AGY_SHA256=d0b1d6f3678a061915caebc431930e240b863bf4059369c08c6ffceb24e66b5f
+# oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
+# `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
+# all, so `npm ci` cannot install it into this image. What ships instead is the
+# GitHub release asset -- a Bun single-file ELF, 251,786,720 bytes, linked
+# against libc/libm/libdl/libpthread only, which is why bookworm-slim's glibc
+# 2.36 runs it with nothing added.
+#
+# Like agy's and muse's and unlike cursor-agent's, this sha256 is UPSTREAM'S
+# OWN: the release publishes a SHA256SUMS.txt naming it against
+# `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
+# fetched file -- which is the point of checking it below anyway.
+ARG OMP_VERSION=18.2.2
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.2/omp-linux-x64
+ARG OMP_SHA256=77c3520ab8ef8318dda02a0715e3b6e69589c427dc23f90a4bb97650caa72f72
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -503,6 +517,79 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
  && AGY_CLI_DISABLE_AUTO_UPDATE=true /opt/mllm/real/agy --version
 
 # --------------------------------------------------------------------------- #
+# oh-my-pi (`omp`): the download, and the 346 MB of native addons it would
+# otherwise extract into every single $HOME at run time.
+#
+# THE FILE LANDS UNCHANGED (`install -m 0755`, grok's shape rather than agy's
+# tarball) and that is load-bearing for `lock_update.py`: `plan_artifacts`
+# recovers a moved row's sha256 by hashing /opt/mllm/real/<binary> out of an
+# @latest image, which is only the artifact's own digest while the install copies
+# the fetched bytes verbatim. `retarget_url` then moves the pin because the
+# version appears EXACTLY ONCE in the URL (`/v18.2.2/`).
+#
+# THE NATIVES. MEASURED (2026-09-17, 18.2.2): the Bun binary embeds a gzipped
+# archive of its native addons and extracts 346 MB -- two files,
+# pi_natives.linux-x64-{modern,baseline}.node at ~181 MB each -- into
+# $HOME/.omp/natives/<version>/ on the first run that loads them. `--version` and
+# `--help` do NOT trigger it (50 ms, nothing written) and neither does a bare
+# `omp config get`, which prints its usage and stops before the loader; `omp
+# config list` DOES, in ~3 s, with no network, no model and no credential -- which
+# is what makes it the warm-up here instead of opencode's deliberately-failing
+# `run`. The EXIT CODE is not the assertion (that is opencode's rule too): what
+# this layer needs is the extracted tree, so the command may fail and the `test`
+# below is what fails the build.
+#
+# Read off the binary (packages/natives/native/loader-state.js, in the bundle):
+# the extractor skips any addon already present at the target path WITH THE
+# EXPECTED SIZE, and the loader's own candidate list starts at that same
+# directory -- so a $HOME/.omp/natives pointing at a populated tree costs two
+# stat() calls and no extraction, whether or not the tree is writable (a
+# read-only target fails the extractor's utimes() and the loader falls through to
+# the candidate, which is the SAME file). That is why the bytes live here, once,
+# under the read-only root: `redirect.yaml`'s `seed_links` is what points each
+# per-invocation $HOME at them (wrapper.py builds its child's environment and its
+# config root from scratch, so neither an image ENV nor the seed tree reaches it
+# by itself). MEASURED IN THIS IMAGE, uid 10001, --read-only, --network none:
+# 132 ms and 200 KB of $HOME through the link, against 2,729 ms and 346 MB
+# without it; and on the host, through the same link, a real agent run against a
+# stub in 0.69 s with 253 KB of $HOME. The megabytes would be tmpfs, per
+# concurrent exec, since `wrapper.seed_invocation_root` copies the whole per-CLI
+# home into /tmp/mllm-inv on EVERY exec.
+#
+# THE VERSION IS READ BACK OFF THE EXTRACTED TREE rather than from ${OMP_VERSION}:
+# under MLLM_PIN_MODE=latest the ARG is precisely the thing that is stale.
+# --------------------------------------------------------------------------- #
+RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        omp_version="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://api.github.com/repos/can1357/oh-my-pi/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"; \
+        omp_url="https://github.com/can1357/oh-my-pi/releases/download/v${omp_version}/omp-linux-x64"; \
+    else \
+        omp_url="${OMP_URL}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/omp "${omp_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${OMP_SHA256}  /tmp/omp" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned omp artifact sha256: $(sha256sum /tmp/omp)"; \
+    fi \
+ && install -m 0755 /tmp/omp /opt/mllm/real/omp \
+ && rm -f /tmp/omp \
+ && /opt/mllm/real/omp --version \
+ && warm=/tmp/omp-warm \
+ && mkdir -p "$warm" \
+ && ( HOME="$warm" /opt/mllm/real/omp config list >/tmp/omp-warm.log 2>&1 || true ) \
+ && test -d "$warm/.omp/natives" \
+      || { echo "omp extracted no natives tree: every per-invocation HOME would pay the 346 MB extraction, and /work/homes and /tmp are tmpfs" >&2; \
+           tail -20 /tmp/omp-warm.log >&2; exit 1; } \
+ && mkdir -p /opt/mllm/omp-natives \
+ && cp -a "$warm/.omp/natives/." /opt/mllm/omp-natives/ \
+ && chmod -R a=rX /opt/mllm/omp-natives \
+ && ls /opt/mllm/omp-natives/*/pi_natives.linux-x64-*.node >/dev/null \
+      || { echo "the extracted tree holds no pi_natives addon: the loader would fall through to an extraction" >&2; exit 1; } \
+ && du -sh /opt/mllm/omp-natives \
+ && rm -rf "$warm" /tmp/omp-warm.log
+
+# --------------------------------------------------------------------------- #
 # 8. The rig, and the wrapper tree it is the source of (C2).
 #
 #     /opt/mllm/real/<cli>   the genuine binary, untouched
@@ -547,7 +634,7 @@ COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null
@@ -687,6 +774,13 @@ COPY skills/multi-llm/prompts         /opt/mllm/skill/prompts
 COPY skills/multi-llm/schemas         /opt/mllm/skill/schemas
 COPY skills/multi-llm/templates       /opt/mllm/skill/templates
 COPY skills/multi-llm/assets/icons    /opt/mllm/skill/assets/icons
+# omp's --config overlay, by its own named path: `assets` is never copied
+# whole. OmpProvider.build_command renders this file's ABSOLUTE path on every
+# dispatch, and a missing overlay is a launch failure by design -- exit 1 in
+# 0.13 s with `error: Config overlay not found: <path>` and zero requests -- so
+# without this line every container-lane omp row dies before it reaches the
+# stub, whatever the build context carries.
+COPY skills/multi-llm/assets/omp      /opt/mllm/skill/assets/omp
 COPY skills/multi-llm/hosts           /opt/mllm/skill/hosts
 # The stub server resolves a scenario through the SHARED matcher rather than a
 # second implementation of it -- `sys.path.insert(0, "/opt/mllm/skill")` and then

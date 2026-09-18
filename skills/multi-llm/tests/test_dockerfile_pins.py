@@ -226,7 +226,7 @@ def test_every_download_verifies_a_checksum(instructions):
 
 @pytest.mark.parametrize(
     "artifact",
-    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "python312"])
+    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "python312"])
 def test_artifact_args_match_the_lock(artifact, build_args, lock):
     """Two copies of a checksum that can disagree are worse than one."""
     entry = lock["artifacts"][artifact]

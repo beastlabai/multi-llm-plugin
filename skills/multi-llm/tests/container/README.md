@@ -64,7 +64,7 @@ All typed at the checkout root, no `-C`: the build context *is* the repo root.
 
 Phase 1 pointed every configured CLI at a local three-surface stub and recorded
 what it did on the wire; the four CLIs `harness-expansion.md` added afterwards
-were probed the same way. **15 of the 17 configured CLIs are redirectable**
+were probed the same way. **16 of the 18 configured CLIs are redirectable**
 (`redirect.yaml` carries the full row per CLI, including the exact mechanism and
 the HTTP footprint):
 
@@ -85,6 +85,7 @@ the HTTP footprint):
 | `copilot` | `COPILOT_PROVIDER_BASE_URL` — the BYOK activation switch | chat | 1 | not timed |
 | `kimi` | the `KIMI_MODEL_*` env family | chat | 1 | not timed |
 | `vibe` | a seeded `config.toml` `[[providers]]` block (no env var exists) | chat | 1 | not timed |
+| `omp` | `~/.omp/agent/models.yml` provider block (no env var exists) — and the **prompt arrives on stdin** | chat | 1 | not timed |
 
 **The last four rows are later arrivals, and the table says so in one column.**
 Their mechanism, surface and turn count are measured exactly like the others,
@@ -304,6 +305,30 @@ stub log before reporting:
 
 A capped row is **never** graded against a golden — a killed CLI has no parseable
 output, so the cap can only ever cost coverage, never fabricate it.
+
+**One row points at vendor bytes instead of copying them: `seed_links`.** Every
+exec's `$HOME` is a fresh `shutil.copytree` of `home_seed/<cli>/` into a tmpfs
+(`wrapper.seed_invocation_root`), which is the right default for a few KB of
+value-free config and the wrong one for a vendor payload. omp is the case that
+forced the alternative: it extracts **346 MB** of native addons into
+`$HOME/.omp/natives/<version>/` on the first run that loads them, and its loader
+skips the extraction outright when the files are already at that path with the
+expected size. So the extract is produced **once, in the image's own download
+layer** (`/opt/mllm/omp-natives`, under the read-only root) and the row declares
+
+    seed_links:
+      ".omp/natives": "/opt/mllm/omp-natives"
+
+which the wrapper turns into one symlink per exec, **after** the token pass has
+walked the tree — so nothing reads 346 MB looking for `{{base_url}}` either.
+Measured in this image, uid 10001, `--read-only`, `--network none`: **132 ms and
+200 KB of `$HOME`** through the link against **2,729 ms and 346 MB** without it.
+A declared target that is absent from the image is a hard wrapper failure naming
+the rebuild, not a silently slow row. Two things it is deliberately NOT: an image
+`ENV` (the wrapper builds its child's environment from scratch, and omp has no
+variable that relocates the extraction — `OMP_NATIVE_LIBRARY_PATH` only appends
+to a spawned subprocess's `LD_LIBRARY_PATH`), and bytes in `home_seed/` (that
+tree is tracked on purpose, and it is copied per exec).
 
 ---
 

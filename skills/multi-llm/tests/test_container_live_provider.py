@@ -83,7 +83,7 @@ RECORD = harness.HERE / "records" / "live-provider.jsonl"
 #: proving the same three surfaces reach OpenRouter since 2026-08-14.
 LANE_CLIS = ("copilot", "kimi", "qwen-code", "vibe", "cursor-agent",
              "aider", "goose", "pi", "cline", "kilocode",
-             "codex", "opencode", "claude-code", "grok", "gemini")
+             "codex", "opencode", "claude-code", "grok", "gemini", "omp")
 
 #: The slug a row is pinned to ON THIS LANE, where `providers.yaml`'s `models[0]`
 #: is not servable by the endpoint this lane holds a key for — with the reason,
@@ -392,6 +392,25 @@ ALLOWED_EGRESS: dict[str, dict[str, str]] = {
     },
 }
 
+#: The one sentence the six omp provider-endpoint probes share, so the table
+#: carries the measurement once rather than six near-copies of it.
+_OMP_PROVIDER_PROBE = (
+    "A BUILT-IN PROVIDER'S ENDPOINT, resolved whatever model the run names. "
+    "Measured on the first live omp row (2026-09-18): seven such names — this "
+    "one, plus catalog.stencil.so above — are queried in a ~10 ms burst BEFORE "
+    "`openrouter.ai`, each A and AAAA, all NXDOMAIN here, and the run still "
+    "exits 0 in 6.3 s with the correct answer, the file channel used and real "
+    "usage reported. So it degrades silently and the refusal costs nothing. "
+    "NOT once per dispatch, corrected 2026-09-18: omp caches the discovery per "
+    "HOME for 24 h, so the SECOND run in one HOME queries none of these (8 "
+    "names then 2, same HOME, same config). This lane sees the burst on every "
+    "row only because every row gets a fresh container HOME — which is the "
+    "right posture for a containment test and the reason the rows stay. On a "
+    "machine with working DNS these do resolve, which is why the omp row in "
+    "docs/providers.md tells users about it, and in a persistent home it is "
+    "about once a day rather than once a review."
+)
+
 REFUSED_EGRESS: dict[str, dict[str, str]] = {
     "kimi": {
         "telemetry-logs.kimi.com":
@@ -494,6 +513,76 @@ REFUSED_EGRESS: dict[str, dict[str, str]] = {
             "FORBIDDEN_EGRESS and is graded instead by a5's second half against "
             "the row's `egress_beyond_stub` declaration.",
     },
+    "omp": {
+        "catalog.stencil.so":
+            "THE SHARED MODEL-CATALOG REFRESH, and upstream treats it as "
+            "best-effort itself. omp 18.2.2 opens one TLS connection to this "
+            "host on every `-p` run — not an updater (the update check is gated "
+            "on interactive mode, `!o.print && mode === undefined`, so no `-p` "
+            "run reaches it) and not telemetry: nothing about the run is sent, "
+            "it is a catalogue fetch beside the local `~/.omp/agent/models.db` "
+            "the run already has. It is REFUSED rather than allowed for the "
+            "reason aider's raw.githubusercontent.com row is allowed: this one "
+            "is measured DEGRADING SILENTLY. The provider-lane row runs "
+            "`--network none`, where the connection fails, omp logs nothing on "
+            "either channel and the run still exits 0 in 0.5 s — so refusing it "
+            "costs the row nothing and there is no false signal to buy back. "
+            "NXDOMAIN, run unaffected, and an ALLOW decision on this name still "
+            "fails a5. The three LOOPBACK probes on the same code path "
+            "(127.0.0.1:11434 / :8080 / :1234 — ollama, llama.cpp, lm-studio "
+            "discovery) never reach a resolver at all and are why the container "
+            "stub must not listen on those ports.",
+        # ---- the six the FIRST LIVE ROW found, 2026-09-18 ---------------- #
+        # One shared entry, because they are one behaviour: on every `-p` run
+        # omp resolves the endpoint of each BUILT-IN provider it knows about,
+        # in a burst, ~25 ms before it reaches the provider the run actually
+        # names. Measured on the first green live row: seven names in 5 ms,
+        # every one NXDOMAIN, then `openrouter.ai` ALLOW and a clean exit 0
+        # with the right answer — so, like the catalogue fetch above, this
+        # DEGRADES SILENTLY and refusing it costs the row nothing.
+        #
+        # It is worth being plain about what this is, because it is the one
+        # thing this lane found that the §6 probe did not: on a user's own
+        # machine there is no allowlist, these names resolve, and a reviewer
+        # dispatch touches seven third-party vendors that have nothing to do
+        # with the model it was asked for. That is a product fact, not a lane
+        # defect — it is recorded in `docs/providers.md`'s omp row so a user
+        # meets it before a packet capture does.
+        #
+        # THE OPEN QUESTION IS CLOSED, 2026-09-18, and the answer is no.
+        # `enabledProviders: ["openrouter"]` was probed against a DNS-logging
+        # resolver in a `--network none` container, fresh HOME per run, matched
+        # pairs with and without a credential: the name list is IDENTICAL with
+        # and without the pin — same names, same counts, same order. It is not
+        # a provider allowlist at all. It gates omp's FOREIGN USER-LEVEL CONFIG
+        # SOURCES (`cursor`, `codex`, `claude`, `gemini`, `opencode`,
+        # `windsurf`, `github`), which upstream's own changelog says in as many
+        # words, and `openrouter` is not one of those names — so the pin is a
+        # no-op, and pinning a name that IS in that set would opt the user's
+        # foreign rules files INTO every reviewer prompt, which is the exact
+        # opposite of §2.9's decision. Shipping it on the guess would have been
+        # worse than useless. (Control, so the null is about the setting and not
+        # about the overlay: `enabledProviders: ["claude"]` in the same
+        # `--config` DOES load ~/.claude/CLAUDE.md into the prompt. The key is
+        # read; it gates something else.)
+        #
+        # WATCH THE 24 h CACHE if you re-probe this. omp caches the discovery
+        # per HOME for a day, so a before/after pair in a SHARED home shows
+        # 7 names then 2 and reads exactly like success. It is the cache, not
+        # the config. Fresh HOME per run or the result is meaningless.
+        #
+        # The lever that DOES work is `disabledProviders` (measured: 8 names to
+        # 2, run still exit 0, and an explicitly-named model on a disabled
+        # provider still reaches it). Not taken here: it is a hand-maintained
+        # vendor denylist that goes stale the day omp adds a provider, so it is
+        # its own decision with its own probe, not a slip-in under this row.
+        "hyper.charm.land": _OMP_PROVIDER_PROBE,
+        "api.commandcode.ai": _OMP_PROVIDER_PROBE,
+        "coding-intl.dashscope.aliyuncs.com": _OMP_PROVIDER_PROBE,
+        "api.kilo.ai": _OMP_PROVIDER_PROBE,
+        "api.venice.ai": _OMP_PROVIDER_PROBE,
+        "zenmux.ai": _OMP_PROVIDER_PROBE,
+    },
 }
 
 #: A row whose ``home_seed/<cli>/`` tree exists ONLY to point the CLI at the
@@ -528,6 +617,46 @@ STUB_ONLY_SEED: dict[str, str] = {
         "different provider entirely, and cline reads OPENROUTER_API_KEY for "
         "it (the string is in @cline/llms' bundled provider table). Seeding "
         "would leave a stale default pointing at a dead 127.0.0.1 endpoint."
+    ),
+    "omp": (
+        ".omp/agent/models.yml defines a provider literally named `stub` "
+        "(baseUrl {{base_url}}, api openai-completions, apiKey "
+        "{{stub_session_key}}, one model `stub-model`). The live row's model is "
+        "`openrouter/openai/gpt-5.6-luna`, which omp resolves through its "
+        "BUILT-IN `openrouter` provider off OPENROUTER_API_KEY in the process "
+        "env (its own $env chain: process env, then a .env in the run's cwd, "
+        "then ~/.omp/agent/.env — there is no login state to seed and no "
+        "auth-status subcommand). The seeded block is never selected and its key "
+        "token is unrenderable. The row's OTHER seeded path, `.omp/natives`, is "
+        "not in this tree at all: it is a symlink made per exec from "
+        "redirect.yaml's `seed_links`, pointing at the image's own read-only "
+        "copy — which is what keeps `--no-seed` from throwing away 346 MB of "
+        "native addons and this declaration from having to be a SEED_DROP. "
+        "THIS LANE BYPASSES THE WRAPPER, which is what reads that key on the "
+        "provider lane, so `_live_argv` forwards it to the runner as "
+        "`--seed-link` and both lanes obey the one declaration. Not a "
+        "convenience: Stage E expected this runner to pay the first-run "
+        "extraction itself as a bounded cost (3.6 s and 346 MB inside the "
+        "`/work/live` tmpfs, against a 180 s inner bound and a 4 GB memory "
+        "limit), and the 2026-09-18 run measured it as a hard failure instead "
+        "— that tmpfs is **noexec** (docker adds nosuid,nodev,noexec to "
+        "`--tmpfs` and the supplied option string does not clear them), so the "
+        "addons land and then cannot be mapped: `failed to map segment from "
+        "shared object`, exit 1 in 1.05 s, an empty DNS log and five "
+        "downstream assertions failing for a reason none of them is about. The "
+        "346-MB-under-`seed_guards` objection does not apply to that fix: a "
+        "`--seed-link` is not a seed file — nothing is rendered, nothing is "
+        "templated and `seed_guards` never sees it, which is also why it "
+        "survives the `--no-seed` this row asks for.\n"
+        "WHICH ROUTE WON IS OBSERVABLE IN-BAND, which matters because this lane "
+        "sees hostnames and never request paths: omp's own JSONL carries "
+        "`provider` and `api` on every assistant `message_start`, and the "
+        "built-in route renders `\"provider\":\"openrouter\"` with "
+        "`\"api\":\"openrouter\"` — the api kind whose branch takes "
+        "`POST /api/v1/responses` unless `PI_OPENROUTER_RESPONSES=0` downgrades "
+        "it to `/api/v1/chat/completions` (read off the binary at 18.2.2) — "
+        "where the seeded block would render `\"provider\":\"stub\"` with "
+        "`\"api\":\"openai-completions\"`."
     ),
     "kilocode": (
         ".config/kilo/kilo.jsonc declares provider `stub` "
@@ -641,15 +770,24 @@ LIVE_ENV_OVERRIDES: dict[str, dict[str, str]] = {
     # CLI reads with no help from anybody.
 }
 
-#: CLIs whose adapter SPLITS `models[0]` before it crosses the argv boundary,
-#: with the measurement. Assertion 2 looks for the half the CLI was actually
-#: given, because the full spec is a string the CLI never sees and so can never
-#: report back — a `pinned in blob` test against it would fail a row that echoed
-#: its model perfectly.
+#: CLIs whose response names `models[0]` MINUS ITS FIRST SEGMENT, with the
+#: measurement. Assertion 2 looks for that half instead of the whole spec,
+#: because for these rows the whole spec is a string nothing on the wire ever
+#: carries — a `pinned in blob` test against it would fail a row that echoed its
+#: model perfectly.
 #:
-#: This narrows nothing that a1 does not already cover: the provider half is the
+#: **The name grades the predicate, not either cause.** Two different causes
+#: land here, and the arithmetic (`partition("/")[2]`) is the same for both:
+#:
+#: * the adapter splits the spec before it crosses the argv boundary, so the CLI
+#:   is never given the first segment at all — cline and kilocode, below;
+#: * the adapter passes the WHOLE spec and the **vendor** answers with its own
+#:   id — omp, below, which sends `--model openrouter/openai/gpt-5.6-luna` and
+#:   gets `"model":"openai/gpt-5.6-luna"` back in its own JSONL.
+#:
+#: This narrows nothing that a1 does not already cover: the first segment is the
 #: ROUTE, and a1 grades the route directly off the DNS log.
-SPLIT_MODEL_SPEC: dict[str, str] = {
+MODEL_ECHO_DROPS_FIRST_SEGMENT: dict[str, str] = {
     "cline": (
         "ClineProvider.build_command partitions on the first '/': "
         "`openrouter/z-ai/glm-5.2` becomes `-P openrouter -m z-ai/glm-5.2`, and "
@@ -666,6 +804,20 @@ SPLIT_MODEL_SPEC: dict[str, str] = {
         "row. goose is NOT in this table even though it splits identically — it "
         "reports no model at all, which NO_MODEL_ECHO says with the "
         "measurement, and that check runs first."
+    ),
+    "omp": (
+        "THE SECOND CAUSE, and the adapter splits nothing: omp is handed the "
+        "whole selector on argv (`--model openrouter/openai/gpt-5.6-luna`, "
+        "which is the spelling its own local catalogue matches on — `omp models "
+        "openrouter --json` keys on `selector`, not `id`) and the VENDOR answers "
+        "with the vendor-side id. Measured on the first live row (2026-09-18): "
+        "every assistant `message_end` in the JSONL carries "
+        "`\"model\":\"openai/gpt-5.6-luna\"` beside `\"provider\":\"openrouter\"` "
+        "and `\"api\":\"openrouter\"` — so the route is reported separately and "
+        "explicitly, which is exactly why dropping the first segment here costs "
+        "this assertion nothing. a1 grades the route off the DNS log and the "
+        "`provider`/`api` pair is the in-band confirmation that the BUILT-IN "
+        "OpenRouter path won rather than the seeded stub block."
     ),
 }
 
@@ -1194,6 +1346,18 @@ def _run_argv(row: dict, out_dir: Path, posture: dict, image: str) -> list[str]:
     # $VIBE_HOME/config.toml, so an unpinned root means no providers configured.
     for var, rel in (row.get("config_roots") or {}).items():
         argv += ["--config-root", f"{var}={rel}"]
+    # The row's `seed_links`, forwarded to the runner so BOTH lanes obey one
+    # declaration. This lane bypasses `wrapper.py`, which is what reads them on
+    # the provider lane, so without this the row's link simply does not happen
+    # here — and for omp that is not a cost but a hard failure: `/work/live` is
+    # a **noexec** tmpfs (docker adds nosuid,nodev,noexec to `--tmpfs`, measured
+    # 2026-09-18), so the 346 MB of Bun addons it extracts into $HOME land and
+    # then cannot be mapped — `failed to map segment from shared object`, exit 1
+    # in 1.05 s, an empty DNS log and five downstream assertions failing for a
+    # reason none of them is about. Pointing HOME at the image's read-only
+    # extract removes the extraction and the failure together.
+    for rel, target in (row.get("seed_links") or {}).items():
+        argv += ["--seed-link", f"{rel}={target}"]
     # A seed that exists only to point the CLI at the stub is not rendered here
     # at all. STUB_ONLY_SEED carries the per-row measurement; the runner records
     # `seed_skipped` in the evidence so the two cases — "the tree was skipped"
@@ -1486,17 +1650,20 @@ class TestTheSmokeReachedTheRealEndpoint:
             _record(kind="assertion", cli=cli, assertion="a2_model",
                     outcome=f"unread — {NO_MODEL_ECHO[cli]}")
             pytest.skip(f"a2 unread — {NO_MODEL_ECHO[cli]}")
-        # THE SPELLING THAT CROSSED THE ARGV BOUNDARY, for the two adapters that
-        # split the spec before spawning (see SPLIT_MODEL_SPEC). Asking a CLI to
-        # report a string it was never given is a harness bug wearing an
-        # assertion's clothes; the provider half those adapters strip is the
-        # route, and a1 grades the route off the DNS log.
-        expected = pinned.partition("/")[2] if cli in SPLIT_MODEL_SPEC else pinned
+        # THE HALF THE RESPONSE ACTUALLY NAMES, for the rows measured to drop
+        # the spec's first segment (see MODEL_ECHO_DROPS_FIRST_SEGMENT) —
+        # whether the adapter split the spec before the argv boundary or the
+        # vendor answered with its own id. Asking a CLI to report a string
+        # nothing on the wire ever carried is a harness bug wearing an
+        # assertion's clothes; the segment dropped is the ROUTE, and a1 grades
+        # the route off the DNS log.
+        drops_route = cli in MODEL_ECHO_DROPS_FIRST_SEGMENT
+        expected = pinned.partition("/")[2] if drops_route else pinned
         assert expected and expected in blob, (
             f"{smoke['cli']}: the response does not name the pinned slug "
             f"{expected!r}"
-            + (f" (from model_arg {pinned!r}; {SPLIT_MODEL_SPEC[cli]})"
-               if cli in SPLIT_MODEL_SPEC else ""))
+            + (f" (from model_arg {pinned!r}; "
+               f"{MODEL_ECHO_DROPS_FIRST_SEGMENT[cli]})" if drops_route else ""))
 
     def test_a3_parsed_output(self, smoke):
         """Assertion 3 — the SHIPPED parser survives the vendor's real bytes.

@@ -890,6 +890,8 @@
         <div class="header-meta">
           <span><strong>Generated:</strong> <span id="meta-timestamp">-</span></span>
           <span><strong>Models:</strong> <span id="meta-models">-</span></span>
+          <!-- Stage U: the run total, hidden outright when nothing reported. -->
+          <span id="meta-usage-wrap" style="display:none"><strong>Usage:</strong> <span id="meta-usage">-</span></span>
           <span><strong>Phase:</strong> <span id="meta-phase">-</span></span>
           <span><strong>Plan:</strong> <span id="meta-plan-path">-</span></span>
         </div>
@@ -1092,6 +1094,18 @@
       }
       html += '<span class="badge badge-model" style="background: ' + metadata.model_color + ';">' +
               escapeHtml(metadata.model) + '</span>';
+      // Stage U: what this slot spent, when the adapter reported it. The text
+      // is `usage_label`, rendered server-side by the one `describe_usage` the
+      // markdown report and the failed-slot log line also use — this template
+      // deliberately does not re-derive it from `metadata.usage` (the numbers
+      // are there for anything that wants to compute), because three templates
+      // each rounding a cost their own way is three answers to "what did this
+      // run cost". A model that reported nothing has no key and renders no
+      // badge — never `$0.00`, which would claim a free run.
+      if (metadata.usage_label) {
+        html += '<span class="badge badge-usage" style="background: #6B7280;" title="Estimated from the CLI\'s own price catalog, not a vendor invoice">' +
+                escapeHtml(metadata.usage_label) + '</span>';
+      }
       html += '</span>';
       return html;
     }
@@ -1107,6 +1121,15 @@
       document.getElementById('report-title').textContent = 'Consolidated ' + phaseLabel + ' Report: ' + planTitle;
       document.getElementById('meta-timestamp').textContent = reportData.generatedAt || '-';
       document.getElementById('meta-models').textContent = (reportData.models || []).join(', ') || '-';
+      var usageWrap = document.getElementById('meta-usage-wrap');
+      if (usageWrap) {
+        if (reportData.usageTotalLabel) {
+          document.getElementById('meta-usage').textContent = reportData.usageTotalLabel;
+          usageWrap.style.display = '';
+        } else {
+          usageWrap.style.display = 'none';
+        }
+      }
       document.getElementById('meta-phase').textContent = reportData.phase || '-';
       document.getElementById('meta-plan-path').textContent = reportData.planPath || '-';
 

@@ -11,7 +11,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -87,6 +87,48 @@ def format_number(n: Optional[int]) -> str:
     if n is None:
         return "-"
     return f"{n:,}"
+
+
+def describe_usage(usage: Optional[Dict[str, Any]]) -> str:
+    """One clause naming what a run cost, or ``""``.
+
+    ``$25.05 est., 137,348 output tokens`` — the dollar figure first because
+    it is the number a human acts on, the output count second because it is
+    the one that says how far the run got. Input and cache counts are not
+    rendered: they are on ``details["usage"]`` for anything that wants them,
+    and a seven-figure cache-read count beside a failure reads as noise. Cost
+    is rendered to the cent and dropped when it rounds to nothing, so a
+    duration-only or free run says nothing rather than "$0.00".
+
+    **Why "est." and not a bare figure.** ``cost_usd`` is whatever the CLI
+    computed from its own price catalog: an estimate the runner relays, never
+    a vendor invoice and never a billed amount, and a report that printed it
+    unqualified would be read as one. One renderer serves every surface that
+    names the number (the failed-slot error line, the ``**Models:**`` line,
+    the HTML model badge and the report header), so the qualifier is attached
+    once, here, rather than trusted to four call sites to remember.
+
+    **Why this module.** It formats a usage metric, beside
+    :func:`format_number` and :func:`format_duration`, and — unlike
+    ``llm_client``, where it was first written for the failed-slot error line
+    — it imports nothing but the standard library. That is what lets
+    ``html_report_generator`` (which must keep working as
+    ``python utils/html_report_generator.py``, where a relative-importing
+    module cannot be loaded at all) render the same clause the fan-out logs,
+    instead of a second copy of these rules drifting in a template.
+    ``llm_client.describe_usage`` re-exports it for the callers that have
+    always reached it there.
+    """
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    parts = []
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0.005:
+        parts.append(f"${cost:.2f} est.")
+    output = usage.get("output_tokens")
+    if isinstance(output, (int, float)) and not isinstance(output, bool) and output > 0:
+        parts.append(f"{int(output):,} output tokens")
+    return ", ".join(parts)
 
 
 def _escape_pipe(text: str) -> str:

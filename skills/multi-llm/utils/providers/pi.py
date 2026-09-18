@@ -52,6 +52,39 @@ def _cap(text: str) -> str:
     return text[:_MAX_DIAGNOSIS_CHARS - 1].rstrip() + "…"
 
 
+def parse_answer_text(text: str) -> Dict[str, Any]:
+    """The answer-channel reader: a bare model answer in, a result dict out.
+
+    Direct ``json.loads`` when the text starts with ``[`` or ``{``, else the
+    shared extractor over code blocks and JSON embedded in prose, arrays
+    preferred.
+
+    Module-level because it has **two** callers now. :meth:`PiProvider._parse_stdout`
+    is one — pi's stdout *is* the answer — and :class:`~utils.providers.omp.OmpProvider`
+    is the other, which reaches the same text by a different road: omp renders
+    ``--mode json`` and the answer is the concatenated ``text`` content of the
+    last assistant ``message_end``, so what arrives here is an answer either way.
+    Lifting it is the whole of what those two adapters share; everything else
+    about them — the channel model, the failure taxonomy, the tool policy, the
+    transports, usage — diverges, which is why omp does not subclass pi.
+
+    Behaviour is unchanged from when this was a method body, and pi's own tests
+    are untouched.
+    """
+    text = (text or "").strip()
+
+    if not text:
+        return {"success": False, "error": "Empty output", "raw": text, "data": None}
+
+    if text.startswith(('[', '{')):
+        try:
+            return {"success": True, "data": json.loads(text)}
+        except json.JSONDecodeError:
+            pass
+
+    return extract_json_from_text(text, prefer_arrays=True)
+
+
 class PiProvider(LLMProvider):
     """Provider for the Pi coding agent CLI (https://pi.dev).
 
@@ -260,16 +293,9 @@ class PiProvider(LLMProvider):
         return result
 
     def _parse_stdout(self, stdout: str) -> Dict[str, Any]:
-        """Today's parser, unchanged — the answer channel, read on its own."""
-        stdout = stdout.strip()
+        """Today's parser, unchanged — the answer channel, read on its own.
 
-        if not stdout:
-            return {"success": False, "error": "Empty output", "raw": stdout, "data": None}
-
-        if stdout.startswith(('[', '{')):
-            try:
-                return {"success": True, "data": json.loads(stdout)}
-            except json.JSONDecodeError:
-                pass
-
-        return extract_json_from_text(stdout, prefer_arrays=True)
+        The body now lives in the module-level :func:`parse_answer_text`, which
+        omp calls too; this method is the name pi's own call sites and tests use.
+        """
+        return parse_answer_text(stdout)

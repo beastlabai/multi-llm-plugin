@@ -44,6 +44,8 @@ skills/multi-llm/schemas/**
 skills/multi-llm/templates/**
 # inlined by the HTML report
 skills/multi-llm/assets/icons/**
+# loaded with `--config` on every omp dispatch
+skills/multi-llm/assets/omp/**
 # capabilities.yaml + shim templates + snippets (host lane)
 skills/multi-llm/hosts/**
 

@@ -15,7 +15,7 @@ kilocode→`kilocode`, kimi→`kimi`, qwen-code→`qwen`, copilot→`copilot`,
 vibe→`vibe`,
 cline→`cline`, goose→`goose`,
 aider→`aider`, agy→`agy`,
-pi→`pi`, muse→`muse`),
+pi→`pi`, muse→`muse`, omp→`omp`),
 copies an **inert template** to the target path, then **uncomments** the lines
 that belong to the detected providers — their full `providers:` sub-blocks
 (command, timeouts, concurrency, `models:` list), the `defaults.models` /
@@ -77,7 +77,7 @@ any host, a plain terminal, or CI.
 - **`default_provider`** is set to the **first detected provider in base
   declaration order** (claude-code, cursor-agent, gemini, grok, opencode,
   codex, kilocode, kimi, qwen-code, copilot, cline, goose, aider, agy, pi, muse,
-  vibe). So with both claude-code and cursor-agent installed it becomes
+  vibe, omp). So with both claude-code and cursor-agent installed it becomes
   `claude-code`. When **nothing** is detected it is left commented and inherits
   the base default.
 - **Nothing detected → no error.** With no provider CLIs on `PATH` the script

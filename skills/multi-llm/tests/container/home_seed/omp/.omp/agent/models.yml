@@ -1,0 +1,28 @@
+# omp's provider catalogue, the one file the container lane seeds for it.
+#
+# `~/.omp/agent/models.yml` is documented upstream (docs/models.md) and is the
+# only mechanism that carries a BASE URL: omp has no base-url flag and no
+# base-url environment variable, so this file is what points it at the stub.
+# A legacy models.json is auto-migrated; this is the current spelling.
+#
+# VALUE-FREE, like every other seed here: `{{base_url}}` and
+# `{{stub_session_key}}` are substituted by wrapper.py per exec (the exec id is
+# what keys the stub's turn counter, so it cannot be done once at image build).
+# `apiKey` must be PRESENT even as a dummy or the model is filtered out of the
+# selectable set, exactly as pi's models.json records.
+#
+# On the credentialed live lane this file is dropped entirely
+# (`STUB_ONLY_SEED["omp"]` in tests/test_container_live_provider.py): omp routes
+# `openrouter/...` through its own BUILT-IN openrouter provider off
+# OPENROUTER_API_KEY, so this block would be dead weight — and its key token is
+# one render_seed refuses to substitute.
+providers:
+  stub:
+    baseUrl: "{{base_url}}"
+    api: openai-completions
+    apiKey: "{{stub_session_key}}"
+    models:
+      - id: stub-model
+        name: Stub Model
+        contextWindow: 128000
+        maxTokens: 16384
