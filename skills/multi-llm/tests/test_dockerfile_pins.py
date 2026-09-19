@@ -308,20 +308,29 @@ def test_npm_rows_match_package_json(lock):
 #: The one place `npm ci` is NOT a byte-level pin, named rather than tolerated.
 #:
 #: `@earendil-works/pi-coding-agent` publishes with `hasShrinkwrap: true`, and its
-#: own npm-shrinkwrap.json carries no `integrity` for these three siblings -- so
-#: npm records them with a resolved URL and no hash, even though the registry
-#: does publish an integrity for each. They are installed by URL alone.
+#: own npm-shrinkwrap.json carries no `integrity` for these siblings -- so npm
+#: records them with a resolved URL and no hash, even though the registry does
+#: publish an integrity for each. They are installed by URL alone.
 #:
-#: The exposure is bounded: all three are pinned to an exact version, come from
+#: The exposure is bounded: all of them are pinned to an exact version, come from
 #: the same publisher as the parent (which IS hashed), and reach only the `pi`
 #: row of the provider lane, which runs with --network none and no credential.
-#: The list is asserted EXACTLY -- a fourth entry appearing here fails, and so
+#: The list is asserted EXACTLY -- an unlisted entry appearing here fails, and so
 #: does an entry that upstream later fixes -- because a "known gap" nobody
 #: re-reads is just a gap.
+#:
+#: WIDENED 3 -> 5 on 2026-09-19, for the pi 0.80.6 -> 0.85.1 bump. `chord` and
+#: `pi-telemetry` are two more siblings of the same vendor, nested in the same
+#: shrinkwrap, unhashed for the same reason -- no new publisher and no new
+#: mechanism. `lock_update.py` refuses to move the npm layer while they are
+#: unlisted, which is what surfaced the decision rather than letting the pin move
+#: carry it silently; it is recorded here as a decision taken, with a date.
 UNHASHED_BY_UPSTREAM = {
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/chord",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-telemetry",
 }
 
 
