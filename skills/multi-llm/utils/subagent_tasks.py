@@ -298,6 +298,8 @@ _TASK_KEY_ORDER = (
     "prompt",
     "output_name",
     "output_path",
+    "prompt_path",
+    "prompt_lines",
     "result_channel",
     "context_mode",
     "capability_tier",
@@ -347,6 +349,8 @@ def make_task(
     result_channel: str = "file",
     subagent_type: Optional[str] = None,
     model_hint: Optional[str] = None,
+    prompt_path: Optional[str] = None,
+    prompt_lines: Optional[int] = None,
     extra: Optional[Dict[str, Any]] = None,
     validate: bool = True,
 ) -> Dict[str, Any]:
@@ -371,6 +375,14 @@ def make_task(
             emit site below). Pass ``""`` to omit it entirely.
         model_hint: Free-form model string or ``auto``; keeps its historical
             meaning. ``full``/``cheap`` belong to ``capability_tier`` alone.
+        prompt_path: Absolute path of a sidecar holding exactly the bytes of
+            ``prompt`` (validation and revalidation only). Invoker plumbing of
+            the same class as ``output_path``, so it is a named kwarg rather
+            than an ``extra`` key: it is not per-kind metadata a reader
+            consults, it is how a native-subagent host hands ``prompt`` to a
+            subagent without re-emitting it.
+        prompt_lines: Line count of ``prompt``, so that host can tell the
+            subagent which line to read through.
         extra: Per-kind fields (``batch_index``, ``group_ids``, ``group_id``,
             ``suggestion_id``, …).
         validate: Validate against the schema before returning (write-side
@@ -413,6 +425,10 @@ def make_task(
         task["output_path"] = output_path
     elif phase_dir:
         task["output_path"] = os.path.join(phase_dir, output_name)
+    if prompt_path:
+        task["prompt_path"] = prompt_path
+    if prompt_lines:
+        task["prompt_lines"] = prompt_lines
     if extra:
         task.update(extra)
 

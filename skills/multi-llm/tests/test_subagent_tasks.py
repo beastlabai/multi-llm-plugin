@@ -228,6 +228,74 @@ class TestPerKindSchema:
         task["inputs"]["plan_sha257"] = "x"
         assert any("plan_sha257" in e for e in validate_subagent_task(task))
 
+    @pytest.mark.parametrize(
+        "kind", ["consolidation", "salvage", "human_decision_judge", "task_generation"]
+    )
+    @pytest.mark.parametrize("key,value", [("prompt_path", "/phase/x.prompt.txt"),
+                                           ("prompt_lines", 12)])
+    def test_prompt_path_is_refused_on_kinds_without_a_shared_context(
+        self, kind, key, value
+    ):
+        """The sidecar is a validation-shaped remedy, so only those kinds get it.
+
+        What makes a validation prompt worth writing to disk is the one shared
+        context excerpt every batch re-embeds: ~65 KB a host would otherwise
+        have to re-emit through its own context, per batch. No other kind is
+        shaped that way — consolidation is a single filled template under a
+        12 000-char budget, salvage carries one `raw_output`, a
+        human_decision_judge task carries one item, task_generation reads the
+        workspace — so a sidecar for them would be a file nothing reads.
+
+        Refusing the key rather than ignoring it is what keeps a producer that
+        half-adopts it (copying a `prompt_path=` line into the wrong
+        `make_task` call) failing on write, where the author sees it, instead
+        of shipping tasks whose sidecars never get written.
+        """
+        task = make_minimal(kind)
+        assert validate_subagent_task(task) == [], "baseline must be clean"
+        task[key] = value
+        assert validate_subagent_task(task), (
+            f"{kind} must not accept {key}: no sidecar is ever written for it"
+        )
+
+    @pytest.mark.parametrize("kind", ["validation", "revalidation"])
+    def test_the_batched_kinds_accept_both_sidecar_keys(self, kind):
+        """The converse: the two kinds whose producer writes the sidecar."""
+        task = make_minimal(
+            kind,
+            prompt_path="/phase/validation_batch_0.prompt.txt",
+            prompt_lines=41,
+        )
+        assert validate_subagent_task(task) == []
+        assert task["prompt_path"] == "/phase/validation_batch_0.prompt.txt"
+        assert task["prompt_lines"] == 41
+
+    def test_prompt_path_sits_after_output_path_in_key_order(self):
+        """Position is the documentation: nothing else says these two belong to
+        the pair of path fields above them.
+
+        `_TASK_KEY_ORDER` is applied to every task before it is written, and
+        anything missing from it is appended at the tail — after `file_key`,
+        `phase`, `model` and the rest of the per-kind bookkeeping. A human or a
+        host reading a materialized task opens it at `output_path` to find where
+        the reply goes; `prompt_path` answers the neighbouring question (where
+        the prompt already is) and has to be readable in the same glance rather
+        than 20 keys further down a 65 KB task.
+        """
+        task = make_minimal(
+            "validation",
+            prompt_path="/phase/validation_batch_0.prompt.txt",
+            prompt_lines=41,
+        )
+        keys = list(task)
+        assert keys[keys.index("output_path") + 1] == "prompt_path"
+        assert keys[keys.index("prompt_path") + 1] == "prompt_lines"
+        assert keys[keys.index("prompt_lines") + 1] == "result_channel"
+        # And a task without them still reads exactly as it did before.
+        plain = list(make_minimal("validation"))
+        assert plain[plain.index("output_path") + 1] == "result_channel"
+
+
 
 class TestTaskFileEnvelope:
     def test_file_envelope_validates_and_carries_the_version(self):

@@ -204,14 +204,23 @@ Items with `needs-human-decision` status are included in the report for the user
 
    `validation_tasks.json` carries `tasks_schema_version: 2` and one complete
    task per batch under `batches` — each with `prompt`, `output_name`, the
-   derived `output_path`, `result_channel: file`, `context_mode: inline`,
-   `capability_tier`, `executor_role` and `task_id`. The plan excerpt and this
-   batch's suggestion records travel **inside** `prompt`, so no subagent has to
-   open a file.
+   derived `output_path`, `prompt_path` and `prompt_lines`,
+   `result_channel: file`, `context_mode: inline`, `capability_tier`,
+   `executor_role` and `task_id`. The sidecar at `prompt_path` holds exactly the
+   bytes of `prompt` (`prompt_lines` is its line count), so the two are
+   interchangeable and a host that would otherwise re-emit the whole prompt can
+   point the subagent at the file instead. The plan excerpt and this batch's
+   suggestion records travel **inside** `prompt`, so no subagent has to open a
+   plan or suggestion file of its own.
 
-   **For each task in the file, run `task.prompt` as a subagent, then write the
-   JSON it returns to `task.output_path`.** That is the whole contract — do not
-   assemble a prompt, and do not tell the subagent to write the file itself.
+   **For each task in the file: when the task carries `prompt_path`, run a
+   subagent that reads that file in full — through line `prompt_lines`, paging
+   if a single read stops short — and follows it verbatim; otherwise, or if the
+   file is absent, run `task.prompt` as a subagent. Either way, write the JSON
+   it returns to `task.output_path`.** That is the whole contract — do not
+   assemble a prompt beyond that one read instruction, and do not tell the
+   subagent to write the file itself. The file's bytes are exactly
+   `task.prompt`; the two are interchangeable.
 
    A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
    `inputs` hashes no longer match the plan and grouped.json, is refused with
@@ -221,8 +230,9 @@ Items with `needs-human-decision` status are included in the report for the user
 
    If `[VALIDATION_PENDING]` marker is present:
    1. Read `validation_tasks.json` from `{plan}/review-plan/`
-   2. Run the single task's `prompt` as a subagent and write its JSON reply to
-      that task's `output_path`
+   2. Run the single task as the contract above says — the sidecar at
+      `prompt_path` when it has one, `task.prompt` otherwise — and write its
+      JSON reply to that task's `output_path`
    3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
@@ -239,7 +249,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-   For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
+   For each task in the `batches` array, run the task exactly as the contract above says — the sidecar at `prompt_path` when it has one, `task.prompt` otherwise — and write the JSON it returns to that task's `output_path`.
 
    **Run all batches in parallel** (single message with multiple subagent calls).
 
@@ -369,7 +379,7 @@ Agent:
 3. Runs: uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file plans/my-feature.md --models gpt-5.2 gemini-3-pro
 4. Orchestrator outputs [VALIDATION_PENDING] marker
 5. Claude reads plans/my-feature/review-plan/validation_tasks.json
-6. For each task: Claude runs task.prompt as a subagent
+6. For each task: Claude has a subagent read task.prompt_path (bytes identical to task.prompt) and follow it
 7. Claude writes each subagent's JSON reply to that task's output_path
 8. Claude runs reaggregation:
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan \

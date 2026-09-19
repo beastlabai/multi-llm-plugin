@@ -125,6 +125,15 @@
           "type": "string",
           "description": "Derived absolute convenience path for native invokers. Invoker plumbing, never a subagent instruction."
         },
+        "prompt_path": {
+          "type": "string",
+          "description": "Optional absolute path to a sidecar holding exactly the bytes of `prompt` (validation and revalidation only). Invoker plumbing, never a subagent instruction: a host whose subagent tool takes a prompt string may hand the subagent this file instead of re-emitting ~65 KB of prompt through its own context. `prompt` stays the source of truth and every other reader ignores this key."
+        },
+        "prompt_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line count of `prompt`, and therefore of the sidecar, so a host can tell a subagent to read through the last line rather than trust a default page size."
+        },
         "result_channel": {
           "enum": ["file", "inline-json"],
           "description": "Producer intent. Every materialized task is `file`. `inline-json` names only the legacy Claude-Code-interactive shape and is refused before dispatch with exit 3."
@@ -281,6 +290,10 @@
               "context_mode": {"const": "workspace-read"}
             }
           }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"not": {"enum": ["validation", "revalidation"]}}}},
+          "then": {"not": {"anyOf": [{"required": ["prompt_path"]}, {"required": ["prompt_lines"]}]}}
         },
         {
           "if": {"required": ["is_human"], "properties": {"is_human": {"const": true}}},

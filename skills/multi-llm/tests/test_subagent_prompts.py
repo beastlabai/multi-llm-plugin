@@ -325,6 +325,17 @@ class TestNoPathsInPromptText:
             assert task["grouped_file"] not in task["prompt"]
             assert task["output_path"] not in task["prompt"]
             assert task["output_name"] not in task["prompt"]
+            # The prompt sidecar is the sharpest case of the rule: its whole
+            # content *is* the prompt, so a prompt that named it would be
+            # telling the subagent to go and read itself. The name stays out ...
+            assert task["prompt_path"] not in task["prompt"]
+            assert "prompt.txt" not in task["prompt"]
+            # ... and the content is the prompt byte for byte. That identity is
+            # what lets the read instruction live in host markdown instead of in
+            # prompt text: a host can substitute the file for the string without
+            # the subagent ever being told a path.
+            with open(task["prompt_path"], "r", encoding="utf-8", newline="") as fh:
+                assert fh.read() == task["prompt"]
 
     def test_the_materialized_consolidation_task_never_leaks_its_paths(self, tmp_path):
         from utils.consolidation import prepare_consolidation_tasks

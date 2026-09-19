@@ -111,6 +111,7 @@ from .state_manager import (
     CURRENT_FORMAT_VERSION,
 )
 from .validation import (
+    ensure_prompt_sidecars,
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
     resolved_reaggregate_command,
@@ -791,7 +792,7 @@ def retire_stale_validation(phase_dir: str, *, reason: str) -> Optional[str]:
 def _retire_stale_file(
     phase_dir: str, name: str, *, reason: str, stamp: str
 ) -> Optional[str]:
-    """Rename one validation artifact to ``<stem>.<stamp>.stale.json`` (D7).
+    """Rename one validation artifact to ``<stem>.<stamp>.stale<ext>`` (D7).
 
     The naming rule :func:`retire_stale_validation` established, factored out
     so the task file and the batch files retire under the same shape as the
@@ -799,15 +800,21 @@ def _retire_stale_file(
     means reads ``validation_batch_0.<stamp>.stale.json`` without a second
     convention. Every such name keeps ``validation`` in its basename, which is
     what every reaggregation glob's ``exclude_patterns`` keys on.
+
+    The extension is taken from the name rather than assumed to be ``.json``:
+    a prompt sidecar (``validation_batch_0.prompt.txt``) retires as
+    ``validation_batch_0.prompt.<stamp>.stale.txt``, not as a ``.txt`` wearing a
+    ``.json`` suffix. Output for every ``.json`` name is byte-identical to what
+    the hard-coded rule produced.
     """
     source = os.path.join(phase_dir, name)
     if not os.path.exists(source):
         return None
-    stem = name[: -len(".json")] if name.endswith(".json") else name
-    target = os.path.join(phase_dir, f"{stem}.{stamp}.stale.json")
+    stem, ext = os.path.splitext(name)
+    target = os.path.join(phase_dir, f"{stem}.{stamp}.stale{ext}")
     suffix = 2
     while os.path.exists(target):
-        target = os.path.join(phase_dir, f"{stem}.{stamp}-{suffix}.stale.json")
+        target = os.path.join(phase_dir, f"{stem}.{stamp}-{suffix}.stale{ext}")
         suffix += 1
     try:
         os.replace(source, target)
@@ -846,7 +853,7 @@ def retire_stale_validation_round(phase_dir: str, *, reason: str) -> List[str]:
 
     Returns:
         The new paths, in ``validation.json``, ``validation_tasks.json``,
-        batch-index order. Empty when nothing was on disk.
+        batch-index, then prompt-sidecar order. Empty when nothing was on disk.
     """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     names = ["validation.json", "validation_tasks.json"]
@@ -858,8 +865,19 @@ def retire_stale_validation_round(phase_dir: str, *, reason: str) -> List[str]:
         ),
         key=lambda name: (len(name), name),
     )
+    # The prompt sidecars belong to the grouping their batch does: left behind,
+    # they would describe a retired round beside the fresh one, and the only
+    # reader that finds them is a host following `prompt_path`.
+    sidecar_names = sorted(
+        (
+            os.path.basename(path)
+            for path in Path(phase_dir).glob("validation_batch_*.prompt.txt")
+            if ".stale." not in os.path.basename(path)
+        ),
+        key=lambda name: (len(name), name),
+    )
     retired: List[str] = []
-    for name in names + batch_names:
+    for name in names + batch_names + sidecar_names:
         target = _retire_stale_file(phase_dir, name, reason=reason, stamp=stamp)
         if target:
             retired.append(target)
@@ -3880,6 +3898,27 @@ async def reaggregate_from_existing_files(
         except TaskFileError as task_file_error:
             print(f"ERROR: {task_file_error}", file=sys.stderr)
             sys.exit(task_file_error.exit_code)
+        # The recorded `prompt_path` is a derived convenience field like
+        # `output_path`, so it goes stale the moment a phase dir is moved or
+        # copied — and a host following it would then hand a subagent a file
+        # that is missing, or one somebody edited. Re-derive from the
+        # loaded-from dir and rewrite anything that is not `prompt` byte for
+        # byte, before a single batch is dispatched.
+        if ensure_prompt_sidecars(batch_metadata, phase_dir):
+            # Native hosts reread the JSON, not this in-memory document. Publish
+            # rebound pointers and removed fallback fields before handing off.
+            from .subagent_executor import _atomic_write_json
+
+            try:
+                _atomic_write_json(validation_tasks_path, batch_metadata)
+            except OSError as exc:
+                print(
+                    f"ERROR: Could not persist repaired prompt metadata to "
+                    f"{validation_tasks_path}: {exc}. Fix task-file write access "
+                    "and retry reaggregation before dispatching native subagents.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
         try:
             total_batches = batch_metadata.get("total_batches", 0)
             batches_found = 0
