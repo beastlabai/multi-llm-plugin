@@ -741,10 +741,21 @@ clis:
     # session-title side call hardcodes `grok-build`. Declared so the per-row
     # "the stub saw only this row's models" assertion can be an exact set rather
     # than a count, which is what makes it fail in both directions.
-    side_model_ids: ["grok-build"]
+    # MEASURED 2026-09-19 on the 0.2.93 -> 1.0.34 bump: the session-title side
+    # call's HARDCODED model id moved from `grok-build` to `grok-4.6`. It is still
+    # hardcoded and still unrelated to the -m value, so the exact-set assertion is
+    # what caught it — a count would have stayed green through the rename.
+    side_model_ids: ["grok-4.6"]
     credential_vars: [XAI_API_KEY]
     seed_files: []
     http_log:
+      # NEW IN 1.0.x, measured 2026-09-19 on the 0.2.93 -> 1.0.34 bump: the CLI
+      # probes the base-URL ROOT for reachability before any completion. 0.2.93
+      # did not, so this route was neither declared here nor served by the stub
+      # and the row recorded `the stub does not serve [('GET', '/')]` — while
+      # every other assertion passed, which is exactly the shape a tolerated
+      # undeclared request has. `stub_server._route` answers it as health.
+      - {method: GET,  path: /,                    stream: false}
       - {method: GET,  path: /v1/models,           stream: false}
       - {method: POST, path: /v1/responses,        stream: true,
          note: "concurrent side call with a HARDCODED model id `grok-build`, not the -m value"}
@@ -767,7 +778,8 @@ clis:
       THE CONCURRENT /v1/responses CALL IS A SESSION-TITLE GENERATOR ("You are
       tasked with generating the session title."), measured in Phase 3 — and it
       carries tools, which is why has_tools cannot be used to separate it. Its
-      model id is the hardcoded `grok-build`, recorded above as side_model_ids.
+      model id is the hardcoded `grok-4.6` (`grok-build` before 1.0.x), recorded
+      above as side_model_ids.
       Documented in grok's own bundled ~/.grok/README.md under "Custom Models
       Endpoint": GROK_MODELS_BASE_URL switches it off xAI's cli-chat-proxy onto a
       plain OpenAI-compatible base URL, and off session auth onto Authorization:
@@ -946,7 +958,32 @@ clis:
     base_url_vars:
       GOOGLE_GEMINI_BASE_URL: "{base_url_root}"
     credential_vars: [GEMINI_API_KEY]
-    seed_files: []
+    # MEASURED 2026-09-19, on the 0.25.2 -> 0.60.0 bump. That jump added TWO
+    # non-interactive gates, and each one fails EARLY ENOUGH TO LOOK LIKE A
+    # REDIRECTION BUG: the CLI exits before any HTTP call, so the row reports
+    # `zero requests reached the stub` while the redirect was never consulted.
+    #
+    # 1. A KEY IS NO LONGER AN AUTH METHOD. 0.25.2 inferred the method from the
+    #    key's presence; 0.60.0 requires it to be SELECTED, and an unselected one
+    #    exits 41 with `{"error":{"message":"Invalid auth method selected."}}`.
+    #    `validateAuthMethod` accepts `gemini-api-key` against GEMINI_API_KEY, so
+    #    the value is not in doubt -- only where it is written. Measured: the flat
+    #    `selectedAuthType` key 0.25.2 used is IGNORED (still exit 41); the shape
+    #    that works is nested under `security.auth.selectedType`, which is why
+    #    this row grew a seed file it never had.
+    # 2. THE WORKSPACE MUST BE TRUSTED. With auth fixed, 0.60.0 then refuses with
+    #    "Gemini CLI is not running in a trusted directory", naming `--skip-trust`
+    #    and this variable. The variable is used rather than the flag: the flag
+    #    would have to be injected into every argv our own adapter builds, and
+    #    this lane's job is to run the adapter's real argv.
+    #
+    # With both, gemini reaches `generateContentStream` and GOOGLE_GEMINI_BASE_URL
+    # is honoured exactly as before -- the transitive-dependency contract the
+    # `notes` below warned was the likeliest to move did NOT move; the CLI's own
+    # startup gates did.
+    env_extra:
+      GEMINI_CLI_TRUST_WORKSPACE: "true"
+    seed_files: [".gemini/settings.json"]
     http_log:
       - {method: POST, path: "/v1beta/models/<model>:streamGenerateContent",
          query: "alt=sse", stream: true, has_tools: true}

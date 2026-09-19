@@ -472,6 +472,20 @@ class Handler(BaseHTTPRequestHandler):
             entry["surface"] = "health"
             return self._send_json({"ok": True})
 
+        # THE BASE-URL ROOT, and it is a reachability probe rather than a model
+        # call. MEASURED 2026-09-19 on the grok 0.2.93 -> 1.0.34 bump: 1.0.x opens
+        # with `GET /` against whatever `GROK_MODELS_BASE_URL` names, before any
+        # completion. 0.2.93 did not, so the route was neither served nor declared
+        # and the row recorded it unserved. It is answered as health, not routed
+        # to a surface: there is no prompt to resolve and no scenario that could
+        # match one, so sending it down `_resolve_or_422` would 422 a request the
+        # CLI is entitled to make. Declared in redirect.yaml's grok `http_log`
+        # beside the completion call, so it stays a stated fact rather than a
+        # silently-tolerated extra request.
+        if method == "GET" and path in ("", "/"):
+            entry["surface"] = "health"
+            return self._send_json({"ok": True})
+
         surface = None
         if method == "POST" and path.endswith("/chat/completions"):
             surface = "chat"
