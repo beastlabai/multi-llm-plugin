@@ -84,7 +84,7 @@ Headless, the argument list needs the host's own separator: `opencode run --comm
 
 **`opencode` — install via npm (not yet published)** — documented
 
-A second route on `opencode`, and the one this documentation will recommend once it is published. **No published install has been verified yet**, so a config entry naming this spec resolves to nothing today — and on this host that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Until then, use the `install-host` route above, or build and install the tarball locally.
+A second route on `opencode`, and the one this documentation will recommend once it is published. **No published install has been verified yet**, so a config entry naming this spec resolves to nothing today — and on this host that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Until then, use the `install-host` route above, or build the package and name its **directory** — `npm pack`'s `.tgz` is not an installable spec on this host: MEASURED 2026-09-19 against opencode 1.18.31, a config entry naming a tarball resolves to the archive's *containing directory* and never opens the archive, so it loads nothing unless that directory happens to be an unpacked package itself.
 
 Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
 

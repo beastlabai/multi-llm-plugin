@@ -850,6 +850,80 @@ RUN /opt/mllm/real/uv sync --project /opt/mllm/skill --locked --no-dev \
  && rm -rf /tmp/uv-cache
 
 # --------------------------------------------------------------------------- #
+# 10b. The opencode PLUGIN route -- the host lane's SECOND way in.
+#
+# `install-host opencode` writes a COMMAND file ($HOME/.config/opencode/commands/
+# multi-llm.md), and that is the only route any opencode row has ever graded. The
+# npm package `opencode-multi-llm` is the other one, and it is the route
+# hosts/capabilities.yaml calls recommended: it registers the same `/multi-llm`
+# command AND a model-callable `multi_llm` tool, out of a plugin module rather
+# than out of a file the host happens to scan. The two resolve differently -- the
+# plugin overwrites a file shim's command entry wholesale and in memory -- so a
+# lane that grades only the shim grades only half of what ships.
+#
+# WHY A DIRECTORY AND NOT THE .tgz. MEASURED 2026-09-19 against opencode 1.18.31,
+# four spec forms, each on a clean $HOME, verdict read from `opencode debug
+# config | jq '.command["multi-llm"] != null'`:
+#
+#     <dir>                  -> LOADED
+#     file://<dir>           -> LOADED
+#     <dir>/<pkg>.tgz        -> NOT loaded (the command map came back empty)
+#     file://<dir>/<pkg>.tgz -> NOT loaded
+#
+# opencode never opens the archive. A `.tgz` spec resolves to the archive's
+# CONTAINING DIRECTORY, which is why pointing at a tarball appears to work when
+# that directory is itself an unpacked package -- confirmed by a fifth run with
+# the tarball copied INSIDE the package dir, which loaded. So the image ships the
+# unpacked tree and names it directly: no tarball, and no dependence on a
+# behaviour upstream never documented.
+#
+# THE PAYLOAD CARRIES ITS OWN SKILL COPY AND SHARES §10's VIRTUALENV, which is
+# not the arrangement this layer was first written for and is worth the six lines
+# it takes to say why. The plugin resolves SKILL_DIR as
+# <package>/skills/multi-llm -- never /opt/mllm/skill -- so the obvious move is a
+# second `uv sync` under the payload. MEASURED: that sync creates nothing.
+# `ENV UV_PROJECT_ENVIRONMENT=/opt/mllm/skill/.venv` is set image-wide above, so
+# `uv sync --project <payload>` resolves the payload's lock INTO THE SKILL'S VENV,
+# reports `Checked 1 package` and leaves `<payload>/.venv` absent -- which is
+# exactly what the build then died asserting.
+#
+# It is also what happens at RUN time, and there it is correct: the plugin
+# dispatches `uv run --frozen --no-dev --project <payload>/skills/multi-llm`, that
+# same ENV redirects it to the same venv, and the payload's uv.lock is a copy of
+# the skill's, so the environment genuinely satisfies it. One interpreter, one
+# pyyaml, no second 500 MB tree.
+#
+# So this layer asserts the real dispatch instead of manufacturing a venv nothing
+# would read. Running the payload's own `multi_llm.py --help` through the exact
+# `uv run` the plugin composes proves two things a file check cannot: that the
+# environment resolves offline, and that `build.py`'s ALLOWLIST STAGING carried
+# every module the dispatcher imports -- the failure mode that shipped a modes
+# table pointing at a module the tarball did not contain.
+#
+# The sources are BUILD OUTPUT: `packaging/opencode/build.py` stages dist/ and
+# skills/, both .gitignore'd. `make e2e-image` stages them before it builds, and
+# context_manifest.txt marks them `# optional` so the clean-checkout build-context
+# guard still passes.
+# --------------------------------------------------------------------------- #
+COPY packaging/opencode/package.json /opt/mllm/opencode-plugin/package.json
+COPY packaging/opencode/dist         /opt/mllm/opencode-plugin/dist
+COPY packaging/opencode/skills       /opt/mllm/opencode-plugin/skills
+RUN test -f /opt/mllm/opencode-plugin/skills/multi-llm/uv.lock \
+ && /opt/mllm/real/uv run --frozen --no-dev \
+      --project /opt/mllm/opencode-plugin/skills/multi-llm \
+      -- python /opt/mllm/opencode-plugin/skills/multi-llm/multi_llm.py --help >/dev/null \
+ && echo "plugin payload dispatches (uv run --frozen --no-dev, shared venv)" \
+ && node -e 'const m=require("/opt/mllm/opencode-plugin/package.json"); if(m.name!=="opencode-multi-llm"){console.error("staged package is "+m.name);process.exit(1)}; console.log("plugin package "+m.name+"@"+m.version+" main="+m.main)' \
+ && for f in dist/index.mjs dist/command.md dist/cli-surface.json; do \
+        test -s "/opt/mllm/opencode-plugin/$f" \
+          || { echo "the staged plugin is missing $f -- run 'make opencode-package' before building this image" >&2; exit 1; }; \
+    done \
+ && /usr/bin/python3 -m compileall -q /opt/mllm/opencode-plugin/skills >/dev/null \
+ && chmod -R a+rX /opt/mllm/opencode-plugin \
+ && du -sh /opt/mllm/opencode-plugin \
+ && rm -rf /tmp/uv-cache
+
+# --------------------------------------------------------------------------- #
 # 11. The verification layer: a pin is a request, this is the evidence (C9).
 #
 # Runs every CLI's version command plus node/npm/uv, diffs the result against

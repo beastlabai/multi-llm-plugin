@@ -25,6 +25,49 @@ Requires **OpenCode 1.18.18 or newer** (declared in `engines`, and enforced: an
 older host refuses the plugin with a clear compatibility error) and
 [uv](https://docs.astral.sh/uv/) on the machine.
 
+### Installing a local build — a **directory**, never the `.tgz`
+
+Before this package is published — and whenever you want to run a build of your
+own — the spec above resolves to nothing, and on this host that failure is silent
+(see *Nothing happened, and there is no error*). The local route is to point
+`plugin[]` at the built package **directory**:
+
+```json
+{ "plugin": ["/abs/path/to/packaging/opencode"] }
+```
+
+A `file://` URL of that same directory works identically. What does **not** work
+is naming the tarball, and the way it fails is worse than not working. Measured
+2026-09-19 against opencode 1.18.31, four spec forms, each in `plugin[]` on a
+clean `$HOME`:
+
+| `plugin[]` entry | Loaded? |
+| --- | --- |
+| `<dir>` | **yes** |
+| `file://<dir>` | **yes** |
+| `<dir>/opencode-multi-llm-0.1.0.tgz` | **no** — the command map came back empty |
+| `file://<dir>/opencode-multi-llm-0.1.0.tgz` | **no** |
+
+OpenCode never opens the archive. A `.tgz` spec resolves to the archive's
+**containing directory** — confirmed by a fifth run with the tarball copied
+*inside* a valid package directory, which loaded. So a tarball path appears to
+work exactly when the directory holding it is itself an unpacked package, and
+`npm pack` writes its tarball straight into the tree it just packed: point at
+`packaging/opencode/opencode-multi-llm-0.1.0.tgz` after a `make opencode-package`
+and the plugin loads — not because the spec resolved, but because its directory
+did. Copy that tarball anywhere else, name it the same way, and it is a silent
+no-op.
+
+So: extract the tarball and name the extracted directory, or name the staging
+directory the build already produced. Never name the `.tgz`. Verify either way
+with the mutated-key check below, which is the only thing on this route that
+distinguishes loaded from not.
+
+A local directory spec also changes the cache story: there is no
+`~/.cache/opencode/packages/<spec>` entry to clear and no pinning to do, because
+the plugin is read from the path you gave. Re-staging the directory and restarting
+is the whole upgrade.
+
 ## First run
 
 **The first `/multi-llm` after an install or an upgrade needs network, or a warm

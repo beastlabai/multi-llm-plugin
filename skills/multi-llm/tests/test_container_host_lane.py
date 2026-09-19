@@ -271,6 +271,17 @@ CREDENTIALED_ROWS = [
     # both are scheduled: a green codex negative proves nothing about opencode.
     ("codex", "codex-auth-negative"),
     ("opencode", "opencode-auth-negative"),
+    # THE PACKAGE ROUTE, and the only rows here that are not the file shim.
+    # Everything above installs multi-llm by writing a command file the host
+    # scans; these two install the npm plugin instead, which registers the same
+    # command AND a `multi_llm` tool from a module. The routes are graded
+    # separately because promotion is keyed on `Row.route` — crediting a plugin
+    # run to the shim, or the reverse, would let either route rot behind the
+    # other's evidence. Last in the list for the same reason the negatives are
+    # near it: they are the newest and the cheapest to lose if the budget runs
+    # out mid-lane.
+    ("opencode", "opencode-package-ask"),
+    ("opencode", "opencode-package-review-plan"),
 ]
 
 
@@ -535,6 +546,14 @@ def graded(request, posture, utc):
         # than `receipts/<row>/`, so no assertion in this module can mistake the
         # rig's own invocation for the host's.
         commands=[str(c) for c in (matrix_row.get("pre_commands") or [])],
+        # WHICH INSTALL ROUTE THIS ROW EXERCISES, and it has to come off the
+        # matrix row: `harness.Row.route` defaults to "file", `build_run_argv`
+        # forwards `--route` only when it is not that, and the entrypoint's
+        # `stage_host` branches on it to skip staging a file shim the plugin
+        # would overwrite in memory anyway. Read it here or a row authored with
+        # `route: package` runs the FILE route under a package row's name --
+        # green, and grading the wrong object.
+        route=str(matrix_row.get("route") or "file"),
     )
     result = harness.run_row(row, posture=posture, utc=utc)
     _Census.record_ran(row_id, host, "openrouter")
