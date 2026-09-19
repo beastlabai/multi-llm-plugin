@@ -127,7 +127,9 @@ class TestTheNpmLayerMovesAsOneTree:
         rows = {row["id"]: row["version"] for row in lock["clis"]}
         assert rows["codex"] == "0.147.0" and rows["gemini"] == "0.55.1"
         # Untouched rows keep their pin: the drift probe said nothing about them.
-        assert rows["cline"] == "3.0.55"
+        # RESTATED, not read from the lock — the point is to disagree with a bad
+        # edit, so it moves by hand when the pin does (2026-09-19: 3.0.55 -> 3.0.62).
+        assert rows["cline"] == "3.0.62"
 
         manifest = json.loads((container_dir / "package.json").read_text("utf-8"))
         assert manifest["dependencies"]["@openai/codex"] == "0.147.0"
@@ -158,7 +160,7 @@ class TestTheNpmLayerMovesAsOneTree:
         root = evidence({"codex": "0.147.0"}, npm_versions={"codex": "0.148.0"})
         assert _apply(container_dir, root, tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.146.0"
+        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.155.1"
 
     def test_a_new_unhashed_dependency_stops_the_layer_but_not_the_run(
             self, container_dir, evidence, tmp_path):
@@ -170,10 +172,69 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.146.0", "the npm layer must not have moved"
+        assert rows["codex"] == "0.155.1", "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", (
             "the artifact rows are independent files and must still move"
         )
+
+    def test_an_adjudicated_unhashed_dependency_lets_the_layer_move(
+            self, container_dir, evidence, tmp_path):
+        """The decision, once taken and committed, is honoured.
+
+        The refusal above tells the reader to widen `UNHASHED_BY_UPSTREAM` in
+        `tests/test_dockerfile_pins.py` — and until 2026-09-19 doing exactly that
+        changed nothing, because the comparison was against the committed
+        lockfile alone and nothing in `lock_update` ever read that allowlist. A
+        remedy a tool names and then ignores is worse than no remedy: it reads as
+        the tool being broken, and the only way past it was to hand-write the
+        lockfile this whole evidence path exists to derive.
+
+        `container_dir` is a temp copy of the four writable files, so the
+        allowlist is read from a sibling that is not there and the strict
+        behaviour is what the test above still sees. Here the sibling is written,
+        naming the very dependency the evidence adds.
+        """
+        (container_dir.parent / "test_dockerfile_pins.py").write_text(
+            'UNHASHED_BY_UPSTREAM = {\n'
+            '    "node_modules/brand-new-unhashed",\n'
+            '}\n', encoding="utf-8")
+        root = evidence({"codex": "0.147.0"},
+                        npm_versions={"codex": "0.147.0"},
+                        extra_unhashed=["node_modules/brand-new-unhashed"])
+        assert _apply(container_dir, root, tmp_path) == 0
+
+        lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
+        rows = {row["id"]: row["version"] for row in lock["clis"]}
+        assert rows["codex"] == "0.147.0", (
+            "the adjudicated entry is named in the allowlist, so the npm layer "
+            "must move — this is the assertion that makes the refusal's own "
+            "instructions true"
+        )
+
+    def test_an_unadjudicated_entry_still_stops_it_when_a_sibling_exists(
+            self, container_dir, evidence, tmp_path):
+        """Reading the allowlist must not become "allow everything".
+
+        The sibling is present and names a DIFFERENT dependency, which is the
+        case that separates "the allowlist is consulted" from "the allowlist is
+        assumed to cover whatever turned up".
+        """
+        (container_dir.parent / "test_dockerfile_pins.py").write_text(
+            'UNHASHED_BY_UPSTREAM = {"node_modules/something-else"}\n',
+            encoding="utf-8")
+        # `grok` rides along for the same reason it does in the sibling test: an
+        # artifact row that really moves keeps the RUN alive (exit 0), so the
+        # assertion below is "the npm layer was held back" rather than the much
+        # weaker "nothing happened at all", which exit 2 would also satisfy.
+        root = evidence({"codex": "0.147.0", "grok": "1.0.3"},
+                        npm_versions={"codex": "0.147.0"},
+                        extra_unhashed=["node_modules/brand-new-unhashed"])
+        assert _apply(container_dir, root, tmp_path) == 0
+
+        lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
+        rows = {row["id"]: row["version"] for row in lock["clis"]}
+        assert rows["codex"] == "0.155.1", "the npm layer must not have moved"
+        assert rows["grok"] == "1.0.3", "and the artifact rows must still move"
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         assert any(entry["row"] == "npm layer" for entry in record["not_moved"])
 
@@ -253,7 +314,7 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
         """goose is unpacked and the tarball discarded: the checksum is gone."""
         assert _apply(container_dir, evidence({"goose": "1.46.0"}), tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert lock["artifacts"]["goose"]["version"] == "1.41.0"
+        assert lock["artifacts"]["goose"]["version"] == "1.51.0"
 
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         [refused] = [entry for entry in record["not_moved"] if entry["row"] == "goose"]

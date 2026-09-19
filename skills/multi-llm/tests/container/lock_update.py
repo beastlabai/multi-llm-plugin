@@ -76,6 +76,7 @@ or failed -- nothing written in either failing case.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -376,12 +377,23 @@ def plan_npm(lock: dict, census: dict[str, dict], evidence: Path, plan: Plan,
         resolved[package] = entry["version"]
 
     # A tarball that upstream ships without an integrity hash is installed by URL
-    # alone. The committed lock has three such entries, asserted exactly by
+    # alone. The committed lock has such entries, asserted exactly by
     # tests/test_dockerfile_pins.py; a new one is a real widening of the trust
     # boundary and is a human's decision, not a bookkeeping side effect.
+    #
+    # THE ALLOWLIST IS SUBTRACTED, and until 2026-09-19 it was not. This refusal
+    # tells the reader to "widen UNHASHED_BY_UPSTREAM in
+    # tests/test_dockerfile_pins.py" -- and then refused again just the same,
+    # because the comparison was against the committed LOCKFILE alone and nothing
+    # here ever read that allowlist. A remedy a tool names and then ignores is
+    # worse than no remedy: it reads as the tool being broken, and the way past it
+    # is to hand-write the very lockfile this evidence path exists to derive. So
+    # the decision, once taken and committed, is honoured here.
     committed = json.loads(
         (container_dir / "package-lock.json").read_text(encoding="utf-8"))
-    grew = _unhashed(packages) - _unhashed(committed.get("packages") or {})
+    grew = (_unhashed(packages)
+            - _unhashed(committed.get("packages") or {})
+            - _adjudicated_unhashed(container_dir))
     if grew:
         raise LayerRefusal(
             "the @latest tree adds package(s) that upstream ships with a resolved "
@@ -418,6 +430,36 @@ def plan_npm(lock: dict, census: dict[str, dict], evidence: Path, plan: Plan,
 def _unhashed(packages: dict) -> set[str]:
     return {name for name, entry in packages.items()
             if name and entry.get("resolved") and not entry.get("integrity")}
+
+
+def _adjudicated_unhashed(container_dir: Path) -> set[str]:
+    """`UNHASHED_BY_UPSTREAM`, read out of the test module that owns it.
+
+    Parsed with `ast` rather than imported: this tool runs on the host against a
+    checkout, and importing a pytest module to read one constant would drag in
+    pytest and every fixture beside it for a set of strings.
+
+    A missing file or a renamed constant yields the empty set, which restores the
+    strict pre-2026-09-19 behaviour -- the safe direction, since the only thing
+    this set can do is let a refusal through.
+    """
+    source = container_dir.parent / "test_dockerfile_pins.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):  # pragma: no cover - a broken checkout
+        return set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "UNHASHED_BY_UPSTREAM"
+                   for t in node.targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:  # pragma: no cover - not a literal any more
+            return set()
+        return {str(item) for item in value}
+    return set()
 
 
 def plan_artifacts(lock: dict, census: dict[str, dict], evidence: Path,
