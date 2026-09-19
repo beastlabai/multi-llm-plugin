@@ -83,8 +83,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
         e2e-clean e2e-prune \
-        opencode-package opencode-package-check-ci opencode-package-check \
-        opencode-publish
+        opencode-stage opencode-package opencode-package-check-ci \
+        opencode-package-check opencode-publish
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -104,6 +104,7 @@ help:
 	@echo
 	@echo "OpenCode npm package (see $(OPENCODE_PKG)/README.md)"
 	@echo
+	@echo "  make opencode-stage               stage the plugin payload the image COPYs (build input only)"
 	@echo "  make opencode-package             build, pack, then sweep the tarball for secrets"
 	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
@@ -117,10 +118,32 @@ e2e-preflight:
 	@docker version >/dev/null 2>&1 || { \
 	  echo "make: the docker CLI is present but no daemon is reachable — start Docker and retry"; exit 1; }
 
+# The opencode PLUGIN payload, staged for the image's §10b COPY.
+#
+# STAGING ONLY — no `npm pack`, no secret sweep, no stamp. Those belong to
+# `opencode-package`, which is the publishing path; this is the build-input path,
+# and the two are separated so that building a test image can never look like a
+# step toward publishing one.
+#
+# It is a prerequisite of `e2e-image` because `dist/` and `skills/` are
+# .gitignore'd build output: a fresh clone has neither, and the Dockerfile COPYs
+# both. Without this the first `make e2e-image` after a clone fails inside
+# docker on a missing build-context path — which reads as a broken Dockerfile
+# rather than as a missing prior step.
+#
+# `--allow-dirty` unconditionally, and ONLY here: the payload has to match the
+# working tree the image is being built from, which is the whole point of a test
+# image, and refusing a dirty tree would make the container lane unrunnable
+# during development. `opencode-publish` re-runs build.py with no such flag and
+# checks its own stamp, so this cannot loosen a publish.
+opencode-stage:
+	@uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --allow-dirty >/dev/null
+	@echo "opencode-stage: payload staged at $(OPENCODE_PKG)/{dist,skills}"
+
 # --------------------------------------------------------------------------- #
 # Pinned build: the gate you run before a release.
 # --------------------------------------------------------------------------- #
-e2e-image: e2e-preflight
+e2e-image: e2e-preflight opencode-stage
 	docker build \
 	  --platform $(PLATFORM) \
 	  --build-arg MLLM_PIN_MODE=pinned \
@@ -182,7 +205,7 @@ e2e-container-host-invocation: e2e-image
 # --------------------------------------------------------------------------- #
 # Drift probe: CLI layer @latest, every other pin held.
 # --------------------------------------------------------------------------- #
-e2e-image-latest: e2e-preflight
+e2e-image-latest: e2e-preflight opencode-stage
 	docker build \
 	  --platform $(PLATFORM) \
 	  --build-arg MLLM_PIN_MODE=latest \

@@ -1856,3 +1856,98 @@ hosts:
           it (an unqualified `opencode:stub-model` runner slug, built in
           `test_container_host_lane.py`'s `harness.Row(...)` constructor, not
           declared here) and clears it.
+
+      # ----------------------------------------------------------------------
+      # THE PACKAGE ROUTE. Everything above this line grades the FILE shim that
+      # `install-host opencode --global` writes. These two grade the npm plugin
+      # `opencode-multi-llm`, which is the other way multi-llm reaches this host
+      # and the one `hosts/capabilities.yaml` calls recommended.
+      #
+      # THEY ARE NOT A DUPLICATE OF THE TWO ROWS ABOVE. The routes do not install
+      # the same object and do not resolve alike:
+      #
+      #   file    a 99-line prose runbook the model reads and retypes into a
+      #           dispatcher command -- which is exactly what
+      #           `opencode-review-plan`'s own `measured` cell records the model
+      #           failing to do, improvising past every baked flag including the
+      #           `--detach` this host declares `required`.
+      #   package an 11-line command telling the model to call the `multi_llm`
+      #           TOOL, whose `execute` composes the argv in JavaScript. The baked
+      #           `--host opencode --yes --exec-subagents` stop being prose a model
+      #           may improvise past and become code.
+      #
+      # So the interesting question these rows ask is not "does the plugin load"
+      # (the free discovery tier answers that for nothing) but "does the route
+      # that cannot be improvised past actually not get improvised past". A
+      # package row that reproduces the file row's `partial` verdict would be a
+      # real finding about the plugin; a pass beside that recorded partial is the
+      # route difference showing up as evidence.
+      #
+      # `route: package` is read by `test_container_host_lane.py`'s `graded`
+      # fixture into `harness.Row.route`, which makes `build_run_argv` forward
+      # `--route package`, which makes `stage_host` stage NO file shim (two
+      # command sources in one $HOME would leave the plugin silently overwriting
+      # the shim's entry) and `_write_opencode_config` write `plugin[]`.
+      - id: opencode-package-ask
+        route: package
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        # IDENTICAL to opencode-ask's, deliberately: the routes must agree on what
+        # the dispatcher is asked to do, or the comparison between them is not a
+        # comparison. What differs is who composes it -- a model reading prose
+        # there, `index.mjs` here.
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        measured:
+          on: "2026-09-19"
+          verdict: pass
+          host_wall_s: 18.7
+          turns: 1
+          stub_requests: 1
+          cli_version: "1.18.31"
+          # The row's own `model` cell resolves to the host pin; this run
+          # overrode it with `MLLM_HOST_MODEL=deepseek/deepseek-v4.1-flash`,
+          # confirmed in the bundle. No per-row usd: the lane's spend is measured
+          # as a key-usage delta across the whole invocation and this run also
+          # carried the file-route rows, so attributing a figure to this row
+          # alone would be arithmetic rather than measurement.
+          note: >
+            FIRST RUN OF THE PACKAGE ROUTE against a real model, and it matched
+            the prediction exactly — one turn, same shape as `opencode-ask`
+            beside it. What it establishes is narrow and worth stating: the
+            plugin loaded, injected its command, composed the dispatcher argv in
+            JS rather than asking a model to retype it, and supervised the run to
+            a terminal result.
+      - id: opencode-package-review-plan
+        route: package
+        args: '--review-plan "plans/auth-feature.md" --quick'
+        command: "review-plan plans/auth-feature.md --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
+        wall_clock_s: 900
+        # Same scenario, and for the same measured reason as the file row: under
+        # --exec-subagents this phase dispatches validation batches too, and the
+        # narrower scenario answers those with something that is not a validation
+        # result.
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: "2026-09-19"
+          verdict: pass
+          host_wall_s: 24.33
+          turns: 6
+          stub_requests: 10
+          unmatched_prompts: 6
+          cli_version: "1.18.31"
+          note: >
+            THE ROW THE PACKAGE ROUTE EXISTS TO ANSWER, and it passed. Its
+            file-route twin was recorded `partial — the workflow completed, the
+            SHIM was not followed` on 2026-08-14, the model having dropped every
+            baked flag and `--detach` with it. On this run BOTH passed and both
+            took six turns, so the honest reading is NOT "the plugin fixed the
+            improvisation": the file route behaved this time too, on a different
+            model and fifteen CLI releases later. What the pair establishes is
+            that the two routes are now graded side by side on the same workload,
+            which is the thing that was missing — the earlier partial is still the
+            reason to keep both rows rather than evidence this route repaired it.
+            `unmatched_prompts: 6` is the fan-out's validation batches meeting a
+            scenario that answers the chain, not a failure; the row is graded on
+            the receipts and the terminal run state.

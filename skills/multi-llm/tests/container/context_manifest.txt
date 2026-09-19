@@ -64,3 +64,19 @@ skills/multi-llm/tests/container/home_seed/**  # optional
 skills/multi-llm/tests/fixtures/**
 skills/multi-llm/tests/golden/**
 skills/multi-llm/tests/test_container_*.py  # optional
+
+# --- the opencode PLUGIN package, staged ------------------------------------
+
+# The host lane's SECOND install route. `install-host opencode` writes a command
+# file; this package is the npm plugin that registers the same command AND the
+# `multi_llm` tool, and the two resolve differently -- so a lane that grades only
+# the shim grades only half of what ships.
+#
+# `dist/` and `skills/` are BUILD OUTPUT (.gitignore'd), produced by
+# `packaging/opencode/build.py` and therefore absent from the clean checkout
+# test_build_context.py exports -- hence `# optional`, which exempts them from
+# direction 1 while still covering them for direction 3. `make e2e-image` stages
+# them before it builds, so a real build never meets them missing.
+packaging/opencode/package.json  # optional
+packaging/opencode/dist/**  # optional
+packaging/opencode/skills/**  # optional

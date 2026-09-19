@@ -152,7 +152,7 @@ first line matches on the fake-binary lane and matches nothing at all here.
   > no `auth_check`, so the absence of an `AUTH_PROBE_ARGS` row is the correct
   > answer and `test_fake_lane_roster.py` asserts exactly that).
 
-  agy is also **in the image** (1.1.15) and has a fixture set
+  agy is also **in the image** (1.2.7) and has a fixture set
   (`tests/fixtures/agy/`), neither of which contradicts the above: it is
   installed for the `cli-surface` help-drift probe, which needs the binary and
   no backend, and the fixture set is **one graded row and eleven written
@@ -396,6 +396,15 @@ is argument delivery, not model output.
 | `opencode` 1.18.18 | **resolves** — shim body, `{SKILL_DIR}` substituted, `--host opencode --yes --exec-subagents`, and `--review-plan plans/<marker>.md` still adjacent | 2026-08-24 |
 | `codex` 0.146.0 | **refused** — `• Unrecognized command '/multi-llm'.` and *zero* requests sent | 2026-08-24 |
 
+The two versions in that table are **what the row ran against**, not what the
+image ships. Re-confirmed unchanged on 2026-09-18 (`records/20260918T152856Z-documented-invocation-*`,
+both `pass`, `cli_version` 1.18.18 and 0.146.0); the pins then moved to **opencode
+1.18.31 and codex 0.155.1 on 2026-09-19**, along with fifteen of the other
+sixteen coding CLIs in the image (`aider` 0.86.2 alone is unchanged), and this
+row has not been re-run since. The verdicts above are therefore carried forward,
+not re-measured — the first credentialed run on the new image is what settles
+whether they still hold.
+
 Codex's shim is discovered — the skill is advertised to the model by name inside
 `<skills_instructions>` with its `SKILL.md` locator — but a Codex *skill* is a
 model-invoked instruction source, not a composer command; its slash surface lists
@@ -503,6 +512,92 @@ synthesized instead.
 > stop one oversized request, a CLI's internal retries, or the reference host's
 > native subagent batches from overshooting mid-run. The only limit that actually
 > holds is enforced by the party doing the billing.
+
+### Two install routes on `opencode`, and only one of them has ever been graded
+
+Every row above that installs anything installs it the same way (`claude-code`
+installs nothing — the plugin *is* the skill there): `install-host <host>` renders
+a **file** the host happens to scan — a `SKILL.md` on codex, a command markdown on
+opencode — and that file is the whole install. It is one of the two routes that
+ship. The other is the npm package `opencode-multi-llm`, which registers the same
+`/multi-llm` command *and* a model-callable `multi_llm` tool out of a plugin
+module, and which `capabilities.yaml` says the documentation will recommend once
+it is published. Until 2026-09-19 nothing in this lane had ever run it.
+
+They are not two spellings of one install, which is why the new rows are not a
+duplicate of the two beside them. The file shim is a prose runbook the model
+reads and retypes into a dispatcher command — which is exactly what
+`opencode-review-plan`'s own recorded cell shows it failing to do, `partial — the
+workflow completed, the SHIM was not followed`, every baked flag improvised past
+including the `--detach` this host declares `required`. The package's command
+body instead tells the model to call the tool, and the tool's `execute` composes
+the argv in JavaScript: `--host opencode --yes --exec-subagents` stop being prose
+a model may improvise past and become code. So the question these rows ask is not
+*does the plugin load* — the free discovery tier answers that for nothing — but
+*does the route that cannot be improvised past actually not get improvised past*.
+
+| Row | What it runs | Its file-route twin's recorded verdict |
+| --- | --- | --- |
+| `opencode-package-ask` | `--ask … --quick`, argv identical to `opencode-ask`'s | `pass` |
+| `opencode-package-review-plan` | `--review-plan … --quick`, same scenario as `opencode-review-plan`'s | `partial — the workflow completed, the SHIM was not followed` |
+
+Both carry `provenance: unmeasured`, because neither has yet been run against a
+credential, and both `expect` blocks are **copied from the file rows and are
+therefore predictions** — the matrix labels them as such rather than letting a
+prediction age into a measurement. Read a first red run as evidence about the
+plugin, not as a regression, and replace the cell with that run's own figures.
+A package row reproducing the file row's `partial` would be a real finding about
+the plugin; a pass beside that recorded `partial` is the route difference showing
+up as evidence.
+
+`route` is a matrix-row field (`route: package`), read by the `graded` fixture
+into `harness.Row`, forwarded into the container as `--route package`, and acted
+on twice there: **no file shim is staged** — two command sources in one `$HOME`
+would leave the plugin silently overwriting the shim's entry, and the row would
+grade an object it did not install — and the host's own `opencode.json` gets a
+`plugin[]` entry instead. Promotion is keyed on the same field, so a package run
+can never be credited to the shim, or the reverse.
+
+**The image ships the plugin unpacked, and that is a measurement rather than a
+preference.** `opencode-multi-llm` is not published, so a registry spec has
+nothing to resolve against and this lane's egress could not fetch it if it had;
+the payload is copied into the image and named by its path. What it may *not* be
+named by is a tarball. Measured 2026-09-19 against opencode 1.18.31, four spec
+forms, each in `plugin[]` on a clean `$HOME`:
+
+| `plugin[]` entry | Loaded? |
+| --- | --- |
+| `<dir>` | **yes** |
+| `file://<dir>` | **yes** |
+| `<dir>/<pkg>.tgz` | **no** — the command map came back empty |
+| `file://<dir>/<pkg>.tgz` | **no** |
+
+opencode never opens the archive. A `.tgz` spec resolves to the archive's
+**containing directory**, confirmed by a fifth run with the tarball copied
+*inside* a valid package directory — that one loaded. That is the trap worth
+naming, because `npm pack` writes its tarball straight into the tree it packed:
+point `plugin[]` at `packaging/opencode/opencode-multi-llm-0.1.0.tgz` and the
+plugin loads, not because the spec works but because its directory is the staging
+tree. The same spelling anywhere else is a silent no-op.
+
+The verdict is read from a **mutated key**, never from a presence check or an
+exit code — on this route both are green whatever happened, and the debug log is
+0 bytes:
+
+```bash
+opencode debug config | jq '.command["multi-llm"] != null'
+```
+
+**The payload carries its own skill copy, and therefore needs its own venv.** The
+plugin resolves its skill directory to `<package>/skills/multi-llm` and never to
+`/opt/mllm/skill`, so the image's main virtualenv is not on its path; the plugin
+layer syncs the packaged tree separately and asserts `yaml` imports out of it at
+build time. Without that, the first dispatch on this route reaches for an index
+this lane's egress does not have and dies with `ModuleNotFoundError: No module
+named 'yaml'` at exit 1, with no uv-level error to read. The staged `dist/` and
+`skills/` are build output — `make e2e-image` stages them before it builds, and
+`context_manifest.txt` marks them `# optional` so the clean-checkout build-context
+guard still passes.
 
 ### The one measured surprise worth knowing
 

@@ -82,6 +82,16 @@
 !skills/multi-llm/tests/golden/**
 !skills/multi-llm/tests/test_container_*.py
 
+# ... and the opencode PLUGIN package, staged (the host lane's second install
+# route). `package.json` and `src/` are tracked; `dist/` and `skills/` are
+# BUILD OUTPUT and .gitignore'd, so a fresh clone has neither and the Dockerfile
+# COPY of them would fail -- `make e2e-image` stages them first, and
+# context_manifest.txt marks the two `# optional` for the clean-checkout export
+# that tests/test_build_context.py runs.
+!packaging/opencode/package.json
+!packaging/opencode/dist/**
+!packaging/opencode/skills/**
+
 # Re-excluded from inside the allowed trees. Last match wins, so these have to
 # stay BELOW the negations above.
 **/__pycache__/**
@@ -93,6 +103,10 @@ skills/multi-llm/tests/container/runs/**
 # creds.json inside tests/container/ is exactly the leak this line stops.
 **/.env
 **/.env.*
+# A staged payload a developer happened to `uv sync` in place: the venv is
+# rebuilt inside the image by its own layer and must never ride in from the host,
+# where it carries absolute paths and host-built binaries.
+packaging/opencode/skills/multi-llm/.venv/**
 **/creds.json
 **/creds/**
 **/*.credentials.json

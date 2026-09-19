@@ -49,6 +49,15 @@ RIG_DIR = Path(os.environ.get("MLLM_RIG_DIR", "/opt/mllm/rig"))
 #: The genuine binaries, behind the PATH wrappers. Used only where a probe must
 #: see what the HOST sees rather than what a dispatched provider sees.
 REAL_DIR = Path(os.environ.get("MLLM_REAL_DIR", "/opt/mllm/real"))
+#: The opencode PLUGIN package, unpacked into the image by the Dockerfile's §10b.
+#: Declaring THIS path in `opencode.json`'s `plugin[]` is the whole package route
+#: in the container, and it is a path rather than the registry spec for one
+#: reason: `opencode-multi-llm` is not published, so `opencode-multi-llm@0.1.0`
+#: has nothing to resolve against and `--network none` could not fetch it if it
+#: had. MEASURED 2026-09-19 (opencode 1.18.31) that a directory spec loads and a
+#: `.tgz` spec does not — see §10b for the four-form table.
+OPENCODE_PLUGIN_DIR = Path(
+    os.environ.get("MLLM_OPENCODE_PLUGIN_DIR", "/opt/mllm/opencode-plugin"))
 OUT = Path("/work/out")
 HOMES = Path("/work/homes")
 WORKSPACE = Path("/work/sample-project")
@@ -1655,6 +1664,13 @@ def _opencode_package_spec() -> str | None:
     ``wrapper.py``; the ``except`` stays only for a rig genuinely running outside
     an installed skill, which is what ``ImportError`` alone names.
     """
+    # THE STAGED DIRECTORY WINS WHEN IT IS THERE, and it is there in every image
+    # built since §10b landed. The registry spec below stays as the fallback for
+    # a rig driving an image that predates that layer (or a future published
+    # package), so this function still answers the question its name asks -- what
+    # do we put in `plugin[]`? -- rather than two different questions by build.
+    if (OPENCODE_PLUGIN_DIR / "package.json").is_file():
+        return str(OPENCODE_PLUGIN_DIR)
     if str(SKILL_DIR) not in sys.path:
         sys.path.insert(0, str(SKILL_DIR))
     try:
@@ -1685,12 +1701,16 @@ def _write_opencode_config(home: Path, slug: str,
     own ``route`` field, and a guard pins that every other row's rendered config
     stays byte-identical to what it was.
 
-    **And the runtime write is not optional on the package row.** The image's
-    warm-up step declares the plugin only to make the installer pre-extract it,
-    and deletes that config before the tree is folded into the seed — so the seed
-    carries the extracted package and *no declaration of it*. Without this write
-    the package lands in the cache at build time and is then never loaded, at
+    **And the runtime write is not optional on the package row.** The image
+    UNPACKS the plugin at /opt/mllm/opencode-plugin (Dockerfile §10b) and declares
+    it nowhere — a declaration is per-$HOME and this one is a tmpfs seeded per
+    row. Without this write the package sits in the image and is never loaded, at
     exit 0, with nothing in the logs.
+
+    This docstring used to describe a *warm-up step* that pre-extracted the
+    package from the registry into the seed. No such step was ever written, the
+    package is unpublished, and `--network none` could not have fetched it; §10b
+    is what actually puts the payload in the image.
     """
     config_dir = home / ".config" / "opencode"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1713,15 +1733,25 @@ def _write_opencode_config(home: Path, slug: str,
                 "hosts/capabilities.yaml, and it is absent or not an npm route."
             )
         document["plugin"] = [spec]
-        # The package payload is read from the CACHE, not from /opt/mllm/skill,
-        # and `external_directory` matches the path opencode actually reads —
-        # not the path the bytes came from. Without these entries the payload
-        # matches only `"*": "deny"` and every read is auto-rejected, producing
-        # the documented signature (`! permission requested: external_directory
-        # … auto-rejecting`) and then a run that ends at exit 0 with no dispatch.
-        # A row that "passes" because the gate silently swallowed the read is the
-        # worst outcome available, which is why restaging the payload does not
-        # fix this on its own.
+        # The package payload is read from WHEREVER THE SPEC POINTS, never from
+        # /opt/mllm/skill, and `external_directory` has to match the path opencode
+        # actually reads — not the path the bytes came from. Without these entries
+        # the payload matches only `"*": "deny"` and every read is auto-rejected,
+        # producing the documented signature (`! permission requested:
+        # external_directory … auto-rejecting`) and then a run that ends at exit 0
+        # with no dispatch. A row that "passes" because the gate silently
+        # swallowed the read is the worst outcome available, which is why
+        # restaging the payload does not fix this on its own.
+        #
+        # BOTH roots are granted, because the spec decides which one is live: a
+        # local directory spec (this image, §10b) is read in place, while a
+        # registry spec is extracted under $HOME/.cache/opencode first. Granting
+        # the one that is not in use costs nothing — it names a path no read will
+        # reach — and granting only the wrong one is the silent-rejection failure
+        # above.
+        if spec.startswith("/"):
+            external[f"{spec}/**"] = "allow"
+            external[f"{spec}/*"] = "allow"
         cache = home / ".cache" / "opencode"
         external[f"{cache}/**"] = "allow"
         external[f"{cache}/*"] = "allow"

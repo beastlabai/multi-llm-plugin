@@ -360,7 +360,12 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
             "to nothing today — and on this host that failure is silent: the "
             "plugin stays listed, the exit code is 0, and the debug log is "
             "empty. Until then, use the `install-host` route above, or build "
-            "and install the tarball locally."
+            "the package and name its **directory** — `npm pack`'s `.tgz` is "
+            "not an installable spec on this host: MEASURED 2026-09-19 against "
+            "opencode 1.18.31, a config entry naming a tarball resolves to the "
+            "archive's *containing directory* and never opens the archive, so "
+            "it loads nothing unless that directory happens to be an unpacked "
+            "package itself."
         )
     lines += [
         "",
