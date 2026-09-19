@@ -82,37 +82,37 @@ ARG MLLM_PIN_MODE=pinned
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
 ARG UV_VERSION=0.11.28
 ARG UV_SHA256=e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
-ARG GOOSE_VERSION=1.41.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.41.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=416de595f3e9e7c54a822bce06a79960b9387e3cd51a832a3eadf876237d5a1c
-ARG GROK_VERSION=0.2.93
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-0.2.93-linux-x86_64
-ARG GROK_SHA256=4e0738d3b5550f3c842bc0ae69f468815c6329c008a110d0c27a694dc3401135
-ARG MUSE_VERSION=0.1.0-R708.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=0.1.0-R708.1&file=muse-x86-linux
-ARG MUSE_SHA256=50937b6470cd0edf28eb683c352a5e7af3bcb1b015cd9a3b21dbf79d22af8182
+ARG GOOSE_VERSION=1.51.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.51.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=de5bf71c6bf470fbb55276de871bbbd65c844aa066d3b09b1552da83f8e367e2
+ARG GROK_VERSION=1.0.34
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-x86_64
+ARG GROK_SHA256=be5905e107d2b8b5f3c142d21ecfe4c8fd32a913d2fd551b788707930c4dc80d
+ARG MUSE_VERSION=1.3.0-R3401.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.3.0-R3401.1&file=muse-x86-linux
+ARG MUSE_SHA256=71b089d055dfe6e4562092bc484896b61bd96fd6ef9fef9da54a14aa174e2a33
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
 # Piping it into a shell would pin nothing, so the tarball is named by its bytes
 # here instead. The sha256 is ours -- Cursor publishes none.
-ARG CURSOR_AGENT_VERSION=2026.08.11-e8db854
-ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.08.11-e8db854/linux/x64/agent-cli-package.tar.gz
-ARG CURSOR_AGENT_SHA256=bfff4bf6f4e9dd30c1d0ef0a70b6077b074015dd2948e4c50685d53afdcfce5a
+ARG CURSOR_AGENT_VERSION=2026.09.18-9a7762b
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.09.18-9a7762b/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b8132bad9
 # Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
 # API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
 # because Cursor publishes none. The build checks it anyway: a published digest
 # is a claim until sha256sum --check --strict agrees with it.
 #
-# agy RELEASES DAILY (1.1.14 on 2026-08-18, 1.1.15 on 2026-08-19), so this is a
+# agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.1.15
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.15/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=d0b1d6f3678a061915caebc431930e240b863bf4059369c08c6ffceb24e66b5f
+ARG AGY_VERSION=1.2.7
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.7/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=e410dd56d8c213ef12643d3ff5eaaab57a17e05bbf72e9415322f23879fc4a18
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
-# GitHub release asset -- a Bun single-file ELF, 251,786,720 bytes, linked
+# GitHub release asset -- a Bun single-file ELF, 252,405,216 bytes, linked
 # against libc/libm/libdl/libpthread only, which is why bookworm-slim's glibc
 # 2.36 runs it with nothing added.
 #
@@ -120,9 +120,9 @@ ARG AGY_SHA256=d0b1d6f3678a061915caebc431930e240b863bf4059369c08c6ffceb24e66b5f
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.2.2
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.2/omp-linux-x64
-ARG OMP_SHA256=77c3520ab8ef8318dda02a0715e3b6e69589c427dc23f90a4bb97650caa72f72
+ARG OMP_VERSION=18.2.6
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.6/omp-linux-x64
+ARG OMP_SHA256=0f38598c91e823d8cce07f151ec3999d51f213fb2cc3e07d89f1af8eef9247a2
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -449,9 +449,25 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
 # exit 0, correct version), but a NODE_COMPILE_CACHE naming an uncreatable parent
 # was measured HANGING the CLI indefinitely. Leaving the launcher's own default
 # in place is the safe branch.
+#
+# THE LATEST-MODE DISCOVERY MATCHES THE VERSION SEGMENT, NEVER THE WHOLE URL.
+# MEASURED 2026-09-19: the server-rendered installer stopped baking the platform
+# into DOWNLOAD_URL and now emits it as SHELL PLACEHOLDERS the script expands at
+# run time --
+#
+#     DOWNLOAD_URL="https://downloads.cursor.com/lab/2026.09.18-9a7762b/${OS}/${ARCH}/agent-cli-package.tar.gz"
+#
+# -- so the previous pattern, which required a literal `linux/x64`, matched
+# nothing and the drift probe died on `the installer's shape changed` with the
+# whole @latest build behind it. The version is the only field we need from that
+# page; `linux/x64` is OUR platform choice (this image is pinned to linux/amd64
+# and says so three ways), so it is spelled here rather than looked for there.
+# The pattern accepts both shapes: it stops at the segment after `/lab/`.
 RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
-        cursor_url="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://cursor.com/install | grep -oE 'https://downloads\.cursor\.com/lab/[^/]+/linux/x64/agent-cli-package\.tar\.gz' | head -n 1)"; \
-        [ -n "${cursor_url}" ] || { echo "cursor-agent: no download URL found in https://cursor.com/install -- the installer's shape changed" >&2; exit 1; }; \
+        cursor_ver="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://cursor.com/install | grep -oE 'downloads\.cursor\.com/lab/[^/"'"'"']+/' | head -n 1 | sed -e 's#.*/lab/##' -e 's#/$##')"; \
+        [ -n "${cursor_ver}" ] || { echo "cursor-agent: no lab version found in https://cursor.com/install -- the installer's shape changed" >&2; exit 1; }; \
+        cursor_url="https://downloads.cursor.com/lab/${cursor_ver}/linux/x64/agent-cli-package.tar.gz"; \
+        echo "cursor-agent: @latest resolved to ${cursor_ver}"; \
     else \
         cursor_url="${CURSOR_AGENT_URL}"; \
     fi \
