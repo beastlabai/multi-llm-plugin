@@ -12,7 +12,7 @@ When there are more than 4 batches, spawn them in waves to control context growt
 1. Split batches into waves of up to 4 batches each, except the last wave may include up to 6 batches (absorbing any small remainder to avoid an unnecessary extra round — e.g., 5 batches = one wave of 5, 9 batches = wave of 4 + wave of 5, 8 batches = two waves of 4)
 2. For each wave:
    - **Spawn subagents** for every batch in the wave at once, in one parallel group
-   - Use the same prompt template as single-batch processing, with each batch's `group_indices` and `output_path`
+   - Run each batch's task exactly as the calling instruction's contract says (the sidecar at `prompt_path`, or `task.prompt`), writing the reply to its `output_path`
    - Wait for all agents in the wave to complete
 3. Proceed to the next wave
 4. After ALL waves complete, continue to the next step (reaggregation, etc.)

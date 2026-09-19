@@ -9,6 +9,7 @@ Tests the following functions:
 - merge_batched_revalidation_results()
 """
 
+import copy
 import json
 import os
 import sys
@@ -21,17 +22,33 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import utils.validation as validation_module  # noqa: E402
+
 from utils.validation import (
     prepare_batched_validation_tasks,
     merge_batched_validation_results,
     prepare_batched_revalidation_tasks,
     merge_batched_revalidation_results,
+    ensure_prompt_sidecars,
+    sidecar_path,
     ERROR_TYPE_AMBIGUOUS,
     ERROR_TYPE_PARSING,
     ERROR_TYPE_TIMEOUT,
     ERROR_TYPE_UNKNOWN,
     resolved_reaggregate_command,
 )
+
+
+def read_sidecar(path) -> str:
+    """Byte-exact read of a prompt sidecar.
+
+    ``newline=""`` is the whole point: universal-newline translation would make
+    a sidecar written on one platform compare equal to a prompt it does not
+    actually equal on disk. ``Path.read_text()`` cannot take the argument on
+    3.12, so this opens the file itself.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
 
 
 # ============================================================================
@@ -286,6 +303,10 @@ class TestPrepareBatchedValidationTasks:
             )
             assert result["batches"] == []
             assert result["total_batches"] == 0
+            # Nothing was materialized, so nothing is written beside the file:
+            # a sidecar with no task pointing at it is litter a later round's
+            # glob would have to clean up.
+            assert list(Path(tmpdir).glob("*.prompt.txt")) == []
 
     def test_batch_structure(self, sample_groups, sample_context):
         """Each batch has correct structure (reference-based, no embedded prompts)."""
@@ -317,6 +338,17 @@ class TestPrepareBatchedValidationTasks:
                 # suggestions_json was the single-task path's field name; the
                 # records now travel inside `prompt`.
                 assert "suggestions_json" not in batch
+                # The prompt sidecar: invoker plumbing for a host whose subagent
+                # tool takes a string, so it hands over this path instead of
+                # re-emitting ~65 KB through its own context. Its bytes are the
+                # prompt's bytes — `prompt` stays the source of truth.
+                expected_sidecar = str(
+                    Path(tmpdir) / f"validation_batch_{batch['batch_index']}.prompt.txt"
+                )
+                assert batch["prompt_path"] == expected_sidecar
+                assert batch["prompt_lines"] == batch["prompt"].count("\n") + 1
+                assert os.path.exists(expected_sidecar)
+                assert read_sidecar(expected_sidecar) == batch["prompt"]
 
     def test_batch_output_paths(self, sample_context):
         """Batch output paths are correctly formatted."""
@@ -331,6 +363,12 @@ class TestPrepareBatchedValidationTasks:
             for i, batch in enumerate(result["batches"]):
                 expected_path = str(Path(tmpdir) / f"validation_batch_{i}.json")
                 assert batch["output_path"] == expected_path
+                # The sidecar sits beside the reply file under the same index,
+                # distinguished only by extension — the reaggregation glob is
+                # `*.json` and must keep ignoring it.
+                assert batch["prompt_path"] == str(
+                    Path(tmpdir) / f"validation_batch_{i}.prompt.txt"
+                )
 
     def test_batch_indices_sequential(self, sample_context):
         """Batch indices are sequential starting from 0."""
@@ -805,6 +843,310 @@ class TestPrepareBatchedValidationTasks:
         assert by_theme["Badge seed"]["line_range"] == [127, 135]
         assert "file" not in by_theme["Cross-cutting"]
         assert "line_range" not in by_theme["Cross-cutting"]
+
+
+# ============================================================================
+# Tests for the prompt sidecars written beside the batch files
+# ============================================================================
+
+class _CountingOs:
+    """``utils.validation``'s view of ``os``, with a failing ``os.replace``.
+
+    Scoped to the one module attribute rather than to ``os.replace`` itself:
+    the real function backs every other atomic write in the process, so
+    patching it globally would break the test run instead of the one sidecar
+    write under test.
+    """
+
+    def __init__(self, fail_on_call: int):
+        self._fail_on_call = fail_on_call
+        self.replace_calls = 0
+
+    def __getattr__(self, name):  # every other os.* stays the real one
+        return getattr(os, name)
+
+    def replace(self, src, dst):
+        self.replace_calls += 1
+        if self.replace_calls == self._fail_on_call:
+            raise OSError(28, "No space left on device")
+        return os.replace(src, dst)
+
+
+class TestPromptSidecars:
+    """`validation_batch_{N}.prompt.txt` holds exactly that batch's prompt.
+
+    Invoker plumbing, never a subagent instruction: a host whose subagent tool
+    takes a prompt string hands over this path instead of re-emitting ~65 KB of
+    prompt through its own context. `prompt` stays the source of truth, so every
+    failure here degrades to "run the round from `prompt` alone".
+    """
+
+    def test_sidecars_are_all_or_none(
+        self, sample_context, tmp_path, monkeypatch, capsys
+    ):
+        """A half-written round is worse than none at all.
+
+        Tasks that carry `prompt_path` beside tasks that do not, in one file,
+        invite an invoker to read some batches off disk and re-emit the others:
+        two prompt sources for one round, which is the non-identical bytes the
+        sidecar exists to rule out. So a mid-round `OSError` unwinds — every
+        file already written is removed, both keys come off *every* task, one
+        line says so, and the fan-out is otherwise untouched.
+        """
+        groups = [make_group("MEDIUM", f"Theme {i}") for i in range(10)]
+        counting_os = _CountingOs(fail_on_call=3)
+        monkeypatch.setattr(validation_module, "os", counting_os)
+
+        result = prepare_batched_validation_tasks(
+            groups=groups,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            max_per_batch=4,
+        )
+
+        assert counting_os.replace_calls == 3, "the third sidecar is the one that fails"
+        assert result["total_batches"] == 3
+        for batch in result["batches"]:
+            assert "prompt_path" not in batch
+            assert "prompt_lines" not in batch
+            # A scratch file failing to write must not throw away a completed
+            # fan-out: the task itself is still complete and dispatchable.
+            assert batch["prompt"]
+            assert batch["output_path"]
+            assert batch["group_ids"]
+        assert list(tmp_path.glob("*.prompt.txt")) == [], (
+            "the two sidecars written before the failure must be unlinked"
+        )
+        # The failing write's own temp file goes too: it is hidden, matched by
+        # no glob and cleaned by nothing else, so leaving it would strand a
+        # partial prompt in the phase dir for as long as the dir lives.
+        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+        skipped = [
+            line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("[PROMPT_SIDECAR_SKIPPED]")
+        ]
+        assert len(skipped) == 1, skipped
+        assert "No space left on device" in skipped[0]
+
+    def test_stale_sidecars_from_a_wider_round_are_removed(
+        self, sample_context, tmp_path
+    ):
+        """Nothing else in the phase dir reaches a higher-numbered sidecar.
+
+        The fan-out overwrites `validation_tasks.json` in place and `--force`
+        deletes nothing, so a round that shrank from 21 batches to 3 would leave
+        `validation_batch_20.prompt.txt` describing a retired grouping beside
+        the fresh ones, with only its index to tell an operator otherwise.
+        """
+        stale = tmp_path / "validation_batch_20.prompt.txt"
+        stale.write_text("a prompt from a wider round", encoding="utf-8")
+
+        result = prepare_batched_validation_tasks(
+            groups=[make_group("MEDIUM", f"Theme {i}") for i in range(10)],
+            context=sample_context,
+            output_dir=str(tmp_path),
+            max_per_batch=4,
+        )
+
+        assert result["total_batches"] == 3
+        assert not stale.exists()
+        assert sorted(p.name for p in tmp_path.glob("*.prompt.txt")) == [
+            "validation_batch_0.prompt.txt",
+            "validation_batch_1.prompt.txt",
+            "validation_batch_2.prompt.txt",
+        ]
+
+    def test_revalidation_tasks_carry_sidecars_too(self, sample_context, tmp_path):
+        """Revalidation materializes through the same producer, so it gets the
+        same plumbing: its prompts are no smaller than validation's."""
+        groups = [make_group("MEDIUM", f"Theme {i}") for i in range(6)]
+        validation_results = [
+            {
+                "group_index": i,
+                "status": "validation_failed" if i < 5 else "valid",
+                "reason": "Timeout during validation" if i < 5 else "OK",
+                "confidence": 0.0 if i < 5 else 0.9,
+                "error_type": ERROR_TYPE_TIMEOUT if i < 5 else ERROR_TYPE_UNKNOWN,
+                "recoverable": i < 5,
+            }
+            for i in range(len(groups))
+        ]
+
+        result = prepare_batched_revalidation_tasks(
+            groups=groups,
+            validation_results=validation_results,
+            context=sample_context,
+            output_dir=str(tmp_path),
+            max_per_batch=2,
+        )
+
+        assert result["total_batches"] >= 2, "one batch would not test much"
+        for batch in result["batches"]:
+            assert batch["kind"] == "revalidation"
+            assert batch["prompt_path"] == sidecar_path(
+                str(tmp_path), batch["batch_index"]
+            )
+            assert batch["prompt_lines"] == batch["prompt"].count("\n") + 1
+            assert read_sidecar(batch["prompt_path"]) == batch["prompt"]
+
+    @pytest.mark.parametrize("kind", ["validation", "revalidation"])
+    def test_locked_stale_sidecar_falls_back_for_the_whole_round(
+        self, sample_context, tmp_path, monkeypatch, capsys, kind
+    ):
+        stale = tmp_path / "validation_batch_0.prompt.txt"
+        stale.write_text("previous round", encoding="utf-8")
+        real_unlink = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path == stale:
+                raise PermissionError("sidecar is locked")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        result = prepare_batched_validation_tasks(
+            groups=[make_group("MEDIUM", f"Theme {i}") for i in range(10)],
+            context=sample_context,
+            output_dir=str(tmp_path),
+            kind=kind,
+        )
+
+        assert result["total_batches"] == 3
+        for batch in result["batches"]:
+            assert "prompt_path" not in batch
+            assert "prompt_lines" not in batch
+            assert batch["prompt"]
+        assert stale.read_text(encoding="utf-8") == "previous round"
+        assert capsys.readouterr().err.count("[PROMPT_SIDECAR_SKIPPED]") == 1
+
+    @pytest.mark.parametrize("contents", [b"\xff", "edited".encode("utf-16")])
+    def test_non_utf8_sidecar_is_repaired(self, tmp_path, contents, capsys):
+        result = prepare_batched_validation_tasks(
+            groups=[make_group()], context="Plan", output_dir=str(tmp_path),
+        )
+        batch = result["batches"][0]
+        sidecar = Path(batch["prompt_path"])
+        sidecar.write_bytes(contents)
+
+        assert ensure_prompt_sidecars(result, str(tmp_path)) is False
+
+        assert sidecar.read_bytes() == batch["prompt"].encode("utf-8")
+        assert "[PROMPT_SIDECAR_REWRITTEN]" in capsys.readouterr().err
+
+    def test_failed_repair_removes_the_existing_sidecars_pointer(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        result = prepare_batched_validation_tasks(
+            groups=[make_group()], context="Plan", output_dir=str(tmp_path),
+        )
+        batch = result["batches"][0]
+        original_prompt = batch["prompt"]
+        sidecar = Path(batch["prompt_path"])
+        sidecar.write_text("incorrect prompt", encoding="utf-8")
+
+        def cannot_write(*args):
+            raise PermissionError("sidecar is locked")
+
+        monkeypatch.setattr(validation_module, "_write_one_sidecar", cannot_write)
+        assert ensure_prompt_sidecars(result, str(tmp_path)) is True
+
+        assert sidecar.read_text(encoding="utf-8") == "incorrect prompt"
+        assert "prompt_path" not in batch
+        assert "prompt_lines" not in batch
+        assert batch["prompt"] == original_prompt
+        assert ensure_prompt_sidecars(result, str(tmp_path)) is False
+        assert capsys.readouterr().err.count("[PROMPT_SIDECAR_SKIPPED]") == 1
+
+    def test_reaggregate_rewrites_a_missing_or_edited_sidecar(
+        self, sample_context, tmp_path, capsys
+    ):
+        """`prompt` is right there to compare against, so healing needs no hash.
+
+        Covers the two ways a sidecar stops matching between materialization and
+        the host reading it: it was deleted, or it was hand-edited. Both are
+        rewritten from the task's own `prompt`, and each says so once.
+        """
+        result = prepare_batched_validation_tasks(
+            groups=[make_group("MEDIUM", f"Theme {i}") for i in range(10)],
+            context=sample_context,
+            output_dir=str(tmp_path),
+            max_per_batch=4,
+        )
+        assert result["total_batches"] == 3
+        capsys.readouterr()
+
+        deleted = tmp_path / "validation_batch_0.prompt.txt"
+        edited = tmp_path / "validation_batch_1.prompt.txt"
+        deleted.unlink()
+        edited.write_text("junk a careless editor left here", encoding="utf-8")
+        untouched = read_sidecar(tmp_path / "validation_batch_2.prompt.txt")
+
+        ensure_prompt_sidecars(result, str(tmp_path))
+
+        for batch in result["batches"]:
+            assert read_sidecar(batch["prompt_path"]) == batch["prompt"]
+        # The one that was already correct is not rewritten, and not reported.
+        assert read_sidecar(tmp_path / "validation_batch_2.prompt.txt") == untouched
+
+        rewritten = [
+            line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("[PROMPT_SIDECAR_REWRITTEN]")
+        ]
+        assert len(rewritten) == 2, rewritten
+        assert sorted(line.split()[-1] for line in rewritten) == [
+            "validation_batch_0.prompt.txt",
+            "validation_batch_1.prompt.txt",
+        ]
+
+    @pytest.mark.parametrize("copied_sidecars", [False, True])
+    def test_a_copied_phase_dir_heals_against_the_dir_it_was_loaded_from(
+        self, sample_context, tmp_path, copied_sidecars
+    ):
+        """The recorded `prompt_path` is absolute and therefore stale the moment
+        a phase dir is copied or moved.
+
+        The comparison target is re-derived from the dir the document was
+        *loaded from* — the rule `subagent_tasks.resolve_output_path` already
+        follows for `output_name` — so the copy heals itself instead of
+        rewriting a file next to the original, where nothing is reading.
+        """
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        result = prepare_batched_validation_tasks(
+            groups=[make_group("MEDIUM", f"Theme {i}") for i in range(10)],
+            context=sample_context,
+            output_dir=str(dir_a),
+            max_per_batch=4,
+        )
+        document = copy.deepcopy(result)
+        for task in document["batches"]:
+            original = Path(task["prompt_path"])
+            if copied_sidecars:
+                (dir_b / original.name).write_bytes(original.read_bytes())
+            original.write_text("a different round now lives here", encoding="utf-8")
+        a_before = {p.name: read_sidecar(p) for p in dir_a.glob("*.prompt.txt")}
+        assert len(a_before) == 3
+        for task in document["batches"]:
+            assert task["prompt_path"].startswith(str(dir_a))
+
+        assert ensure_prompt_sidecars(document, str(dir_b)) is True
+
+        assert sorted(p.name for p in dir_b.glob("*.prompt.txt")) == [
+            "validation_batch_0.prompt.txt",
+            "validation_batch_1.prompt.txt",
+            "validation_batch_2.prompt.txt",
+        ]
+        for task in document["batches"]:
+            healed = dir_b / f"validation_batch_{task['batch_index']}.prompt.txt"
+            assert task["prompt_path"] == str(healed)
+            assert read_sidecar(healed) == task["prompt"]
+            assert read_sidecar(task["prompt_path"]) == task["prompt"]
+        assert ensure_prompt_sidecars(document, str(dir_b)) is False
+        # Nothing was written back into the dir the document was copied from.
+        assert {p.name: read_sidecar(p) for p in dir_a.glob("*.prompt.txt")} == a_before
 
 
 # ============================================================================

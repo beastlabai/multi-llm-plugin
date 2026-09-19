@@ -371,10 +371,14 @@ def ask_class(host_id: str, base: Optional[str] = None) -> str:
 
 _SUBAGENTS = {
     "native": (
-        "**Spawn subagents** — call your host's own subagent tool `{tool}`: pass "
-        "`task.prompt` verbatim, take the role from `task.subagent_type` when your "
-        "tool needs one, and write the JSON it returns to `task.output_path`. "
-        "Never pass `--exec-subagents` on this host."
+        "**Spawn subagents** — call your host's own subagent tool `{tool}`: when the "
+        "task carries `task.prompt_path`, tell the subagent to read that file in "
+        "full — through line `task.prompt_lines`, paging if one read returns fewer "
+        "— and follow it verbatim, printing only what it asks; if the file is "
+        "absent, or the task has no `prompt_path`, pass `task.prompt` verbatim. "
+        "Take the role from `task.subagent_type` when your tool needs one, and "
+        "write the JSON it returns to `task.output_path`. Never pass "
+        "`--exec-subagents` on this host."
     ),
     "executor": (
         "**Spawn subagents** — run the dispatcher with `--exec-subagents`: it "

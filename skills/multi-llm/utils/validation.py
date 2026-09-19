@@ -7,6 +7,7 @@ and identify items needing human review.
 """
 
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -115,6 +116,16 @@ VALIDATION_CONTEXT_LIMIT = 60000
 #: ``plans/host-harness-portability.md``), and failing a phase outright would
 #: throw away a completed fan-out over a scratch file being large.
 VALIDATION_TASKS_TOTAL_CHARS_CEILING = 2_000_000
+
+#: Sidecar beside ``validation_batch_{N}.json``, holding exactly the bytes of
+#: that task's ``prompt``. ``.prompt.txt``, never ``.json``: the reaggregation
+#: glob is ``*.json`` and both ``validation_batch_*.json`` globs (here and in
+#: ``review_orchestrator_base.retire_stale_validation_round``) must keep
+#: ignoring it. Invoker plumbing for a native-subagent host, whose only other
+#: way to run a batch is to re-emit a ~65 KB prompt through its own context —
+#: three real runs improvised the same dump-to-file by hand before this existed.
+#: ``prompt`` stays the source of truth; the executor never opens this file.
+PROMPT_SIDECAR_TEMPLATE = "validation_batch_{index}.prompt.txt"
 
 
 def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
@@ -231,6 +242,136 @@ def excerpt_context_reported(
 def materialized_total_chars(tasks: List[Dict[str, Any]]) -> int:
     """Prompt characters a phase's task file will carry — the D2f file total."""
     return sum(len(task.get("prompt", "")) for task in tasks)
+
+
+def sidecar_path(phase_dir: str, batch_index: int) -> str:
+    """Absolute path of one batch's prompt sidecar inside ``phase_dir``."""
+    return os.path.join(phase_dir, PROMPT_SIDECAR_TEMPLATE.format(index=batch_index))
+
+
+def _write_one_sidecar(target: str, prompt: str) -> None:
+    r"""Atomic, byte-identical write.
+
+    ``newline=""`` is load-bearing: a text-mode open on Windows would rewrite
+    ``\n`` as ``\r\n`` and the file would no longer equal ``prompt`` — and
+    byte identity is the whole contract, since a host hands a subagent this file
+    *instead of* the prompt. Same temp-then-``os.replace`` shape as
+    ``subagent_executor._atomic_write_json``, written out here because importing
+    that module from this one would close a cycle.
+    """
+    tmp = os.path.join(
+        os.path.dirname(target), f".{os.path.basename(target)}.{os.getpid()}.tmp"
+    )
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(prompt)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        # The all-or-none rule above removes the sidecars this one already
+        # wrote; without this the *partial* write would survive as a hidden
+        # `.…tmp` in the phase dir, matched by no glob and cleaned by nothing.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_prompt_sidecars(tasks: List[Dict[str, Any]], phase_dir: str) -> bool:
+    """Write every task's prompt sidecar; all tasks or none.
+
+    Each task already carries ``prompt_path``/``prompt_lines`` (set by the
+    caller before :func:`make_task`, so the schema saw them). A phase where some
+    tasks carry the key and others do not invites non-identical prompt bytes
+    across batches, so on any ``OSError`` every written file is removed, both
+    keys are popped from every task, one ``[PROMPT_SIDECAR_SKIPPED]`` line goes
+    to stderr and ``False`` comes back: the run continues on ``prompt`` alone.
+    Degrades rather than raises — a scratch-file write failing must not throw
+    away a completed fan-out.
+
+    Returns:
+        Whether the sidecars are on disk and the keys still on the tasks.
+    """
+    written: List[str] = []
+    try:
+        os.makedirs(phase_dir, exist_ok=True)
+        # A wider previous round may have left higher-numbered sidecars.
+        # Cleanup is optional too: a locked file must not abort materialization
+        # or leave any task advertising a prompt from that earlier round.
+        for stale in Path(phase_dir).glob("validation_batch_*.prompt.txt"):
+            stale.unlink(missing_ok=True)
+        for task in tasks:
+            _write_one_sidecar(task["prompt_path"], task["prompt"])
+            written.append(task["prompt_path"])
+    except OSError as exc:
+        for path in written:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        for task in tasks:
+            task.pop("prompt_path", None)
+            task.pop("prompt_lines", None)
+        print(
+            f"[PROMPT_SIDECAR_SKIPPED] {exc}; every task keeps `prompt` only",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def ensure_prompt_sidecars(document: Dict[str, Any], phase_dir: str) -> bool:
+    """Rewrite any sidecar that is missing or whose bytes differ from ``prompt``.
+
+    Covers a moved or copied phase dir (whose recorded absolute ``prompt_path``
+    is stale) and a hand-edited sidecar. Tasks without sidecar metadata keep
+    using their inline prompt. The comparison target is derived from the
+    *loaded-from* ``phase_dir``, the same rule
+    :func:`subagent_tasks.resolve_output_path` follows for ``output_name`` — so
+    a copied dir heals itself rather than rewriting a file next to the original.
+    No new ``inputs`` key and no new refusal: ``prompt`` is right there to
+    compare against, so a ``prompt_sha256`` field would only restate it.
+
+    Returns whether task metadata changed. The caller must persist those
+    changes before handing the task file back to a native host.
+    """
+    changed = False
+    for task in document.get("batches", []):
+        if not task.get("prompt_path"):
+            continue
+        expected = sidecar_path(os.path.abspath(phase_dir), task["batch_index"])
+        try:
+            with open(expected, "rb") as handle:
+                same = handle.read() == task["prompt"].encode("utf-8")
+        except OSError:
+            same = False
+        if not same:
+            try:
+                _write_one_sidecar(expected, task["prompt"])
+            except OSError as exc:
+                # The incorrect file may still exist. Remove its advertised
+                # pointer so the native host actually takes the inline fallback.
+                task.pop("prompt_path", None)
+                task.pop("prompt_lines", None)
+                changed = True
+                print(
+                    f"[PROMPT_SIDECAR_SKIPPED] {exc}; "
+                    f"{os.path.basename(expected)} keeps `prompt` only",
+                    file=sys.stderr,
+                )
+                continue
+            print(
+                f"[PROMPT_SIDECAR_REWRITTEN] {os.path.basename(expected)}",
+                file=sys.stderr,
+            )
+        lines = task["prompt"].count("\n") + 1
+        if task["prompt_path"] != expected or task.get("prompt_lines") != lines:
+            task["prompt_path"] = expected
+            task["prompt_lines"] = lines
+            changed = True
+    return changed
 
 
 # Error type constants - ALWAYS use these constants, never raw strings
@@ -1556,6 +1697,8 @@ def prepare_batched_validation_tasks(
             inputs=inputs,
             phase_dir=output_dir,
             model_hint=model,
+            prompt_path=sidecar_path(output_dir, next_index),
+            prompt_lines=prompt.count("\n") + 1,
             extra={
                 "batch_index": next_index,
                 "group_indices": indices,
@@ -1567,6 +1710,8 @@ def prepare_batched_validation_tasks(
             },
         ))
         next_index += 1
+
+    write_prompt_sidecars(batch_tasks, output_dir)
 
     stats = estimate_validation_batching_stats(groups, max_per_batch)
 

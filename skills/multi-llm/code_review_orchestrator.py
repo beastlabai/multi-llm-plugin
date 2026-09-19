@@ -2609,8 +2609,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     print("ERROR: Partial completion detected for 'code-review'.")
                     print(f"  validation_tasks.json exists but validation has not started.")
-                    print(f"  Resume it: for each task in that file, run task.prompt as a")
-                    print(f"  subagent and write the JSON it returns to task.output_path.")
+                    print(f"  Resume it: for each task in that file, run task.prompt")
+                    print(f"  (or the file at task.prompt_path, whose bytes are the same)")
+                    print(f"  as a subagent and write the JSON it returns to task.output_path.")
                     sys.exit(3)
         elif grouped_path.exists():
             print("ERROR: Partial completion detected for 'code-review'.")

@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -128,6 +129,96 @@ def _aggregated_suggestions(phase_dir):
     payload = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
     groups = payload["groups"] if isinstance(payload, dict) else payload
     return [s for group in groups for s in group.get("suggestions", [])]
+
+
+class TestReaggregatePromptSidecars:
+    def test_copied_phase_persists_rebound_pointers(self, tmp_path):
+        plan, out_dir, phase_dir = _phase(
+            tmp_path, {"sonnet": _suggestions(["Finding"])},
+        )
+        _reaggregate(plan, out_dir, phase_dir)
+        copied_out = tmp_path / "copy"
+        shutil.copytree(out_dir, copied_out)
+        copied_phase = copied_out / "review-plan"
+        original_tasks = (phase_dir / "validation_tasks.json").read_bytes()
+        for sidecar in phase_dir.glob("*.prompt.txt"):
+            sidecar.write_text("different round", encoding="utf-8")
+
+        _reaggregate(plan, copied_out, copied_phase)
+
+        tasks = json.loads((copied_phase / "validation_tasks.json").read_text())
+        for batch in tasks["batches"]:
+            assert Path(batch["prompt_path"]).parent == copied_phase
+            assert Path(batch["prompt_path"]).read_bytes() == batch["prompt"].encode("utf-8")
+        assert (phase_dir / "validation_tasks.json").read_bytes() == original_tasks
+        assert all(p.read_text() == "different round" for p in phase_dir.glob("*.prompt.txt"))
+
+    def test_failed_repair_persists_inline_fallback(self, tmp_path, monkeypatch):
+        from utils import validation as validation_mod
+
+        plan, out_dir, phase_dir = _phase(
+            tmp_path, {"sonnet": _suggestions(["Finding"])},
+        )
+        _reaggregate(plan, out_dir, phase_dir)
+        tasks_path = phase_dir / "validation_tasks.json"
+        before = json.loads(tasks_path.read_text())
+        for sidecar in phase_dir.glob("*.prompt.txt"):
+            sidecar.write_text("incorrect prompt", encoding="utf-8")
+
+        def cannot_write(*args):
+            raise PermissionError("sidecar is locked")
+
+        monkeypatch.setattr(validation_mod, "_write_one_sidecar", cannot_write)
+        _reaggregate(plan, out_dir, phase_dir)
+
+        after = subagent_tasks_mod.read_task_file(str(tasks_path))
+        for original, repaired in zip(before["batches"], after["batches"]):
+            assert "prompt_path" not in repaired
+            assert "prompt_lines" not in repaired
+            assert repaired["prompt"] == original["prompt"]
+        assert all(p.read_text() == "incorrect prompt" for p in phase_dir.glob("*.prompt.txt"))
+
+    def test_corrupt_sidecar_does_not_block_completed_batches(self, tmp_path):
+        plan, out_dir, phase_dir = _phase(
+            tmp_path, {"sonnet": _suggestions(["Finding"])},
+        )
+        _reaggregate(plan, out_dir, phase_dir)
+        tasks = _complete_validation_batches(phase_dir)
+        batch = tasks["batches"][0]
+        Path(batch["prompt_path"]).write_bytes(b"\xff")
+
+        _reaggregate(plan, out_dir, phase_dir)
+
+        assert Path(batch["prompt_path"]).read_bytes() == batch["prompt"].encode("utf-8")
+        validation = json.loads((phase_dir / "validation.json").read_text())
+        assert all(group["status"] == "valid" for group in validation["groups"])
+
+    def test_metadata_write_failure_preserves_the_task_file_and_stops_handoff(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from utils import subagent_executor
+
+        plan, out_dir, phase_dir = _phase(
+            tmp_path, {"sonnet": _suggestions(["Finding"])},
+        )
+        _reaggregate(plan, out_dir, phase_dir)
+        tasks_path = phase_dir / "validation_tasks.json"
+        tasks = json.loads(tasks_path.read_text())
+        tasks["batches"][0]["prompt_path"] = str(tmp_path / "old.prompt.txt")
+        tasks_path.write_text(json.dumps(tasks), encoding="utf-8")
+        before = tasks_path.read_bytes()
+
+        def cannot_write(*args):
+            raise PermissionError("task file is locked")
+
+        monkeypatch.setattr(subagent_executor, "_atomic_write_json", cannot_write)
+        with patch.object(rob, "dispatch_subagent_tasks") as dispatch:
+            with pytest.raises(SystemExit) as exc:
+                _reaggregate(plan, out_dir, phase_dir)
+        assert exc.value.code == 3
+        dispatch.assert_not_called()
+        assert tasks_path.read_bytes() == before
+        assert "Could not persist repaired prompt metadata" in capsys.readouterr().err
 
 
 class TestOneFilePerLogicalModel:
@@ -2222,6 +2313,62 @@ class TestRetireStaleValidationRound:
         ).read_text(encoding="utf-8") == "older"
         live = [p.name for p in tmp_path.glob("*.json") if not p.name.endswith(".stale.json")]
         assert live == []
+
+
+    def test_retire_round_takes_the_sidecars_with_it(self, tmp_path, capsys):
+        """A prompt sidecar belongs to the grouping its batch does.
+
+        Left behind, `validation_batch_0.prompt.txt` would sit beside the fresh
+        round describing the retired one, and the only reader that ever finds it
+        is a host following `prompt_path` — which would hand a subagent the old
+        round's prompt with nothing to say otherwise. It retires under the same
+        stamp, keeping its real extension: `.txt` stays `.txt`, because
+        `<stem>.<stamp>.stale.json` on a text file would be a lie an operator
+        (and any `*.json` glob) reads as a JSON reply.
+        """
+        for name in (
+            "validation.json", "validation_tasks.json",
+            "validation_batch_0.json", "validation_batch_1.json",
+            "validation_batch_0.prompt.txt", "validation_batch_1.prompt.txt",
+        ):
+            (tmp_path / name).write_text(name, encoding="utf-8")
+
+        retired = rob.retire_stale_validation_round(str(tmp_path), reason="regrouped")
+        out = capsys.readouterr().out
+
+        names = [Path(p).name for p in retired]
+        stamps = {n[: -len(".stale.json")].rsplit(".", 1)[1] for n in names[:4]}
+        stamps |= {n[: -len(".stale.txt")].rsplit(".", 1)[1] for n in names[4:]}
+        assert len(stamps) == 1, f"one round, one stamp: {names}"
+        stamp = stamps.pop()
+
+        # Order: merged file, task file, batch replies, then the sidecars.
+        assert names == [
+            f"validation.{stamp}.stale.json",
+            f"validation_tasks.{stamp}.stale.json",
+            f"validation_batch_0.{stamp}.stale.json",
+            f"validation_batch_1.{stamp}.stale.json",
+            f"validation_batch_0.prompt.{stamp}.stale.txt",
+            f"validation_batch_1.prompt.{stamp}.stale.txt",
+        ]
+        for name in names:
+            assert f"[VALIDATION_RETIRED] {name} (regrouped)" in out
+        # Content travels with every rename, and nothing live is left behind.
+        for original, name in zip(
+            (
+                "validation.json", "validation_tasks.json",
+                "validation_batch_0.json", "validation_batch_1.json",
+                "validation_batch_0.prompt.txt", "validation_batch_1.prompt.txt",
+            ),
+            names,
+        ):
+            assert (tmp_path / name).read_text(encoding="utf-8") == original
+            assert not (tmp_path / original).exists()
+        assert list(tmp_path.glob("validation_batch_*.prompt.txt")) == []
+        # The sidecars keep their own extension rather than wearing the batch
+        # files': a `.txt` named `.stale.json` would be read back as a reply.
+        assert sorted(p.name for p in tmp_path.glob("*.stale.txt")) == sorted(names[4:])
+        assert sorted(p.name for p in tmp_path.glob("*.stale.json")) == sorted(names[:4])
 
     def test_nothing_on_disk_is_nothing_retired(self, tmp_path, capsys):
         assert rob.retire_stale_validation_round(str(tmp_path), reason="why") == []

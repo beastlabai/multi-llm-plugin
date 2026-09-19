@@ -211,14 +211,23 @@ Items with `needs-human-decision` status are included in the report for the user
 
    `validation_tasks.json` carries `tasks_schema_version: 2` and one complete
    task per batch under `batches` — each with `prompt`, `output_name`, the
-   derived `output_path`, `result_channel: file`, `context_mode: inline`,
-   `capability_tier`, `executor_role` and `task_id`. The plan excerpt, this
-   batch's issue records (including each issue's `file` and `line_range`) and the
+   derived `output_path`, `prompt_path` and `prompt_lines`,
+   `result_channel: file`, `context_mode: inline`, `capability_tier`,
+   `executor_role` and `task_id`. The sidecar at `prompt_path` holds exactly the
+   bytes of `prompt` (`prompt_lines` is its line count), so the two are
+   interchangeable and a host that would otherwise re-emit the whole prompt can
+   point the subagent at the file instead. The plan excerpt, this batch's issue
+   records (including each issue's `file` and `line_range`) and the
    code-inspection guidance all travel **inside** `prompt`.
 
-   **For each task in the file, run `task.prompt` as a subagent, then write the
-   JSON it returns to `task.output_path`.** That is the whole contract — do not
-   assemble a prompt, and do not tell the subagent to write the file itself.
+   **For each task in the file: when the task carries `prompt_path`, run a
+   subagent that reads that file in full — through line `prompt_lines`, paging
+   if a single read stops short — and follows it verbatim; otherwise, or if the
+   file is absent, run `task.prompt` as a subagent. Either way, write the JSON
+   it returns to `task.output_path`.** That is the whole contract — do not
+   assemble a prompt beyond that one read instruction, and do not tell the
+   subagent to write the file itself. The file's bytes are exactly
+   `task.prompt`; the two are interchangeable.
 
    A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
    `inputs` hashes no longer match the plan and grouped.json, is refused with
@@ -228,8 +237,9 @@ Items with `needs-human-decision` status are included in the report for the user
 
    If `[VALIDATION_PENDING]` marker is present:
    1. Read `validation_tasks.json` from `{plan}/code-review/`
-   2. Run the single task's `prompt` as a subagent and write its JSON reply to
-      that task's `output_path`
+   2. Run the single task as the contract above says — the sidecar at
+      `prompt_path` when it has one, `task.prompt` otherwise — and write its
+      JSON reply to that task's `output_path`
 
    **Record metrics** for each validation subagent. When the validation phase used multiple batches, include the cumulative `--batch-index` (1..N across waves) and `--total-batches` so the script prints an `[ETA]` line:
    ```bash
@@ -256,7 +266,7 @@ Items with `needs-human-decision` status are included in the report for the user
 
    **Strategy A: Direct parallel spawning (≤ 4 batches)**
 
-   For each task in the `batches` array, run `task.prompt` as a subagent and write the JSON it returns to that task's `output_path`.
+   For each task in the `batches` array, run the task exactly as the contract above says — the sidecar at `prompt_path` when it has one, `task.prompt` otherwise — and write the JSON it returns to that task's `output_path`.
 
    **Run all batches in parallel** (one batch of parallel subagent spawns).
 

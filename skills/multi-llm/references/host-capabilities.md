@@ -38,7 +38,7 @@ sentence when it is installed.
 - Driving agent gets a turn after a command returns (`multi_turn`): `true` — verified. A `false` here is what addresses a failed batch's retry instruction to the human rather than to an agent that will never read it.
 - Subagent tiers: full `sonnet`, cheap `haiku`
 - Verb sentences a rendered shim carries:
-  - **Spawn subagents** — call your host's own subagent tool `Task`: pass `task.prompt` verbatim, take the role from `task.subagent_type` when your tool needs one, and write the JSON it returns to `task.output_path`. Never pass `--exec-subagents` on this host.
+  - **Spawn subagents** — call your host's own subagent tool `Task`: when the task carries `task.prompt_path`, tell the subagent to read that file in full — through line `task.prompt_lines`, paging if one read returns fewer — and follow it verbatim, printing only what it asks; if the file is absent, or the task has no `prompt_path`, pass `task.prompt` verbatim. Take the role from `task.subagent_type` when your tool needs one, and write the JSON it returns to `task.output_path`. Never pass `--exec-subagents` on this host.
   - **Ask the user** — call your host's own structured question tool `AskUserQuestion`, then copy the selected option's command verbatim. Never compose a flag from the user's words.
   - **Run detached** — use your host's own background mechanism `run_in_background`, redirecting stdout and stderr to the phase dir's `orchestrator-run.log`. Never pass `--detach` on this host.
 - Install paths (project): `.claude/skills/multi-llm`
