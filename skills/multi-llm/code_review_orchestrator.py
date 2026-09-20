@@ -38,6 +38,7 @@ from utils import (
     get_or_create_state,
     load_prompt,
     get_output_paths,
+    drop_non_record_entries,
     validate_code_review_issues,
     get_files_changed_since_ref,
     group_similar_suggestions,
@@ -1722,7 +1723,10 @@ def generate_review_report(
     for model, (success, issues, error) in results.items():
         if success:
             successful_models.append(model)
-            for issue in issues or []:
+            # `drop_non_record_entries` because `issue["model"] = model` is an
+            # item assignment: one non-dict element used to raise TypeError here
+            # and lose every model's findings, not just this model's.
+            for issue in drop_non_record_entries(issues, model, noun="issues"):
                 issue["model"] = model
                 all_issues.append(issue)
 
@@ -2148,6 +2152,12 @@ async def reaggregate_from_existing_files(
     ):
         models_found.add(model)
 
+        # The file on disk is whatever the fan-out (or a salvage, or a hand
+        # edit) left there, so the same guard the fan-out's own aggregate uses
+        # applies before anything is stamped — this is the site the documented
+        # `--reaggregate` recovery died at, on the very file a malformed
+        # fan-out had just written.
+        issues = drop_non_record_entries(issues, model, noun="issues")
         for issue in issues:
             # `model` before `source_model`, which is the order the fan-out
             # stamps them in (`main` sets `model` as it flattens `results`, then
@@ -2997,7 +3007,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         all_issues = []
         for model_spec, (success, issues, _) in results.items():
             if success and issues:
-                for issue in issues:
+                for issue in drop_non_record_entries(
+                    issues, model_spec, noun="issues"
+                ):
                     issue["model"] = model_spec
                     all_issues.append(issue)
 

@@ -17,6 +17,7 @@ from utils.json_extractor import (
     is_refused_result_envelope,
     sanitize_model_name,
 )
+from utils.providers.result_envelope import parse_result_envelope
 
 CLAUDE_CODE_FIXTURES = Path(__file__).parent / "fixtures" / "claude-code"
 
@@ -159,16 +160,36 @@ class TestGenerateOutputPath:
             assert path.name == expected_name, f"Mismatch for {model_spec}: {path.name} != {expected_name}"
 
 
+#: The tail of one real `cursor-agent:kimi-k3-high` review, verbatim, from
+#: ``plans/uv-preflight-per-run-cost/code-review/log_cursor-agent_kimi-k3-high.txt``
+#: (2026-09-20): a clean review that ends on the empty array, having written two
+#: bracketed indices in its prose on the way there. `[0]` is the one that used to
+#: be served as the model's answer — the result file it produced held the integer
+#: `0`, the schema validator warned `'[0]: expected object, got int'`, and
+#: aggregation then died on `issue["model"] = model_spec` and took the other four
+#: models' eleven findings with it. Kept as a capture rather than paraphrased,
+#: because the ordering (index in prose, THEN the answer) is the whole bug.
+KIMI_CLEAN_REVIEW_TAIL = (
+    "- `legacy/` untouched, `ROW_DOCS[1]` unchanged, `unattended.ROWS[0].site` "
+    "correctly left as-is (probe still precedes the first `uv run` under "
+    "A-only), no shim/lint/`SHIM_VERSION` changes — all consistent with A-only "
+    "scope.\n\nDeviations from the plan's letter (no renumbering, item-4 second "
+    "branch, multi-line remainder) are documented in the record's DECISIONS "
+    "section with sound reasoning tied to the acceptance criteria. No bugs, "
+    "missing functionality, security issues, or scope creep found.\n\n[]"
+)
+
+
 class TestLastDocumentWins:
     """The extractor's one selection rule, stated as a test rather than a convention.
 
     **The last document wins, at every level** — the last envelope record (each
     adapter's own rule), then the last top-level candidate inside that record's
     text — with shape preference consulted before position, and a contained
-    candidate never outranking the one that contains it. Four clauses make that
+    candidate never outranking the one that contains it. Five clauses make that
     implementable, and there is one case per clause below, on fixed strings
     rather than on a capture so the rule is pinned independently of any vendor's
-    bytes.
+    bytes — except clause 5, whose case *is* the capture that produced it.
     """
 
     def test_the_last_top_level_document_is_the_answer(self):
@@ -259,6 +280,69 @@ class TestLastDocumentWins:
     def test_clause_4_an_empty_fence_is_still_served_when_it_is_all_there_is(self):
         """Else the last fence that parses at all: an empty answer is not a failure."""
         result = extract_json_from_text("```json\n[]\n```")
+
+        assert result["success"]
+        assert result["data"] == []
+
+    def test_clause_5_a_bracketed_index_in_prose_is_not_the_answer(self):
+        """The real 2026-09-20 failure: `[0]` scraped out of a clean review.
+
+        `KIMI_CLEAN_REVIEW_TAIL` is the model's own final paragraph, so the two
+        bracketed indices and the `[]` sit exactly where it put them. Under
+        clause 3 alone the `[0]` was non-empty and the `[]` was not, so `[0]`
+        won and the phase died aggregating an int.
+        """
+        result = extract_json_from_text(KIMI_CLEAN_REVIEW_TAIL, prefer_arrays=True)
+
+        assert result["success"]
+        assert result["data"] == []
+
+    def test_clause_5_the_whole_captured_envelope_resolves_to_the_empty_review(self):
+        """End to end through the adapter's own unwrapping, not just the prose.
+
+        `cursor-agent`'s `--output-format json` envelope is what reached
+        `parse_result_envelope`, which hands the inner `result` string to this
+        extractor — the path that produced the `[\\n  0\\n]` result file.
+        """
+        envelope = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": KIMI_CLEAN_REVIEW_TAIL,
+            "session_id": "674cab5f-e7b6-4c75-9854-2f65972857f9",
+        })
+
+        assert parse_result_envelope(envelope) == {"success": True, "data": []}
+
+    def test_clause_5_records_still_outrank_a_bracketed_index_written_later(self):
+        """Rank before position: prose after the answer never displaces it."""
+        answer_then_prose = (
+            '[{"id": "S001", "title": "Bound the retry ladder"}]\n\n'
+            "For the record, `unattended.ROWS[0].site` was left as-is."
+        )
+        result = extract_json_from_text(answer_then_prose, prefer_arrays=True)
+
+        assert result["success"]
+        assert result["data"] == [{"id": "S001", "title": "Bound the retry ladder"}]
+
+    def test_clause_5_a_bare_scalar_array_is_still_served_when_it_is_all_there_is(self):
+        """Demoted, never dropped: it is the only JSON in the reply."""
+        result = extract_json_from_text("The offsets are [1, 2].")
+
+        assert result["success"]
+        assert result["data"] == [1, 2]
+
+    def test_clause_5_binds_the_fenced_path_too(self):
+        """A fenced index does not beat the empty array the model ended on."""
+        fenced_index_then_empty = (
+            "The row it reads is:\n\n"
+            "```json\n"
+            "[0]\n"
+            "```\n\n"
+            "Nothing to report.\n\n"
+            "[]"
+        )
+        result = extract_json_from_text(fenced_index_then_empty)
 
         assert result["success"]
         assert result["data"] == []

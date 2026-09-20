@@ -222,6 +222,45 @@ def _candidate_spans(text: str, char_type: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
+#: How a parsed candidate ranks *as an answer*, lowest first (clause 5).
+#: ``_RANK_BARE`` is the whole reason the scale exists: ``[0]`` is a JSON array
+#: no answer schema can ever accept, and prose produces one every time a model
+#: writes a bracketed index (``ROWS[0]``, ``arr[1]``, ``items[i]``).
+_RANK_ANSWER = 0
+_RANK_EMPTY = 1
+_RANK_BARE = 2
+
+
+def _answer_rank(data: Any) -> int:
+    """Rank a parsed candidate by how much it can be the model's answer.
+
+    Every answer this package asks for is an array of record objects, an object
+    wrapping one, or the empty array a model writes when it found nothing — so
+    "an array holding no object at all" is the one shape that can be told apart
+    from an answer here, where the expected schema is not known (this module
+    sits below the provider layer and serves every phase). That shape is
+    precisely what a bracketed index in prose parses to.
+
+    A list is ranked on *any* member being an object rather than on all of them:
+    a model that appended a stray scalar to a real findings array still wrote
+    the findings, and dropping the stray is the aggregation guard's job
+    (:func:`utils.schema_validator.drop_non_record_entries`), not this one's.
+    """
+    if isinstance(data, list):
+        if not data:
+            return _RANK_EMPTY
+        return (
+            _RANK_ANSWER
+            if any(isinstance(item, dict) for item in data)
+            else _RANK_BARE
+        )
+    if isinstance(data, dict):
+        return _RANK_ANSWER if data else _RANK_EMPTY
+    # Unreachable from the two call sites — every candidate opens with `[` or
+    # `{` — but a bare scalar is not an answer either, and saying so costs a line.
+    return _RANK_BARE
+
+
 def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, Any]:
     """Extract JSON with multiple fallback strategies.
 
@@ -232,7 +271,7 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     draft or a decoy before the real answer in one turn; the answer is the one
     that comes last.
 
-    Four clauses make that concrete:
+    Five clauses make that concrete:
 
     1. **Top-level first.** A candidate contained in another candidate's span is
        ranked *after* every top-level one rather than dropped, so an inner
@@ -245,9 +284,23 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     4. **Code fences follow the same rule.** The last fenced block that parses
        to a non-empty value wins, else the last that parses at all, so the
        fenced path and the bare-text path are on one rule.
+    5. **A bracket scraped out of prose is not an answer.** Clause 3 asks only
+       whether a candidate is *non-empty*, and ``[0]`` is non-empty — so a
+       reviewer that ended its message on ``[]`` after writing the sentence
+       "``unattended.ROWS[0].site`` correctly left as-is" had that ``[0]``
+       returned as its review (measured 2026-09-20 on
+       ``cursor-agent:kimi-k3-high``: the result file it produced held the
+       integer ``0``, ``validate_code_review_issues`` said ``'[0]: expected
+       object, got int'`` and only warned, and aggregation then died on
+       ``issue["model"] = model_spec``, stranding the eleven findings the other
+       four models had already produced). So candidates are ordered by
+       :func:`_answer_rank` first — a document carrying records, then an empty
+       document the model really wrote, then an array of bare scalars — and
+       clauses 1-4 decide only *within* one rank. A model that reviewed and
+       found nothing therefore ends up with ``[]``, which is what it wrote.
 
     Strategies in order:
-    1. Code blocks (```json ... ```), last non-empty parseable one
+    1. Code blocks (```json ... ```), the highest-ranked parseable one
     2. Balanced bracket matching - find all candidates, ranked by the rule above
     3. Try parsing each candidate in rank order
 
@@ -261,25 +314,29 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     text = text.strip()
 
     # Strategy 1: Code blocks - try both json-tagged and untagged.
-    # Clause 4: the LAST fenced block that parses wins - and clause 3 binds the
-    # fenced path too, so a trailing empty fence never displaces an earlier
-    # non-empty one. Walk the fences in reverse, keep the first empty document
-    # seen as the fallback, and serve it only when no fence carries a value.
+    # Clause 4: the LAST fenced block that parses wins - and clauses 3 and 5
+    # bind the fenced path too, so a trailing empty fence never displaces an
+    # earlier fence carrying records. Walk the fences in reverse and keep the
+    # first document seen per rank. A fence holding nothing but bare scalars is
+    # deliberately NOT served from here: it falls through to strategy 2, which
+    # finds that same fence body among its candidates (a fence lives inside
+    # `text`) and ranks it against everything outside the fences before serving
+    # it as a last resort.
     fence_matches = list(
         re.finditer(r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```", text)
     )
-    empty_fence = None
+    fence_fallbacks: Dict[int, Any] = {}
     for match in reversed(fence_matches):
         try:
             fence_data = json.loads(match.group(1))
         except json.JSONDecodeError:
             continue
-        if fence_data:
+        rank = _answer_rank(fence_data)
+        if rank == _RANK_ANSWER:
             return {"success": True, "data": fence_data}
-        if empty_fence is None:
-            empty_fence = fence_data
-    if empty_fence is not None:
-        return {"success": True, "data": empty_fence}
+        fence_fallbacks.setdefault(rank, fence_data)
+    if _RANK_EMPTY in fence_fallbacks:
+        return {"success": True, "data": fence_fallbacks[_RANK_EMPTY]}
 
     # Strategy 2: Balanced bracket extraction.
     # Clause 2: shape before position - every array is tried before every
@@ -313,20 +370,24 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
             )
 
     # Strategy 3: Try parsing each candidate in rank order.
-    # Clause 3: the highest-ranked candidate that parses to a NON-EMPTY value,
-    # else the highest-ranked that parses at all.
-    empty_fallback = None
+    # Clauses 3 and 5: the highest-ranked candidate that parses to a document
+    # CARRYING RECORDS, else the highest-ranked empty document, else the
+    # highest-ranked array of bare scalars. The last tier is still served rather
+    # than dropped — `[1, 2]` really is the only JSON in a reply that holds
+    # nothing else — but it can no longer outrank the `[]` a reviewer ended on.
+    fallbacks: Dict[int, Any] = {}
     for candidate in candidates:
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if data:
+        rank = _answer_rank(data)
+        if rank == _RANK_ANSWER:
             return {"success": True, "data": data}
-        if empty_fallback is None:
-            empty_fallback = data
-    if empty_fallback is not None:
-        return {"success": True, "data": empty_fallback}
+        fallbacks.setdefault(rank, data)
+    for rank in (_RANK_EMPTY, _RANK_BARE):
+        if rank in fallbacks:
+            return {"success": True, "data": fallbacks[rank]}
 
     return {
         "success": False,

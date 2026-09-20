@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -432,6 +433,89 @@ def validate_code_review_issues(issues: List[Dict[str, Any]]) -> Tuple[bool, Lis
         "code_review_issues.schema.json"
     )
     return is_valid, errors
+
+
+def drop_non_record_entries(
+    payload: Any,
+    model: str,
+    *,
+    noun: str = "issues",
+) -> List[Dict[str, Any]]:
+    """Return the record objects in one model's result, dropping everything else.
+
+    **Every aggregation site stamps the producing model onto each element it
+    reads** — ``issue["model"] = model``, ``s["source_model"] = model`` — and an
+    item assignment against an ``int`` raises ``TypeError``. So a single
+    malformed element does not degrade the model that produced it: it takes down
+    the phase, and with it every other model's work.
+
+    Measured 2026-09-20 on a ``--review-code --quick`` fan-out of five.
+    ``cursor-agent:kimi-k3-high`` reviewed cleanly and ended its final message on
+    ``[]``; the stdout fallback scraped the ``[0]`` out of its prose sentence
+    "``unattended.ROWS[0].site`` correctly left as-is" instead (clause 5 of
+    :func:`utils.json_extractor.extract_json_from_text` is the root-cause fix),
+    so its result file held one bare integer. :func:`validate_code_review_issues`
+    saw it exactly right — ``Warning: Validation errors: ['[0]: expected object,
+    got int']`` — and only *warned*; the run then counted "Found 1 issues" and
+    died on ``issue["model"] = model_spec``, stranding the eleven findings the
+    other four models had already produced. ``--reaggregate``, the documented
+    recovery, died at the same statement one function over.
+
+    This is the validator's verdict being **acted on** rather than only printed,
+    which is why it lives beside it. The trade is deliberate and matches the rest
+    of the aggregate path (``build_unsanitize_map``'s stem collisions,
+    ``resolve_result_files_by_model``'s divergent duplicates): degrade loudly and
+    keep going, because fail-closed at the far end of a run throws away a
+    completed fan-out to protect one element of it. A payload that is not a list
+    at all yields no records for the same reason — iterating a dict there hands
+    the caller its *keys*, which fail on the same assignment.
+
+    Args:
+        payload: Whatever that model's result was parsed to — a list of records
+            in the ordinary case, but any JSON value can reach here from a
+            result file on disk.
+        model: The model spec the records will be stamped with; named in the
+            warning, because "which model do I go and look at" is the first
+            question this raises.
+        noun: What the records are called in the warning ("issues",
+            "suggestions"), matching ``resolve_result_files_by_model``'s.
+
+    Returns:
+        The elements of *payload* that are dicts, in order. Empty for ``None``,
+        for an empty list, and for any payload that is not a list.
+    """
+    if payload is None:
+        return []
+
+    if not isinstance(payload, list):
+        print(
+            f"WARNING: {model} produced {type(payload).__name__} where a JSON "
+            f"array of {noun} was expected; no {noun} from this model reach the "
+            f"report. Every other model's results are aggregated as usual.",
+            file=sys.stderr,
+        )
+        return []
+
+    records = [entry for entry in payload if isinstance(entry, dict)]
+    dropped = [entry for entry in payload if not isinstance(entry, dict)]
+    if dropped:
+        listed = ", ".join(
+            f"{entry!r} ({type(entry).__name__})" for entry in dropped[:3]
+        )
+        if len(dropped) > 3:
+            listed += ", …"
+        print(
+            f"WARNING: {len(dropped)} of {model}'s {len(payload)} {noun} are not "
+            f"JSON objects and cannot be attributed to a model: {listed}.\n"
+            f"  Dropped. This model's remaining {len(records)} {noun}, and every "
+            f"other model's, are aggregated as usual.\n"
+            f"  A bare scalar where a record belongs is what the schema "
+            f"validator reports as \"expected object, got int\" — most often a "
+            f"bracketed index scraped out of the model's prose (`ROWS[0]`) "
+            f"rather than anything the model meant to report.",
+            file=sys.stderr,
+        )
+    return records
 
 
 SUBAGENT_TASKS_SCHEMA = "subagent_tasks.schema.json"

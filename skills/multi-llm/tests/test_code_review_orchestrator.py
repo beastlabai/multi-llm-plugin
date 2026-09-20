@@ -584,6 +584,150 @@ class TestEmptyReviewReplacesPreviousFindings:
         assert status_file.read_status(str(phase_dir))["state"] == "complete"
 
 
+class TestOneModelsMalformedElementCannotStrandTheOthers:
+    """2026-09-20: a `--review-code --quick` fan-out of five lost all of it.
+
+    ``cursor-agent:kimi-k3-high`` reviewed cleanly and ended its final message
+    on ``[]``; the stdout fallback scraped the ``[0]`` out of its prose sentence
+    "``unattended.ROWS[0].site`` correctly left as-is" instead (clause 5 of
+    ``extract_json_from_text`` is the root-cause fix), so its result file held
+    one bare integer. ``validate_code_review_issues`` reported it exactly right
+    — ``Warning: Validation errors: ['[0]: expected object, got int']`` — and
+    only warned; aggregation then died on ``issue["model"] = model_spec``
+    (``TypeError: 'int' object does not support item assignment``) and the
+    eleven findings the other four models had already produced were never
+    written. ``--reaggregate``, the documented recovery, died at the same
+    statement one function over.
+
+    Both aggregation legs are exercised on one malformed payload here, as
+    ``TestEmptyReviewReplacesPreviousFindings`` does, because they are two
+    implementations of one rule: one model's malformed element costs that
+    element and nothing else.
+    """
+
+    #: The other reviewer's finding, and the thing the phase used to lose.
+    SURVIVING_ISSUE = {
+        "title": "Bound the retry ladder",
+        "desc": "The backoff loop has no deadline.",
+        "importance": "high",
+        "file": "src/a.py",
+        "type": "bug",
+    }
+
+    @pytest.mark.parametrize("reaggregate", [False, True])
+    def test_the_other_models_findings_still_reach_the_report(
+        self, tmp_path, capsys, reaggregate
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        # What the extractor wrote for the clean reviewer: an array of one int.
+        (phase_dir / "cursor-agent_kimi-k3-high.json").write_text(
+            "[\n  0\n]", encoding="utf-8"
+        )
+        (phase_dir / "claude-code_sonnet.json").write_text(
+            json.dumps([self.SURVIVING_ISSUE]), encoding="utf-8"
+        )
+
+        fake_state = MagicMock()
+        fake_state.get.side_effect = lambda key, default=None: {
+            "tracked_files": [{"path": "src/a.py"}],
+            "head_before_implement": "abc123",
+            "head_at_start": "abc123",
+            "pre_existing_changes": [],
+        }.get(key, default)
+        fake_state.is_phase_completed.return_value = False
+        fake_state.state = {"phases_completed": {}}
+        models = ["cursor-agent:kimi-k3-high", "claude-code:sonnet"]
+        args = _make_args(
+            plan_path, models=models, force=True, skip_validation=True,
+            reaggregate=reaggregate,
+        )
+        fanout_results = {
+            "cursor-agent:kimi-k3-high": (True, [0], None),
+            "claude-code:sonnet": (True, [dict(self.SURVIVING_ISSUE)], None),
+        }
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models", return_value=models), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
+             patch.object(cro, "build_unsanitize_map", return_value={
+                 "cursor-agent_kimi-k3-high": "cursor-agent:kimi-k3-high",
+                 "claude-code_sonnet": "claude-code:sonnet",
+             }), \
+             patch.object(cro, "run_all_reviews",
+                          new=AsyncMock(return_value=fanout_results)):
+            if reaggregate:
+                asyncio.run(cro.reaggregate_from_existing_files(
+                    "plan", phase_dir.parent, plan_path, args
+                ))
+            else:
+                assert asyncio.run(cro.main()) == 0
+
+        issues = json.loads((phase_dir / "issues.json").read_text(encoding="utf-8"))
+        assert [issue["title"] for issue in issues] == ["Bound the retry ladder"]
+        assert issues[0]["model"] == "claude-code:sonnet"
+
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "**Total Issues:** 1" in report
+        assert "Bound the retry ladder" in report
+        # The malformed reviewer still completed; it is not a failed review.
+        assert "## Failed Reviews" not in report
+
+        # Named, not swallowed: the model and the element it produced.
+        warning = capsys.readouterr().err
+        assert "cursor-agent:kimi-k3-high" in warning
+        assert "0 (int)" in warning
+
+    def test_generate_review_report_drops_the_element_and_keeps_the_rest(
+        self, tmp_path, capsys
+    ):
+        """The report generator's own site, reached by every leg above."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        results = {
+            "cursor-agent:kimi-k3-high": (True, [0], None),
+            "claude-code:sonnet": (True, [dict(self.SURVIVING_ISSUE)], None),
+        }
+
+        report = cro.generate_review_report(
+            plan_path, results, changed_files=["src/a.py"]
+        )
+
+        assert "**Total Issues:** 1" in report
+        assert "Bound the retry ladder" in report
+        models_line = next(
+            line for line in report.splitlines() if line.startswith("**Models:**")
+        )
+        assert "claude-code:sonnet" in models_line
+        assert "cursor-agent:kimi-k3-high" in models_line
+        assert "cursor-agent:kimi-k3-high" in capsys.readouterr().err
+
+    def test_a_result_file_that_is_not_a_list_at_all_is_survivable_too(
+        self, tmp_path, capsys
+    ):
+        """An object where an array belongs iterates to its *keys* — strings,
+
+        which fail on the identical item assignment. Same disposition.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        results = {
+            "cursor-agent:kimi-k3-high": (True, {"issues": []}, None),
+            "claude-code:sonnet": (True, [dict(self.SURVIVING_ISSUE)], None),
+        }
+
+        report = cro.generate_review_report(
+            plan_path, results, changed_files=["src/a.py"]
+        )
+
+        assert "**Total Issues:** 1" in report
+        assert "cursor-agent:kimi-k3-high" in capsys.readouterr().err
+
+
 class TestGenerateReviewReportFailedModelDerivation:
     """F10: ``success and issues`` misclassified a reviewer that legitimately
     returned ``[]`` as failed — it was listed under ``## Failed Reviews`` as

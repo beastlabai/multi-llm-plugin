@@ -60,6 +60,7 @@ from .json_extractor import (
     read_json_from_file,
     sanitize_model_name,
 )
+from .schema_validator import drop_non_record_entries
 from .llm_client import (
     SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
@@ -3771,6 +3772,12 @@ async def reaggregate_from_existing_files(
         phase_dir, result_files, unsanitize
     ):
         models_found.add(model)
+        # `s["source_model"] = model` is an item assignment, so one non-dict
+        # element in one file used to raise TypeError and lose every model's
+        # suggestions — the same defect code-review's reaggregate carried.
+        suggestions = drop_non_record_entries(
+            suggestions, model, noun="suggestions"
+        )
         for s in suggestions:
             s["source_model"] = model
         all_suggestions.extend(suggestions)
@@ -4542,7 +4549,9 @@ async def run_review_orchestration(
         if os.path.exists(result_path):
             try:
                 with open(result_path, 'r', encoding='utf-8') as f:
-                    suggestions = json.load(f)
+                    suggestions = drop_non_record_entries(
+                        json.load(f), model_spec, noun="suggestions"
+                    )
                     for s in suggestions:
                         s["source_model"] = model_spec
                     all_suggestions.extend(suggestions)

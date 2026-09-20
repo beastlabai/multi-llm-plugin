@@ -414,6 +414,44 @@ class TestMergedValidationIsAnnouncedOnce:
         assert "Merged validation saved to:" not in out
 
 
+class TestOneMalformedElementCannotStrandTheOtherModels:
+    """`s["source_model"] = model` is an item assignment, so a result file
+    holding a bare scalar used to raise `TypeError` here and lose every model's
+    suggestions — the review-plan twin of the 2026-09-20 code-review failure,
+    where the stdout fallback scraped `[0]` out of one reviewer's prose.
+    """
+
+    def test_the_other_models_suggestions_still_reach_the_grouping(
+        self, tmp_path, capsys
+    ):
+        plan, out_dir, phase_dir = _phase(
+            tmp_path,
+            {
+                "cursor-agent_kimi-k3-high": [0],
+                "claude-code_sonnet": _distinct_suggestions(["Alpha", "Bravo"]),
+            },
+            models_requested=["cursor-agent:kimi-k3-high", "claude-code:sonnet"],
+        )
+
+        asyncio.run(
+            rob.reaggregate_from_existing_files(
+                prefix="plan",
+                out_dir=str(out_dir),
+                phase_dir=str(phase_dir),
+                phase_name="review-plan",
+                plan_path=str(plan),
+                args=_args(skip_validation=True),
+                orchestrator_script="review_plan_orchestrator.py",
+            )
+        )
+        captured = capsys.readouterr()
+
+        titles = sorted(s["title"] for s in _aggregated_suggestions(phase_dir))
+        assert titles == ["Alpha", "Bravo"]
+        assert "cursor-agent:kimi-k3-high" in captured.err
+        assert "0 (int)" in captured.err
+
+
 # ---------------------------------------------------------------------------
 # The code-review copy
 # ---------------------------------------------------------------------------
