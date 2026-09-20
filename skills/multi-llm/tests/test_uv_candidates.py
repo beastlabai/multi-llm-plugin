@@ -1,13 +1,14 @@
 """Every spelling of the uv candidate list agrees with the one that runs.
 
-**Why this is its own module.** The list lives in nine places, and the guard that
-existed covered one of them, one-directionally, with no ordering. It could not
-sit in ``tests/test_unattended.py`` (whose corpus is rooted at the skill dir and
-would never see ``packaging/``) nor in ``tests/test_instruction_portability.py``
+**Why this is its own module.** The list lives in every place the ``READERS``
+table below names, and the guard that existed covered one of them,
+one-directionally, with no ordering. It could not sit in
+``tests/test_unattended.py`` (whose corpus is rooted at the skill dir and would
+never see ``packaging/``) nor in ``tests/test_instruction_portability.py``
 (whose manifest carries placeholder *counts*, a different property).
 
 **The two halves, and the second is the one that was missing.** A table of known
-readers proves each one agrees; it proves nothing about a *tenth* reader added
+readers proves each one agrees; it proves nothing about an *unlisted* reader added
 somewhere else. So the discovery half greps the whole tracked tree and requires
 the hit set to **equal** the table's path set. Without it the table is a list
 somebody remembers to update; with it, a new reader turns this red on the pull
@@ -56,7 +57,7 @@ def _shell_form(candidate: str) -> str:
 CANDIDATES = unattended.UV_CANDIDATES
 LS_LINE = " ".join(_shell_form(candidate) for candidate in CANDIDATES)
 
-#: The nine readers, each with the *form* it carries the list in.
+#: Every reader below, each with the *form* it carries the list in.
 #:
 #: ``ls`` — the literal ``ls <paths> 2>/dev/null`` probe an agent runs.
 #: ``python`` — the tuple itself.
@@ -201,7 +202,7 @@ class TestNoUnlistedReader:
         """The discovery half: the hit set must **equal** the table's path set.
 
         This is what today's guard most lacked. A table proves its own rows
-        agree and says nothing about a tenth reader added elsewhere — so the
+        agree and says nothing about an unlisted reader added elsewhere — so the
         whole tracked tree is grepped and an unlisted hit is a failure by name.
         """
         # The patterns are derived from the list, never typed: a bare `bin/uv`

@@ -1815,8 +1815,15 @@ def _environment_row(
 
     Layer 1 exists because layer 3 cannot run: every invocation goes through
     ``uv run``, so on a machine with no uv the shell fails with exit 127 before any
-    Python could print the message. A host installed successfully has therefore
-    already been told about uv, and no run reaches the 127 case.
+    Python could print the message. What this row certifies is narrower than it
+    looks: on a host where it runs and passes, :func:`find_uv` found uv at
+    install time. It says nothing about a host that never runs it (Claude Code is
+    ``installable: false``, so no install route evaluates this row), nothing about
+    an install kept after this row failed (:func:`install` excludes
+    ``ROW_ENVIRONMENT`` from the failures that roll a write back), and nothing
+    about whether a bare ``uv`` resolves in the shell the shim later dispatches
+    in — the row can pass on ``$MULTI_LLM_UV`` or on an absolute candidate.
+    Layers 2 and 3 are what cover the rest.
 
     The runner leg is :func:`_runner_facts`, which resolves the runner this
     project would really dispatch — never the capability entry's default read on

@@ -1,5 +1,11 @@
 # uv Preflight (D6 row 1)
 
+**Audience: maintainers.** No agent opens this file at run time — every shim
+carries its own inlined copy of the step below. This document is the one
+written contract that copy, `install-host --check`'s row-3 shape lint and the
+shim tests are authored against, so an edit here is an edit to what every shim
+has to say.
+
 Every orchestrator and helper in this skill runs through `uv run`, so when `uv`
 is genuinely absent the shell fails with `uv: command not found` (exit 127)
 *before* any Python that could explain it runs. Row 1 therefore cannot own its own detection, and
@@ -8,7 +14,7 @@ ownership is split across three layers with three different lifetimes:
 | Layer | When | Owner |
 |---|---|---|
 | 1 | install time | `multi_llm.py install-host --check` resolves `uv` and reports a miss as a prerequisite failure |
-| 2 | invocation time | **the shim's first step**, below — the only part of this that cannot be Python |
+| 2 | invocation time | **the shim's uv step, placed before its first `uv run`** — the inlined copy of the procedure below, and the only part of this that cannot be Python |
 | 3 | run time | the Python backstop, `utils/unattended.require_uv()` — uv removed after install, a host invoking `multi_llm.py` directly, or a shim edited by hand |
 
 **The message text lives in exactly one place: `hosts/uv-missing.txt`.** The shim

@@ -45,7 +45,7 @@ By default, full mode still stops to ask you a few questions (model selection, `
 
 | Phase | Default (interactive) | With `--yes` |
 |-------|----------------------|--------------|
-| uv preflight (every phase) | Offers to install uv | Prints `hosts/uv-missing.txt` and **exits 3** — never installs, never asks (row 1) |
+| uv preflight (shim, once per invocation) | Prints `hosts/uv-missing.txt` and **exits 3** — never installs, never offers | Identical; `--yes` changes nothing (row 1) |
 | Model selection (Phase 1 & 5) | Prompts if no models given | Never prompts — uses `--models` if given, else `--quick` if given, else `providers.yaml` `defaults.models`; **exit 3** if nothing resolves (row 2) |
 | Partial fan-out results (Phase 1 & 5) | Asks partial / resume / rerun-all | Resumes the missing models once (`--force`), then reaggregates: `[PARTIAL_RESULTS: …]`, `state: "partial"`, exit 0. Zero results → exit 3 (row 3) |
 | Consolidation (after Phase 1) | Asks "run consolidation?" | Auto-runs once on `[CONSOLIDATION_RECOMMENDED]` (row 4) |

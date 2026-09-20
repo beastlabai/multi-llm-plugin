@@ -114,14 +114,10 @@ Items with `needs-human-decision` status are included in the report for the user
 
 ## Step-by-Step Execution
 
-0. **Check `uv` is available** (BEFORE the first `uv run` command)
-
-   Every command below runs through `uv run`. Follow
-   `references/uv-check.md`: run `command -v uv`; if missing, check the seven
-   documented install locations and use the absolute path. If uv is truly
-   absent, print `hosts/uv-missing.txt` verbatim and **stop with exit 3** — never
-   offer to install it, never ask, and never fall back to bare `python`
-   (D6 row 1).
+**Prerequisite — `uv` (D6 row 1).** Every command below runs through `uv run`.
+If it is absent the resolution is fail-closed: print `hosts/uv-missing.txt`
+verbatim and **stop with exit 3** — never install it, never ask, never fall back
+to bare `python`.
 
 1. **Validate plan file exists**
 
