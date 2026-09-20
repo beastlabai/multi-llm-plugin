@@ -588,16 +588,30 @@ exit code — on this route both are green whatever happened, and the debug log 
 opencode debug config | jq '.command["multi-llm"] != null'
 ```
 
-**The payload carries its own skill copy, and therefore needs its own venv.** The
-plugin resolves its skill directory to `<package>/skills/multi-llm` and never to
-`/opt/mllm/skill`, so the image's main virtualenv is not on its path; the plugin
-layer syncs the packaged tree separately and asserts `yaml` imports out of it at
-build time. Without that, the first dispatch on this route reaches for an index
-this lane's egress does not have and dies with `ModuleNotFoundError: No module
-named 'yaml'` at exit 1, with no uv-level error to read. The staged `dist/` and
-`skills/` are build output — `make e2e-image` stages them before it builds, and
-`context_manifest.txt` marks them `# optional` so the clean-checkout build-context
-guard still passes.
+**The payload carries its own skill copy, and shares the image's one
+virtualenv.** The plugin resolves its skill directory to
+`<package>/skills/multi-llm` and never to `/opt/mllm/skill`, so the obvious move
+is a second `uv sync` under the payload — and measured, that sync creates
+nothing: `UV_PROJECT_ENVIRONMENT=/opt/mllm/skill/.venv` is set image-wide, so
+`uv sync --project <payload>` resolves the payload's lock **into the skill's
+venv**, reports `Checked 1 package` and leaves `<payload>/.venv` absent, which is
+exactly what an assertion against that directory then died on. At run time the
+same redirection is what makes the route work: the plugin dispatches `uv run
+--frozen --no-dev --project <payload>/skills/multi-llm`, the ENV points it at the
+same venv, and the payload's `uv.lock` is a copy of the skill's, so the
+environment genuinely satisfies it — one interpreter, one pyyaml, no second tree.
+
+The build layer therefore asserts the **real dispatch** rather than manufacturing
+a venv nothing would read: it runs the payload's own `multi_llm.py --help`
+through the exact `uv run` the plugin composes. That proves two things a file
+check cannot — that the environment resolves **offline**, where a dispatch that
+had to reach an index this lane's egress does not have dies with
+`ModuleNotFoundError` at exit 1 and no uv-level error to read, and that
+`build.py`'s allowlist staging carried every module the dispatcher imports, the
+failure mode that once shipped a modes table pointing at a module the payload did
+not contain. The staged `dist/` and `skills/` are build output — `make e2e-image`
+stages them before it builds, and `context_manifest.txt` marks them `# optional`
+so the clean-checkout build-context guard still passes.
 
 ### The one measured surprise worth knowing
 
