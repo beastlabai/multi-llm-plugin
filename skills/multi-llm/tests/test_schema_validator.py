@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.schema_validator import (
+    drop_non_record_entries,
     validate_type,
     validate_against_schema,
     validate_json_output,
@@ -192,3 +193,64 @@ class TestValidateCodeReviewIssues:
         """Test that empty list is valid."""
         is_valid, errors = validate_code_review_issues([])
         assert len(errors) == 0 or "Schema not found" in str(errors)
+
+
+class TestDropNonRecordEntries:
+    """The guard that acts on the verdict ``validate_code_review_issues`` prints.
+
+    2026-09-20: one reviewer's result file held ``[0]`` — the stdout fallback
+    had scraped a bracketed index out of its prose — and every aggregation site
+    stamps the producing model onto each element it reads
+    (``issue["model"] = model``). The validator said ``'[0]: expected object,
+    got int'`` and only warned; the item assignment then raised ``TypeError``
+    and the other four models' eleven findings were never written.
+    """
+
+    def test_the_real_failing_payload_yields_no_records(self, capsys):
+        assert drop_non_record_entries([0], "cursor-agent:kimi-k3-high") == []
+
+    def test_the_records_beside_a_stray_scalar_survive(self):
+        issue = {"title": "x", "desc": "y", "importance": "low",
+                 "file": "src/a.py", "type": "bug"}
+
+        kept = drop_non_record_entries([issue, 0, "prose"], "m:a")
+
+        assert kept == [issue]
+
+    def test_a_clean_payload_is_returned_unchanged_and_in_silence(self, capsys):
+        issues = [{"title": "x"}, {"title": "y"}]
+
+        assert drop_non_record_entries(issues, "m:a") == issues
+        assert capsys.readouterr().err == ""
+
+    def test_nothing_to_aggregate_is_not_a_warning(self, capsys):
+        assert drop_non_record_entries(None, "m:a") == []
+        assert drop_non_record_entries([], "m:a") == []
+        assert capsys.readouterr().err == ""
+
+    def test_a_payload_that_is_not_a_list_yields_no_records(self):
+        """Iterating a dict hands the caller its *keys*, which fail identically."""
+        assert drop_non_record_entries({"issues": []}, "m:a") == []
+
+    def test_the_warning_names_the_model_the_element_and_the_disposition(
+        self, capsys
+    ):
+        drop_non_record_entries([0], "cursor-agent:kimi-k3-high", noun="issues")
+
+        warning = capsys.readouterr().err
+        assert "cursor-agent:kimi-k3-high" in warning
+        assert "0 (int)" in warning
+        assert "issues" in warning
+
+    def test_the_warning_goes_to_stderr_and_never_to_stdout(self, capsys):
+        """stdout is the machine-readable channel (the bracketed markers)."""
+        drop_non_record_entries([0], "m:a")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "WARNING:" in captured.err
+
+    def test_the_noun_follows_the_phase(self, capsys):
+        drop_non_record_entries([0], "m:a", noun="suggestions")
+
+        assert "suggestions" in capsys.readouterr().err

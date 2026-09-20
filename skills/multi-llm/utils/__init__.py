@@ -40,6 +40,7 @@ from .json_extractor import (
 
 from .schema_validator import (
     ValidationError,
+    drop_non_record_entries,
     load_schema,
     validate_against_schema,
     validate_json_output,
@@ -233,6 +234,7 @@ __all__ = [
     "sanitize_model_name",
     # schema_validator
     "ValidationError",
+    "drop_non_record_entries",
     "load_schema",
     "validate_against_schema",
     "validate_json_output",

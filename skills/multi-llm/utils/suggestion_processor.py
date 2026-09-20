@@ -6,6 +6,8 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from .schema_validator import drop_non_record_entries
+
 
 class SuggestionGroup:
     """A group of similar suggestions from multiple models."""
@@ -83,7 +85,12 @@ def extract_suggestions_from_review(
         try:
             parsed = json.loads(json_match.group(1))
             if isinstance(parsed, list):
-                for item in parsed:
+                # Same guard as the aggregation sites: `item["source_model"] = …`
+                # is an item assignment, and a fenced array can carry a bare
+                # scalar the same way a model result file can.
+                for item in drop_non_record_entries(
+                    parsed, model_name, noun="suggestions"
+                ):
                     item["source_model"] = model_name
                     suggestions.append(item)
                 return suggestions
