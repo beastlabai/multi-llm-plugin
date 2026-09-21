@@ -62,7 +62,9 @@ from utils import (  # noqa: E402
     cli_common,
     host_capabilities as caps,
     host_install,
+    progress_tracker,
     provider_registry,
+    run_status,
     unattended,
 )
 
@@ -1731,6 +1733,143 @@ def uv_stub(tmp_path):
             ]
             return result, calls
 
+        def relay(
+            self, package, args, script, *, with_metadata=True,
+            client_js="undefined", extra_env=None, abort_on_call=None,
+        ):
+            """``run``'s sibling for the rows about the mid-run relay.
+
+            ``run`` hands ``execute`` a **JSON** context, and JSON cannot carry a
+            function — while the relay's entire contract is a callback. So this
+            composes the context in JS instead, records every ``ctx.metadata``
+            update and every toast the stub client is asked for, and returns
+            them beside the result and the argv log.
+
+            ``client`` is passed as ``execute``'s fourth argument exactly as the
+            plugin factory passes it, so the fallback row exercises the real
+            parameter rather than a shape invented here.
+
+            ``abort_on_call=n`` hands ``execute`` a real ``AbortSignal`` and
+            fires it a moment after the stub's *n*-th child starts, which is
+            how the cancellation rows reach a seam with a live ``metadata``
+            callback attached. It is driven off the argv log rather than off a
+            bare timer because a timer picks its child by how fast the machine
+            is; the short settle after the log line is what makes the abort
+            land *after* that child's stdout, the stub recording its argv
+            before it prints. A backstop fires it anyway, so a row whose child
+            never starts fails rather than hangs on a scripted sleep.
+            """
+            log.write_text("", encoding="utf-8")
+            script_path = tmp_path / "script.json"
+            script_path.write_text(json.dumps(script), encoding="utf-8")
+            env = {
+                "MULTI_LLM_UV": str(stub),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT_FILE": str(script_path),
+            }
+            env.update(extra_env or {})
+            # Omitted entirely rather than set to null: "this host's context
+            # carries no metadata callback" is the condition the fallback exists
+            # for, and a key holding null is not that condition.
+            metadata_js = (
+                "metadata: (update) => { updates.push(update) }," if with_metadata
+                else ""
+            )
+            abort_js = "" if abort_on_call is None else f"""
+                const fs = await import("node:fs")
+                const controller = new AbortController()
+                const started = () => {{
+                  try {{
+                    return fs.readFileSync({json.dumps(str(log))}, "utf8")
+                      .split("\\n").filter(Boolean).length
+                  }} catch {{ return 0 }}
+                }}
+                const watcher = setInterval(() => {{
+                  if (started() < {abort_on_call}) return
+                  clearInterval(watcher)
+                  setTimeout(() => controller.abort(), 250).unref?.()
+                }}, 10)
+                watcher.unref?.()
+                setTimeout(() => controller.abort(), 20000).unref?.()
+            """
+            abort_ctx = "" if abort_on_call is None else "abort: controller.signal,"
+            payload = node_json(
+                f"""
+                const updates = []
+                const toasts = []
+                const client = {client_js}
+                {abort_js}
+                const answer = await MultiLlmPlugin.execute(
+                  {json.dumps(args)},
+                  {{ directory: {json.dumps(str(tmp_path))},
+                     {abort_ctx} {metadata_js} }},
+                  surface,
+                  client,
+                )
+                emit({{result: answer, updates, toasts}})
+                """,
+                package,
+                env=env,
+            )
+            calls = [
+                json.loads(line)
+                for line in log.read_text(encoding="utf-8").splitlines() if line
+            ]
+            return payload["result"], calls, payload["updates"], payload["toasts"]
+
+        def relay_repeatedly(self, package, args, script, *, calls=2):
+            """*calls* ``execute`` invocations **inside one node process**.
+
+            Every other row in this file spawns a fresh node per ``execute``,
+            which makes a per-call relay memory and a module-level one
+            indistinguishable: the module is re-imported, so its Set is empty
+            again either way. In the real host this module is imported once for
+            a whole OpenCode session and lives across every tool call, so that
+            distinction is the difference between a roster shown on every run
+            and a roster shown on the session's first run only. This helper is
+            the only thing here that can see it.
+
+            Each toast is tagged with the ``execute`` call it came from, since
+            what the rows below assert is *which call* said what, not how many
+            toasts there were in total. The stub picks its scripted step by the
+            global argv-log line count, so one flat script spans every call.
+            """
+            log.write_text("", encoding="utf-8")
+            script_path = tmp_path / "script.json"
+            script_path.write_text(json.dumps(script), encoding="utf-8")
+            env = {
+                "MULTI_LLM_UV": str(stub),
+                "STUB_LOG": str(log),
+                "STUB_SCRIPT_FILE": str(script_path),
+            }
+            payload = node_json(
+                f"""
+                const toasts = []
+                let call = 0
+                const client = {{
+                  tui: {{
+                    showToast: async (options) => {{
+                      toasts.push({{call, message: options?.body?.message}})
+                      return true
+                    }},
+                  }},
+                }}
+                const answers = []
+                for (call = 0; call < {calls}; call += 1) {{
+                  answers.push(await MultiLlmPlugin.execute(
+                    {json.dumps(args)},
+                    {{ directory: {json.dumps(str(tmp_path))} }},
+                    surface,
+                    client,
+                  ))
+                }}
+                emit({{answers, toasts}})
+                """,
+                package,
+                env=env,
+            )
+            return payload["answers"], payload["toasts"]
+
     return Driver()
 
 
@@ -2055,8 +2194,11 @@ class TestExecuteStateMachine:
         poll = _dispatcher_argv(calls[1])
         assert "--run-id" in poll and poll[poll.index("--run-id") + 1] == "RID-42"
         assert poll[0] == "status" and "--wait" in poll and "--view" in poll
-        # `--wait` is a store_true: the plugin passes the bare flag and never a
-        # --timeout, so the duration is the dispatcher's own default.
+        # `--wait` is a store_true and the plugin still passes the bare flag.
+        # What it *means* is no longer a fixed default — the dispatcher resolves
+        # it from `progress.poll_s` and clamps that against this host's ceiling —
+        # and `test_the_poll_argv_is_the_bare_wait_flag` is where that contract
+        # is pinned rather than commented.
         assert "--timeout" not in poll
 
     def test_launch_result_is_not_the_answer(self, built_package, uv_stub):
@@ -3130,6 +3272,1035 @@ class TestExecuteStateMachine:
             "init scaffolded somewhere other than the workspace"
         )
         assert not Path("/.multi-llm").exists()
+
+
+# ===========================================================================
+# The mid-run progress relay
+# ===========================================================================
+
+#: A `client` stub carrying only the one SDK route the fallback uses. It closes
+#: over the `toasts` array the driver's snippet declares above it.
+TOAST_CLIENT = (
+    "{ tui: { showToast: async (options) => { toasts.push(options); return true } } }"
+)
+
+
+def _poll(exit_code, progress=None, state=None, **extra):
+    """One scripted `status` child, with or without a ``progress`` payload."""
+    body = {
+        "mode": "status",
+        "state": state or cli_common.STATE_RUNNING,
+        "exit": exit_code,
+        "artifacts": [],
+        "next": None,
+        **extra,
+    }
+    # Absent, never null: "this run predates the tracker" is the degrade case,
+    # and a key holding null is a different payload from a key that is missing.
+    if progress is not None:
+        body["progress"] = progress
+    return {"exit": exit_code, "stdout": [f"MULTI_LLM_RESULT: {json.dumps(body)}"]}
+
+
+def _fanout(step, done, succeeded, total, **states):
+    """A ``progress`` object shaped like the one ``progress_tracker`` writes."""
+    return {
+        "step": step,
+        "models_done": done,
+        "models_succeeded": succeeded,
+        "models_total": total,
+        "interval_s": 30,
+        "models": {
+            spec: {
+                "state": state,
+                "started_at": "2026-09-20T10:00:00Z",
+                "updated_at": "2026-09-20T10:01:00Z",
+                "timeout_s": 600,
+                "attempt": 1,
+                "source": None,
+            }
+            for spec, state in states.items()
+        },
+    }
+
+
+#: The two rendered lines the dispatcher puts on `MULTI_LLM_RESULT.progress_lines`
+#: — built here by the **renderers themselves**, never typed out, because what
+#: these rows are about is that the string the plugin displays is the string
+#: Python composed. A literal would still pass the day one of them is reworded.
+RELAY_ROSTER = progress_tracker.render_roster_line({
+    "codex:gpt-6-astra:xhigh": {"state": "running", "timeout_s": 1800},
+    "opencode:auto": {"state": "queued", "timeout_s": 1800},
+})
+RELAY_JUST_FINISHED = "{} {}".format(
+    run_status.JUST_FINISHED_LABEL,
+    run_status._just_finished_text({"finished_during_wait": [{
+        "spec": "codex:gpt-6-astra:xhigh", "state": "done",
+        "elapsed_s": 252.0, "error": None,
+    }]}),
+)
+
+
+#: The launch every relay row starts from: a banner, then a handshake result
+#: line that carries **no** `progress` of its own, because a launcher's does not.
+RELAY_LAUNCH = {
+    "exit": 0,
+    "stdout": [
+        "run_id: RID-P",
+        "log: /tmp/relay.log",
+        'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+        '"artifacts":[],"next":null}',
+    ],
+}
+
+RELAY_ARGS = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []}
+
+#: The abort dispatch a cancelled relay row ends on, scripted the way
+#: `_run_abort` really answers a confirmed stop: its human line plus the
+#: dispatcher's own terminal result line. Both are required — an exit code
+#: alone is not the dispatcher's verdict, so a stub without the result line
+#: would be scripting an *unconfirmed* abort.
+RELAY_ABORTED = {
+    "exit": 0,
+    "stdout": [
+        "aborted review-plan run RID-P (process group terminated)",
+        'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+        '"artifacts":[],"next":null}',
+    ],
+}
+
+
+class TestProgressRelay:
+    """The package route's mid-run feedback, asserted where the JS really runs.
+
+    **Why this class is the acceptance evidence and the container lane is not.**
+    OpenCode has two install routes and only one of them is a shim. Every row in
+    ``tests/container/host_matrix.yaml`` is file-route, the ``Makefile`` refuses
+    the package rows outright — "a green file-route run is no evidence about the
+    published package" — and the image cannot even receive the tarball. The two
+    routes share no delivery code, so "OpenCode passed" means both routes or
+    neither, and this is the package route's half.
+
+    **What is being pinned.** On this route there is no agent in the loop:
+    ``execute`` supervises the run and returns exactly once, so the only thing
+    that can speak mid-run is the poll loop itself. The loop already held the
+    data and was silent. These rows assert the relay's *cadence* (one update per
+    non-terminal poll — "at least one" is satisfied by a single terminal flush
+    and proves nothing), its *silence* after the answer and after a
+    cancellation, its *channels*, and that a payload it cannot read costs it
+    nothing.
+    """
+
+    def test_one_update_per_non_terminal_poll(self, built_package, uv_stub):
+        """Several updates across a run, one per poll, in order, none repeated.
+
+        Three non-terminal polls plus the launch banner is four updates, and the
+        per-model map arrives *whole* — the object the status file already
+        computed, not a sentence composed in JS about it.
+        """
+        first = _fanout("fan-out", 0, 0, 3, a="running", b="queued", c="queued")
+        second = _fanout("fan-out", 1, 1, 3, a="done", b="running", c="queued")
+        third = _fanout("fan-out", 2, 1, 3, a="done", b="failed", c="running")
+        terminal = _fanout("TERMINAL-STEP", 3, 2, 3, a="done", b="failed", c="done")
+
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [
+                RELAY_LAUNCH,
+                _poll(2, first),
+                _poll(2, second),
+                _poll(2, third),
+                _poll(0, terminal, state="done"),
+            ],
+        )
+
+        assert result["state"] == "done" and result["ok"] is True
+        # One per non-terminal poll, plus the launch seam. Not one, not one per
+        # run: the count IS the criterion.
+        assert len(updates) == 4, updates
+
+        bodies = [update["metadata"] for update in updates]
+        # The launch seam: identifiers the moment the banner yields them, before
+        # a whole `--wait` has elapsed. Its result line carries no map, and that
+        # relays as null rather than throwing or being dropped.
+        assert bodies[0]["run_id"] == "RID-P"
+        assert bodies[0]["log"] == "/tmp/relay.log"
+        assert bodies[0]["progress"] is None
+        assert bodies[0]["polls"] == 0
+
+        # Then one per poll, in order, each carrying that poll's own object
+        # verbatim — key for key, including the nested per-model map.
+        assert [body["progress"] for body in bodies[1:]] == [first, second, third]
+        assert [body["polls"] for body in bodies[1:]] == [1, 2, 3]
+        assert all(body["run_id"] == "RID-P" for body in bodies)
+        # Not a rendered line, not a summary: the JS relays the object it was
+        # handed and composes no prose of its own.
+        assert all(isinstance(body["progress"], dict) for body in bodies[1:])
+        # No `client` was handed to `execute` on this row, so the toast channel
+        # simply is not there — this assertion pins that the missing client
+        # costs nothing, not that metadata suppresses the toast. The two-channel
+        # contract is pinned in `test_every_update_goes_out_on_both_channels`.
+        assert toasts == []
+
+    def test_the_terminal_poll_neither_repeats_nor_appends(
+        self, built_package, uv_stub
+    ):
+        """Nothing is emitted for the poll that ends the call, or after it.
+
+        The terminal poll's numbers ride out in the result ``execute`` returns,
+        so relaying them would be the same state twice and an update *after* the
+        answer. The seam sits below the loop's break, which is what makes that
+        structural rather than remembered.
+        """
+        running = _fanout("fan-out", 1, 1, 2, a="done", b="running")
+        terminal = _fanout("TERMINAL-STEP", 2, 2, 2, a="done", b="done")
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, running), _poll(0, terminal, state="done")],
+        )
+
+        assert result["ok"] is True
+        assert len(updates) == 2, updates
+        # The terminal object reached the *result*, and only the result.
+        assert result["result"]["progress"] == terminal
+        assert "TERMINAL-STEP" not in json.dumps(updates)
+        # And the last thing relayed is the last non-terminal poll, so no update
+        # trails the answer.
+        assert updates[-1]["metadata"]["progress"] == running
+
+    def test_cancellation_ends_the_updates_at_the_last_live_poll(
+        self, built_package, uv_stub
+    ):
+        """Zero updates after a cancellation, on both channels.
+
+        The abort lands while a poll child is sleeping, and three things have
+        to stay silent from that moment: the poll that was killed (its payload
+        was printed, but a corpse's numbers are not progress this call may
+        report), the abort dispatch behind it, and everything after the
+        needs-human result. So the last thing a cancelled call relays is the
+        last *live* poll — which is what "silent after cancellation" means on a
+        route where the poll loop is the only thing that speaks.
+
+        Driven through the relay driver rather than ``uv_stub.run``: ``run``
+        hands ``execute`` a JSON context, JSON cannot carry a callback, and
+        every other cancellation row in this file is blind to the updates for
+        exactly that reason.
+        """
+        live = _fanout("fan-out", 1, 1, 3, a="done", b="running", c="queued")
+        # Scripted and printed, and still never relayed: this is the child the
+        # cancellation kills mid-sleep.
+        killed = _fanout("KILLED-POLL", 2, 2, 3, a="done", b="done", c="running")
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, live), {**_poll(2, killed), "sleep": 30},
+             RELAY_ABORTED],
+            client_js=TOAST_CLIENT,
+            abort_on_call=3,
+        )
+
+        assert result["state"] == "needs-human" and result["ok"] is False
+        assert result["run_id"] == "RID-P"
+        # The claimed run really was stopped, so this is the cancellation path
+        # and not some earlier exit that happens to be quiet.
+        assert result["abort_dispatched"] is True
+        assert [
+            call for call in calls if "--abort" in _dispatcher_argv(call)
+        ], "the cancelled call abandoned the run it had claimed"
+
+        # The launch seam and the one live poll. Not three: the killed poll
+        # relays nothing, and neither does the abort dispatch behind it.
+        assert len(updates) == 2, updates
+        assert len(toasts) == 2, toasts
+        bodies = [update["metadata"] for update in updates]
+        # `polls` is incremented before the aborted child is inspected, so the
+        # killed poll's number is 2 — and no update carries it.
+        assert [body["polls"] for body in bodies] == [0, 1]
+        assert bodies[-1]["progress"] == live
+        assert "KILLED-POLL" not in json.dumps(updates)
+        assert "KILLED-POLL" not in json.dumps(toasts)
+
+    def test_a_launch_cancelled_mid_flight_relays_nothing(
+        self, built_package, uv_stub
+    ):
+        """The banner seam goes quiet too, once the signal has fired.
+
+        ``detach.launch()`` prints the banner *before* the launcher exits, so a
+        cancellation landing in the launch window comes back holding a claimed
+        run whose identifiers the launch seam would happily relay — after the
+        call was cancelled. That seam sits deliberately above the failure
+        checks, because a launch that claimed a run and then **died** still
+        started one and the update naming it is what points a human at the log.
+        So the two halves are asserted together here: cancelled relays nothing,
+        failed still relays, and moving the seam below the checks satisfies
+        only the first.
+        """
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [{**RELAY_LAUNCH, "sleep": 30}, RELAY_ABORTED],
+            client_js=TOAST_CLIENT,
+            abort_on_call=1,
+        )
+        assert result["state"] == "needs-human" and result["ok"] is False
+        # The run was claimed and aborted, so this is the launch *window* — not
+        # a launcher killed before it ever printed a banner, which claims
+        # nothing and would have nothing to relay anyway.
+        assert result["run_id"] == "RID-P" and result["abort_dispatched"] is True
+        assert updates == [] and toasts == []
+
+        # The other half: a launcher that printed its banner and then failed
+        # was never cancelled, and its one update is what a human reads.
+        failed = {
+            "exit": 3,
+            "stdout": [*RELAY_LAUNCH["stdout"], "the launcher fell over"],
+        }
+        result, _, updates, toasts = uv_stub.relay(
+            built_package, RELAY_ARGS, [failed, RELAY_ABORTED],
+            client_js=TOAST_CLIENT,
+        )
+        assert result["state"] == "needs-human" and result["run_id"] == "RID-P"
+        assert len(updates) == 1 and len(toasts) == 1, (updates, toasts)
+        assert updates[0]["metadata"]["log"] == "/tmp/relay.log"
+
+    def test_a_result_with_no_progress_payload_degrades_quietly(
+        self, built_package, uv_stub
+    ):
+        """A run that predates the tracker still polls, still relays, never throws.
+
+        Three shapes in one row, because they are three different absences: a
+        payload with no ``progress`` key, a non-terminal poll with no
+        ``MULTI_LLM_RESULT`` line at all, and a terminal result that carries
+        none either. The relay reads the key optionally and sends ``null``
+        rather than dropping the update — the identifiers and the poll count are
+        themselves the signal that the loop is alive, so silence would make the
+        cadence depend on the run's age.
+        """
+        silent = {"exit": 2, "stdout": ["still working"]}
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2), silent, _poll(0, state="done")],
+        )
+
+        assert result["state"] == "done" and result["ok"] is True, result
+        assert "progress" not in result["result"]
+        assert len(updates) == 3, updates
+        assert [update["metadata"]["progress"] for update in updates] == [
+            None, None, None,
+        ]
+        assert [update["metadata"]["polls"] for update in updates] == [0, 1, 2]
+
+    def test_every_update_goes_out_on_both_channels(self, built_package, uv_stub):
+        """``ctx.metadata`` **and** ``client.tui.showToast``, on every seam.
+
+        This row used to pin the opposite — metadata wins, the toast is skipped
+        — on the reading that ``ctx.metadata`` is what opencode's bash tool
+        streams through, so the host renders it mid-call. That holds for *bash*,
+        which has a dedicated renderer; the generic renderer a third-party
+        plugin tool gets is not known to paint a running tool's metadata, and
+        this suite cannot see the host's TUI to settle it. So the assertion was
+        changed deliberately: ``ctx.metadata`` still goes out (it is cheap and
+        it attaches the update to this tool part, which is the right record),
+        and the toast goes out beside it because that channel is definitely
+        displayed. A successful metadata call no longer suppresses it.
+
+        There is still no ``tool.execute.progress`` hook to prefer over either —
+        ``tool.execute.after`` fires only once the result exists.
+
+        Every payload here carries no ``progress_lines``, which is why the two
+        channels are still byte-for-byte identical below: with nothing rendered
+        to show, the toast serializes the same object it always did. The rows
+        above pin the other half — that a payload which *does* render one sends
+        the line to the toast and the whole object to the record.
+        """
+        running = _fanout("fan-out", 1, 2, 4, a="done", b="running")
+        script = [RELAY_LAUNCH, _poll(2, running), _poll(0, state="done")]
+
+        result, _, updates, toasts = uv_stub.relay(
+            built_package, RELAY_ARGS, script, client_js=TOAST_CLIENT,
+        )
+        assert result["ok"] is True
+        # Both channels, same cadence — the launch seam and the one
+        # non-terminal poll — and byte-for-byte the same object on each.
+        assert len(updates) == 2, updates
+        assert len(toasts) == 2, toasts
+        assert [json.loads(toast["body"]["message"]) for toast in toasts] == [
+            update["metadata"] for update in updates
+        ]
+        assert updates[-1]["metadata"]["progress"] == running
+
+        # A context that carries no ``metadata`` callback at all (an older host,
+        # or any caller that built the context itself) loses that channel and
+        # nothing else: the toast still carries every seam.
+        result, _, updates, toasts = uv_stub.relay(
+            built_package, RELAY_ARGS, script,
+            with_metadata=False, client_js=TOAST_CLIENT,
+        )
+        assert result["ok"] is True
+        assert updates == []
+        # Same seams, same cadence, same payload — only the transport differs.
+        assert len(toasts) == 2, toasts
+        assert json.loads(toasts[-1]["body"]["message"])["progress"] == running
+        # A `message` field has to hold a string, so the object goes over as
+        # JSON. It is still data: the plugin authors no sentence about the run.
+        assert toasts[-1]["body"]["variant"] in {
+            "info", "success", "warning", "error"
+        }
+
+    def test_a_command_hidden_in_progress_is_redacted_on_both_channels(
+        self, built_package, uv_stub
+    ):
+        """``progress`` goes out redacted, exactly as the terminal result does.
+
+        ``progress`` is not the plugin's text and it is not the dispatcher's
+        prose either: ``models[*].error`` is whatever sentence a provider handed
+        back, mirrored by the executor into the status file. So a runnable
+        ``uv run … multi_llm.py …`` can reach the relay by the same route it
+        reaches ``child.result`` — and a command a model can paste is a command
+        a model may paste, whichever field it arrived in. Both exits therefore
+        run the same redaction; a relay that skipped it would enforce the rule
+        for the model reading the result and not for the model reading the
+        toast.
+        """
+        planted = (
+            "uv run --project /skill -- python /skill/multi_llm.py "
+            "review-plan /w/p.md --host opencode --yes"
+        )
+        running = _fanout("fan-out", 1, 0, 2, a="running", b="failed")
+        # The provider's own sentence, with the command inside it: the prose
+        # must survive, only the runnable span may go.
+        running["models"]["b"]["error"] = (
+            f"the provider timed out; resume it with `{planted}` if you must"
+        )
+        script = [RELAY_LAUNCH, _poll(2, running), _poll(0, state="done")]
+
+        result, _, updates, toasts = uv_stub.relay(
+            built_package, RELAY_ARGS, script, client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        assert len(updates) == 2 and len(toasts) == 2, (updates, toasts)
+        relayed = [update["metadata"] for update in updates]
+        tui = [json.loads(toast["body"]["message"]) for toast in toasts]
+
+        # Neither channel carries a pasteable command.
+        assert "uv run" not in json.dumps(relayed), (
+            "a runnable command survived into ctx.metadata"
+        )
+        assert "uv run" not in json.dumps(tui), (
+            "a runnable command survived into the toast"
+        )
+        # The whole span went, not just its head.
+        assert "multi_llm.py" not in json.dumps(relayed)
+        assert "multi_llm.py" not in json.dumps(tui)
+        # Redacted in place, not dropped: the provider's own sentence is still
+        # there, and so is every other field of the object.
+        scrubbed = relayed[-1]["progress"]["models"]["b"]["error"]
+        assert "the provider timed out" in scrubbed
+        assert planted not in scrubbed
+        assert scrubbed != running["models"]["b"]["error"]
+        assert relayed[-1]["progress"]["step"] == "fan-out"
+        assert relayed[-1]["progress"]["models_total"] == 2
+        assert relayed[-1]["progress"]["models"]["a"]["state"] == "running"
+        assert relayed[-1]["polls"] == 1 and relayed[-1]["run_id"] == "RID-P"
+        # And the two channels still carry byte-for-byte the same object, so
+        # the redaction is one pass rather than one per transport.
+        assert tui == relayed
+
+    def test_the_toast_shows_the_line_the_dispatcher_rendered(
+        self, built_package, uv_stub
+    ):
+        """The reported defect, closed: a sentence, not a serialized object.
+
+        Measured 2026-09-21 on a 5 m 40 s four-model fan-out: the user saw
+        nothing at all and then one compressed line. The toast was firing — it
+        was carrying `JSON.stringify(update)`, which is the whole poll payload
+        including the per-model map. `ctx.metadata` was firing too and producing
+        no persisted part update whatsoever (opencode's `event` table ran
+        `pending` → `running` → `completed` with no gap across four `relay()`
+        calls), so the toast is the only channel there is.
+
+        What fills `message` now is the dispatcher's own rendered line, passed
+        through byte for byte — asserted against the Python renderer's output,
+        because a plugin that composed the sentence itself would pass an
+        assertion written against a string typed into this file.
+        """
+        running = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        result, _, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [
+                RELAY_LAUNCH,
+                _poll(2, running, progress_lines=[RELAY_ROSTER]),
+                _poll(0, state="done"),
+            ],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        assert len(toasts) == 2, toasts
+        # The launch seam carries no rendered line (its result is a handshake),
+        # so it is the object as before — which is also the fallback this row's
+        # sibling below is about.
+        assert json.loads(toasts[0]["body"]["message"])["run_id"] == "RID-P"
+        # And the poll carries the line, alone, exactly as Python wrote it.
+        assert toasts[-1]["body"]["message"] == RELAY_ROSTER
+        assert RELAY_ROSTER.startswith("[PROGRESS] fan-out over 2 models: ")
+
+        # The structured half is untouched on both channels: the record still
+        # carries the map, the identifiers and the lines it displayed.
+        body = updates[-1]["metadata"]
+        assert body["progress"] == running
+        assert body["lines"] == [RELAY_ROSTER]
+        assert body["run_id"] == "RID-P" and body["polls"] == 1
+
+    def test_the_roster_is_said_once_and_the_news_every_time(
+        self, built_package, uv_stub
+    ):
+        """Selection, which is the one judgement this file is allowed.
+
+        The roster is byte-identical on every poll of one run — it names what
+        the fan-out is *over*, which does not change — so repeating it every
+        83 s would bury the line that is news under the line that is not. The
+        plugin remembers what it has shown and shows what it has not; it reads
+        no line's content to decide, so no wording from the Python side is
+        spelled on this side. A poll with nothing fresh falls back to the
+        object, which keeps the cadence exactly what it was: one update per
+        non-terminal poll, never a silent one.
+        """
+        first = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        second = _fanout("fan-out", 1, 1, 2, a="done", b="running")
+        third = _fanout("fan-out", 1, 1, 2, a="done", b="running")
+        result, _, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [
+                RELAY_LAUNCH,
+                _poll(2, first, progress_lines=[RELAY_ROSTER]),
+                _poll(2, second, progress_lines=[RELAY_ROSTER, RELAY_JUST_FINISHED]),
+                _poll(2, third, progress_lines=[RELAY_ROSTER]),
+                _poll(0, state="done"),
+            ],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        messages = [toast["body"]["message"] for toast in toasts]
+        assert len(messages) == 4, messages
+        # Poll 1: the roster, said once.
+        assert messages[1] == RELAY_ROSTER
+        # Poll 2: only the news — the roster came again and was not repeated.
+        assert messages[2] == RELAY_JUST_FINISHED
+        # Poll 3: nothing fresh, so the object — the relay still speaks.
+        assert json.loads(messages[3])["polls"] == 3
+
+    def test_a_second_tool_call_in_one_process_says_the_roster_again(
+        self, built_package, uv_stub
+    ):
+        """The relay memory is per call, and only one process can prove it.
+
+        `relayMemory()` is created inside `execute`, so its `shown` Set dies
+        with the call — which is what makes a second tool call a second run
+        whose roster is news again. Moved to module scope the plugin would
+        still pass every other row in this class, because each of those spawns
+        a fresh node and re-imports the module: the Set is empty at the start
+        of each one either way. The real host imports this module once per
+        OpenCode session, so the regression it would ship is a roster the user
+        sees on the session's first run and never again — for runs the plugin
+        has never seen.
+
+        Two full runs, one node process, one flat script: launch, roster poll,
+        terminal poll, twice over. The second call's roster must be relayed.
+        """
+        first = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        second = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        one_run = [
+            RELAY_LAUNCH,
+            _poll(2, first, progress_lines=[RELAY_ROSTER]),
+            _poll(0, state="done"),
+        ]
+        answers, toasts = uv_stub.relay_repeatedly(
+            built_package,
+            RELAY_ARGS,
+            [*one_run,
+             RELAY_LAUNCH,
+             _poll(2, second, progress_lines=[RELAY_ROSTER]),
+             _poll(0, state="done")],
+            calls=2,
+        )
+
+        assert [answer["ok"] for answer in answers] == [True, True], answers
+        shown = {}
+        for toast in toasts:
+            shown.setdefault(toast["call"], []).append(toast["message"])
+        assert sorted(shown) == [0, 1], shown
+        # Each call: the launch seam (the object, since this scripted launch
+        # renders no line of its own) then the poll's roster.
+        for call in (0, 1):
+            assert len(shown[call]) == 2, shown[call]
+            assert json.loads(shown[call][0])["run_id"] == "RID-P"
+            assert shown[call][1] == RELAY_ROSTER, (
+                f"call {call} did not announce its roster; a relay memory that "
+                "outlives the call suppresses every run after the first"
+            )
+
+    def test_a_launch_that_renders_its_own_roster_says_it_at_the_banner(
+        self, built_package, uv_stub
+    ):
+        """The roster ~83 s early, and no line of JS changed to get it.
+
+        The launch's `MULTI_LLM_RESULT` is the first thing this loop can relay
+        and the next relay is a whole `--wait` away, while the *terminal* poll
+        is deliberately never relayed — so a run that went terminal inside that
+        first wait announced its models nowhere at all. `detach.launch` now
+        renders the roster from the selection it resolved and puts it on that
+        handshake line; the launch seam here already read
+        `result.progress_lines`, so the only thing this row asserts about the JS
+        is that it needed nothing.
+
+        And the poll behind it brings the identical string, which the per-call
+        memory drops — so the user is told the line-up once, at the start,
+        rather than twice or a poll late.
+        """
+        launched = {
+            "exit": 0,
+            "stdout": [
+                "run_id: RID-P",
+                "log: /tmp/relay.log",
+                "MULTI_LLM_RESULT: " + json.dumps({
+                    "mode": "review-plan", "state": "done", "exit": 0,
+                    "artifacts": [], "next": None,
+                    "progress_lines": [RELAY_ROSTER],
+                }),
+            ],
+        }
+        running = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        result, _, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [
+                launched,
+                _poll(2, running, progress_lines=[RELAY_ROSTER]),
+                _poll(2, running, progress_lines=[RELAY_ROSTER,
+                                                  RELAY_JUST_FINISHED]),
+                _poll(0, state="done"),
+            ],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        messages = [toast["body"]["message"] for toast in toasts]
+        assert len(messages) == 3, messages
+        # The banner seam: the roster, as a sentence, before any poll ran.
+        assert messages[0] == RELAY_ROSTER
+        # The first poll brings it again and is not allowed to repeat it, so it
+        # falls back to the object — the cadence never goes silent.
+        assert json.loads(messages[1])["polls"] == 1
+        # And the news is news.
+        assert messages[2] == RELAY_JUST_FINISHED
+        assert updates[0]["metadata"]["lines"] == [RELAY_ROSTER]
+
+    def test_a_dispatcher_that_renders_nothing_still_relays_the_object(
+        self, built_package, uv_stub
+    ):
+        """The compatibility half: an older dispatcher must not break.
+
+        A package and the skill tree it carries travel together, but a user's
+        `MULTI_LLM_PROVIDERS_CONFIG`, a hand-run dispatcher or a phase with no
+        per-model map at all (`generate-tasks`, an apply phase) all produce a
+        poll with `progress` and no `progress_lines`. That is the payload this
+        plugin shipped against and it goes over exactly as it did — the key is
+        read optionally, never required.
+        """
+        running = _fanout("fan-out", 1, 1, 2, a="done", b="running")
+        result, _, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, running), _poll(0, state="done")],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        assert len(toasts) == 2, toasts
+        assert json.loads(toasts[-1]["body"]["message"])["progress"] == running
+        assert updates[-1]["metadata"]["lines"] is None
+
+    def test_a_command_hidden_in_a_rendered_line_is_redacted_too(
+        self, built_package, uv_stub
+    ):
+        """The rendered line is a provider's prose as much as `models[*].error` is.
+
+        `just finished:` renders a failed slot's own error text, which is
+        whatever sentence the provider handed back — so a runnable
+        `uv run … multi_llm.py …` reaches the toast through the rendered line
+        by exactly the route it reaches `progress.models[*].error`. The line
+        rides *inside* the update for that reason: one redaction pass covers
+        both, rather than one that covers the object and misses the sentence
+        composed from it.
+        """
+        planted = (
+            "uv run --project /skill -- python /skill/multi_llm.py "
+            "review-plan /w/p.md --host opencode --yes"
+        )
+        line = (
+            "just finished: opencode:auto (0m30s, failed: the provider died; "
+            f"resume it with `{planted}`)"
+        )
+        running = _fanout("fan-out", 1, 0, 2, a="failed", b="running")
+        result, _, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [
+                RELAY_LAUNCH,
+                _poll(2, running, progress_lines=[line]),
+                _poll(0, state="done"),
+            ],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        shown = toasts[-1]["body"]["message"]
+        # Redacted in place: the provider's own sentence survives, the runnable
+        # span does not, and the line is still the line — not dropped, not JSON.
+        assert shown.startswith("just finished: opencode:auto (0m30s, failed:")
+        assert "the provider died" in shown
+        assert planted not in shown and "uv run" not in shown
+        assert "multi_llm.py" not in shown
+        assert "uv run" not in json.dumps(updates)
+
+    #: The schema default `duration` falls back to when the body omits it —
+    #: opencode's own number, not this suite's, and the one the relay was
+    #: silently taking. Every assertion below is written against it rather than
+    #: against the constants `index.mjs` chose, so a re-tuned hold does not
+    #: rewrite the row and a regression to "omit it" fails by name.
+    SCHEMA_DEFAULT_TOAST_MS = 5000
+
+    def test_the_toast_asks_to_outlive_the_gap_to_the_next_one(
+        self, built_package, uv_stub
+    ):
+        """The reported defect: a five-second flash every ninety seconds.
+
+        `tui.showToast`'s `duration` is optional and opencode's schema defaults
+        it to 5 000 ms, so a body carrying only `{message, variant}` asks for a
+        flash. Measured 2026-09-21 on a 363 s run: five toasts, four of them
+        ~90 s apart, a 5.5 % duty cycle inside a six-minute silence — and the
+        user saw one, the launch one, because it lands a second after they press
+        enter. The channel worked the whole time.
+
+        What is asserted is the *property*, not the constants: a toast asks to
+        stay up longer than the schema default, and past the first it asks for
+        the gap this process just watched. The launch seam has no gap to
+        measure, so it falls back to the largest hold — which is why the first
+        toast's request is longer than the ones behind it in a suite where the
+        stubbed polls return in milliseconds.
+        """
+        running = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        result, _, _updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, running), _poll(2, running),
+             _poll(0, state="done")],
+            client_js=TOAST_CLIENT,
+        )
+
+        assert result["ok"] is True
+        assert len(toasts) == 3, toasts
+        for toast in toasts:
+            body = toast["body"]
+            # The title is the tool's own registration key — identifiable
+            # among whatever else the host is showing, and not a word this
+            # plugin authors about the run.
+            assert body["title"] == "multi_llm", body
+            assert isinstance(body["duration"], (int, float)), body
+            assert body["duration"] > self.SCHEMA_DEFAULT_TOAST_MS, body
+        # No gap to measure at the launch seam, so it asks for the fallback
+        # hold; every poll behind it asks for the gap it watched, which in this
+        # suite is milliseconds.
+        assert toasts[0]["body"]["duration"] > toasts[1]["body"]["duration"]
+
+    def test_the_hold_is_the_measured_gap_not_a_configured_cadence(
+        self, built_package
+    ):
+        """`toastHoldMs` in isolation: three properties, no constants restated.
+
+        `--wait`'s duration is a fact Python owns — resolved from the project's
+        poll cadence, clamped to this host's foreground cap — and this file may
+        not hold it. The interval between two relays is something this process
+        *observes*, and after the first poll it is that duration by
+        construction, so the hold is derived rather than configured.
+        """
+        payload = node_json(
+            """
+            const memory = T.relayMemory()
+            const first = T.toastHoldMs(memory)
+            memory.lastRelayAt = Date.now() - 30_000
+            const short = T.toastHoldMs(memory)
+            memory.lastRelayAt = Date.now() - 90_000
+            const measured = T.toastHoldMs(memory)
+            memory.lastRelayAt = Date.now() - 60 * 60 * 1000
+            const capped = T.toastHoldMs(memory)
+            // A memory-less direct call must not throw or stamp anything.
+            const stateless = T.toastHoldMs(undefined)
+            emit({first, short, measured, capped, stateless,
+                  stamped: typeof memory.lastRelayAt})
+            """,
+            built_package,
+        )
+        # Before any gap exists: long enough to survive one `--wait`, which
+        # Python clamps under this host's ~120 s foreground cap.
+        assert payload["first"] >= 90_000, payload
+        # After one: the gap it watched, plus a margin, and never less. Two
+        # different gaps, because one alone is satisfied by any constant that
+        # happens to sit in the window — a hold that ignored the measurement
+        # would pass a single-gap assertion and show a stale toast for minutes.
+        assert 30_000 < payload["short"] <= 30_000 + 60_000, payload
+        assert 90_000 < payload["measured"] <= 90_000 + 60_000, payload
+        assert payload["short"] < payload["measured"], payload
+        # And bounded, because nothing clears a toast when `execute` returns.
+        assert payload["capped"] < 60 * 60 * 1000, payload
+        assert payload["capped"] >= payload["measured"], payload
+        assert payload["stateless"] == payload["first"], payload
+        assert payload["stamped"] == "number", payload
+
+    def test_the_result_counts_what_the_relay_was_asked_to_do(
+        self, built_package, uv_stub
+    ):
+        """The question a forensic pass could not answer, made answerable.
+
+        Two failures used to leave identical evidence — none: `showToast`
+        persists nothing in `opencode.db`, a rejected POST was swallowed by a
+        bare `.catch(() => {})`, and `warn` writes to a stderr `opencode.log`
+        does not capture. "It fired and you missed it" and "every POST failed"
+        looked the same from the outside. The counters are numbers on the
+        result, which is consistent with the rule that this file authors no
+        sentence about the run.
+
+        `attempted` is exact when the result is composed. `delivered` and
+        `rejected` settle asynchronously — nothing awaits the SDK call — so the
+        last relay of a call may still be in flight, which is why the rows below
+        read them as a floor rather than as a census.
+        """
+        running = _fanout("fan-out", 0, 0, 2, a="running", b="queued")
+        script = [RELAY_LAUNCH, _poll(2, running), _poll(2, running),
+                  _poll(0, state="done")]
+
+        # A host that displays them: three relays, none refused.
+        result, _, updates, toasts = uv_stub.relay(
+            built_package, RELAY_ARGS, script, client_js=TOAST_CLIENT,
+        )
+        assert result["ok"] is True
+        assert len(updates) == 3 and len(toasts) == 3
+        assert result["relays"]["attempted"] == 3, result["relays"]
+        assert result["relays"]["rejected"] == 0, result["relays"]
+        assert result["relays"]["unavailable"] == 0, result["relays"]
+
+        # A host whose route refuses: the rejection is counted rather than
+        # swallowed, which is the whole point of the change.
+        refusing = (
+            "{ tui: { showToast: async (options) => { toasts.push(options); "
+            "throw new Error('the TUI is gone') } } }"
+        )
+        result, _, _u, _t = uv_stub.relay(
+            built_package, RELAY_ARGS, script, client_js=refusing,
+        )
+        assert result["ok"] is True
+        assert result["relays"]["attempted"] == 3, result["relays"]
+        assert result["relays"]["rejected"] >= 1, result["relays"]
+        assert result["relays"]["delivered"] == 0, result["relays"]
+
+        # And a host with no route at all is the third diagnosis, told apart
+        # from both of the above.
+        result, _, _u, _t = uv_stub.relay(built_package, RELAY_ARGS, script)
+        assert result["ok"] is True
+        assert result["relays"]["attempted"] == 3, result["relays"]
+        assert result["relays"]["unavailable"] == 3, result["relays"]
+        assert result["relays"]["delivered"] == 0, result["relays"]
+        assert result["relays"]["rejected"] == 0, result["relays"]
+
+    def test_an_absent_toast_channel_says_so_once(self, built_package):
+        """"The channel was not there" and "it fired and you missed it" are
+        different diagnoses, and they used to leave identical evidence.
+
+        `showToast` persists nothing in `opencode.db`, and this file's `catch`
+        only fires when a channel *throws* — so a host carrying no
+        `client.tui.showToast` at all produced exactly what a displayed-and-
+        missed toast produces: nothing. It now warns, once per call rather than
+        once per poll, since a run that polls twenty times has one missing
+        channel and not twenty.
+
+        Read what this buys, honestly: `warn` is `console.error`, so the line
+        lands on whatever stderr the opencode process was started with. That is
+        visible to someone running the binary in a terminal and is **not**
+        captured in `opencode.log`, so the probe helps a maintainer reproducing
+        the condition and does not by itself answer it from a user's logs.
+        """
+        payload = node_json(
+            """
+            const said = []
+            const real = console.error
+            console.error = (...parts) => { said.push(parts.join(" ")) }
+            try {
+              const memory = T.relayMemory()
+              T.relayProgress({}, undefined, {progress: null}, memory)
+              T.relayProgress({}, undefined, {progress: null}, memory)
+              // A fresh call is a fresh run, so it says so again.
+              T.relayProgress({}, undefined, {progress: null}, T.relayMemory())
+              // And a host that HAS the channel says nothing at all.
+              const toasts = []
+              T.relayProgress({}, """ + TOAST_CLIENT + """, {progress: null},
+                              T.relayMemory())
+              emit({said, toasts})
+            } finally { console.error = real }
+            """,
+            built_package,
+        )
+        said = payload["said"]
+        assert len(said) == 2, said
+        assert all("showToast" in line for line in said), said
+        assert all(line.startswith("[multi-llm] ") for line in said), said
+        assert len(payload["toasts"]) == 1
+
+    def test_the_message_chooser_reads_no_line_s_content(self, built_package):
+        """`toastMessage` in isolation: selection by identity, nothing else.
+
+        Whatever the dispatcher supplies is shown; a non-string or empty entry
+        is skipped rather than rendered as `null`; several fresh lines go
+        together in the order they were supplied; and with nothing supplied the
+        object is serialized as it always was. No prefix, marker or word from
+        the Python side appears in the decision — which is what keeps this file
+        free of a vocabulary it would then own a second copy of.
+
+        The non-string check is a `typeof` and not a truthiness test, and the
+        `42` below is what makes the difference visible: a falsy non-string
+        (`null`, `0`, `""`) is skipped either way, while a **truthy** one is
+        joined into `message` and read by a user as a sentence the dispatcher
+        composed. Today's dispatcher only ever emits strings
+        (`cli_common.set_progress_lines` maps `str` over the list), so this is a
+        guard against the payload rather than against the current writer of it —
+        `update.lines` is JSON parsed off whatever process printed the marker.
+        """
+        payload = node_json(
+            f"""
+            const memory = T.relayMemory()
+            const update = {{
+              progress: null, run_id: "RID-P", polls: 1,
+              lines: [{json.dumps(RELAY_ROSTER)}, "", null, 0, 42, {{}},
+                      [{json.dumps(RELAY_ROSTER)}],
+                      {json.dumps(RELAY_JUST_FINISHED)}],
+            }}
+            const both = T.toastMessage(update, memory)
+            const again = T.toastMessage(update, memory)
+            const bare = T.toastMessage({{progress: null, lines: null}}, memory)
+            const stateless = T.toastMessage(update, undefined)
+            emit({{both, again, bare, stateless}})
+            """,
+            built_package,
+        )
+        assert payload["both"] == f"{RELAY_ROSTER}\n{RELAY_JUST_FINISHED}"
+        # Nothing but the two strings: no "42", no "[object Object]", and no
+        # array stringified into a line of its own.
+        assert "42" not in payload["both"] and "object" not in payload["both"]
+        # Both were shown, so a second identical poll has nothing fresh.
+        assert json.loads(payload["again"])["run_id"] == "RID-P"
+        assert json.loads(payload["bare"])["progress"] is None
+        # No memory, no deduplication: the right default for one direct call.
+        assert payload["stateless"] == payload["both"]
+
+    def test_neither_channel_costs_the_run_nothing(self, built_package, uv_stub):
+        """No callback and no client at all: the fan-out is unaffected (rule 4).
+
+        A relay is a nicety on top of a run that is already paid for. An older
+        host, or any caller that built the context itself, must lose the updates
+        and nothing else.
+        """
+        result, calls, updates, toasts = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, _fanout("fan-out", 0, 0, 1, a="running")),
+             _poll(0, state="done")],
+            with_metadata=False,
+        )
+        assert result["state"] == "done" and result["ok"] is True
+        assert updates == [] and toasts == []
+        assert len([c for c in calls if "instructions" not in _dispatcher_argv(c)]) == 3
+
+    def test_a_channel_that_throws_is_swallowed_and_the_other_still_fires(
+        self, built_package, uv_stub
+    ):
+        """A rejecting host costs a warning line, never the fan-out.
+
+        A ``metadata`` that *throws* must not take the toast down with it: the
+        two channels are independent, so the seam still reaches the TUI and
+        ``relayProgress`` still reports that something was relayed. With neither
+        channel there is nothing to relay, and that is the only ``false``.
+        """
+        running = _fanout("fan-out", 0, 0, 2, a="running", b="running")
+        payload = node_json(
+            f"""
+            const toasts = []
+            const client = {TOAST_CLIENT}
+            const ctx = {{ metadata: () => {{ throw new Error("no channel here") }} }}
+            const relayed = T.relayProgress(ctx, client, {json.dumps(
+                {"progress": running, "run_id": "RID-P", "log": None, "polls": 2}
+            )})
+            // And with neither channel: still false, still no throw.
+            const bare = T.relayProgress({{}}, undefined, {{progress: null}})
+            emit({{relayed, bare, toasts}})
+            """,
+            built_package,
+        )
+        assert payload["relayed"] is True
+        assert payload["bare"] is False
+        assert len(payload["toasts"]) == 1
+        assert json.loads(payload["toasts"][0]["body"]["message"])["run_id"] == "RID-P"
+
+    def test_the_poll_argv_is_the_bare_wait_flag(self, built_package, uv_stub):
+        """The poll argv, pinned — not left to a doc comment (resolution (b)).
+
+        ``--wait`` is a ``store_true`` and the plugin passes the bare flag, so
+        the duration is the dispatcher's to resolve: from the project's
+        ``progress.poll_s`` (90 s as shipped, so a default install polls exactly
+        as it always did), then clamped to the named host's foreground cap less
+        the margin. The clamp *does* fire on this route — the baked ``--host``
+        is on every poll argv, as this assertion also shows — and it is accepted
+        as authoritative here rather than routed around with a ``--timeout``
+        composed in JS, because the poll duration is this loop's cancellation
+        and budget granularity and the clamp is the only thing bounding it.
+
+        What the row guards is a **configured** project: a ``poll_s: 300`` that
+        silently became 90 s here is invisible unless the argv is pinned. Every
+        element is read from the generated surface, so the spelling has exactly
+        one owner.
+        """
+        result, calls, _, _ = uv_stub.relay(
+            built_package,
+            RELAY_ARGS,
+            [RELAY_LAUNCH, _poll(2, _fanout("fan-out", 0, 0, 1, a="running")),
+             _poll(0, state="done")],
+        )
+        assert result["ok"] is True
+
+        surface = pkg_build.cli_surface()
+        spelling = surface["dispatcher"]["poll"]
+        poll = _dispatcher_argv(calls[1])
+        assert poll == [
+            spelling[0],
+            str(uv_stub.log_path.parent / "p.md"),
+            *surface["baked_flags"],
+            *spelling[1:],
+            surface["dispatcher"]["run_id_option"],
+            "RID-P",
+        ], poll
+        # Spelled out because it is the half of the contract that is an absence:
+        # no duration is composed here, and none is spelled in the JS.
+        assert "--timeout" not in poll
+        assert spelling[-1] == "--wait"
+        # The runtime `--host` the dispatcher's clamp reads is what makes the
+        # clamp fire on this route at all.
+        assert surface["dispatcher"]["host_option"] in poll
 
 
 # ===========================================================================

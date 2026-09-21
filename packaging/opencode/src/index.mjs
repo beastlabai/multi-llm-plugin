@@ -1025,7 +1025,12 @@ function runChild({
  * approach. It is emphatically *not* derived from the host's
  * `timeout_ceiling_s`: that is the documented **shell** cap, it binds no tool
  * execution, and reading a host capability into a poll duration is precisely how
- * the shell-cap workaround would get transliterated back in.
+ * the shell-cap workaround would get transliterated back in. That is a statement
+ * about *this* bound and not about the `--wait` the poll child resolves for
+ * itself: the dispatcher does clamp that one against the same ceiling, and the
+ * poll loop's comment says why it is accepted there. The difference is who
+ * computes it — nothing here reads a capability, and no duration is spelled in
+ * this file.
  *
  * Both are overridable **only** through the environment, and only so the suite
  * can drive the exhaustion branch without waiting hours for it. There is no
@@ -1049,6 +1054,271 @@ function positiveInt(raw, fallback) {
 }
 
 /**
+ * The toast's severity word. An SDK enum value (`"info" | "success" |
+ * "warning" | "error"`), like the `"assistant"` the session-model lookup
+ * matches on — not a word this file authors about the run.
+ */
+const TOAST_VARIANT = "info"
+
+/**
+ * How long a relayed toast asks to stay on screen, in milliseconds.
+ *
+ * `tui.showToast`'s `duration` is optional and opencode's own schema defaults
+ * it to 5 000 ms, which is what this relay was sending by omitting it: a
+ * five-second flash once per poll. Measured 2026-09-21 on a 363 s package-route
+ * run — five toasts, four of them ~90 s apart — that is a 5.5 % duty cycle
+ * inside a six-minute silence, and the user saw exactly one of the five: the
+ * launch one, which lands about a second after they press enter. The channel
+ * was never the problem; the dwell was. A toast that lives until its successor
+ * replaces it turns a flash into continuous progress.
+ *
+ * The number is **measured, not configured**, which is what keeps it out of the
+ * rule this file is held to. `--wait`'s duration is a fact Python owns (it
+ * resolves the project's poll cadence and clamps it to this host's foreground
+ * cap), and composing it here is exactly what the poll loop below refuses to
+ * do — but the interval between two relays is something *this process*
+ * observes, and after the first poll it is that duration by construction. So
+ * every relay past the first asks for the gap it just watched plus a margin,
+ * and nothing here has to know what the cadence is.
+ *
+ * The two literals are this file's own display facts, in the sense
+ * `TOAST_VARIANT` is: `FIRST_HOLD` covers the launch seam, which fires before
+ * any gap exists and must survive until the first poll returns — one `--wait`,
+ * which Python clamps under this host's documented ~120 s foreground cap — and
+ * `MAX_HOLD` bounds how long a stale toast can outlive a loop that stopped,
+ * since nothing clears a toast when `execute` returns.
+ */
+const TOAST_FIRST_HOLD_MS = 120_000
+const TOAST_GAP_MARGIN_MS = 15_000
+const TOAST_MAX_HOLD_MS = 5 * 60 * 1000
+
+/** The gap this call just watched, plus a margin. Stamps the clock it reads. */
+function toastHoldMs(memory) {
+  const now = Date.now()
+  const previous = memory?.lastRelayAt ?? null
+  if (memory) memory.lastRelayAt = now
+  const gap = previous ? now - previous : 0
+  if (!Number.isFinite(gap) || gap <= 0) return TOAST_FIRST_HOLD_MS
+  return Math.min(gap + TOAST_GAP_MARGIN_MS, TOAST_MAX_HOLD_MS)
+}
+
+/** One relay counter, where the memory may legitimately be absent. */
+function countRelay(memory, key) {
+  if (memory?.relays && typeof memory.relays[key] === "number") {
+    memory.relays[key] += 1
+  }
+}
+
+/**
+ * The relay's own tally, for the result line. Numbers, never a sentence.
+ *
+ * It exists because two very different failures leave identical evidence, and
+ * a forensic pass over a real run could not separate them: `showToast`
+ * persists nothing in `opencode.db`, a rejected POST used to be swallowed by a
+ * bare `.catch(() => {})`, and `warn` is `console.error` on a stderr
+ * `opencode.log` does not capture (grep it for this plugin's prefix and you get
+ * nothing). "The relay fired five times and you missed four" and "the relay
+ * fired five times and every POST failed" produced the same artifacts: none.
+ *
+ * `attempted` is decisive on its own and is exact when this is read.
+ * `delivered` and `rejected` settle asynchronously — nothing awaits the SDK
+ * call, which is what fire-and-forget costs — so the **last** relay of a call
+ * may still be in flight here and land in neither. They are a floor, not a
+ * census, and `attempted - delivered - rejected <= 1` is the shape to read them
+ * by. `unavailable` counts the relays this host had no toast route for at all,
+ * which is the third diagnosis and the only one that was ever visible.
+ */
+function relayCounts(memory) {
+  return memory?.relays ? { ...memory.relays } : null
+}
+
+/**
+ * One fire-and-forget progress update, on every channel this host offers.
+ *
+ * WHY THERE IS A RELAY AT ALL. On the package route there is no agent in the
+ * loop: `execute` supervises the run itself and returns exactly once, so the
+ * poll loop below already holds every number a user wants mid-run — which
+ * models are running, how many have finished — and is otherwise silent for as
+ * long as the fan-out takes. There is no `tool.execute.progress` hook to hang
+ * this on either; `tool.execute.after` fires only once the result exists.
+ *
+ * WHY BOTH CHANNELS FIRE, AND WHICH ONE THE DESIGN RESTS ON. `ctx.metadata` is
+ * `ToolContext`'s own fire-and-forget callback, callable any number of times
+ * during `execute`. It attaches the update to *this* tool part rather than to
+ * the session and costs no round trip, so it is the cheap and correct **record**
+ * of what the loop knew and when. What it is not is a mid-run *render*, and
+ * that is now measured rather than doubted: on a 5 m 40 s four-model run
+ * (2026-09-21) opencode's `event` table carried that tool part's whole life as
+ * `pending` → `running` → `completed` on three contiguous per-session `seq`
+ * values, with no gap — across four `relay()` calls, no `ctx.metadata` call
+ * produced a persisted part update at all. It is kept because it costs nothing
+ * and another renderer may yet paint it; nothing here depends on it.
+ * `client.tui.showToast` is the live channel, and what it carries is the *same
+ * update* rendered for a human rather than serialized (see WHAT TRAVELS): it is
+ * session-global, noisier and costs an SDK round trip, but it is the channel
+ * that is displayed, and it is what keeps the package route from being silent
+ * until the fan-out answers. A context with no `metadata` is one channel down;
+ * a caller with no `client` is the relay's only channel gone, which is why that
+ * one is said out loud rather than passed over, and a channel that throws never
+ * suppresses the other one.
+ *
+ * WHAT TRAVELS. The update object as handed in, unreworded — the dispatcher's
+ * own `progress` object, the line(s) the dispatcher already *rendered* from it,
+ * and the identifiers the tool's result already spells (`run_id`, `log`,
+ * `polls`). Nothing is scraped out of rendered text and nothing is summarised
+ * into a sentence: a regex over a human line, or a phrase composed here, would
+ * be the first break in the rule that this file holds no mode word, flag or
+ * message of its own. The toast has to fill a `message` field, and what fills
+ * it is one of the strings the dispatcher supplied, passed through byte for
+ * byte — `MULTI_LLM_RESULT.progress_lines`, composed by the same renderers that
+ * write the human `status` view. This file selects which of the supplied
+ * strings to show and remembers which it has shown; it authors none of them.
+ * With none supplied — an older dispatcher, or a run with no per-model map —
+ * the object goes over as JSON exactly as it always did.
+ *
+ * Never throws and never blocks (rule 4), and returns whether *anything* was
+ * relayed. A relay is a nicety on top of a run that is already paid for; a host
+ * whose channel rejects must cost a warning line, never the fan-out.
+ *
+ * `memory` is the caller's per-call relay state (see `relayMemory`) and is
+ * optional: without it nothing is deduplicated and the absent-channel warning
+ * is not rate-limited, which is the right default for a single direct call.
+ */
+function relayProgress(ctx, client, update, memory) {
+  let relayed = false
+  countRelay(memory, "attempted")
+  try {
+    if (typeof ctx?.metadata === "function") {
+      ctx.metadata({ metadata: update })
+      relayed = true
+    }
+  } catch (error) {
+    warn(`could not relay progress through the tool context: ${describe(error)}`)
+  }
+  try {
+    const toast = client?.tui?.showToast
+    if (typeof toast === "function") {
+      const answered = toast.call(client.tui, {
+        body: {
+          // The tool's own registration key, which this file necessarily holds
+          // — not a word it authors about the run. It is what makes this toast
+          // identifiable among whatever else the host is showing.
+          title: TOOL_NAME,
+          message: toastMessage(update, memory),
+          variant: TOAST_VARIANT,
+          // Omitted, this defaulted to a five-second flash once per poll. See
+          // `toastHoldMs`.
+          duration: toastHoldMs(memory),
+        },
+      })
+      // Nothing awaits the SDK call — that is what "fire and forget" costs — so
+      // its rejection has to be handled here or it surfaces as an unhandled
+      // rejection in the process `execute` is running in. It is *counted*
+      // rather than swallowed: a bare `.catch(() => {})` is what made a failed
+      // POST and a displayed-and-missed toast leave identical evidence.
+      if (answered && typeof answered.then === "function") {
+        answered.then(
+          () => countRelay(memory, "delivered"),
+          () => countRelay(memory, "rejected"),
+        )
+      } else {
+        countRelay(memory, "delivered")
+      }
+      relayed = true
+    } else {
+      countRelay(memory, "unavailable")
+      if (!memory?.warnedNoToast) {
+        // The absence is said out loud, because it is otherwise
+        // indistinguishable from the failure it looks like. `showToast` leaves
+        // no trace in `opencode.db` and this function's `catch` only fires when
+        // a channel *throws*, so a host that simply does not carry the route
+        // produced exactly the same evidence as one that displayed the toast
+        // and was missed: none. Once per call rather than once per poll — a run
+        // that polls twenty times has one missing channel, not twenty. The
+        // counter above is the half a user can hand back; this line only
+        // reaches a maintainer watching the process's stderr, which
+        // `opencode.log` does not capture.
+        if (memory) memory.warnedNoToast = true
+        warn(
+          "no toast channel on this host (client.tui.showToast is absent), so " +
+            "nothing this run relays mid-run can be displayed",
+        )
+      }
+    }
+  } catch (error) {
+    countRelay(memory, "rejected")
+    warn(`could not relay progress to the TUI: ${describe(error)}`)
+  }
+  return relayed
+}
+
+/**
+ * The relay's memory for one `execute` call.
+ *
+ * Two facts: which supplied lines have already been shown, and whether the
+ * missing-channel warning has been said. Per **call**, which is not the same
+ * thing as per run, and the difference is worth stating in both directions.
+ *
+ * It is not per *module*, and that is the load-bearing half. This module is
+ * imported once for a whole OpenCode session, so a Set declared up there would
+ * show one run's roster on the session's first tool call and suppress it on
+ * every call after — for runs it has never seen. A second tool call is a second
+ * run, whose roster is news again.
+ *
+ * It is not per *run* either, and that is a real gap rather than a
+ * simplification. One `execute` can span several runs: a mechanical
+ * continuation (`--reaggregate`, `--consolidate`) is driven through the same
+ * launch-and-poll cycle and claims a **new** run id, while this state is
+ * created once above that loop. A continuation's roster is byte-identical to
+ * the one already shown — same models, same budgets, it is the same fan-out
+ * being finished off — so it is suppressed, and that run's first poll falls
+ * back to the serialized object. Accepted rather than overlooked: the roster
+ * answers "what is this fan-out over", the answer has not changed, and
+ * resetting per cycle would repeat a line the user is already looking at in
+ * order to announce a phase they never asked for. The continuation's
+ * `just finished:` lines are news and are shown as usual.
+ */
+function relayMemory() {
+  return {
+    shown: new Set(),
+    warnedNoToast: false,
+    // When the last relay went out, so the next one can ask to stay up for the
+    // gap it just watched (`toastHoldMs`).
+    lastRelayAt: null,
+    // What the relay did, for the result line (`relayCounts`).
+    relays: { attempted: 0, delivered: 0, rejected: 0, unavailable: 0 },
+  }
+}
+
+/**
+ * The toast's `message`: the dispatcher's own lines, or the update as JSON.
+ *
+ * The one piece of judgement this file is allowed over the relay's text, and it
+ * is selection, never composition. A supplied line is shown once and then
+ * suppressed — the roster is byte-identical on every poll of one run, so
+ * repeating it would bury the line that *is* news under the line that is not —
+ * and equality is the whole test: nothing here reads a line's content, so no
+ * wording, prefix or marker from the Python side is spelled on this side.
+ *
+ * Several fresh lines are shown together, joined by newlines, in the order the
+ * dispatcher supplied them. Falling back to the serialized object when nothing
+ * is fresh keeps the relay's cadence exactly as it was — one update per
+ * non-terminal poll, never a silent one — which is what tells a live loop apart
+ * from a stalled one.
+ */
+function toastMessage(update, memory) {
+  const supplied = Array.isArray(update?.lines) ? update.lines : []
+  const fresh = []
+  for (const line of supplied) {
+    if (typeof line !== "string" || !line) continue
+    if (memory?.shown?.has(line)) continue
+    memory?.shown?.add(line)
+    fresh.push(line)
+  }
+  return fresh.length ? fresh.join("\n") : JSON.stringify(update)
+}
+
+/**
  * S1–S5. Runs to a terminal result and returns exactly once.
  *
  * `execute` is not resumable and hands back no continuation token; re-attachment
@@ -1062,7 +1332,10 @@ function positiveInt(raw, fallback) {
  * crashed session or an abandoned poll leaves the run alive and re-attachable
  * instead of killing a paid fan-out mid-flight.
  */
-async function runWorkflow({ row, values, surface, ctx, env, uv, anchor }) {
+async function runWorkflow({
+  row, values, surface, ctx, client, env, uv, anchor,
+  relayState = relayMemory(),
+}) {
   const signal = ctx?.abort
   const codes = surface.dispatcher.exit_codes
   const banner = surface.dispatcher.banner
@@ -1117,6 +1390,52 @@ async function runWorkflow({ row, values, surface, ctx, env, uv, anchor }) {
   let logPath = null
   let watched = values
   let polls = 0
+  // The mid-run relay, closed over exactly the four fields above so a caller
+  // cannot hand it a run id that disagrees with the one this call is watching.
+  // `child` is whichever dispatcher child just answered; a launch carries no
+  // `progress` (its result line is a handshake) and a poll of a run that
+  // predates the tracker carries none either, so the key is read optionally and
+  // a missing payload relays as `null` rather than throwing inside `execute`.
+  // It still relays: the identifiers and the poll count are themselves the
+  // signal that the loop is alive, and dropping the update would make the
+  // cadence depend on the run's age.
+  //
+  // `lines` is the same payload's own rendered text, read the same optional
+  // way and for the same reason — a dispatcher that predates the key, or a
+  // phase with no per-model map, supplies none. It is what the toast displays,
+  // and it exists because a toast's `message` is a string while this file may
+  // not author one: the sentence is composed where the numbers are, by the
+  // renderers that also write the human `status` view, and travels ready to
+  // show. It rides inside the update rather than beside it so the redaction
+  // below covers it too — a provider's own error sentence reaches
+  // `just finished:` exactly as it reaches `models[*].error`.
+  //
+  // The update goes out through the same redaction the terminal result
+  // applies, and for the same reason: `progress` is free text other writers
+  // composed — a provider's own sentence in `models[*].error`, mirrored by the
+  // executor — so a runnable dispatcher command can reach this object exactly
+  // as it reaches `child.result`. Redacting on one exit and not the other
+  // would enforce the no-runnable-string rule for the model reading the result
+  // and not for the model reading the relay. No `next` string is threaded in:
+  // the relay names no field a pointer could point at, so the shape pass is
+  // the whole of it.
+  const relay = (child) =>
+    relayProgress(
+      ctx,
+      client,
+      redactCommand(
+        {
+          progress: child?.result?.progress ?? null,
+          lines: child?.result?.progress_lines ?? null,
+          run_id: runId,
+          log: logPath,
+          polls,
+        },
+        null,
+        surface,
+      ),
+      relayState,
+    )
 
   // Every internally-composed call — the poll, the abort — goes through the
   // same composition as the launch, so it carries the same appended flags and
@@ -1208,6 +1527,19 @@ async function runWorkflow({ row, values, surface, ctx, env, uv, anchor }) {
         logPath = launch.banner[banner.log_field] || null
         watched = cycleValues
         claimed = true
+        // The banner is the first moment this call knows anything, and the
+        // first poll below can take a whole `--wait` to come back, so this seam
+        // is the difference between "it started, here is the log" arriving now
+        // and arriving a poll from now. Deliberately after the assignments and
+        // before the failure checks: a launch that claimed a run and then died
+        // still started one, and the update naming it is what a human needs to
+        // go read the log. Guarded on the cancellation signal rather than
+        // moved below those checks, because the two exits are not the same
+        // exit: a launch that *died* owes the reader the identifiers, while a
+        // launch the caller *cancelled* owes them nothing — an update emitted
+        // once the signal has fired is an update after cancellation, and this
+        // loop goes silent from that moment.
+        if (!signal?.aborted) relay(launch)
       }
       if (launch.aborted || launch.code !== codes.ok) {
         // `detach.launch()` daemonises the worker and prints the banner *before*
@@ -1266,12 +1598,46 @@ async function runWorkflow({ row, values, surface, ctx, env, uv, anchor }) {
       // Adopted, never claimed: this call did not start that run, so abandoning
       // the watch is not a request to stop it.
       claimed = false
+      // No relay seam here, and that is a gap named rather than a decision
+      // defended. The detach branch above relays its launch child because the
+      // banner is the first moment it knows anything; this branch does not, so
+      // a `mode: "status"` re-attach whose caller composed `--wait` drops
+      // whatever that wait observed: the dispatcher rendered it onto *this*
+      // child's result line (`--wait` is the only invocation that can honestly
+      // write `just finished:`) and the loop below relays only the polls it
+      // issues itself. The shape is pre-existing; what it costs changed, since
+      // it used to drop a JSON blob nobody would have read and now drops a
+      // composed sentence. Bounded, though: a run still in flight loses one
+      // `just finished:` line and nothing lasting — the first poll this loop
+      // issues carries the roster and every later piece of news.
     }
 
     // S2/S3 — the poll loop. One blocking child per iteration; the JS side
     // invents no cadence of its own, because `--wait` already polls internally
-    // and returns exit 2 while non-terminal. `--wait` is a store_true: the bare
-    // flag, never a --timeout, so the duration is the dispatcher's own default.
+    // and returns exit 2 while non-terminal.
+    //
+    // `--wait` is a store_true and the bare flag is still all that is passed —
+    // but what the flag *means* is no longer one fixed default. The dispatcher
+    // resolves the duration from the project's configured poll cadence and then
+    // clamps the resolved value to this host's documented foreground cap less a
+    // margin, and that clamp fires here: `composeStatus` appends the same baked
+    // flags every dispatch gets, so the `--host` it reads is always on the
+    // argv. A configured 300 s cadence therefore polls at the clamped figure on
+    // this route.
+    //
+    // That is accepted rather than worked around, and for a reason that is this
+    // loop's own rather than the shell cap's. The poll duration is the relay's
+    // granularity: the seam below fires once per non-terminal poll, so a long
+    // cadence is a run that reports in rarely. It is *only* the relay that
+    // pays — cancellation and the call budget do not reach here to wait out an
+    // iteration: `spawnOne` threads the abort signal into `runChild`, whose
+    // `onAbort` kills the child's process group the moment it fires, and the
+    // poll is spawned with the *remaining* budget as its timeout. The clamp
+    // bounds exactly that, so what it costs is a configured cadence's length
+    // and what it buys is a live relay. Composing an explicit
+    // `--timeout` here would buy none of that and would move a duration into
+    // this file, which is the one thing it may not hold: the number stays a
+    // fact Python owns, and the shipped cadence is unchanged either way.
     const pollArgv = composeStatus([
       ...surface.dispatcher.poll.slice(1),
       surface.dispatcher.run_id_option,
@@ -1320,6 +1686,13 @@ async function runWorkflow({ row, values, surface, ctx, env, uv, anchor }) {
       // them; a loop that adopted the newest run would poll a stranger
       // *successfully*, which is the worse failure.
       if (poll.code !== codes.nothing_to_do) break
+      // The per-iteration seam, and deliberately *below* the break. The
+      // terminal poll's numbers ride out in the result this call is about to
+      // return, so relaying it here too would emit the same state twice and put
+      // an update *after* the answer. Every non-terminal poll relays exactly
+      // once instead: a run that polls five times yields five updates, which is
+      // the only thing that tells a live loop apart from a stalled one.
+      relay(poll)
     }
 
     // No argv is threaded in: `terminalResult` names the argv of the child it
@@ -2388,9 +2761,20 @@ async function execute(args, ctx, surface, client) {
       extraFlags: args.extra_flags,
     }
 
+    // What the relay has already said, and what it did: see `relayMemory`,
+    // where both halves of "per call" are written down — not per module (this
+    // module outlives the session's every tool call), and deliberately not per
+    // *run* either, so a mechanical continuation inherits it and its identical
+    // roster stays unrepeated. Created here rather than inside the loop because
+    // *this* is the frame that reads it back onto the answer.
+    const relayState = relayMemory()
     const outcome = await runWorkflow({
-      row, values, surface, ctx, env, uv, anchor,
+      row, values, surface, ctx, client, env, uv, anchor, relayState,
     })
+    // Numbers, not a sentence (`relayCounts`): what the mid-run channel was
+    // asked to do, on the one surface a user can hand back.
+    const relays = relayCounts(relayState)
+    if (relays) outcome.relays = relays
 
     // The core instructions and the three resolved verb sentences, for a call
     // whose mode *and* whose outcome leave the model work after the dispatcher
@@ -2463,6 +2847,9 @@ const __testing = {
   nextAsToolCall,
   normalizePlan,
   parseDispatcherCommand,
+  relayCounts,
+  relayMemory,
+  relayProgress,
   reservedHit,
   resolveAnchor,
   resolveSessionModel,
@@ -2472,6 +2859,8 @@ const __testing = {
   splitFrontmatter,
   splitPosix,
   terminalResult,
+  toastHoldMs,
+  toastMessage,
   uvMissingText,
   validateArgs,
   workedExamples,

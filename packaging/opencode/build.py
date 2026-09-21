@@ -390,11 +390,34 @@ def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
             # decision. Read from the launch, because its result line carries
             # the same state as every other exit 3.
             "review_gate": dict(mode_table.REVIEW_GATE),
-            # ``--wait`` is a store_true: the plugin passes the bare flag and
-            # never a ``--timeout``, so the duration is the dispatcher's own
-            # default with its own internal re-read. It is emphatically not
-            # derived from ``timeout_ceiling_s`` — that is the documented
-            # *shell* cap and it binds no tool execution.
+            # ``--wait`` is a store_true and the plugin passes the bare flag,
+            # never a ``--timeout``: the duration is the dispatcher's to
+            # resolve. What that resolution *is* changed underneath this row —
+            # ``_resolve_wait_timeout`` now takes the project's
+            # ``progress.poll_s`` (90 s as shipped, so a default install polls
+            # exactly as it always did) and then clamps the resolved value to
+            # the named host's ``timeout_ceiling_s`` less ``WAIT_CAP_MARGIN_S``.
+            #
+            # The clamp therefore *does* bind this route, whatever was once
+            # written here: ``baked_flags`` above puts ``--host`` on every
+            # dispatch and the poll is composed through the same function, so
+            # the runtime ``--host`` the clamp reads is never absent. It is
+            # accepted rather than routed around, even though
+            # ``timeout_ceiling_s`` is documented as the cap on a *foreground
+            # shell command* and binds no tool execution: the plugin's poll is
+            # a child spawned with the call's remaining budget as its timeout
+            # and killed by process group the moment the call is cancelled, so
+            # a long cadence costs neither abort latency nor budget overshoot
+            # nor a killed child — it costs a thinned progress relay, one
+            # update per poll, and the clamp is the one thing bounding that.
+            #
+            # The alternative, weighed and refused, was to compute a number here
+            # from the host entry this surface is already built against and bake
+            # it in as ``--timeout <n>``. That keeps the duration Python-owned
+            # too, but it makes this the *second* place that computes it: it
+            # would have to track the margin, the tightest-cap fallback for an
+            # unrouted poll and the ``poll_s`` floor by hand, and the two would
+            # drift the first time one of them moved.
             "poll": ["status", "--view", "run", "--wait"],
             "abort": ["status", "--abort"],
             "instructions": ["util", "instructions"],
