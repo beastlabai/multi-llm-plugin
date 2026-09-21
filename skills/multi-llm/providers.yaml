@@ -428,12 +428,17 @@ providers:
     # Run "kilocode models" to see the full list of available models
     # Model names use 3-part format: backend/provider/model
     # ":variant" suffix -> "run --variant <name>". Variant names are MODEL-specific
-    # and drift, so there is no per-family rule to memorise — 201 of 351 openrouter
-    # models publish a `variants` list and each one is its own. Measured 2026-08-16
-    # on kilocode 7.4.19: glm-5.2 high/xhigh; minimax-m3 and kimi-k2.7-code
-    # instant/thinking; kimi-k3 low/high/max; nemotron-3-ultra medium/high;
-    # mimo-v2.5-pro low/medium/high; qwen3.8-max minimal/low/medium/high/xhigh;
-    # qwen3.7-max high/max; hy3 none/low/high; step-3.7-flash low/medium/high.
+    # and drift, so there is no per-family rule to memorise — 183 of 374 openrouter
+    # models publish a `variants` list and each one is its own. Measured 2026-09-21
+    # on kilocode 7.5.16: glm-5.2 high/xhigh; glm-5.3 low/high/max; kimi-k3
+    # low/high/max; nemotron-3-ultra medium/high; mimo-v2.5-pro low/medium/high;
+    # hy3 none/low/high; step-3.7-flash low/medium/high. The openrouter backend
+    # has since dropped EVERY variant from minimax-m2.7, minimax-m3,
+    # kimi-k2.7-code, qwen3.7-max and trinity-large-thinking (the kilo backend
+    # still publishes them), and openrouter/qwen/qwen3.8-max has left the
+    # catalog altogether — the rows below name the dated qwen3.8-max-0902
+    # snapshot instead, which carries the same minimal/low/medium/high/xhigh
+    # ladder.
     # Discover with "kilocode models <backend> --verbose" (credential-free); the
     # capture backing these rows is tests/fixtures/kilocode/model_variants.json.
     # GOTCHA: an invalid/unsupported variant is SILENTLY ignored. Whitelisted
@@ -447,12 +452,12 @@ providers:
       - openrouter/z-ai/glm-5.2:xhigh
       - kilo/z-ai/glm-5.2
       - openrouter/minimax/minimax-m2.7
-      - openrouter/minimax/minimax-m3:thinking     # was :xhigh (publishes instant, thinking)
+      - openrouter/minimax/minimax-m3              # was :thinking (openrouter now publishes no variants)
       - openrouter/x-ai/grok-4.20-multi-agent
       - openrouter/arcee-ai/trinity-large-thinking
       - openrouter/xiaomi/mimo-v2.5-pro
-      - openrouter/qwen/qwen3.7-max:max            # was :xhigh (publishes high, max)
-      - openrouter/qwen/qwen3.8-max:xhigh
+      - openrouter/qwen/qwen3.7-max                # was :max (openrouter now publishes no variants)
+      - openrouter/qwen/qwen3.8-max-0902:xhigh     # was qwen3.8-max (gone from the catalog)
       - openrouter/tencent/hy3:high                # was :xhigh (publishes low, high, none)
       - openrouter/stepfun/step-3.7-flash:high     # was :xhigh (publishes low, medium, high)
       - openrouter/openai/gpt-5.5-pro
@@ -1256,7 +1261,7 @@ defaults:
     - cursor-agent:composer-2.5
     #- cursor-agent:gpt-5.6-sol-xhigh
     - cursor-agent:gemini-3.6-flash-high
-    - cursor-agent:cursor-grok-4.5-high
+    - cursor-agent:grok-4.7-high                          # was cursor-grok-4.7-high (4.7 has no cursor- slug)
     #- cursor-agent:kimi-k3-high
     #- opencode:opencode/big-pickle
     - opencode:openrouter/deepseek/deepseek-v4-flash-0731
@@ -1264,18 +1269,18 @@ defaults:
     # ignored, so four of these six rows used to run at their model's default
     # effort while reporting success. Each now asks for the top variant the
     # model actually publishes, per `kilocode models <backend> --verbose`
-    # (kilocode 7.4.19, captured 2026-08-16 into
+    # (kilocode 7.5.16, captured 2026-09-21 into
     # tests/fixtures/kilocode/model_variants.json, which is what
     # tests/test_providers.py::TestKiloCodeDefaultModelSpecs checks these
     # against). Do not edit a suffix here without checking that capture.
     - kilocode:openrouter/moonshotai/kimi-k3:max          # was :thinking (publishes low, high, max)
     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high   # was :xhigh (publishes medium, high)
-    - kilocode:openrouter/z-ai/glm-5.2:xhigh
-    - kilocode:openrouter/minimax/minimax-m3:thinking     # was :xhigh (publishes instant, thinking)
+    - kilocode:openrouter/z-ai/glm-5.3:max                # was :xhigh (publishes low, high, max)
+    - kilocode:openrouter/minimax/minimax-m3              # was :thinking (openrouter now publishes no variants)
     - kilocode:openrouter/xiaomi/mimo-v2.5-pro:high       # was :xhigh (publishes low, medium, high)
-    - kilocode:openrouter/qwen/qwen3.8-max:xhigh
-    - claude-code:fable:high
-    - codex:gpt-5.6-sol:xhigh
+    - kilocode:openrouter/qwen/qwen3.8-max-0902:xhigh     # was qwen3.8-max (gone from the catalog)
+    - codex:gpt-6-astra:xhigh
+    - claude-code:claude-fable-5-1:high
     #- grok:grok-4.5
     #- cline:openrouter/z-ai/glm-5.2
     #- goose:openrouter/z-ai/glm-5.2
@@ -1293,9 +1298,9 @@ defaults:
   # Used instead of defaults.models for faster reviews with fewer models
   # Omit --quick to use the full defaults.models list, or pass --interactive to pick manually
   quick_models:
-    - cursor-agent:cursor-grok-4.5-high
-    - cursor-agent:gpt-5.6-sol-xhigh
-    - claude-code:fable:high
+    - cursor-agent:grok-4.7-high
+    - codex:gpt-6-astra:xhigh
+    - claude-code:claude-fable-5-1:high
 
   # Optional: only use defaults for specific modes
   # modes:
