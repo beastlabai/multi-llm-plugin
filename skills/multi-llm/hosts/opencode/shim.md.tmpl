@@ -78,13 +78,13 @@ Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complet
 `state`, `artifacts` and `next` from it rather than mining the transcript.
 {NEEDS_HUMAN_RULE}
 
-Every fan-out mode runs with `--detach` here, then polls — one call per turn,
-reading the **exit code** (`0` finished, `2` still running, `3` needs a human, `1`
-unreadable) and never spelling the wait as a sleep inside the same command, which
-would run straight back into this host's shell-command cap:
+Every fan-out mode runs with `--detach` here, then polls the command the launcher printed — it carries
+`--host`, `--run-id` on an `ask` run, and `--wait` with no `--timeout` — one call per turn: read the
+**exit code** (`0` finished, `2` still running, `3` needs a human, `1` unreadable), relay the view's
+`progress:` line verbatim, and never sleep inside one call, straight back into this host's cap. That wait is `progress.poll_s` (90 s), clamped off `--host`:
 
 ```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan-path>" --view run --wait
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan-path>" --host opencode --view run --wait
 ```
 
 ## 6. Examples

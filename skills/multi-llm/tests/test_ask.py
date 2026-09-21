@@ -1278,3 +1278,546 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         assert not os.path.exists(answer_file)
         assert os.path.exists(answer_file + ".violated")
         assert os.path.exists(os.path.join(root, "leak.md"))  # never restored
+
+
+# ---------------------------------------------------------------------------
+# 27. T4/T5 — per-model fan-out progress on the ask lane
+# ---------------------------------------------------------------------------
+# ask was the coarsest lane in the tree: no `fanout_slot_counter` at all, two
+# `report_progress` calls for a whole run (`0` at the fan-out and the final
+# count at grouping), so a poller mid-run read `models 0/4` beside models that
+# had already answered. These tests pin what replaced it — a per-model map
+# written into the *question* dir, both counters, and two tickers.
+
+
+@pytest.fixture
+def progress_lines(monkeypatch):
+    """Every ``[PROGRESS]`` line, with the ticker's wait made instant.
+
+    ``_tick_sleep`` is the only wait either ticker has, so replacing it is what
+    keeps a test of a 30 s cadence from taking 30 s. The 5 ms is deliberate
+    rather than ``sleep(0)``: the shape under test is a task that wakes, prints
+    and sleeps again, and a zero sleep would spin the loop for every turn the
+    mocked fan-out spends in ``asyncio.to_thread`` and bound the line count by
+    the machine rather than by the script. Both tickers' teardown ``_tick``
+    fires regardless, so at least one line per ticker is guaranteed.
+    """
+    from utils import progress_tracker
+
+    lines = []
+    monkeypatch.setattr(progress_tracker, "_emit", lines.append)
+
+    async def instant(_delay):
+        await asyncio.sleep(0.005)
+
+    monkeypatch.setattr(progress_tracker, "_tick_sleep", instant)
+    return lines
+
+
+def progress_of(question_dir):
+    """The checkpoint's reserved ``progress`` object, as a poller reads it."""
+    return read_status(question_dir).get("progress", {})
+
+
+def models_of(question_dir):
+    return progress_of(question_dir).get("models", {})
+
+
+def spy_on_the_fanout(monkeypatch):
+    """Record the tracker ``ask`` hands the shared helper, and forbid the wrapper.
+
+    ask reaches ``run_models_concurrent`` **directly** with its own per-model
+    coroutine; it never goes through ``run_all_models``, which serves review-plan
+    and review-tasks only. Anything hooked into the wrapper would therefore
+    reach this lane not at all, so the wrapper is replaced with a raiser: these
+    tests fail loudly rather than passing on a code path ask does not run.
+    """
+    import utils.review_orchestrator_base as base
+
+    seen = {}
+    real = ask_orchestrator.run_models_concurrent
+
+    async def spy(*args, **kwargs):
+        seen["tracker"] = kwargs.get("tracker")
+        return await real(*args, **kwargs)
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("ask must not reach run_all_models")
+
+    monkeypatch.setattr(ask_orchestrator, "run_models_concurrent", spy)
+    monkeypatch.setattr(base, "run_all_models", never)
+    return seen
+
+
+def spy_on_the_phase_ticker(monkeypatch):
+    """Snapshot the map at the instant the phase-scoped ticker is started.
+
+    That instant is the boundary the plan draws: the fan-out has swept and
+    returned, so whatever the map says here is what a table rendered an hour
+    later must still say. Anything the second ticker did to it would show up as a
+    difference against the file at the end of the run.
+    """
+    from utils import progress_tracker
+
+    seen = {}
+
+    class Spy(progress_tracker.PhaseProgress):
+        def start_ticker(self):
+            seen["models"] = read_status(self.phase_dir).get("progress", {}).get("models")
+            return super().start_ticker()
+
+    monkeypatch.setattr(ask_orchestrator, "PhaseProgress", Spy)
+    return seen
+
+
+def break_the_codex_sandbox(monkeypatch, policy="off"):
+    """The real codex adapter with only its probe argv replaced (see D6 above)."""
+    from utils import provider_registry as registry
+    from utils import review_orchestrator_base as rob
+    from utils.providers import codex as codex_module
+    from utils.providers.base import PROFILE_GENERATE
+
+    monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+    line = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+    broken = ["sh", "-c", f"echo '{line}' >&2; exit 1"]
+    provider = registry.get_provider("codex")
+    monkeypatch.setattr(
+        type(provider), "sandbox_probe_command",
+        lambda _self, profile: broken if profile == PROFILE_GENERATE else None,
+    )
+    monkeypatch.setattr(
+        codex_module, "sandbox_fallback_policy", lambda anchor=None: policy
+    )
+
+
+class TestTheAskFanoutWritesAPerModelMap:
+    """T4: the map is complete from the first poll and terminal at the end."""
+
+    def test_the_map_is_complete_at_the_first_poll_and_wholly_terminal_after(
+        self, plan, monkeypatch, progress_lines
+    ):
+        """Seeded before the tasks exist, not filled in as models start.
+
+        The launch write drops a predecessor's ``progress`` wholesale, so what
+        this run writes is all any reader ever sees: a model missing from the map
+        is a bug, never a model carried over. The first dispatched slot reads the
+        checkpoint here — the earliest moment a poller could — and must already
+        see every requested spec.
+
+        That used to be credited to ``claim_run``, which only the *detached*
+        worker calls; on the foreground lane nothing dropped it and
+        ``write_status`` carries the reserved objects over from disk by design
+        (F1, 2026-09-20, pinned by the test below).
+        """
+        from utils.progress_tracker import LIVE_STATES, TERMINAL_STATES
+
+        d = qdir(plan, "Q")
+        specs = ["claude-code:sonnet", "claude-code:haiku", "claude-code:opus"]
+        seen = spy_on_the_fanout(monkeypatch)
+
+        class Snapshotting(FakeInvoker):
+            first_poll = None
+            first_spec = None
+
+            def __call__(self, prompt, model_spec, timeout=None, log_file=None,
+                         cwd=None, anchor=None, **kwargs):
+                if Snapshotting.first_poll is None:
+                    Snapshotting.first_spec = model_spec
+                    Snapshotting.first_poll = progress_of(d)
+                return super().__call__(prompt, model_spec, timeout, log_file,
+                                        cwd, anchor)
+
+        inv = Snapshotting()
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", *specs], inv)
+        assert rc == 0
+
+        # (a) complete at the first poll, and every entry already carries the
+        #     budget a queued row renders its denominator from.
+        first = Snapshotting.first_poll
+        assert sorted(first["models"]) == sorted(specs)
+        assert first["models_total"] == 3
+        for spec in specs:
+            entry = first["models"][spec]
+            assert entry["state"] in set(LIVE_STATES) | set(TERMINAL_STATES)
+            assert entry["started_at"] and entry["timeout_s"]
+
+        # (a2) F1, 2026-09-20. The poll above is taken from *inside* the
+        #      invoker, so the slot it belongs to is being dispatched at that
+        #      instant and must read `running` — with the attempt and the whole
+        #      slot budget the row renders as `0m00s/30m`, exactly as
+        #      `run_single_model` and `run_single_review` write it on the other
+        #      two lanes. Until F1 this lane took no `running` transition at
+        #      all: the entry read `queued` here and for the model's whole
+        #      30-minute run, and every `[PROGRESS]` line of the fan-out said
+        #      `0/N done | staggering 1 | queued N-1` without ever naming a
+        #      model. The loop above deliberately keeps its own weaker
+        #      assertion, which is the whole state enum and passes for any
+        #      state — it says "every row exists and is seeded", not "this row
+        #      is live".
+        dispatching = first["models"][Snapshotting.first_spec]
+        assert dispatching["state"] == "running", dispatching
+        assert dispatching["attempt"] == 1
+        assert dispatching["timeout_s"] == first["models"][specs[0]]["timeout_s"]
+        # `error` is terminal-and-failed-only, and `source` is meaningful only
+        # after a completed attempt.
+        assert "error" not in dispatching
+        assert dispatching["source"] is None
+
+        # (b) the tracker is the fan-out's, not the wrapper's (see the spy).
+        assert seen["tracker"] is not None
+        assert seen["tracker"].phase_dir == str(d)
+
+        # (c) a ticker really ran on this path.
+        assert [ln for ln in progress_lines if " done (" in ln]
+
+        # (d) wholly terminal once the fan-out returned.
+        final = progress_of(d)
+        assert {e["state"] for e in final["models"].values()} == {"done"}
+        assert (final["models_done"], final["models_succeeded"],
+                final["models_total"]) == (3, 3, 3)
+
+    def test_the_launch_write_drops_a_predecessors_map(self, plan, monkeypatch,
+                                                       progress_lines):
+        """A re-asked question must not open on the last run's answers.
+
+        A question dir is keyed by the question, so asking the same question
+        twice lands in the same dir — and until F1 (2026-09-20) the previous
+        run's per-model map was still in it when the new run reported its first
+        progress. The snapshot is taken as the launch `report_progress` is
+        entered, which is the first thing after the write that claims the dir
+        and before the tracker seeds, because the seed replaces `models`
+        wholesale and a final-state assertion would pass either way.
+        """
+        from utils import status_file
+
+        d = qdir(plan, "Q")
+        os.makedirs(d, exist_ok=True)
+        status_file.write_status(d, {
+            "phase": "ask", "state": "complete",
+            "models_requested": ["gemini:old-a", "pi:old-b"],
+            "progress": {
+                "step": "complete", "models_total": 2, "models_done": 2,
+                "models_succeeded": 2,
+                "models": {
+                    "gemini:old-a": {"state": "done", "elapsed_s": 300},
+                    "pi:old-b": {"state": "done", "elapsed_s": 240},
+                },
+            },
+        })
+
+        snapshots = []
+        real = ask_orchestrator.report_progress
+
+        def record(phase_dir, **updates):
+            if not snapshots:
+                snapshots.append(read_status(str(phase_dir)).get("progress"))
+            real(phase_dir, **updates)
+
+        monkeypatch.setattr(ask_orchestrator, "report_progress", record)
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "claude-code:sonnet"], FakeInvoker())
+        assert rc == 0
+        assert snapshots, "the launch never reported progress"
+        assert not snapshots[0], (
+            f"the predecessor's progress survived the launch write: "
+            f"{snapshots[0]}"
+        )
+        assert set(models_of(d)) == {"claude-code:sonnet"}
+
+    def test_a_resumed_run_does_not_report_a_skipped_model_as_pending(
+        self, plan, monkeypatch, progress_lines
+    ):
+        """Acceptance criterion 2, on the lane where nothing dispatches at all.
+
+        A model answered from disk is terminal the moment it is seeded, so it
+        counts on **both** numbers: it has finished its slot and it has a usable
+        result. Left ``queued`` — the default if the skip predicate's return were
+        not fed to the tracker — `models_done` and the rendered table would lie
+        about a run with nothing left to do.
+        """
+        specs = ["claude-code:sonnet", "claude-code:haiku", "claude-code:opus"]
+        argv = ["--plan-file", str(plan), "--question", "Q", "--models", *specs]
+        assert run_ask(argv, FakeInvoker()) == 0
+
+        second = FakeInvoker()
+        assert run_ask(argv, second) == 0
+        assert second.calls == []  # every model came off disk
+
+        d = qdir(plan, "Q")
+        progress = progress_of(d)
+        for spec in specs:
+            entry = progress["models"][spec]
+            assert entry["state"] == "done"
+            # There is no `skipped` state; the distinction lives in `source`.
+            assert entry["source"] == "resume"
+            assert entry["attempt"] == 0
+            assert entry["elapsed_s"] == 0
+            assert "error" not in entry
+        assert not [e for e in progress["models"].values() if e["state"] == "queued"]
+        assert (progress["models_done"], progress["models_succeeded"],
+                progress["models_total"]) == (3, 3, 3)
+
+
+class TestEveryAskSourceLandsOnTheMap:
+    """T4: ``ask_one``'s returns already carry the ``source`` the entry needs.
+
+    One case per value of the enum this lane produces — ``file``, ``fallback``,
+    ``failed``, ``resume`` and the pre-dispatch ``not-dispatched`` — because
+    ``record_result`` copies the value through verbatim and a renderer labels a
+    row "skipped" by reading it.
+    """
+
+    def test_file_fallback_and_failed_land_as_their_own_wording(
+        self, plan, progress_lines
+    ):
+        inv = FakeInvoker()
+        # claude-code inherits `supports_file_output = True`, so a model that
+        # writes the file is the `file` source; one that answers on stdout is
+        # recovered and persisted, which is `fallback`; one with nothing usable
+        # anywhere is `failed`.
+        inv.configure("claude-code:sonnet", write_file=True, content="FROM THE FILE")
+        inv.configure("claude-code:haiku", write_file=False,
+                      result={"success": True, "data": "RECOVERED ON STDOUT"})
+        inv.configure("claude-code:opus", write_file=False,
+                      result={"success": False, "error": "provider exploded",
+                              "data": None})
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q", "--models",
+                      "claude-code:sonnet", "claude-code:haiku",
+                      "claude-code:opus"], inv)
+        assert rc == 0  # a partial answer set is usable output
+
+        models = models_of(qdir(plan, "Q"))
+        assert (models["claude-code:sonnet"]["state"],
+                models["claude-code:sonnet"]["source"]) == ("done", "file")
+        assert (models["claude-code:haiku"]["state"],
+                models["claude-code:haiku"]["source"]) == ("done", "fallback")
+        assert (models["claude-code:opus"]["state"],
+                models["claude-code:opus"]["source"]) == ("failed", "failed")
+        # `error` is terminal-only and is absent on a `done` entry.
+        assert models["claude-code:opus"]["error"] == "provider exploded"
+        assert "error" not in models["claude-code:sonnet"]
+
+    def test_the_resume_source_marks_only_the_slot_that_came_off_disk(
+        self, plan, progress_lines
+    ):
+        inv = FakeInvoker()
+        assert run_ask(["--plan-file", str(plan), "--question", "Q",
+                        "--models", "claude-code:sonnet"], inv) == 0
+
+        # Same question, same dir: sonnet resumes, haiku is asked for the first
+        # time, and the two sources have to be distinguishable afterwards.
+        second = FakeInvoker()
+        assert run_ask(["--plan-file", str(plan), "--question", "Q", "--models",
+                        "claude-code:sonnet", "claude-code:haiku"], second) == 0
+        assert second.calls == ["claude-code:haiku"]
+
+        models = models_of(qdir(plan, "Q"))
+        assert models["claude-code:sonnet"]["source"] == "resume"
+        assert models["claude-code:haiku"]["source"] == "file"
+        assert {e["state"] for e in models.values()} == {"done"}
+
+    def test_the_pre_dispatch_refusal_lands_as_not_dispatched(
+        self, plan, monkeypatch, progress_lines
+    ):
+        """The one terminal transition that happens before any CLI is launched.
+
+        It is covered by ``record_result`` like every other return, so the
+        refusal site adds no transition of its own — a second one would be the
+        double-write the plan forbids.
+        """
+        break_the_codex_sandbox(monkeypatch, policy="off")
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "codex:gpt-5.2-codex"], FakeInvoker())
+        assert rc == 3  # zero answers: nothing to aggregate
+
+        entry = models_of(qdir(plan, "Q"))["codex:gpt-5.2-codex"]
+        assert entry["state"] == "failed"
+        assert entry["source"] == "not-dispatched"
+        assert entry["error"].startswith("[SANDBOX_UNAVAILABLE]")
+
+
+class TestEveryEndingRetiresItsSlot:
+    """T4: after the fan-out returns, nothing is still described as live."""
+
+    def test_no_slot_is_left_live_and_each_carries_its_own_ending(
+        self, plan, progress_lines
+    ):
+        """Four different endings in one run: an answer, a refusal the lane
+        produced, a slot that *raised* (retired by the helper as ``exception``,
+        the only place the spec behind a dropped task is still known), and a
+        model that came off disk."""
+        from utils import progress_tracker
+        from utils.progress_tracker import LIVE_STATES
+
+        d = qdir(plan, "Q")
+        seed = FakeInvoker()
+        seed.configure("claude-code:opus", write_file=True, content="EARLIER ANSWER")
+        assert run_ask(["--plan-file", str(plan), "--question", "Q",
+                        "--models", "claude-code:opus"], seed) == 0
+
+        class Exploding(FakeInvoker):
+            def __call__(self, prompt, model_spec, timeout=None, log_file=None,
+                         cwd=None, anchor=None, **kwargs):
+                if model_spec == "claude-code:haiku":
+                    raise RuntimeError("boom")
+                return super().__call__(prompt, model_spec, timeout, log_file,
+                                        cwd, anchor)
+
+        inv = Exploding()
+        inv.configure("claude-code:sonnet", write_file=True, content="AN ANSWER")
+        inv.configure("claude-code:fable", write_file=False,
+                      result={"success": False, "error": "no usable answer", "data": None})
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q", "--models",
+                      "claude-code:sonnet", "claude-code:haiku",
+                      "claude-code:fable", "claude-code:opus"], inv)
+        assert rc == 0
+
+        progress = progress_of(d)
+        models = progress["models"]
+        assert not [s for s, e in models.items() if e["state"] in LIVE_STATES]
+        assert (models["claude-code:sonnet"]["state"],
+                models["claude-code:sonnet"]["source"]) == ("done", "file")
+        assert (models["claude-code:opus"]["state"],
+                models["claude-code:opus"]["source"]) == ("done", "resume")
+        assert (models["claude-code:fable"]["state"],
+                models["claude-code:fable"]["source"]) == ("failed", "failed")
+        assert models["claude-code:fable"]["error"] == "no usable answer"
+        # The slot that raised keeps its own exception text, while the report's
+        # failed map — built from `results`, which a raised task never reaches —
+        # falls to F11's backfill. The map is the finer-grained of the two.
+        #
+        # Updated for F4 (2026-09-20): this used to assert the sentence "No
+        # answer produced (model did not complete)", which was ask's own third
+        # wording for the one cause the other two lanes name once. A slot in
+        # neither `results` nor the failure map is `DEADLINE_ERROR` here exactly
+        # as it is in `run_models_concurrent`'s sibling test
+        # (`test_a_slot_that_raises_retires_itself_and_leaves_its_sibling_alone`,
+        # tests/test_review_plan_orchestrator.py), which pins the same
+        # asymmetry: the map keeps the exception, the report's list — which has
+        # no exception in hand — names the deadline wording. That the sentence
+        # was *right* about this particular slot is a coincidence of a generic
+        # phrasing; it was equally applied to a genuine deadline loss, whose
+        # swept map entry said `DEADLINE_ERROR` in the same file.
+        assert (models["claude-code:haiku"]["state"],
+                models["claude-code:haiku"]["source"]) == ("failed", "exception")
+        assert models["claude-code:haiku"]["error"] == "boom"
+        assert read_status(d)["models_failed"]["claude-code:haiku"] == (
+            progress_tracker.DEADLINE_ERROR
+        )
+
+        # Both counters, and the right way round: four finished slots, two of
+        # which produced a usable answer.
+        assert (progress["models_done"], progress["models_succeeded"],
+                progress["models_total"]) == (4, 2, 4)
+        assert progress["step"] == "complete"
+
+
+class TestTheDeadlineIsNamedOnceOnThisLane:
+    """F4, 2026-09-20: ask used to invent a **third** wording for one cause.
+
+    The other two fan-out lanes hand every model the deadline lost to
+    ``backfill_deadline_losses``, which writes
+    ``progress_tracker.DEADLINE_ERROR`` into ``failed_models`` and into the map
+    in one pass — the whole point being that the table and the report's failure
+    list name one cause.  ask used neither: its failed map was built by a lone
+    loop ending in ``or "No answer produced (model did not complete)"``, so a
+    slot the deadline cancelled was described one way in ``answers.md`` and in
+    ``models_failed`` and another way, in the same ``.status.json``, by the
+    entry the fan-out's own sweep had just frozen.
+    """
+
+    def test_a_deadline_loss_reads_the_same_in_the_map_and_in_the_report(
+        self, plan, progress_lines
+    ):
+        from utils import progress_tracker
+        from utils import review_orchestrator_base as base
+
+        specs = ["claude-code:sonnet", "claude-code:haiku"]
+        # `--timeout 0` with the stagger patched out makes the fan-out's own
+        # `total_timeout` 0, so `asyncio.wait_for` fires its deadline before any
+        # slot can run: the real deadline path, not a simulated one.
+        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+            rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                          "--timeout", "0", "--models", *specs], FakeInvoker())
+        assert rc == 3  # zero answers: nothing to aggregate
+
+        d = qdir(plan, "Q")
+        status = read_status(d)
+        assert status["models_failed"] == {
+            spec: progress_tracker.DEADLINE_ERROR for spec in specs
+        }
+        # The map's swept entries, which always said this, and which the report
+        # used to contradict.
+        models = status["progress"]["models"]
+        for spec in specs:
+            assert models[spec]["state"] == "failed"
+            assert models[spec]["error"] == progress_tracker.DEADLINE_ERROR
+
+        answers = Path(d, "answers.md").read_text(encoding="utf-8")
+        assert progress_tracker.DEADLINE_ERROR in answers
+        assert "No answer produced (model did not complete)" not in answers
+
+
+class TestThePhaseScopedTicker:
+    """T5: the window between the last model and the report is not silent."""
+
+    def test_it_freezes_the_fanouts_map_and_its_last_line_names_the_terminal_step(
+        self, plan, monkeypatch, progress_lines
+    ):
+        seen = spy_on_the_phase_ticker(monkeypatch)
+        inv = FakeInvoker()
+        inv.configure("claude-code:haiku", write_file=False,
+                      result={"success": False, "error": "nothing usable", "data": None})
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "claude-code:sonnet", "claude-code:haiku"], inv)
+        assert rc == 0
+
+        d = qdir(plan, "Q")
+        # The phase ticker writes nothing at all, so the map the sweep froze is
+        # byte-identical either side of it — which is what keeps a table
+        # rendered during grouping showing each model's real duration rather
+        # than a clock that kept running after the model finished.
+        assert seen["models"] is not None
+        assert json.dumps(seen["models"], sort_keys=True) == json.dumps(
+            models_of(d), sort_keys=True
+        )
+
+        fanout_lines = [ln for ln in progress_lines if " done (" in ln]
+        phase_lines = [ln for ln in progress_lines if ln.startswith("[PROGRESS] step: ")]
+        assert fanout_lines and phase_lines
+        # Stopped after the terminal step was written, so the log's last
+        # [PROGRESS] reads `complete` instead of trailing off at `fanout`.
+        assert progress_lines[-1].startswith("[PROGRESS] step: complete")
+        # Lifetime rule 1: the fan-out's own ticker is dead before the phase's
+        # first line, so no [PROGRESS] can interleave with the per-model summary.
+        assert progress_lines.index(fanout_lines[-1]) < progress_lines.index(phase_lines[0])
+
+
+class TestTheQuestionDirIsTheSelector:
+    """T4: ``ask`` writes to the question dir, not the ``ask`` phase dir.
+
+    Two questions asked about one plan are two independent runs with two answer
+    sets; a tracker built against ``{plan}/ask/`` would merge both into one map
+    and hand a poller a run it could not attribute to either question. (The
+    ``status --question`` half of this belongs to the run-view lane; what is
+    pinned here is the writing half.)
+    """
+
+    def test_two_questions_under_one_plan_keep_their_own_maps(self, plan, progress_lines):
+        first = FakeInvoker()
+        assert run_ask(["--plan-file", str(plan), "--question", "First question?",
+                        "--models", "claude-code:sonnet"], first) == 0
+        second = FakeInvoker()
+        assert run_ask(["--plan-file", str(plan), "--question", "Second question?",
+                        "--models", "claude-code:haiku", "claude-code:opus"], second) == 0
+
+        a = qdir(plan, "First question?")
+        b = qdir(plan, "Second question?")
+        assert a != b
+        assert sorted(models_of(a)) == ["claude-code:sonnet"]
+        assert sorted(models_of(b)) == ["claude-code:haiku", "claude-code:opus"]
+        assert progress_of(a)["models_total"] == 1
+        assert progress_of(b)["models_total"] == 2
+        # The phase dir above them is not a run and never gains a checkpoint.
+        assert not (ask_root(plan) / ".status.json").exists()

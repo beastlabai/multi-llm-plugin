@@ -625,6 +625,267 @@ class TestVerbResolution:
         sentence = caps.verb_sentence("claude-code", "subagents")
         assert "Never pass `--exec-subagents`" in sentence
 
+    def test_the_native_detach_sentence_carries_the_whole_loop(self):
+        """T8: on this host the launch is the *start* of *run detached*.
+
+        A native background run writes no ``run`` object, so ``classify_run``
+        can only ever answer ``no_run`` and the poll's exit code can never end
+        the loop. Everything that makes the loop correct there is stated in this
+        one sentence because nothing else on the host says it: the poll itself,
+        the ``--host`` the wait clamp reads (no launcher printed a command to
+        copy it from), the per-call timeout (a tool parameter, so none of
+        ``host_install.TIMEOUT_CHANNELS`` protects it), and the background
+        mechanism's own exit signal as the stop condition.
+        """
+        sentence = caps.verb_sentence("claude-code", "detach")
+        assert "Never pass `--detach`" in sentence
+        for fragment in (
+            "--view run",          # it polls at all
+            "--wait",
+            "--timeout <interval>",
+            "120-300 s",           # rule 5's range, not the host's hard cap
+            "`progress:`",         # rule 1: relay the rendered line
+            "Spell `--host` out yourself",
+            # The call's own timeout, not the command's — and the margin is
+            # `WAIT_CAP_MARGIN_S`, never a typed `30` (F6, 2026-09-20). Pinning
+            # the literal here was the reason moving that constant could have
+            # left the number standing on every surface an agent reads.
+            f"plus {caps.WAIT_CAP_MARGIN_S:.0f} s",
+            "except `1`",          # rule 2, narrowed for this host
+            "the background mechanism reports the process exited",
+            "orchestrator-run.log",
+        ):
+            assert fragment in sentence, (
+                "the native *run detached* sentence lost "
+                f"{fragment!r}; SKILL.md is a byte-identical copy of this "
+                "string, so what is dropped here is dropped on the one host "
+                "the poll loop was written for.\n"
+                f"  sentence: {sentence}"
+            )
+
+    def test_the_native_detach_sentence_says_which_models_and_which_finished(self):
+        """2026-09-20: the launch named a count and never a model.
+
+        On this host the whole loop is this one sentence, so the two things a
+        real run was missing have to be in it. The **roster** is a call of its
+        own, made once between the launch and the loop and never waiting: the
+        first poll waits 120-300 s, and a roster that reaches the user three
+        minutes after launch is not a roster. And what a poll relays gains the
+        `just finished:` line, which is the run's own answer to *which* of them
+        finished \u2014 `models 4/5 done` names no model, and a name an agent derived
+        by diffing two tables is a name it can get wrong.
+        """
+        sentence = caps.verb_sentence("claude-code", "detach")
+        for fragment in (
+            "one **non-waiting**",       # the roster call, and that it does not wait
+            "no `--wait`, no `--timeout`",
+            "`models:` table once",      # relayed, and relayed once
+            "which CLI and model each of them runs",
+            "repeat that one call once if no table printed yet",
+            "`just finished:` line",     # the per-poll half
+            "turned terminal during that wait",
+        ):
+            assert fragment in sentence, (
+                "the native *run detached* sentence lost "
+                f"{fragment!r}; SKILL.md is a byte-identical copy of this "
+                "string, so what is dropped here is dropped on the one host "
+                "the poll loop was written for.\n"
+                f"  sentence: {sentence}"
+            )
+
+    def test_the_native_detach_sentence_overclaims_neither_reading(self):
+        """F-2026-09-20: both halves of the sentence claimed more than the code.
+
+        **The roster half.** "repeat that one call once if no table printed yet"
+        was the only escape hatch, and on a re-used phase dir a table *always*
+        prints — the predecessor's — so an agent following the sentence relayed
+        a finished run's models as this run's roster. The discriminator is on
+        screen: the head line's tense, which ``run_status._verdict_text`` reads
+        off the checkpoint, and the ``progress:`` step, ``fanout`` while a
+        fan-out runs and ``complete`` once one finished.
+
+        **The relay half.** The absence of ``just finished:`` is not a claim
+        that nothing finished — that line is a difference between two readings
+        taken inside one ``--wait`` call, so a model that finishes in the gap
+        between polls is already terminal when the next poll takes its baseline.
+        The sentence hands the agent the fallback instead: copy the newly
+        terminal row's spec and state word out of the table, which is a copy and
+        not the recount the counts rule forbids.
+
+        Every word the sentence tells the agent to look for is pinned against
+        the code that emits it, because a grep for a phrase this same edit wrote
+        proves only that the phrase is there.
+        """
+        from utils import detach as detach_mod
+        from utils import run_status
+
+        def head(state, step, done):
+            return run_status._verdict_text({
+                "verdict": detach_mod.VERDICT_NO_RUN,
+                "run": {},
+                "state": state,
+                "progress": {
+                    "step": step, "models_total": 2, "models_done": done,
+                },
+            })
+
+        assert head("complete", "complete", 2).startswith("finished in foreground")
+        assert head("models_running", "fanout", 0).startswith("running in foreground")
+        assert "complete" in run_status.CHECKPOINT_TERMINAL_STEPS
+        skill_root = Path(caps.__file__).parent.parent
+        for src in (
+            "utils/review_orchestrator_base.py",
+            "ask_orchestrator.py",
+            "code_review_orchestrator.py",
+        ):
+            body = (skill_root / src).read_text(encoding="utf-8")
+            assert 'step="fanout"' in body, f"{src} no longer reports `fanout`"
+            assert '"progress": None' in body, (
+                f"{src} no longer drops the predecessor's `progress` in the "
+                "write that claims the dir"
+            )
+
+        sentence = caps.verb_sentence("claude-code", "detach")
+        for fragment, why in (
+            ("a table that *does* print can still be the previous run's",
+             "the sentence still treats any printed table as this run's roster"),
+            ("`finished in foreground (…)` rather than `running`",
+             "the sentence names no tense discriminator"),
+            ("`progress:` step that is not `fanout`",
+             "the sentence names no step discriminator"),
+            ("That step is the whole test",
+             "the sentence no longer says the step is the ONLY test. F-2026-"
+             "09-21: as an OR with the head line's tense it never accepted "
+             "this run's roster on a dir an earlier detached run had used, "
+             "because only `claim_run` drops a predecessor's `run` record"),
+            ("make that call again rather than relaying it",
+             "the sentence says what to notice and not what to do"),
+            ("Its absence claims nothing",
+             "the sentence still reads a missing `just finished:` line as "
+             "proof that nothing finished"),
+            ("copying its spec and state word out of",
+             "the sentence gives no fallback for a finish no line named"),
+            ("a copy, never a recount",
+             "the sentence does not reconcile the fallback with the counts "
+             "rule, so the two read as a contradiction"),
+            ("every poll compares its `models:` table",
+             "the comparison is conditional again; one model finishing in "
+             "the gap and a second during the wait share one "
+             "`just finished:` line that names only the second"),
+            ("names no verdict for this one",
+             "a `0` or a `3` reads as a verdict again on the one host where "
+             "no selector names this invocation"),
+            ("relay the rendered line exactly as on a `2`",
+             "the sentence tells the agent to relay NOTHING on a `0` or a "
+             "`3`, which drops every `progress:` line of a run whose phase "
+             "dir carries a predecessor's terminal record"),
+        ):
+            assert fragment in sentence, f"{why} (missing {fragment!r})"
+        for gone, why in (
+            ("rather than `running`, or under a `progress:` step",
+             "the roster test ORs the head line's tense back in"),
+            ("when the counts moved with no such line",
+             "the `models:` comparison is conditional again"),
+            ("belongs to an earlier run in the same dir and is relayed as "
+             "nothing",
+             "a poll whose exit code belongs to an earlier run relays "
+             "nothing again, which is the silence Layer 2 exists to remove"),
+        ):
+            assert gone not in sentence, why
+
+    def test_only_the_native_detach_sentence_names_a_call_timeout(self):
+        """The two `--detach` resolutions inherit `--host` from the launcher.
+
+        They also run their wait inside a shell command rather than a tool call,
+        so the per-call timeout rule is meaningless there — and a rule that does
+        not apply is a rule an agent has to decide about.
+        """
+        for value in ("python", "required"):
+            assert f"plus {caps.WAIT_CAP_MARGIN_S:.0f} s" not in caps._DETACH[value]
+            assert "--timeout" not in caps._DETACH[value]
+
+    def test_the_margin_is_one_constant_two_registers_and_no_typed_copy(self):
+        """F6, 2026-09-20: the margin was a literal in six places.
+
+        `run_status`'s comment said it was "named once here rather than twice so
+        the two cannot drift" — but `30` was typed into the constant, this verb
+        sentence, `SKILL.md`, `references/host-capabilities.md` and four
+        instruction cores, and the only test that looked pinned the *string*
+        `"plus 30 s"`. Moving the constant would have gone green with every
+        agent-read surface still on the old number.
+
+        Two registers, one owner. `status --wait` clamps a resolved deadline to
+        `ceiling - margin`; a Claude Code poll gives its tool call
+        `interval + margin`. The sentence interpolates the constant, so the two
+        generated copies (`SKILL.md` is byte-compared to it,
+        `references/host-capabilities.md` is generated from it) follow it; the
+        four hand-written cores are pinned against it in
+        `tests/test_instruction_portability.py`.
+        """
+        from utils import run_status
+
+        assert run_status.WAIT_CAP_MARGIN_S is caps.WAIT_CAP_MARGIN_S, (
+            "run_status re-exports the constant; it must not grow a second copy"
+        )
+        # Interpolated, not typed: raise the margin and the sentence moves.
+        rendered = caps._DETACH["native"].format(tool="run_in_background")
+        assert f"plus {caps.WAIT_CAP_MARGIN_S:.0f} s," in rendered
+        source = Path(caps.__file__).read_text(encoding="utf-8")
+        assert f"plus {caps.WAIT_CAP_MARGIN_S:.0f} s" not in source, (
+            "the *run detached* sentence types the margin out instead of "
+            "interpolating WAIT_CAP_MARGIN_S — which is how the number came to "
+            "stand in six places while the comment claimed it stood in one"
+        )
+
+    def test_the_native_call_timeout_names_its_unit(self):
+        """F-2026-09-21: "the interval plus 30 s" never said *in what*.
+
+        The per-call timeout is the one number in this sentence that is a tool
+        parameter rather than a flag, and on the only host the template renders
+        for that parameter is **milliseconds** — the Bash tool's `timeout`,
+        120000 by default and 600000 at the cap. An agent that read the seconds
+        and passed `330` got a 0.33 s call, killed before `status` could answer,
+        and rule 2 then told it to re-issue with the right call timeout: a spin,
+        not a poll loop. So the unit, one worked value and the value it is *not*
+        all have to be on the surface the agent reads, and both numbers are
+        derived from `WAIT_CAP_MARGIN_S` so a changed margin cannot leave a
+        stale example behind.
+        """
+        sentence = caps.verb_sentence("claude-code", "detach")
+        # The widest interval the same sentence offers, so the largest call
+        # timeout following it can ever ask for.
+        seconds = int(300 + caps.WAIT_CAP_MARGIN_S)
+        assert "milliseconds here" in sentence, (
+            "the native *run detached* sentence states a call timeout in "
+            "seconds without naming the unit its host's parameter takes; "
+            f"sentence: {sentence}"
+        )
+        for fragment in (f"{seconds * 1000} for a 300 s interval", f"not {seconds},"):
+            assert fragment in sentence, (
+                f"the worked call timeout lost {fragment!r} — the unit alone "
+                "still leaves the conversion to the agent"
+            )
+        # Following it can never name a value the host would clamp.
+        assert seconds <= caps.timeout_ceiling_s("claude-code"), (
+            "the sentence's own widest interval plus the margin now exceeds "
+            "this host's documented per-call ceiling"
+        )
+        # Derived, never typed: raise the margin and both numbers move with it.
+        source = Path(caps.__file__).read_text(encoding="utf-8")
+        for fragment in (f"{seconds * 1000} for a ", f"not {seconds},"):
+            assert fragment not in source, (
+                "the worked call timeout is typed out instead of derived from "
+                "WAIT_CAP_MARGIN_S, so the margin and its example can drift"
+            )
+        # The unit is host-specific; this template is keyed by the resolution.
+        native = [h for h in HOST_IDS if HOSTS[h]["detach"] == "native"]
+        assert native == ["claude-code"], (
+            f"{native} resolve *run detached* to `native` and share one "
+            "sentence that says the per-call timeout is in milliseconds — "
+            "true of claude-code's Bash tool, a guess about any other host. "
+            "Give the unit a slot before adding the host."
+        )
+
     def test_a_fourth_verb_is_a_keyerror(self):
         with pytest.raises(KeyError):
             caps.verb_sentence("claude-code", "run-tests")
@@ -873,6 +1134,84 @@ class TestCeilingUsesTheData:
         record = executor.effective_ceiling([])
         assert record["host_max_concurrent_subagents"] is None
         assert record["effective"] >= 1
+
+
+class TestTheForegroundCommandCeiling:
+    """``timeout_ceiling_s``, the second thing read off a host entry at runtime.
+
+    `capabilities.yaml`'s own "not on any agent read path" note names
+    `multi_llm.py` as a legitimate consumer, so `status --wait` resolving the
+    ceiling here — rather than a number being baked into a rendered surface — is
+    the indirection this module exists for.
+    """
+
+    @pytest.mark.parametrize("host_id", HOST_IDS)
+    def test_the_accessor_answers_the_entry(self, host_id):
+        assert caps.timeout_ceiling_s(host_id) == HOSTS[host_id]["timeout_ceiling_s"]
+
+    def test_zero_means_no_documented_cap_not_a_cap_of_zero(self):
+        """The falsy special case `host_install.timeout_note` and
+        `render_capabilities._timeout_cell` already make, restated where the
+        clamp reads it: codex ships `0`, and a caller that subtracted a margin
+        from it would clamp every codex poll to nothing."""
+        assert caps.timeout_ceiling_s("codex") == 0
+        host, ceiling = caps.tightest_timeout_ceiling()
+        assert host != "codex"
+        assert ceiling > 0
+
+    def test_the_tightest_ceiling_is_what_an_unrouted_command_clamps_against(self):
+        """Pinned to the literal pair the shipped file resolves to.
+
+        Re-deriving the minimum here would just restate the accessor's own body
+        and pass by construction, so the number is written out instead:
+        `opencode`'s documented 120s bash default is what an unrouted poll has
+        to fit inside today. A deliberate ceiling change in
+        `hosts/capabilities.yaml` is expected to update this literal -- and to
+        look at `status --wait`'s clamp while doing so.
+        """
+        assert caps.timeout_ceiling_s("opencode") == 120
+        assert caps.tightest_timeout_ceiling() == ("opencode", 120)
+
+    def test_a_tie_on_the_ceiling_is_broken_by_host_id(self, monkeypatch):
+        """Two hosts at the same lowest cap must resolve the same way twice.
+
+        The clamp is identical either way, but the *host* named in the message
+        is not, and a dict-order answer would flip whenever the file is
+        reordered. `claude-code` sorts before `opencode`, so it wins the tie
+        even though it is written second here.
+        """
+        document = {"hosts": {
+            "opencode": dict(HOSTS["opencode"], timeout_ceiling_s=120),
+            "claude-code": dict(HOSTS["claude-code"], timeout_ceiling_s=120),
+            "codex": dict(HOSTS["codex"], timeout_ceiling_s=600),
+        }}
+        monkeypatch.setattr(caps, "load", lambda base=None: document)
+        assert caps.tightest_timeout_ceiling() == ("claude-code", 120)
+
+    def test_a_file_where_nobody_declares_a_cap_clamps_nothing(self, monkeypatch):
+        """`None` is "do not clamp", which is the only honest answer when no
+        host declares a bound — not a clamp to zero."""
+        document = {"hosts": {
+            host_id: dict(HOSTS[host_id], timeout_ceiling_s=0)
+            for host_id in HOST_IDS
+        }}
+        monkeypatch.setattr(caps, "load", lambda base=None: document)
+        assert caps.tightest_timeout_ceiling() is None
+
+    def test_mutating_the_entry_moves_the_ceiling(self, fixture_tree, monkeypatch):
+        root, write = fixture_tree
+        document = yaml.safe_load(
+            (root / caps.CAPABILITIES_FILE).read_text(encoding="utf-8")
+        )
+        document["hosts"]["claude-code"]["timeout_ceiling_s"] = 45
+        write(document)
+        monkeypatch.setattr(caps, "load", lambda base=None: document)
+        assert caps.timeout_ceiling_s("claude-code") == 45
+        assert caps.tightest_timeout_ceiling() == ("claude-code", 45)
+
+    def test_an_unknown_host_is_exit_three_like_every_other_entry_read(self):
+        with pytest.raises(caps.UnknownHost):
+            caps.timeout_ceiling_s("not-a-host")
 
 
 # ===========================================================================

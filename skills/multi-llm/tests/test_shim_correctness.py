@@ -210,6 +210,99 @@ def test_no_shim_runs_next_verbatim_without_qualifying_exit_3():
         assert "on `3` stop" in collapsed
 
 
+def test_the_shared_poll_snippet_shows_a_copyable_command():
+    """`hosts/snippets/poll-loop.md`'s block is a command, not a sentence.
+
+    F8b, 2026-09-20: it read `--host <the host id baked into the dispatcher
+    command>` — eight words, seven spaces and a pair of angle brackets
+    *inside* a fenced bash block an agent is told to copy. A placeholder in a
+    copyable command has to be one token, so the substitution is obvious and
+    a paste that misses it fails loudly instead of running `--host the` with
+    seven stray positionals. The prose above the block is where the sentence
+    belongs, and that is where it went.
+
+    Held here rather than in the shim parametrization above because no
+    shipped shim carries this slot (the 100-line budget) — which is exactly
+    why it needs a guard of its own.
+    """
+    snippet = (
+        SKILL_ROOT / "hosts" / "snippets" / "poll-loop.md"
+    ).read_text(encoding="utf-8")
+    commands = [command for _, command in _command_units(snippet)]
+    assert commands, "the poll snippet shows no dispatcher command at all"
+    for command in commands:
+        for placeholder in re.findall(r"<[^>]*>", command):
+            assert " " not in placeholder, (
+                f"hosts/snippets/poll-loop.md puts a phrase inside a copyable "
+                f"command: {placeholder!r}\n  {command}"
+            )
+    assert "--host <host-id>" in snippet, (
+        "the poll snippet's command must still carry `--host`, which is what "
+        "bounds the wait; it is the one token an agent has to substitute"
+    )
+
+
+def test_the_shared_poll_snippet_names_the_roster_and_what_finished():
+    """2026-09-20: the same two gaps, in the snippet a `--detach` slot would carry.
+
+    **What this file is, stated exactly** (F-2026-09-20). It used to be called
+    "the snippet every `--detach` shim reads", and no shim reads it: the
+    `{{poll_loop}}` slot appears in no shipped template, so `install-host`
+    interpolates this text into nothing and its prose reaches no agent today.
+    It is the snippet such a slot *would* carry — kept correct and in sync
+    against the four instruction cores for the shim that eventually declares the
+    slot — and the assertion below pins that "no shipped template carries it",
+    so the day one does, this docstring is the thing that has to change.
+
+    The roster is stated as *that same call without* `--wait` rather than a
+    second fenced block: a snippet is charged to every rendered shim's line
+    budget, and a second copy of a command already on the page buys nothing but
+    a second place for it to drift. The relay rule gains `just finished:`, which
+    is what makes "nothing else from the view is relayed mid-run" a rule an
+    agent can follow and still say which model finished — and, since that line
+    cannot name a model that finished *between* two polls, the `models:` table
+    fallback that goes with it.
+    """
+    carriers = [
+        path.name for _, path in SHIMS
+        if "{{poll_loop}}" in path.read_text(encoding="utf-8")
+    ]
+    assert not carriers, (
+        f"{carriers} now carry the `{{{{poll_loop}}}}` slot, so this file is on "
+        "an agent read path for the first time: the docstring above says no "
+        "shipped template carries it, and the rendered-shim line budget has to "
+        "absorb the whole snippet"
+    )
+    snippet = (
+        SKILL_ROOT / "hosts" / "snippets" / "poll-loop.md"
+    ).read_text(encoding="utf-8")
+    for fragment in (
+        "once without `--wait`",
+        "`models:` table",
+        "which CLI and model each row runs",
+        "relay it once, never again",
+        "`just finished:` line",
+        # F-2026-09-20, both halves of the same overclaim: a printed table can
+        # be the PREVIOUS run's (the phase dir is re-used), and a missing
+        # `just finished:` line is not evidence that nothing finished.
+        "can still be the previous run's",
+        "step that is not `fanout`",
+        "Its absence claims nothing",
+        "copying its spec and state word out of the `models:` table",
+    ):
+        assert fragment in " ".join(snippet.split()), (
+            f"hosts/snippets/poll-loop.md lost {fragment!r}: the launch says a "
+            "fan-out began and the counts say how many are done, so without "
+            "these two the shim never names a model at either end"
+        )
+    commands = [command for _, command in _command_units(snippet)]
+    assert len(commands) == 1, (
+        f"the poll snippet shows {len(commands)} commands; the roster is the "
+        "same one without `--wait`, and a second copy is a second thing to keep "
+        "in sync inside every shim's line budget"
+    )
+
+
 @pytest.mark.parametrize("host_id,path", SHIMS, ids=SHIM_IDS)
 class TestShim:
     # -- verb resolution ------------------------------------------------
@@ -292,6 +385,138 @@ class TestShim:
                     f"is ask: {entry['ask']}"
                 )
 
+    def test_the_poll_command_carries_the_host_the_clamp_reads(
+        self, host_id, path
+    ):
+        """T8: `--host` on the poll is what bounds `--wait`, not decoration.
+
+        The resolved wait is clamped under ``timeout_ceiling_s`` for the host
+        *named on the command*; with no ``--host`` the clamp falls back to the
+        tightest non-zero ceiling in the capability file and silently shortens
+        every poll. The launcher's own printed command threads ``--host``
+        through (``detach.status_command_for``), so the shim's illustrative
+        block has to as well — an agent that copies the block instead of the
+        printed line must not get a different wait.
+
+        Skipped where *run detached* is the host's own background mechanism:
+        there the loop lives in the verb sentence, which has its own guard in
+        ``tests/test_host_capabilities.py``.
+        """
+        entry = caps.entry(host_id)
+        if entry["detach"] == "native":
+            return
+        rendered = _rendered(host_id, path)
+        polls = [
+            command
+            for _, command in _command_units(rendered)
+            if " status " in command and "--wait" in command
+        ]
+        assert polls, f"{path.name} shows no `status … --wait` poll command"
+        for command in polls:
+            assert f"--host {host_id}" in command, (
+                f"{path.name}'s poll command omits `--host {host_id}`, so its "
+                "wait is clamped against the tightest ceiling on record rather "
+                f"than this host's own:\n  {command}"
+            )
+        # F6, 2026-09-20: this assertion used to be `"progress.poll_s" in
+        # rendered` alone, while the message above it claimed the *number* was
+        # pinned. It was not: the shim's `(90 s)` could have gone stale against
+        # `PROGRESS_FALLBACKS["poll_s"]` — the value the dispatcher really
+        # resolves with no project config — and nothing would have gone red. The
+        # shim has to name the key AND the number the key ships with, because an
+        # agent budgeting a turn reads the number, not the key.
+        from utils.provider_registry import PROGRESS_FALLBACKS
+
+        poll_s = PROGRESS_FALLBACKS["poll_s"]
+        expected = f"`progress.poll_s` ({poll_s:g} s)"
+        assert expected in rendered, (
+            f"{path.name} never says what `--wait` resolves to, or names a "
+            f"different number than the dispatcher's own default. Expected "
+            f"{expected!r}. The duration is the dispatcher's resolved default, "
+            "not a flat literal, and the shim, `hosts/snippets/poll-loop.md` and "
+            "`provider_registry.PROGRESS_FALLBACKS` all name the same number or "
+            "it drifts."
+        )
+
+    def test_only_a_capped_host_promises_its_wait_is_clamped(self, host_id, path):
+        """F-2026-09-21: the codex shim said its wait was "clamped off `--host`".
+
+        ``run_status._wait_clamp_ceiling`` reads a declared
+        ``timeout_ceiling_s: 0`` as *do not clamp* — the documented "no
+        documented cap" value, which is exactly what codex ships — so on such a
+        host `--wait` runs the resolved ``progress.poll_s`` out in full and
+        nothing shortens it. The sentence is hand-written per template rather
+        than rendered from a slot, so the sibling shim's *correct* copy of it
+        (opencode declares 120 s) proves nothing about this one, and an agent
+        told its poll will come back early budgets the wrong turn.
+
+        Only the affirmative claim is barred: a shim may still say a clamp is
+        absent here, and a host that declares a real ceiling may promise one.
+        """
+        if caps.timeout_ceiling_s(host_id):
+            return
+        rendered = " ".join(_rendered(host_id, path).split())
+        claim = re.search(
+            r"[^.]*\bclamp(?:ed|s)?\s+(?:off|under|to|against|below)\b[^.]*",
+            rendered,
+        )
+        assert claim is None, (
+            f"{path.name} promises the wait is clamped, but host '{host_id}' "
+            f"declares timeout_ceiling_s: {caps.timeout_ceiling_s(host_id)!r}, "
+            "which `_wait_clamp_ceiling` reads as *do not clamp*:\n  "
+            f"{(claim.group(0).strip() if claim else '')}"
+        )
+
+    def test_the_shim_describes_the_printed_command_as_it_really_prints(
+        self, host_id, path
+    ):
+        """F-2026-09-20: "it carries `--run-id` and `--host`" was false here too.
+
+        Both `--detach` shims told the agent the launcher's printed poll command
+        carries a run id. ``detach.launch`` passes one only for an ``ask`` run
+        (``run_id=run_id if ask_slug else None``), so on the three review lanes
+        the flag is simply not on the line — and an agent told to expect it
+        either composes one or reports the wrong run. The same command now
+        appends ``--wait`` and deliberately no ``--timeout``.
+
+        Pinned against ``detach.status_command_for`` rather than against the
+        shim's own sentence: a grep for prose the same edit wrote proves only
+        that the prose is there.
+
+        Skipped where *run detached* is the host's own background mechanism —
+        nothing prints a command there, which is exactly why the ``native``
+        verb sentence spells ``--host`` out instead.
+        """
+        entry = caps.entry(host_id)
+        if entry["detach"] == "native":
+            return
+        from utils import detach
+
+        ask_cmd = detach.status_command_for(
+            "/p.md", phase="ask", run_id="R1", host=host_id
+        )
+        plain = detach.status_command_for(
+            "/p.md", phase="review-plan", run_id=None, host=host_id
+        )
+        assert "--run-id R1" in ask_cmd
+        assert "--run-id" not in plain
+        for command in (ask_cmd, plain):
+            assert "--wait" in command, command
+            assert "--timeout" not in command, command
+
+        rendered = " ".join(_rendered(host_id, path).split())
+        assert "carries `--run-id` and `--host`" not in rendered, (
+            f"{path.name} still claims the printed poll command always carries "
+            "`--run-id`; the launcher passes one only for an `ask` run"
+        )
+        assert "`--run-id` on an `ask` run" in rendered, (
+            f"{path.name} does not say which of the two flags is conditional"
+        )
+        assert "and `--wait` with no `--timeout`" in rendered, (
+            f"{path.name} does not say the printed command waits by itself, "
+            "which is what makes `progress.poll_s` the number it names"
+        )
+
     def test_an_installable_shim_bakes_the_unattended_default(self, host_id, path):
         """D6b: unattended is the default everywhere except the reference host."""
         entry = caps.entry(host_id)
@@ -342,6 +567,12 @@ class TestShim:
             "no-confirm", "consolidate", "skip-prerequisites", "review-tasks",
             "force-strategy", "human-task", "apply-fixes", "init",
             "apply-suggestions", "apply-task-suggestions",
+            # `status`' own flags. The poll loop is prose in every shim now — it
+            # names the wait, its duration and the selector that pins one run —
+            # so the flags that loop is written around are quoted outside a
+            # command block and reach this scan. All of them are real arguments
+            # on `utils/run_status.py`'s parser.
+            "wait", "timeout", "view", "run-id", "phase", "question", "abort",
         }
         for word in named - flags:
             assert mode_table.resolve(word) is not None, (

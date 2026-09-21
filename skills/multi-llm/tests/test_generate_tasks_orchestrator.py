@@ -58,6 +58,20 @@ Create `src/foundation.py`.
 Call it from `src/main.py`.
 """
 
+#: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
+#: enumerates them. A foreground run writes this object now (``report_progress``
+#: falls back to ``status_file.update_progress`` when no run handle owns the phase
+#: dir), so the foreground assertion below pins its *shape*: the keys a reader of
+#: the checkpoint is allowed to meet, and never a ``run`` object beside them.
+_RESERVED_PROGRESS_KEYS = {
+    "step", "batch_index", "batches_total", "tasks_done", "tasks_total",
+    "failed_task_ids", "models", "models_done", "models_succeeded",
+    "models_total", "interval_s",
+    # Written straight through ``update_status`` by the two executor mirrors,
+    # so they already reach a foreground checkpoint.
+    "subagents", "write_subagents", "sandbox_bypassed",
+}
+
 RESULT_NAME = gto.RESULT_NAME
 TASK_FILE_NAME = gto.TASK_FILE_NAME
 
@@ -807,9 +821,19 @@ class TestTheHostIsToldWhatWasProduced:
         assert progress.get("tasks_total") == 2
         assert progress.get("tasks_done") == 2
 
-    def test_a_foreground_run_still_records_nothing(self, tmp_path, capsys):
-        """No handle, no new keys — "with `--detach` unset, behavior is
-        unchanged" stays literally true."""
+    def test_a_foreground_run_records_progress_and_no_run(self, tmp_path, capsys):
+        """The two halves of the same checkpoint now disagree, on purpose.
+
+        ``record_output_files`` keeps its handle guard — artifacts are the
+        *detached* hand-back, and a foreground host reads them off
+        ``MULTI_LLM_RESULT.artifacts`` (the sibling class below pins that) — so
+        ``output_files`` stays absent. ``report_progress`` grew a foreground
+        write path, so ``progress`` is present and carries this phase's real
+        task counts. What survives of "with `--detach` unset, behavior is
+        unchanged" is the narrower invariant: a foreground ``.status.json``
+        gains a ``progress`` object and still **no `run` object**, because only
+        a detached worker's ``claim_run`` writes process state.
+        """
         from utils import status_file
 
         plan = _plan(tmp_path)
@@ -819,7 +843,17 @@ class TestTheHostIsToldWhatWasProduced:
         capsys.readouterr()
         status = status_file.read_status(str(_phase_dir(plan)))
         assert "output_files" not in status
-        assert "tasks_total" not in (status.get("progress") or {})
+        progress = status.get("progress") or {}
+        assert progress.get("step") == "complete"
+        assert progress.get("tasks_total") == 2
+        assert progress.get("tasks_done") == 2
+        # Only keys the reserved object documents: a foreground checkpoint is
+        # not a place for a writer to invent one.
+        assert set(progress) <= _RESERVED_PROGRESS_KEYS, progress
+        assert "run" not in status, (
+            "a foreground run claims no run; `progress` is the only reserved "
+            "object it writes"
+        )
 
 
 class TestAForegroundRunNamesItsArtifactsOnTheResultLine:

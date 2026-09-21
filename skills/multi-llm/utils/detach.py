@@ -62,6 +62,7 @@ from .cli_common import (
     modes_table,
     record_artifact,
     record_next,
+    record_progress_lines,
     replay_flags,
     skill_dir,
 )
@@ -519,17 +520,61 @@ TERMINAL_VERDICTS = (VERDICT_DONE, VERDICT_FAILED, VERDICT_ABORTED)
 
 
 def _elapsed_since(stamp: Any, now: Optional[float] = None) -> Optional[float]:
-    """Seconds since an ISO timestamp, or ``None`` when it is absent/unreadable."""
+    """Seconds since an ISO timestamp, or ``None`` when it is absent/unreadable.
+
+    The one ISO reader for the whole checkpoint (``heartbeat_at``,
+    ``started_at``, ``dispatched_at``, and every ``progress.models`` row), so its
+    failure modes are ``status``'s failure modes.
+
+    **A timezone-aware stamp is one of them** (F4, 2026-09-20). Every writer here
+    is ``status_file.now_iso`` → ``datetime.now().isoformat()``, which is naive,
+    but a hand-edited or foreign file is exactly what ``read_status``'s contract
+    says must not make ``status`` crash — and
+    ``datetime.fromisoformat("2026-09-19T10:14:03Z")`` parses to an *aware*
+    datetime on 3.11+ (that ``Z`` form is the schema example in the plan, and
+    what the JS tests emit), after which ``datetime.now() - when`` raises
+    ``TypeError``, not the ``ValueError`` this only used to catch. One aware
+    ``started_at`` anywhere in the map therefore took down the whole command.
+    Normalised rather than refused, because a stamp we *can* read is worth an
+    honest elapsed: an aware stamp is converted to this machine's local wall
+    clock, the same clock the naive stamps are already on.
+    """
+    from datetime import datetime
+
+    when = _parse_stamp(stamp)
+    if when is None:
+        return None
+    try:
+        reference = datetime.now() if now is None else datetime.fromtimestamp(now)
+        return max((reference - when).total_seconds(), 0.0)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _parse_stamp(stamp: Any) -> Optional[Any]:
+    """An ISO stamp as a naive local ``datetime.datetime``, or ``None`` if unreadable.
+
+    The parsing half of :func:`_elapsed_since`, split out (2026-09-21) for the
+    one stamp the checkpoint carries that lies in the *future*:
+    ``progress.models[*].stagger_until``, which
+    ``progress_tracker.entry_stagger_remaining_s`` reads as a countdown rather
+    than an age. ``_elapsed_since`` clamps at zero, so a future stamp through it
+    reads ``0`` — honest for an age, useless for a countdown — and a second
+    ``fromisoformat`` call site would be a second place to forget the aware-stamp
+    normalisation F4 was about. Same failure modes, same answer: anything that
+    does not parse is ``None``, never a raise.
+    """
     from datetime import datetime
 
     if not stamp:
         return None
     try:
         when = datetime.fromisoformat(str(stamp))
-    except ValueError:
+        if when.tzinfo is not None:
+            when = when.astimezone().replace(tzinfo=None)
+    except (ValueError, TypeError, OverflowError, OSError):
         return None
-    reference = datetime.now() if now is None else datetime.fromtimestamp(now)
-    return max((reference - when).total_seconds(), 0.0)
+    return when
 
 
 def heartbeat_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
@@ -570,6 +615,18 @@ def classify_run(
     """
     status = status_file.read_status(phase_dir)
     run = status.get("run") if isinstance(status.get("run"), dict) else {}
+    # Coerced here, once, the same way `run` is on the line above: a truncated or
+    # hand-edited checkpoint whose `progress` is a list or a string is *truthy*,
+    # so `status.get("progress") or {}` let it straight through into the view and
+    # every reader that spells the same idiom — `_checkpoint_in_flight`,
+    # `_verdict_text`, `_model_table_lines`, `_terminal_fingerprints` — called
+    # `.get` on it and raised `AttributeError`. A poll that ends in a traceback
+    # and exit 1 is what rule 2 reads as "the run is unreadable", which is a much
+    # larger claim than "this one key is malformed". Same rule the per-model rows
+    # already follow: an entry that is not a mapping is not trusted.
+    progress = status.get("progress")
+    if not isinstance(progress, dict):
+        progress = {}
     view: Dict[str, Any] = {
         "phase_dir": str(phase_dir),
         "phase": status.get("phase"),
@@ -577,7 +634,7 @@ def classify_run(
         "state": status.get("state"),
         "updated_at": status.get("updated_at"),
         "output_files": status.get("output_files") or {},
-        "progress": status.get("progress") or {},
+        "progress": progress,
         # Optional, and absent on every phase that has nothing to recommend:
         # `{valid_groups, threshold, command}`, written by the review base's
         # `[CONSOLIDATION_RECOMMENDED]` site. A detached run's caller never saw
@@ -689,6 +746,92 @@ def classify_run(
     return view
 
 
+#: ``full``'s mode word — the one mode whose handle does not own the directories
+#: its progress lands in. It claims ``{plan}/full/`` for its lock, log and ``run``
+#: record and then calls each phase's ``main()`` in process, where every tracker
+#: is built for ``{plan}/<phase>/`` and writes there through the foreign-dir
+#: branch of :func:`report_progress` (F3, 2026-09-20).
+FULL_MODE = "full"
+
+
+def _sibling_phase_dirs(phase_dir: str) -> List[str]:
+    """Every *other* directory beside *phase_dir* that carries a checkpoint.
+
+    Read-only and best-effort: a plan's output dir holds one directory per phase
+    and nothing else, so this is the phase dirs of the same plan minus the one
+    the caller owns. Anything without a ``.status.json`` cannot hold a map and is
+    skipped before it is ever opened.
+    """
+    directory = os.path.abspath(str(phase_dir))
+    parent = os.path.dirname(directory)
+    found: List[str] = []
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        return found
+    for name in names:
+        candidate = os.path.join(parent, name)
+        if candidate == directory or not os.path.isdir(candidate):
+            continue
+        if os.path.exists(status_file.status_path(candidate)):
+            found.append(candidate)
+    return found
+
+
+def _retire_driven_phase_maps(
+    phase_dir: str, mode: Optional[str], *, reason: Optional[str] = None
+) -> int:
+    """Retire the maps left live in the phase dirs a ``full`` run drove.
+
+    "Whoever records the ending retires the map" (F1, 2026-09-20) reads the
+    ending's own dir, which is right for every mode but one. ``full`` records its
+    ending in ``{plan}/full/`` — a directory that holds no ``progress.models`` at
+    all — while the phase that was actually fanning out when the run was aborted
+    or died wrote its map into ``{plan}/<phase>/``. Those rows carry no ``run``
+    record of their own, so nothing else will ever retire them: the table went on
+    reading ``codex:gpt-5.6-sol  running  30m00s/30m``, the dir went on reporting
+    ``running in foreground (…)``, and ``_checkpoint_in_flight`` stayed ``True``
+    on every later poll — on the longest-running mode the tool has.
+
+    A sibling carrying a **live ``run`` record of its own** is skipped. That is an
+    independently detached phase run, not one this handle drove, and retiring it
+    would mark a live run's slots ``cancelled`` — exactly what the compare-and-set
+    in the callers prevents for their own dir.
+
+    Called **after** the caller has released its own ``checkpoint_lock``, never
+    inside it, and that is deliberate. :func:`progress_tracker.retire_live_entries`
+    takes the *sibling's* lock, and holding two phase dirs' interprocess mutexes
+    at once would introduce a lock order nothing else in this file has — two
+    processes taking them in opposite orders would each wait out
+    ``FileMutex``'s bounded timeout and then write unserialized, which is worse
+    than not nesting. Nothing is given up by waiting: the caller's lock guards
+    the caller's checkpoint and says nothing about a sibling's, so this
+    retirement is no more atomic with the ``run`` write inside that section than
+    outside it. The successor guard above is what covers the window instead.
+
+    Returns how many dirs were rewritten. Never raises.
+    """
+    if str(mode or "") != FULL_MODE:
+        return 0
+    from . import progress_tracker
+
+    swept = 0
+    for sibling in _sibling_phase_dirs(phase_dir):
+        try:
+            other = status_file.read_run(sibling)
+            if other.get("run_id") and other.get("state") not in TERMINAL_RUN_STATES:
+                continue
+            if reason is None:
+                changed = progress_tracker.retire_live_entries(sibling)
+            else:
+                changed = progress_tracker.retire_live_entries(sibling, reason=reason)
+        except Exception:  # noqa: BLE001 - a close-out never raises
+            continue
+        if changed:
+            swept += 1
+    return swept
+
+
 def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> bool:
     """Write the terminal record for a run whose process is gone.
 
@@ -717,18 +860,44 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
             )
         except Exception:
             pass
-    wrote = status_file.update_run(
-        phase_dir,
-        {
-            "state": RUN_STATE_FAILED,
-            "exit_code": None,      # no exit status was ever observed
-            "error": reason,
-            "closed_out_at": status_file.now_iso(),
-        },
-        expect_run_id=str(run_id),
-        quiet=True,
-    )
+    with status_file.checkpoint_lock(phase_dir):
+        wrote = status_file.update_run(
+            phase_dir,
+            {
+                "state": RUN_STATE_FAILED,
+                "exit_code": None,      # no exit status was ever observed
+                "error": reason,
+                "closed_out_at": status_file.now_iso(),
+            },
+            expect_run_id=str(run_id),
+            quiet=True,
+        )
+        if wrote:
+            # The worker died without running its own close-out, so nothing swept
+            # its per-model map either: without this the table goes on reading
+            # `codex:gpt-5.6-sol  running  30m00s/30m` under `run.state: failed`,
+            # forever. Same rule as `RunHandle.finish` — whoever records the ending
+            # retires the map, and only on a compare-and-set that was accepted
+            # (F1, 2026-09-20) — and, as there, both writes sit inside **one**
+            # `checkpoint_lock` section. Releasing it between them would leave a
+            # window for a successor to claim the dir and seed its own map, and
+            # the retirement checks no run id of its own: it would close out the
+            # live run's slots as `cancelled`.
+            #
+            # `reason` is forwarded rather than left at `CANCELLED_ERROR`: this
+            # leg is reached for `heartbeat_timeout` and `worker_never_started`
+            # as well as an abort, it is already the word recorded on the `run`
+            # record two lines up, and a table reading `failed: cancelled` under
+            # `run.error: heartbeat_timeout` tells the two halves of one
+            # checkpoint two different stories about the same ending.
+            from . import progress_tracker
+
+            progress_tracker.retire_live_entries(phase_dir, reason=reason)
     if wrote:
+        # `full` records its ending here but fills no map here; the maps it
+        # drove are one directory over. Outside the lock above on purpose — see
+        # `_retire_driven_phase_maps`.
+        _retire_driven_phase_maps(phase_dir, run.get("mode"), reason=reason)
         holder = process_control.read_lock_holder(lock_path(phase_dir))
         if holder is None or holder.get("run_id") == run_id:
             process_control.break_lock(lock_path(phase_dir))
@@ -769,17 +938,36 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
         start_time=None if force else run.get("process_start_time"),
         pgid=int(run["pgid"]) if run.get("pgid") else None,
     )
-    wrote = status_file.update_run(
-        phase_dir,
-        {
-            "state": RUN_STATE_ABORTED,
-            "exit_code": EXIT_NEEDS_HUMAN,
-            "error": "aborted_by_request",
-            "closed_out_at": status_file.now_iso(),
-        },
-        expect_run_id=run_id,
-        quiet=True,
-    )
+    with status_file.checkpoint_lock(phase_dir):
+        wrote = status_file.update_run(
+            phase_dir,
+            {
+                "state": RUN_STATE_ABORTED,
+                "exit_code": EXIT_NEEDS_HUMAN,
+                "error": "aborted_by_request",
+                "closed_out_at": status_file.now_iso(),
+            },
+            expect_run_id=run_id,
+            quiet=True,
+        )
+        if wrote:
+            # The worker's own handler retires the map when SIGTERM reaches it, but
+            # this leg exists precisely for the workers that never got there: one
+            # that outlived the 10 s window and took the SIGKILL, which catches
+            # nothing and runs no `finally`. Whoever records the ending retires the
+            # map (F1, 2026-09-20); the retirement is idempotent, so the overlap
+            # with the handler's own costs a no-op read. Held under the *same*
+            # `checkpoint_lock` as the record above, as in `RunHandle.finish`: the
+            # retirement compares no run id, so a successor that claimed the dir in
+            # a gap here would have its freshly seeded rows marked `cancelled`.
+            from . import progress_tracker
+
+            progress_tracker.retire_live_entries(phase_dir)
+    if wrote:
+        # Same blind spot as `close_out_dead_run`: a `full` run's maps live in
+        # the phase dirs it drove, not in the dir it claimed. Outside the lock
+        # above on purpose — see `_retire_driven_phase_maps`.
+        _retire_driven_phase_maps(phase_dir, run.get("mode"))
     holder = process_control.read_lock_holder(lock_path(phase_dir))
     if holder is None or holder.get("run_id") == run_id:
         process_control.break_lock(lock_path(phase_dir))
@@ -940,6 +1128,15 @@ class RunHandle:
                 "log_path": self.log_path,
             },
         )
+        # Imported *before* the handler is installed, never by it: `finish()`
+        # retires the per-model map on the `--abort` path (F1, 2026-09-20), and
+        # a first import executed inside a signal handler takes the import lock
+        # the interrupted main thread may already be holding. Warming it here
+        # turns that into a `sys.modules` hit. Kept lazy at module level for the
+        # reason the whole file is: `status` must stay a sub-second command and
+        # nothing on its path needs the tracker.
+        from . import progress_tracker  # noqa: F401  (warm-up, see above)
+
         process_control.install_worker_signal_handlers(self._on_signal)
         atexit.register(self._atexit)
         self._beat = threading.Thread(
@@ -1059,7 +1256,36 @@ class RunHandle:
         state: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
-        """Record the terminal state. Idempotent; the first call wins."""
+        """Record the terminal state, and retire whatever the run left live.
+
+        Idempotent; the first call wins.
+
+        **The per-model map is closed out here, not by a sweep** (F1,
+        2026-09-20). On every other ending the fan-out's own ``finally`` (or the
+        ticker's) retires the map before this is reached, and this finds nothing
+        left to do. ``--abort`` is the ending that runs no such code: the signal
+        handler calls this and then ``os._exit(3)``, which executes no
+        ``finally``, cancels no task and gives the ticker no teardown — so
+        without the retirement below the checkpoint kept ``run.state: aborted``
+        beside rows still reading ``running``/``staggering``/``queued`` and a
+        ``models_done`` frozen mid-count, and a poll rendered
+        ``codex:gpt-5.6-sol  running  30m00s/30m`` under a run that was over.
+        This function is the only code on that path, so this is the only place
+        it can go.
+
+        Both writes sit in **one** :func:`status_file.checkpoint_lock` section,
+        reentrant with the ones ``update_run`` and ``update_progress`` take for
+        themselves, so no poller can catch a terminal ``run`` record beside a
+        table that still says ``running``. The map is retired *on disk*
+        (``progress_tracker.retire_live_entries``) rather than through a live
+        tracker: this runs inside a signal handler, where the interrupted frame
+        may be halfway through mutating one, and a ``full`` run has one tracker
+        per phase anyway.
+
+        Only a **non-normal** close-out retires: a ``done`` run really did finish
+        its slots, and rewriting its map from here could only overwrite honest
+        endings with ``cancelled``.
+        """
         global _ACTIVE
         if self._closed:
             return
@@ -1069,18 +1295,37 @@ class RunHandle:
             state = state_for_exit(exit_code)
         if error is None and exit_code == EXIT_NEEDS_HUMAN and state == RUN_STATE_FAILED:
             error = "needs_human (exit 3)"
-        status_file.update_run(
-            self.phase_dir,
-            {
-                "state": state,
-                "exit_code": exit_code,
-                "error": error,
-                "heartbeat_at": status_file.now_iso(),
-                "finished_at": status_file.now_iso(),
-            },
-            expect_run_id=self.run_id,
-            quiet=True,
-        )
+        with status_file.checkpoint_lock(self.phase_dir):
+            recorded = status_file.update_run(
+                self.phase_dir,
+                {
+                    "state": state,
+                    "exit_code": exit_code,
+                    "error": error,
+                    "heartbeat_at": status_file.now_iso(),
+                    "finished_at": status_file.now_iso(),
+                },
+                expect_run_id=self.run_id,
+                quiet=True,
+            )
+            # Gated on the compare-and-set, not just on the state: a refused
+            # write means this dir was closed out under us or taken over by a
+            # *successor* run, whose `claim_run` dropped our `progress` and
+            # seeded its own map — retiring that would mark a live run's slots
+            # `cancelled`. Whoever recorded the ending owns the retirement, which
+            # is why `close_out_dead_run` and `abort_run` carry the same pair.
+            if recorded and state != RUN_STATE_DONE:
+                # Warmed at `start()` so this cannot be the import that runs
+                # under a signal; a no-op lookup in `sys.modules` by now.
+                from . import progress_tracker
+
+                progress_tracker.retire_live_entries(self.phase_dir)
+        if recorded and state != RUN_STATE_DONE:
+            # And the dirs this run drove but does not own. `full` is the only
+            # mode where those differ from `self.phase_dir`, and it is the one
+            # where the line above sweeps a directory that holds no map at all.
+            # Outside the lock above on purpose — see `_retire_driven_phase_maps`.
+            _retire_driven_phase_maps(self.phase_dir, self.mode)
         run_registry.remove_entry(self.project_root, self.run_id)
         self._lock.release()
         if _ACTIVE is self:
@@ -1102,6 +1347,14 @@ class RunHandle:
         )
 
     def _on_signal(self, signum: int) -> None:
+        # `os._exit` is deliberate — a run being aborted must not run another
+        # phase's `atexit`, and the process group has already been signalled —
+        # but it is also why everything this ending owes the checkpoint has to
+        # happen *inside* `finish()`: no `finally` below this frame will run, no
+        # task is cancelled, and neither the fan-out's sweep nor the ticker's
+        # teardown is ever reached. `finish()` retires the per-model map for
+        # exactly that reason (F1, 2026-09-20); nothing may be added here that
+        # expects to run after it.
         name = _signal_name(signum)
         print(f"\nReceived {name}: aborting this detached run.", file=sys.stderr)
         self.finish(
@@ -1143,13 +1396,67 @@ def finish_active_run(
 
 
 def report_progress(phase_dir: str, **updates: Any) -> None:
-    """Record ``progress`` — but only for a detached run.
+    """Merge *updates* into this phase's reserved ``progress`` object — on every
+    run, foreground or detached.
 
-    A foreground run's ``.status.json`` gains no new keys, which is what keeps
-    "with ``--detach`` unset, behavior is unchanged" literally true.
+    The invariant narrowed when the foreground path landed: "a foreground run's
+    ``.status.json`` gains no new keys" became **"a foreground ``.status.json``
+    gains a ``progress`` object and still no ``run`` object"**. That is the whole
+    of the change a reader has to hold. ``progress`` is display-only — nothing
+    resumes, reaggregates or branches on it — while ``run`` is the *process*
+    machine, and only a detached worker's ``claim_run`` ever writes it. So "with
+    ``--detach`` unset, behavior is unchanged" still holds everywhere a reader
+    actually decides something, and a foreground run stops being a phase dir that
+    reports nothing for the length of a fan-out.
+
+    The handle decides **which door** the write goes through, never *whether* it
+    happens. Three cases, and the last one is the non-obvious half:
+
+    * **No handle** (``_ACTIVE is None``) — the foreground, and also a Claude Code
+      native-background run, which is a foreground run inside a background Bash.
+      Write straight through :func:`status_file.update_progress`. That is the
+      entire foreground path, and it deliberately lands under the *same* reserved
+      object in the *same* shape a detached run writes, so one renderer serves
+      both and no second file is invented for the foreground.
+    * **The handle owns this phase dir** — through ``handle.progress``, so a
+      detached worker keeps one door onto its own checkpoint and anything that
+      later has to travel with a run (the heartbeat stamp, the run_id
+      compare-and-set) has a single place to attach.
+    * **A handle owned by a *different* phase dir** — written **directly, into
+      the dir the caller named** (F3, 2026-09-20). This branch used to drop the
+      write silently, and the stated reason — "one run's ticker would scribble
+      into another run's map" — conflated two directories that are never the
+      same one: a tracker writes to the dir it was *built for* and has no way to
+      address the handle's, so no scribbling was ever possible. What the drop
+      really cost was ``full --detach``, which claims ``{plan}/full/`` and then
+      calls each phase's ``main()`` in process while every phase tracker targets
+      ``{plan}/<phase>/``: **every** progress write of the longest-running mode
+      the tool has was discarded, silently, so the log filled with ``[PROGRESS]``
+      lines while ``status --phase review-plan`` showed no map, no counters and
+      no step at all. What the handle legitimately guards is its own record —
+      the heartbeat stamp and the ``run_id`` compare-and-set — which is why a
+      foreign dir goes through ``update_progress`` rather than ``handle.progress``
+      and why ``record_output_files``/``record_resolution`` keep the guard
+      wholesale: those really are the detached hand-back.
+
+    All three branches end in ``status_file.update_status`` under
+    ``checkpoint_lock`` — the critical section that already serializes the 10 s
+    heartbeat thread against the orchestrator's main-thread phase transitions — so
+    the new foreground writer adds no race. ``progress`` merges key by key at its
+    top level, so a write here never erases a sibling another site wrote
+    (``step``, ``sandbox_bypassed``, the ``subagents`` / ``write_subagents``
+    executor mirrors). The merge is one level *deep* only: a nested value such as
+    the per-model ``models`` map is a single key, and a write carrying it replaces
+    the stored map wholesale rather than deep-merging into it.
     """
     handle = _ACTIVE
-    if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(str(phase_dir)):
+    # No handle, or a handle that owns some *other* dir: the same direct write,
+    # into the dir the caller named. The only thing the handle adds is its own
+    # record's heartbeat stamp, and that belongs to its own dir alone.
+    if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(
+        str(phase_dir)
+    ):
+        status_file.update_progress(str(phase_dir), updates)
         return
     handle.progress(**updates)
 
@@ -1275,6 +1582,17 @@ def status_command_for(
         args += ["--run-id", run_id]
     if host:
         args += ["--host", host]
+    # `--wait` with no `--timeout`, which resolves to `progress.poll_s` and is
+    # then clamped under the `--host` above. This command is what four
+    # instruction cores tell an agent to poll *instead of composing one*, and
+    # they describe it as waiting — it did not (F2, 2026-09-20). Without the
+    # flag each poll is a 0.13 s file read, so the turn loop spins at the
+    # host's own pace rather than the run's, the announced "I will check back
+    # in ~90 s" is a gap nobody waits, and `just finished:` can never print
+    # here at all: only a wait spans the two readings that line is a
+    # difference between. The clamp is why no `--timeout` is baked in — a
+    # number chosen here could not know the reader's shell cap.
+    args.append("--wait")
     return dispatcher_command("status", *args)
 
 
@@ -1532,7 +1850,55 @@ def launch(
     record_artifact(log)
     record_artifact(status_file.status_path(phase_dir))
     record_next(status_cmd)
+    # The roster, on the first result line a supervising host can read.
+    #
+    # `progress_lines` is otherwise `status`'s key, rendered from
+    # `progress.models` — which nothing has written at this instant, because the
+    # worker seeds that map a moment from now. The launcher does not need it:
+    # it is the process that *resolved the selection*, and it has already
+    # refused this very launch if none of those specs had a CLI, so the roster
+    # is knowable here without a map. `roster_line_for_specs` renders it through
+    # the same budget resolution `seed()` uses, so the two processes emit one
+    # sentence rather than two spellings of it.
+    #
+    # Why here rather than one poll later. On the OpenCode package route the
+    # launch's result is the first thing `execute` can relay, the next relay is
+    # a whole `--wait` away (~83 s, the host cap less a margin), and the
+    # *terminal* poll is deliberately never relayed — so a run that went
+    # terminal inside that first wait announced its line-up nowhere at all, and
+    # every other run announced it a poll late, against a requirement that says
+    # a fan-out names its models when it starts. Nothing changes on the JS side:
+    # that route's launch seam already reads `result.progress_lines`, and its
+    # per-call "shown once" memory drops the identical line the first poll
+    # brings behind it.
+    #
+    # A launch with no fan-out — a `--reaggregate` branch, `generate-tasks`, the
+    # write phases — renders "" here, and `set_progress_lines` drops an empty
+    # entry, so an invocation with nothing to say grows no key.
+    record_progress_lines([_launch_roster(model_specs, plan_file, args)])
     return EXIT_OK
+
+
+def _launch_roster(
+    model_specs: Optional[Sequence[str]], plan_file: str, args: Any
+) -> str:
+    """This launch's roster line, or ``""`` — never an exception.
+
+    Imported lazily like every other `progress_tracker` reach from this module,
+    and wrapped, because the line is narration: a banner that has already been
+    printed for a worker that is already running must not turn into a traceback
+    over a config read. The anchor is the plan (§9.3.c) and the override is the
+    run's own `--timeout`, which is exactly what the tracker will be constructed
+    with on the other side of the fork.
+    """
+    try:
+        from . import progress_tracker
+
+        return progress_tracker.roster_line_for_specs(
+            model_specs, anchor=plan_file, timeout=getattr(args, "timeout", None)
+        )
+    except Exception:  # noqa: BLE001 - narration never fails a launch
+        return ""
 
 
 def _snapshot_question_file(argv: Sequence[str], phase_dir: str) -> List[str]:

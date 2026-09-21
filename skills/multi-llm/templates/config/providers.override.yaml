@@ -345,6 +345,23 @@
 #       - '**/.npmrc'
 #       - '**/node_modules/**'
 
+## --- progress ---------------------------------------------------------------
+## How often a running fan-out says it is still alive. TWO knobs, because one
+## interval cannot serve two cadences: `interval_s` is the `[PROGRESS]` ticker's
+## stdout cadence (priced in log readability — a print and nothing else),
+## while `poll_s` is the host's poll cadence and the resolved `--wait` default
+## (priced in TOOL TURNS, one per poll). The run's `.status.json` is a third
+## cadence and is deliberately not configurable.
+## NOT written by `--init`: uncomment a line to override it. `interval_s: 0` is
+## the documented disable form — it silences the ticker LINES only, and the
+## status file still records every transition. `poll_s` has no disable form (`0`
+## is rejected) and is clamped under the host's shell cap. `progress:` is a
+## CLOSED key set: an unknown key is REJECTED at load time rather than silently
+## keeping the shipped cadence.
+# progress:
+#   interval_s: 30
+#   poll_s: 90
+
 
 ## --- defaults ---------------------------------------------------------------
 defaults:

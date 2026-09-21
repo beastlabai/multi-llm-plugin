@@ -1457,6 +1457,253 @@ class TestFailFastVsPermissive:
 
 
 @pytest.mark.config_override
+class TestProgressBlockValidation:
+    """`progress:` is a CLOSED key set, validated at load on OVERRIDE layers only.
+
+    Driven through a project-local layer rather than through
+    `validate_progress_block` directly, because the thing under test is the wiring
+    as much as the rules: a `progress_overridden` flag that only noticed the env
+    file would leave every project override unchecked, and the rejection has to
+    happen at `load_config` — not lazily in an accessor, where `interval_s` is
+    first read after a fan-out has already launched its models and `poll_s` is
+    first read inside the agent's `status --wait` poll loop.
+    """
+
+    @staticmethod
+    def _override(monkeypatch, tmp_path, body):
+        """Write ``body`` as the project layer and point discovery at it."""
+        override = _write_yaml(tmp_path / ".multi-llm" / "providers.yaml", body)
+        _set_project_config(monkeypatch, override)
+        return override
+
+    @pytest.fixture
+    def reg_with_base_progress(self, monkeypatch):
+        """``reg``, but with a base that CARRIES ``progress:`` — as the shipped one does.
+
+        The rejection table has to run against this rather than against the bare
+        ``FIXED_BASE``, or it passes for the wrong reason. ``_deep_merge`` skips
+        an override value of ``None`` (blank keeps base), so the two bases give
+        genuinely different merge shapes: against a base that already has the
+        block a project-layer ``progress:`` *merges into* it, which is what a
+        real config does; against a base with no ``progress:`` key the override
+        *replaces* wholesale, and a row whose only fault is a blanked key would
+        raise for a reason no real config can reproduce.
+        """
+        shipped = registry._load_base_config().get("progress")
+        assert isinstance(shipped, dict), (
+            "the shipped providers.yaml must carry a `progress:` block — this "
+            "table's whole point is to merge onto one"
+        )
+        base = copy.deepcopy(FIXED_BASE)
+        # The shipped cadence, spelled out rather than copied from the live base
+        # so the expectations below stay stable if those numbers are ever retuned.
+        base["progress"] = {"interval_s": 30, "poll_s": 90}
+        monkeypatch.setattr(registry, "_load_base_config", lambda: copy.deepcopy(base))
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        _reset_cache()
+        yield registry
+        _reset_cache()
+
+    @pytest.mark.parametrize(
+        "body, fragments",
+        [
+            # Floor rejections. `interval_s` names its disable form in the
+            # message, because 0 being legal here and illegal for `poll_s` is the
+            # asymmetry a user is most likely to have guessed wrong.
+            (
+                "progress:\n  interval_s: -1\n",
+                ["progress.interval_s is -1 —", "disable form"],
+            ),
+            (
+                "progress:\n  interval_s: 3\n",
+                ["progress.interval_s is 3 —", "at least 5 seconds"],
+            ),
+            # Type rejections. Each of these is a value YAML actually produces,
+            # and each must fail on the TYPE check ("finite"), not on the floor:
+            # a quoted scalar would otherwise blow up inside the ticker, `true`
+            # is an int in Python and would read as a 1 s ticker, `.nan` would be
+            # rejected with a message about a floor rather than about a nonsense
+            # value, and `.inf` would sail straight through a floor check.
+            (
+                'progress:\n  interval_s: "30"\n',
+                ["progress.interval_s is '30' —", "finite number of seconds"],
+            ),
+            (
+                "progress:\n  interval_s: true\n",
+                ["progress.interval_s is True —", "finite number of seconds"],
+            ),
+            (
+                "progress:\n  interval_s: .nan\n",
+                ["progress.interval_s is nan —", "finite number of seconds"],
+            ),
+            (
+                "progress:\n  poll_s: .inf\n",
+                ["progress.poll_s is inf —", "finite number of seconds"],
+            ),
+            # An integer too large to convert to a float. PyYAML resolves a
+            # bare digit string of any length to a Python `int`, and
+            # `math.isfinite(10**400)` RAISES OverflowError rather than
+            # returning False — so without the guard this escaped `load_config`
+            # as an uncaught OverflowError instead of the documented ConfigError.
+            (
+                f"progress:\n  poll_s: {10 ** 400}\n",
+                [f"progress.poll_s is {10 ** 400} —", "finite number of seconds"],
+            ),
+            # `poll_s: 0` is NOT a disable form: a poll of zero returns instantly
+            # rather than being switched off, so the floor rejects it.
+            (
+                "progress:\n  poll_s: 0\n",
+                ["progress.poll_s is 0 —", "no disable form"],
+            ),
+            # NOTE: `poll_s: null` is NOT a row here. Against a base carrying the
+            # block — the only base a real config merges onto — `_deep_merge`
+            # skips a `None` override and the base's cadence survives, so it
+            # never reaches the validator at all. See
+            # `test_a_blank_value_keeps_the_base_cadence`.
+            #
+            # The block itself, and the closed-set check: a typo that was merely
+            # ignored would keep the shipped cadence while the config reads as if
+            # it had been changed.
+            (
+                "progress: 30\n",
+                ["`progress:` must be a mapping", "(30)"],
+            ),
+            (
+                "progress:\n  interval: 30\n",
+                ["unknown key(s) under `progress:`: interval: 30", "interval_s"],
+            ),
+        ],
+        ids=[
+            "interval_s-negative", "interval_s-under-floor", "interval_s-quoted",
+            "interval_s-true", "interval_s-nan", "poll_s-inf",
+            "poll_s-oversized-int", "poll_s-zero",
+            "progress-not-a-mapping", "unknown-key-typo",
+        ],
+    )
+    def test_a_bad_value_on_the_project_layer_is_rejected(
+        self, reg_with_base_progress, monkeypatch, tmp_path, body, fragments
+    ):
+        """Driven onto a base that already carries `progress:`, deliberately.
+
+        Every row here has to fail because the VALUE is bad, not because the
+        override happened to replace an absent base block — which is what a base
+        without `progress:` would turn each of these into.
+        """
+        self._override(monkeypatch, tmp_path, body)
+        with pytest.raises(ConfigError) as exc:
+            load_config(anchor=str(tmp_path))
+        message = str(exc.value)
+        for fragment in fragments:
+            assert fragment in message, f"{fragment!r} missing from: {message}"
+
+    @pytest.mark.parametrize(
+        "body, expected",
+        [
+            (
+                "progress:\n  interval_s: 60\n  poll_s: null\n",
+                {"interval_s": 60, "poll_s": 90},
+            ),
+            ("progress:\n", {"interval_s": 30, "poll_s": 90}),
+        ],
+        ids=["poll_s-blank", "whole-block-blank"],
+    )
+    def test_a_blank_value_keeps_the_base_cadence(
+        self, reg_with_base_progress, monkeypatch, tmp_path, body, expected
+    ):
+        """A blank key is `_deep_merge`'s keep-base form, not a rejection.
+
+        `_deep_merge` skips an override value of `None` for EVERY key, so
+        `poll_s:` with nothing after it inherits the shipped 90 while a sibling
+        key on the same layer still applies, and a bare `progress:` inherits the
+        whole block. That is not an accident of this table: it is what the
+        `--init` template's commented-out `progress:` stanza depends on —
+        uncommenting the key and one line under it must not blank the other.
+        Making `progress:` raise on a blank instead would make one block the
+        exception to the rule the rest of the config is authored around.
+        """
+        self._override(monkeypatch, tmp_path, body)
+        config = load_config(anchor=str(tmp_path))
+        assert config["progress"] == expected
+        assert registry.get_progress_interval(anchor=str(tmp_path)) == float(
+            expected["interval_s"]
+        )
+        assert registry.get_progress_poll(anchor=str(tmp_path)) == float(
+            expected["poll_s"]
+        )
+
+    def test_the_same_value_in_the_base_is_not_validated(self, monkeypatch):
+        """The base is ours: a broken one is a test failure, not a user's problem.
+
+        Validating it here would turn every unrelated invocation into a config
+        error, which is `driver:`'s stated rule and the reason the flag keys off
+        an override layer rather than off the merged block.
+        """
+        base = copy.deepcopy(FIXED_BASE)
+        base["progress"] = {"interval_s": -1, "poll_s": 0}
+        monkeypatch.setattr(registry, "_load_base_config", lambda: copy.deepcopy(base))
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        _reset_cache()
+        assert load_config()["progress"] == {"interval_s": -1, "poll_s": 0}
+
+    def test_permissive_mode_does_not_relax_the_rejection(
+        self, reg, monkeypatch, tmp_path
+    ):
+        """Same carve-out `driver:` gets, for the same reason.
+
+        Permissive restores warn-and-skip for a layer that could not be *read*; a
+        readable layer whose cadence was silently dropped degrades to the shipped
+        default, which is exactly the failure this check exists to catch.
+        """
+        self._override(monkeypatch, tmp_path, "progress:\n  poll_s: 0\n")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", "1")
+        _reset_cache()
+        with pytest.raises(ConfigError) as exc:
+            load_config(anchor=str(tmp_path))
+        assert "progress.poll_s is 0 —" in str(exc.value)
+
+    def test_a_config_with_no_progress_block_falls_back(self, reg):
+        """FIXED_BASE predates the block, which is the only case the hardcoded
+        defaults exist for — a real merged config always carries the base's."""
+        assert "progress" not in load_config()
+        assert registry.get_progress_interval() == registry.PROGRESS_FALLBACKS["interval_s"]
+        assert registry.get_progress_poll() == registry.PROGRESS_FALLBACKS["poll_s"]
+
+    def test_a_valid_override_resolves_through_both_accessors_from_a_foreign_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """§9.3.c, the reason the accessors take an anchor at all.
+
+        Real base, real git-anchored discovery, and a CWD outside the project: the
+        unanchored read must answer with the base's cadence and the anchored one
+        with the project's. `interval_s: 0` doubles as the proof that the disable
+        form survives validation rather than being caught by the floor.
+        """
+        proj = tmp_path / "proj"
+        (proj / "plans").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+        _write_yaml(
+            proj / ".multi-llm" / "providers.yaml",
+            "progress:\n  interval_s: 0\n  poll_s: 120\n",
+        )
+        plan_file = proj / "plans" / "feature.md"
+        plan_file.write_text("# plan\n", encoding="utf-8")
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        _reset_cache()
+        assert registry._find_project_config() is None, "foreign CWD has its own config"
+        _reset_cache()
+
+        base_progress = registry._load_base_config()["progress"]
+        assert registry.get_progress_interval() == float(base_progress["interval_s"])
+        assert registry.get_progress_poll() == float(base_progress["poll_s"])
+
+        assert registry.get_progress_interval(anchor=str(plan_file)) == 0.0
+        assert registry.get_progress_poll(anchor=str(plan_file)) == 120.0
+
+
+@pytest.mark.config_override
 class TestInitConfigScaffolder:
     """init_config.py scaffolding + packaging guard (template path / gitignore).
 
@@ -2183,6 +2430,9 @@ ANCHORED_ACCESSORS = frozenset({
     "get_provider_timeout",
     "get_all_model_specs",
     "resolve_models",
+    # ...and the `progress:` block's two.
+    "get_progress_interval",
+    "get_progress_poll",
 })
 
 #: Directories that are not this skill's runtime source.

@@ -252,9 +252,75 @@ def resolve_host_id(
 # Derived facts consumers ask for
 # ---------------------------------------------------------------------------
 
+#: The startup slack a command must leave below a host's ``timeout_ceiling_s``.
+#:
+#: It lives **here**, beside the ceilings it is subtracted from, rather than in
+#: ``run_status`` where it is spent, because it is spent in two unrelated
+#: registers: ``status --wait`` clamps its own resolved deadline to
+#: ``ceiling - margin`` (``run_status._resolve_wait_timeout``, which re-exports
+#: this name), and a Claude Code poll has to give the **tool call around** the
+#: command a timeout of ``interval + margin``. Both are "the cap is not the
+#: budget; process start, ``load_config``, the checkpoint read and a 5 s re-check
+#: grid all come out of it".
+#:
+#: F6, 2026-09-20: ``run_status``'s own comment claimed the number was "named
+#: once here rather than twice so the two cannot drift" while ``30`` was spelled
+#: out in six places — this constant's predecessor, the ``native`` *run detached*
+#: sentence below, ``SKILL.md``, ``references/host-capabilities.md`` and four
+#: instruction cores. The sentence is rendered from the constant now, which
+#: carries the two generated copies with it (``SKILL.md`` is byte-compared to it,
+#: ``references/host-capabilities.md`` is generated from it), and the four cores
+#: are pinned against the constant in ``tests/test_instruction_portability.py``.
+WAIT_CAP_MARGIN_S = 30.0
+
+
 def max_concurrent_subagents(host_id: str, base: Optional[str] = None) -> int:
     """The host-side leg of D3i's three-way minimum."""
     return int(entry(host_id, base)["max_concurrent_subagents"])
+
+
+def timeout_ceiling_s(host_id: str, base: Optional[str] = None) -> int:
+    """How long one *foreground* command may run here before the host kills it.
+
+    ``0`` is not a cap of zero — it is the documented "no cap" value (codex ships
+    it, `hosts/capabilities.yaml`), the same falsy special case
+    ``host_install.timeout_note`` and ``render_capabilities._timeout_cell``
+    already make. Every caller therefore has to test truthiness before
+    subtracting anything from it, or a host with no documented cap becomes the
+    tightest one in the file.
+
+    The one runtime consumer is ``status --wait``'s clamp: ``capabilities.yaml``'s
+    own "not on any agent read path" note names ``multi_llm.py`` as a legitimate
+    reader, so resolving the ceiling *here* rather than baking a number into a
+    rendered surface is exactly the indirection this module exists for.
+    """
+    try:
+        return int(entry(host_id, base).get("timeout_ceiling_s") or 0)
+    except (TypeError, ValueError):  # pragma: no cover - schema keeps this an int
+        return 0
+
+
+def tightest_timeout_ceiling(
+    base: Optional[str] = None
+) -> Optional[Tuple[str, int]]:
+    """``(host_id, ceiling)`` for the smallest **non-zero** cap in the file.
+
+    What an *unrouted* command clamps against. A poll that names no ``--host``
+    could be running under any of them, so skipping the clamp entirely would let
+    it overshoot some host's cap by accident; the tightest declared cap is the
+    only bound that holds whichever host it turns out to be. Hosts declaring
+    ``0`` are skipped rather than winning as the minimum, per
+    :func:`timeout_ceiling_s`. ``None`` when no host declares one at all.
+    """
+    capped = [
+        (host_id, timeout_ceiling_s(host_id, base))
+        for host_id in host_ids(base)
+    ]
+    live = [(host_id, ceiling) for host_id, ceiling in capped if ceiling]
+    if not live:
+        return None
+    # Ties broken by host id, so the reported host is stable across runs.
+    return min(live, key=lambda pair: (pair[1], pair[0]))
 
 
 def executor_capable_runners(
@@ -411,11 +477,117 @@ _ASK = {
     ),
 }
 
+# T8 (2026-09-20): the `native` sentence used to stop at the launch, and the
+# launch is the only part of this host's loop the agent could get right without
+# being told. A native background run writes no `run` record, so `status` can
+# never hand it a terminal verdict (`no_run` is not in `TERMINAL_VERDICTS`) — the
+# loop is bounded by the background mechanism's own completion signal, and the
+# poll in between is a timed progress snapshot rather than a verdict read. Both
+# numbers a poll needs are stated here because neither is in `capabilities.yaml`:
+# the `--host` the wait clamp reads (with no launcher-printed command there is
+# nothing to copy it from, and its absence silently clamps every poll to the
+# tightest declared ceiling) and the per-call timeout, which is a tool parameter
+# and therefore none of `host_install.TIMEOUT_CHANNELS`.
+#
+# That second number is interpolated from `WAIT_CAP_MARGIN_S` rather than typed,
+# so the margin `status --wait` subtracts from a ceiling and the margin a poll
+# adds to its call timeout are the same number by construction (F6, 2026-09-20).
+# `SKILL.md` is byte-compared to this sentence and `references/host-capabilities.md`
+# is generated from it, so both follow the constant without a second edit.
+#
+# F-2026-09-21: what it never said is what *unit* that tool parameter takes, and
+# on the only host this template renders for it is **milliseconds** (the Bash
+# tool's `timeout`: 120000 by default, 600000 at the cap). An agent that read
+# the interval-plus-margin figure as seconds and passed `330` got a 0.33 s
+# call, killed before `status` could answer — and rule 2 below then told it to
+# re-issue with the right call timeout, so the loop span rather than polled.
+# The sentence names the unit and one worked value now, both derived from the
+# same constant rather than typed: the widest interval it offers is 300 s, so
+# the largest number it can ever ask for is 330000, well under the cap. The
+# unit is host-specific while this template is keyed by the *resolution*, so
+# `tests/test_host_capabilities.py` fails if a second host ever resolves
+# *run detached* to `native` — "milliseconds here" would be a guess there.
+#
+# 2026-09-20: it gained the two things a real run was missing. The **roster** is
+# a call of its own, made once between the launch and the loop and never waiting
+# — the first poll waits 120-300 s, and a roster that reaches the user three
+# minutes after launch is not a roster; the `models:` table is the only thing on
+# screen that says which CLI and model each slot runs. And what a poll relays
+# gains the `just finished:` line, because `models 4/5 done` names no model.
+#
+# Both halves were then corrected against the code that emits them (F-2026-09-20).
+# The roster call cannot assume a printed table is *this* run's: a phase dir is
+# re-used, so on a re-run the predecessor's table is what prints until the write
+# that claims the dir drops its `progress` (~0.2 s warm). The discriminator is on
+# screen in that window and it is the `progress:` step alone — `fanout` here and
+# `complete` for a predecessor that finished — so the sentence names it rather
+# than leaving the agent to relay a finished run's roster. The head line's tense
+# is NOT the second half of an OR (F-2026-09-21): only `status_file.claim_run`
+# writes `"run": None`, so a foreground re-run over a dir an earlier `--detach`
+# run used keeps the predecessor's terminal `run` record and `_verdict_text`
+# renders its verdict word for the whole fan-out — an OR on that never accepts
+# this run's roster at all. And the ABSENCE of `just finished:` is
+# not a claim that nothing finished: the line is a difference between two
+# readings taken inside one `--wait` call (`run_status._wait_for_terminal` takes
+# the baseline, `_attach_finished_during_wait` diffs it), so a model that
+# finishes in the gap between polls is already terminal when the next poll takes
+# its baseline and no poll ever names it. So the table comparison is per poll and
+# not conditional on the line being absent (a model finishing in the gap and a
+# second during the wait share one line that names only the second) — copy the
+# newly terminal row's spec and state word out of the table, which is a copy and
+# not the recount the counts rule forbids.
 _DETACH = {
     "native": (
-        "**Run detached** — use your host's own background mechanism `{tool}`, "
+        f"**Run detached** — use your host's own background mechanism `{{tool}}`, "
         "redirecting stdout and stderr to the phase dir's `orchestrator-run.log`. "
-        "Never pass `--detach` on this host."
+        "Never pass `--detach` on this host. Then make one **non-waiting** "
+        "`status <plan> <selector> --host <this host's id> --view run` call — no "
+        "`--wait`, no `--timeout`, so it answers in well under a second — and "
+        "relay its `progress:` line and `models:` table once: the count is on the "
+        "one, and the other's rows are the only thing that says which CLI and "
+        "model each of them runs. The run writes that roster a few seconds after "
+        "launch, so repeat that one call once if no table printed yet — and a "
+        "table that *does* print can still be the previous run's, because the "
+        "phase dir is re-used and the write that claims it for this fan-out "
+        "drops the predecessor's `progress` only about 0.2 s in: a table under "
+        "a `progress:` step that is not `fanout` is the last run's, so "
+        "make that call again rather than relaying it. That step is the whole "
+        "test — a head line reading `finished in foreground (…)` rather than "
+        "`running` is what a re-used dir prints all run long once an earlier "
+        "`--detach` run left its own terminal `run` record in it, so the tense "
+        "names no run. Then poll "
+        "while it runs, one "
+        "foreground `status <plan> <selector> --host <this host's id> --view run "
+        "--wait --timeout <interval>` call per turn at a 120-300 s interval, "
+        "relaying the rendered `progress:` line and, whenever one prints, the "
+        "`just finished:` line that names the model that turned terminal during "
+        "that wait — verbatim. Its absence claims nothing: that line is a "
+        "difference between two readings taken inside one wait, so a model that "
+        "finished in the gap between polls is already terminal when the next "
+        "poll takes its baseline — so every poll compares its `models:` table "
+        "with the previous poll's and names every newly terminal row that line "
+        "did not name, copying its spec and state word out "
+        "of the row — a copy, never a recount. Nothing else from the "
+        "view is relayed mid-run. Spell "
+        "`--host` out yourself — no launcher printed a command to copy it from, "
+        "and without it the wait is clamped under the tightest ceiling on "
+        "record — and give the call itself a timeout of at least the interval "
+        f"plus {WAIT_CAP_MARGIN_S:.0f} s, in that parameter's own unit — "
+        f"milliseconds here, so {int((300 + WAIT_CAP_MARGIN_S) * 1000)} for a "
+        f"300 s interval, not {int(300 + WAIT_CAP_MARGIN_S)}, which is a third "
+        "of a second — because this host's default per-call "
+        "cap is shorter than the "
+        "interval and would otherwise kill every poll from the first. No exit "
+        "code from that poll ends the loop except `1`, the unreadable one: "
+        "nothing on this host names one invocation, so `2` is the steady state "
+        "and a `0` or a `3` belongs to an earlier run in the same dir and names "
+        "no verdict for this one: read the exit code as nothing, relay the "
+        "rendered line exactly as on a `2`, and keep polling. The loop ends when "
+        "the background mechanism reports "
+        "the process exited; read the markers and output paths from "
+        "`orchestrator-run.log` then, and report a non-zero exit status with "
+        "that path rather than retrying. The mode instruction names the selector "
+        "and the rest of the loop."
     ),
     # R4 (2026-08-21): the previous wording ended "the foreground stays legal
     # for short calls", and codex-apply-executor read that as permission to skip

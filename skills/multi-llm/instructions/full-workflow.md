@@ -110,18 +110,13 @@ pre-substituted and the file on disk is not.
 
 ### 2. Execute Phase 1: Review Plan
 
-Load the `review-plan` core and execute it.
+Load the `review-plan` core and execute it. **The core owns the launch** — its
+"Run the orchestrator (DETACHED)" step runs the orchestrator detached, makes the
+one non-waiting roster call and then polls — so there is no command to compose
+here. Pass the models resolved in step 1 as `--models <selected>`, or `--quick`
+instead of `--models` if `--quick` was given, to the command that step builds.
 
-```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --models <selected>
-```
-
-If `--quick` was specified, pass `--quick` to the orchestrator instead of `--models`:
-```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-plan --plan-file "$PLAN_PATH" --quick
-```
-
-Wait for completion, then proceed to Phase 2.
+Phase 1 is done when that core's poll loop ends; then proceed to Phase 2.
 
 ### 2b. Conditional Consolidation (Between Phase 1 and Phase 2)
 
@@ -219,7 +214,7 @@ Then Phase 3b follows.
 
 After task generation completes successfully, determine whether to run the review-tasks phase.
 
-**`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load the `review-tasks` core and execute it. Wait for completion, then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
+**`--yes` / `--non-interactive` mode** (D6 row 12): Run `review-tasks` **automatically without prompting**, using the same models resolved in Phase 1 (or `--quick` / `providers.yaml` defaults). Load the `review-tasks` core and execute it; as in Phase 1 the core owns the launch, the roster call and the poll loop, and the resolved models go to the command its "Run the Orchestrator (DETACHED)" step builds. Phase 3b is done when that loop ends; then proceed to Phase 3c. (Do NOT skip and do NOT prompt.)
 
 **There is no TTY-sniffing branch, and there is no question.** "Not asked" is
 decided by the shim's baked `--yes` plus the user-typed `--review-tasks` opt-in —
@@ -280,20 +275,15 @@ Wait for completion, then proceed to Phase 5.
 
 ### 6. Execute Phase 5: Review Code
 
-Load the `review-code` core and execute it.
-
-```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --models <selected>
-```
-
-If `--quick` was specified, pass `--quick` to the code review orchestrator:
-```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code --plan-file "$PLAN_PATH" --quick
-```
+Load the `review-code` core and execute it. **The core owns the launch** — its
+"Run the code review orchestrator (DETACHED)" step runs the orchestrator
+detached, makes the one non-waiting roster call and then polls — so there is no
+command to compose here. Pass `--models <selected>`, or `--quick` instead of
+`--models` if `--quick` was given, to the command that step builds.
 
 Use the **same models resolved in Phase 1** (Critical Rule 4). Under `--yes`, resolve models the same non-interactive way as Phase 1 (never prompt). This phase only *reviews* the code and produces `{plan}/code-review/` outputs — the fixes are applied in Phase 6.
 
-Wait for completion, then proceed to Phase 6.
+Phase 5 is done when that core's poll loop ends; then proceed to Phase 6.
 
 ### 6b. Execute Phase 6: Apply Code Fixes
 

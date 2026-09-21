@@ -1140,6 +1140,39 @@ driver:
       - '**/node_modules/**'
 
 # ---------------------------------------------------------------------------
+# progress: how often a running fan-out says it is still alive
+# ---------------------------------------------------------------------------
+# Two knobs, because one interval cannot serve two cadences. A `[PROGRESS]`
+# ticker line is priced in log readability and costs a print and nothing else;
+# a host poll is priced in TOOL TURNS — one per poll. Coupled, a user who
+# wanted 30 s log granularity would be forcing 30 s tool-turn polls on the agent
+# host. The run's `.status.json` is a third cadence and is deliberately NOT
+# configurable: transitions are written when they happen, nothing refreshes the
+# file between them, and every elapsed figure is computed from `started_at` at
+# read time.
+#
+# Merge semantics are the ordinary three-layer chain, with one difference from
+# the open blocks: `progress:` is a CLOSED set, so an unknown key (the typo
+# `interval:`) is rejected at load time rather than silently kept at the default
+# while the user believes they configured a ticker. Values are validated on an
+# OVERRIDE layer only — this base is ours — and read once per run through the
+# typed accessors (`get_progress_interval` / `get_progress_poll`), so editing a
+# config mid-run changes nothing until the next invocation.
+progress:
+  # Cadence of the `[PROGRESS]` ticker lines, and nothing else: a stdout
+  # cadence, not a write cadence. `0` is the documented disable form — it
+  # silences the lines only, while the status file still records every
+  # event-driven transition and `--wait` is untouched. Any other value is >= 5 s.
+  interval_s: 30
+  # The host's poll cadence, and the resolved `--wait` default (an explicit
+  # `--timeout` wins, else this). Clamped under the host's shell cap, which is
+  # where 90 comes from: OpenCode's ceiling is 120 s and 120 - 30 = 90, so
+  # codex and opencode keep exactly today's wait. Floor 5 s and NO disable
+  # form — `0` here would mean a poll that returns instantly, not one switched
+  # off, so it is rejected.
+  poll_s: 90
+
+# ---------------------------------------------------------------------------
 # git_env: the non-interactive git environment every spawned CLI inherits
 # ---------------------------------------------------------------------------
 # Every provider CLI shells out to git under an agent profile, and a credential

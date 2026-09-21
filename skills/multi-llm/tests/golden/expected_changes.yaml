@@ -599,6 +599,135 @@ changes:
       `cost_usd`. Nothing else in the checkpoint moved, and an adapter that
       reports nothing still writes no key at all.
 
+  # ---------------------------------------------------------------------------
+  # T2 — `progress` is the one reserved object a FOREGROUND run writes.
+  #
+  # `detach.report_progress` was never a `--detach` check: it read the
+  # module-global `_ACTIVE` run handle and returned early when there was none, so
+  # a foreground run (and a Claude Code native-background run, which is a
+  # foreground run inside a background Bash) wrote nothing for the length of a
+  # fan-out. It now falls back to `status_file.update_progress` when — and only
+  # when — no handle exists; a handle owned by a *different* phase dir is still
+  # dropped, because that is a nested run and not the foreground.
+  #
+  # The guard's fixture runs in the foreground, so its `review-plan` checkpoint
+  # gains the three keys that lane's existing writers already emit under
+  # `--detach`: `step` (the phase-transition sites) and the `models_done` /
+  # `models_total` slot counters. These are ADDED keys under an object that is
+  # display-only — nothing resumes, reaggregates or branches on `progress` — and
+  # `run` stays absent, which is the invariant that actually narrowed: "a
+  # foreground .status.json gains no new keys" became "it gains a `progress`
+  # object and still no `run` object". Every other key of the checkpoint, every
+  # artifact and every instruction is untouched.
+  #
+  # Four pointers rather than the `/phases/review-plan/status_steps` subtree: the
+  # step sequence is a list, so naming its three new indices keeps the entry from
+  # excusing a *changed* `phase=`/`state=` word at indices 0 and 1.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/review-plan/status_shape/progress
+    rationale: >
+      T2, 2026-09-20 — `report_progress` gained a foreground write path, so a
+      non-detached `review-plan` checkpoint now carries the reserved `progress`
+      object its detached counterpart always had: `step` plus the `models_done`
+      / `models_total` slot counters. Display-only and additive; `run` is still
+      never claimed in the foreground.
+  - pointer: /phases/review-plan/status_steps/2
+    rationale: >
+      T2, 2026-09-20 — `_status_steps` appends one `progress.<key>` name per
+      key, SORTED, after `phase=`/`state=`; index 2 was `progress.models_done`
+      when T2 landed, previously absent because a foreground run wrote no
+      `progress` at all. T4 added three more keys ahead of it in sort order, so
+      what this index names moved — see the T4/T5 block below, which is why the
+      three indices it added are declared there rather than here.
+  - pointer: /phases/review-plan/status_steps/3
+    rationale: >
+      T2, 2026-09-20 — likewise; T2 wrote `progress.models_total` here and T4's
+      new keys shifted it.
+  - pointer: /phases/review-plan/status_steps/4
+    rationale: >
+      T2, 2026-09-20 — likewise; T2 wrote `progress.step` here and T4's new keys
+      shifted it.
+
+  # ---------------------------------------------------------------------------
+  # T4/T5 — the per-model map, and the two `[PROGRESS]` tickers.
+  #
+  # T4 replaced D4a's `fanout_slot_counter` with `progress_tracker.FanoutProgress`:
+  # one in-memory map keyed by model spec, written whole into the reserved
+  # `progress` object on every transition, plus the two counters derived from it
+  # (`models_done` = finished slots, `models_succeeded` = slots that produced a
+  # usable result) and the resolved ticker cadence `interval_s`. T5 added the
+  # phase-scoped second ticker over the window after the fan-out returns.
+  #
+  # Both effects are ADDITIVE and both are display-only. `progress` is not read
+  # by resume, reaggregate or any branch; `run` is still never claimed in the
+  # foreground; every artifact, every instruction and every other checkpoint key
+  # is byte-identical. The fixture's own numbers are what they were — the
+  # mid-run `models_done` is the same number the deleted counter produced, which
+  # is the whole point of consolidating the writer rather than adding one.
+  #
+  # Leaf-exact pointers again, never the `/phases/review-plan/status_steps` or
+  # `/markers/review-plan` subtree: both are positional lists, and a subtree
+  # pointer would also excuse a CHANGED `phase=`/`state=` word at index 0 or 1,
+  # or a marker line that stopped being printed.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/review-plan/status_steps/5
+    rationale: >
+      T4, 2026-09-20 — the sorted `progress` key list grew from
+      {models_done, models_total, step} to {interval_s, models, models_done,
+      models_succeeded, models_total, step}, so three indices are new. This one
+      is the tail of that list; the names at 2-4 shifted within the declared
+      pointers above.
+  - pointer: /phases/review-plan/status_steps/6
+    rationale: >
+      T4, 2026-09-20 — likewise, one more `progress.<key>` name at the tail.
+  - pointer: /phases/review-plan/status_steps/7
+    rationale: >
+      T4, 2026-09-20 — likewise, the last of the three.
+  - pointer: /markers/review-plan/0
+    rationale: >
+      T4, 2026-09-20 — the fan-out's ticker prints one `[PROGRESS]` line per
+      `progress.interval_s` and one more at teardown stating the run's real
+      totals, in the style of the existing `[SALVAGE_NEEDED]` markers. The
+      fixture run is far shorter than the 30 s interval, so exactly the teardown
+      line lands. review-plan recorded no marker of any kind before, so the list
+      grew from empty and the bundle flattens it positionally.
+  - pointer: /markers/review-plan/1
+    rationale: >
+      T5, 2026-09-20 — the phase-scoped second ticker's own teardown line,
+      printed after the fan-out's ticker has been cancelled and awaited (lifetime
+      rule 1) and carrying the phase's terminal `progress.step`. Same cadence,
+      same prefix, no per-model map and no write.
+  # review-code reaches neither shared helper — `run_all_reviews` is its own
+  # fan-out — so it is wired separately and lands its own two pointers here.
+  - pointer: /markers/review-code/1
+    rationale: >
+      T4, 2026-09-20 — review-code's own fan-out now runs the same ticker, and
+      the fixture run is far shorter than the 30 s interval, so exactly the
+      teardown line lands: one `[PROGRESS]` stating the run's real totals.
+  - pointer: /markers/review-code/2
+    rationale: >
+      T4, 2026-09-20 — positional shift only: `[HIGH_PRIORITY_ISSUES]` (declared
+      at /markers/review-code/0 above) moves down one index now that a
+      `[PROGRESS]` line precedes it in the flattened marker list.
+  # The roster line, 2026-09-20: one more `[PROGRESS]` per fan-out phase, and it
+  # is the FIRST one — `FanoutProgress.seed()` emits it before any task exists.
+  - pointer: /markers/review-plan/2
+    rationale: >
+      2026-09-20 — `seed()` now emits one roster line naming every model the
+      fan-out is over and each slot's budget, so a detached run's log says what
+      it is running instead of opening at whatever the first interval caught.
+      It is the line at index 0; all three of this phase's markers render the
+      same `[PROGRESS]` token, so positionally the flattened list simply grew by
+      one at the tail. Gated on `progress.interval_s > 0`, the same switch the
+      ticker answers, so a run that asked for silence still produces the empty
+      list the baseline recorded.
+  - pointer: /markers/review-code/3
+    rationale: >
+      2026-09-20 — positional shift only: `[HIGH_PRIORITY_ISSUES]` (declared at
+      /markers/review-code/0, and again at /2 when the fan-out ticker's teardown
+      line first preceded it) moves down one more index now that the roster
+      precedes both `[PROGRESS]` teardown lines.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #
