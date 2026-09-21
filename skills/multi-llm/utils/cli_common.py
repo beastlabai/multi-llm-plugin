@@ -538,6 +538,8 @@ class ResultContext:
         self.consolidation_recommended: Optional[Dict[str, Any]] = None
         self.high_priority_groups: Optional[Dict[str, Any]] = None
         self.notice: Optional[str] = None
+        self.progress: Optional[Dict[str, Any]] = None
+        self.progress_lines: Optional[List[str]] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -598,6 +600,64 @@ class ResultContext:
         """
         self.notice = text or None
 
+    def set_progress(self, progress: Optional[Dict[str, Any]]) -> None:
+        """Record the watched run's whole ``progress`` object, if it has one.
+
+        Mirrors :meth:`set_high_priority_groups`: present only when there is
+        something to report, so every other invocation's line stays
+        byte-for-byte what it was.
+
+        It exists because the fan-out's per-model map had exactly one surface —
+        ``render_run_text``'s human table — and the OpenCode *package* route has
+        no agent in the loop to read it: the ``multi_llm`` tool supervises the
+        poll itself and would have had to regex a rendered line to relay
+        anything mid-run. A regex over human text would also be the first break
+        in the rule that the JS holds no mode word, flag or message of its own,
+        so the structured object rides the result line instead and the plugin
+        reads ``poll.result.progress``.
+
+        Copied one level deep rather than deep-copied: the nested ``models`` map
+        is handed to ``json.dumps`` immediately and the caller (a read-only
+        ``status`` poll) never mutates it afterwards.
+
+        It is the status file's object **whole and unreworded** — no key is
+        added to it here, which is why the rendered lines its one agent-less
+        reader needs ride beside it in :meth:`set_progress_lines` rather than
+        inside it.
+        """
+        self.progress = dict(progress) if progress else None
+
+    def set_progress_lines(self, lines: Optional[Sequence[str]]) -> None:
+        """Record the already-rendered progress line(s) a host may show verbatim.
+
+        The sibling of :meth:`set_progress`, and the reason the two are separate
+        keys: ``progress`` is the checkpoint's own object, carried through
+        unreworded so a reader gets the numbers where they were computed, while
+        this is *text* — ``run_status`` rendering that same object through the
+        renderers the human view already uses (the fan-out roster, and the
+        ``just finished:`` line ``--wait`` alone can honestly write).
+
+        It exists for the OpenCode **package** route, which is the one host with
+        no agent in the poll loop: the plugin's ``execute`` supervises the run
+        itself and the model makes exactly one blocking tool call, so every
+        instruction telling an agent to announce the roster and relay what just
+        finished is structurally unreachable there — nothing reads
+        ``instructions/*.md`` on that route, and the orchestrator's own
+        ``[PROGRESS]`` lines go to a log the plugin never opens. The plugin's
+        one live channel is a toast whose ``message`` is a string, and the rule
+        that file is held to is that it composes no sentence of its own. So the
+        sentence is composed here, by the renderers that already own its
+        wording, and the plugin passes it through verbatim.
+
+        Rendered strings and not a structure to render: a host that had to
+        compose the line would be a second author of it, which is exactly the
+        drift this key removes. Present only when there is something to show, so
+        every other invocation's line stays byte-for-byte what it was, and empty
+        entries are dropped rather than carried as blanks a reader must filter.
+        """
+        kept = [str(line) for line in lines if line] if lines else []
+        self.progress_lines = kept or None
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -620,6 +680,10 @@ class ResultContext:
             payload["high_priority_groups"] = dict(self.high_priority_groups)
         if self.notice:
             payload["notice"] = self.notice
+        if self.progress:
+            payload["progress"] = dict(self.progress)
+        if self.progress_lines:
+            payload["progress_lines"] = list(self.progress_lines)
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -728,6 +792,18 @@ def record_notice(text: Optional[str]) -> None:
     """Record the workflow notice, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_notice(text)
+
+
+def record_progress(progress: Optional[Dict[str, Any]]) -> None:
+    """Record the watched run's ``progress`` object, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_progress(progress)
+
+
+def record_progress_lines(lines: Optional[Sequence[str]]) -> None:
+    """Record the rendered progress line(s), if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_progress_lines(lines)
 
 
 # ---------------------------------------------------------------------------

@@ -176,8 +176,9 @@ PLACEHOLDER_MANIFEST = {
     "instructions/apply-task-suggestions.md": (0, 26),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
     # git root inline, launch) collapsed into the dispatcher's two positionals,
-    # and the mode gained its `--detach` + `status` poll pair.
-    "instructions/ask.md": (0, 6),
+    # and the mode gained its `--detach` + `status` poll pair. 6 -> 8: the roster
+    # call (see the review rows below).
+    "instructions/ask.md": (0, 8),
     # 50 -> 48: D6 row 12 deleted the no-TTY branch, and with it the
     # `check_workflow_prerequisites.py --skip` command it carried. 48 -> 36: the
     # Phase-3 sequencing (the inlined subagent prompt, its file-write steps, the
@@ -185,8 +186,14 @@ PLACEHOLDER_MANIFEST = {
     # `full_workflow_orchestrator.py`. 36 -> 30: six "load instructions from
     # <path>" lines became one shared `util instructions <mode>` command. A count
     # that *drops* is the corpus shrinking as designed; only a rise is a
-    # regression.
-    "instructions/full-workflow.md": (0, 30),
+    # regression. 30 -> 22: Phases 1, 3b and 5 used to show a bare foreground
+    # `review-plan` / `review-tasks` / `review-code` command (plus a `--quick`
+    # variant) beside "load the core", which contradicted those cores' own
+    # detached launch-then-poll step; all three sections point at that step now
+    # instead of carrying a second, staler copy of the launch. The three fan-out
+    # phases therefore name no command of their own; Phase 4 (`implement`) is
+    # not a fan-out core and keeps its block.
+    "instructions/full-workflow.md": (0, 22),
     # 8 -> 0: gate, materialization, dispatch, the in-process `update_plan_tasks`
     # call and the TASKS_FILE verification are all Python now, so the file names no
     # command at all.
@@ -198,9 +205,21 @@ PLACEHOLDER_MANIFEST = {
     # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
     # is served pre-substituted.
     "instructions/init-config.md": (0, 2),
-    "instructions/review-code.md": (0, 24),
-    "instructions/review-plan.md": (0, 26),
-    "instructions/review-tasks.md": (0, 16),
+    # 24 -> 26, 26 -> 28 and 16 -> 18: Layer 2 of the fan-out progress feature
+    # gave each fan-out mode a `status … --view run --wait` poll beside its
+    # launch, so the detached step is now launch-then-poll rather than
+    # launch-then-wait. One more command per file, hence one more instance of the
+    # invariant two-token prefix.
+    #
+    # 26 -> 28, 28 -> 30, 18 -> 20 and ask.md's 6 -> 8: every fan-out mode gained
+    # a second `status` command, the **non-waiting** roster call made once
+    # between the launch and the loop. It is a separate command rather than a
+    # reading of the first poll because the first poll waits 120-300 s, and a
+    # roster that reaches the user three minutes after launch is not a roster —
+    # so `ask.md` moves this time too, where the poll row above left it alone.
+    "instructions/review-code.md": (0, 28),
+    "instructions/review-plan.md": (0, 30),
+    "instructions/review-tasks.md": (0, 20),
     # The shared shim partials (D5). Authored once, interpolated into a rendered
     # shim by `install-host`, and still counted against that shim's rendered line
     # budget because an agent reads them. `poll-loop.md` carries the one `status`
@@ -1387,6 +1406,697 @@ class TestHostNeutralityLint:
     def test_the_verb_vocabulary_is_closed_at_three(self):
         assert len(CAPABILITY_VERBS) == 3, CAPABILITY_VERBS
         assert len(set(CAPABILITY_VERBS)) == 3
+
+
+# ===========================================================================
+# Layer 2: the poll loop is one paragraph in five places
+# ===========================================================================
+# The five rules are what turn "relay one line and repeat" from a summary into
+# something an agent can execute the same way twice. Hand-maintained copies that
+# drift are the failure mode the verb sentences exist to prevent, so the copies
+# are compared here rather than reviewed: the five files differ only in the
+# phase name, the log path and the selector, and the rules themselves are byte
+# identical across all four cores.
+
+#: The four fan-out modes, each with the phase dir its log lives in and the
+#: selector that names *one* invocation on a host recording no run.
+FAN_OUT_POLL = {
+    "instructions/review-plan.md": ("review-plan", "--phase review-plan"),
+    "instructions/review-tasks.md": ("review-tasks", "--phase review-tasks"),
+    "instructions/review-code.md": ("code-review", "--phase code-review"),
+    "instructions/ask.md": (
+        "ask/<question-slug>-<hash8>", '--question "$RAW_QUESTION"'
+    ),
+}
+
+#: The opening of the shared five-rule paragraph, and the last words of rule 5.
+RULES_OPEN = "Five rules govern the loop:"
+RULES_CLOSE = "worse than announcing none."
+
+
+def _rules_paragraph(rel: str) -> str:
+    """The five-rule block, dedented and with the per-file log path masked."""
+    text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+    start = text.index(RULES_OPEN)
+    end = text.index(RULES_CLOSE, start) + len(RULES_CLOSE)
+    phase, _ = FAN_OUT_POLL[rel]
+    block = text[start:end].replace(f"{{plan}}/{phase}/orchestrator-run.log", "<LOG>")
+    return "\n".join(line.strip() for line in block.splitlines())
+
+
+class TestLayerTwoPollLoop:
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_every_fan_out_mode_polls_while_it_runs(self, rel):
+        """Launching is half the step; the other half is the poll."""
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        polls = [
+            command
+            for _, command in _command_units(text)
+            if " status " in command and "--wait" in command
+        ]
+        assert len(polls) == 1, (
+            f"{rel} carries {len(polls)} `status … --wait` poll commands; the "
+            "step names exactly one"
+        )
+        command = polls[0]
+        phase, selector = FAN_OUT_POLL[rel]
+        for fragment in (selector, "--host <host-id>", "--view run",
+                         "--wait", "--timeout <interval>"):
+            assert fragment in command, (
+                f"{rel}'s poll command is missing {fragment!r}:\n  {command}"
+            )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_roster_call_is_a_second_command_and_never_waits(self, rel):
+        """2026-09-20: the launch said five models started and never which five.
+
+        A real run put `running in foreground (1/5 models, no detached run
+        record)` on screen over `models 1/5 done` and nothing that named a CLI
+        or a model \u2014 the `models:` table the run view already renders was
+        reachable only through a poll, and the first poll waits 120-300 s. A
+        roster that arrives three minutes after launch is not a roster, so the
+        step makes one call of its own: no `--wait`, no `--timeout`, a file read
+        that answers in well under a second.
+
+        Asserted as a *second* `status` command carrying this file's own
+        selector, because the two failure modes are spelling it with another
+        mode's selector and quietly folding it back into the waiting poll.
+        """
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        rosters = [
+            command
+            for _, command in _command_units(text)
+            if " status " in command and "--wait" not in command
+        ]
+        assert len(rosters) == 1, (
+            f"{rel} carries {len(rosters)} non-waiting `status` commands; the "
+            "step names exactly one, the roster call made between the launch and "
+            "the loop"
+        )
+        command = rosters[0]
+        _, selector = FAN_OUT_POLL[rel]
+        for fragment in (selector, "--host <host-id>", "--view run"):
+            assert fragment in command, (
+                f"{rel}'s roster command is missing {fragment!r}:\n  {command}"
+            )
+        for forbidden in ("--wait", "--timeout"):
+            assert forbidden not in command, (
+                f"{rel}'s roster command carries {forbidden!r}. It is the call "
+                "that has to answer immediately; a wait on it is the three-minute "
+                f"silence it exists to remove:\n  {command}"
+            )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_roster_says_what_it_is_for_and_that_it_is_said_once(self, rel):
+        """Every clause the roster step turns on, spelled rather than implied.
+
+        A spec *is* the CLI plus the model, so the step derives nothing \u2014 which
+        is the reason it can be a verbatim relay at all. The run seeds its map a
+        few seconds after launch behind a cold Python start, so the one call can
+        legitimately print no table and the retry is part of the step rather
+        than an agent's improvisation. And it is relayed once: repeating it
+        every poll would bury the movement the loop exists to report.
+        """
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        # Line-wrapped prose: collapse every run of whitespace, so a clause that
+        # happens to straddle a wrap is still one fragment to look for.
+        flat = " ".join(text.split())
+        for fragment, why in (
+            ("**Say which models, before the loop starts.**",
+             "the roster step has no heading, so nothing marks it as a step"),
+            ("non-waiting status call",
+             "the step never says the call does not wait"),
+            ("one row per model",
+             "the step never says what a row is worth relaying for"),
+            ("a row's spec *is* the CLI and the model it runs",
+             "the step leaves the agent to derive the CLI and the model"),
+            ("`progress:` line's own `models 0/N done`",
+             "the step never says where the model COUNT comes from"),
+            ("first poll waits 120 to 300 s",
+             "the step gives no reason to be a call of its own"),
+            ("once more before entering the loop",
+             "the step never says what to do when the roster is not written yet"),
+            ("Relay it **once**",
+             "the step never says the roster is not repeated"),
+        ):
+            assert fragment in flat, f"{rel}: {why} (missing {fragment!r})"
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_rule_one_relays_the_line_that_names_what_finished(self, rel):
+        """2026-09-20: `models 4/5 done` cannot say *which* four.
+
+        Rule 1 used to end "no per-model text", which forbade relaying the one
+        line that answers it. `just finished:` is relayed verbatim whenever it
+        prints: it is exact, and it carries the elapsed and the failure reason
+        that nothing else on screen does.
+        """
+        block = _rules_paragraph(rel)
+        for fragment, why in (
+            ("`just finished:` line when it prints one",
+             "rule 1 never names the line that says which model finished"),
+            ("just finished: codex:gpt-6-astra:xhigh (4m12s, done)",
+             "rule 1 shows no example of the shape it tells the agent to copy"),
+            ("`models 4/5 done` cannot give",
+             "rule 1 never says what the counts alone cannot answer"),
+            ("copied through and never reworded",
+             "rule 1 lost the verbatim rule the whole loop rests on"),
+        ):
+            assert fragment in block, f"{rel}: {why} (missing {fragment!r})"
+        assert "no per-model text" not in block, (
+            f"{rel}'s rule 1 still forbids per-model text wholesale, which "
+            "forbids the `just finished:` line the rule above now requires"
+        )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_rule_one_does_not_read_a_missing_line_as_nothing_finished(self, rel):
+        """F-2026-09-20: the absence of `just finished:` proved nothing.
+
+        The line is a difference between two readings taken *inside one*
+        ``--wait`` call (``run_status._wait_for_terminal`` takes the baseline
+        on entry and ``_attach_finished_during_wait`` diffs it on exit), so a
+        model that finishes in the gap between polls — the agent's own relay
+        turn plus the next call's process start — is already terminal when the
+        next poll takes its baseline and no poll ever names it. Reproduced with
+        the real CLI: the counts moved to ``models 1/2 done`` and no
+        ``just finished:`` line printed, which is the user's original complaint
+        verbatim.
+
+        So rule 1 must (a) not claim the absence means nothing finished and (b)
+        hand the agent the fallback — the `models:` table's own row, copied.
+        The forbidding sentence goes with it: it banned exactly that fallback
+        and contradicted rule 3, which *requires* comparing this poll's map
+        with the last one's.
+        """
+        block = _rules_paragraph(rel)
+        for gone, why in (
+            ("So when the counts moved and no such line printed",
+             "rule 1 still runs the `models:` comparison only when no "
+             "`just finished:` line printed, so a model that finished in the "
+             "gap is never announced when a second finished during the wait"),
+            ("its absence is a reading too",
+             "rule 1 still reads a missing `just finished:` line as proof that "
+             "nothing finished, which the polling gap makes false"),
+            ("nothing finished in those minutes",
+             "rule 1 still spells the false reading out"),
+            ("Never reconstruct it by diffing",
+             "rule 1 still forbids the `models` table fallback it now needs — "
+             "and rule 3 requires that very comparison"),
+            ("with no line there is nothing to claim",
+             "rule 1 still tells the agent a poll with no line has nothing to "
+             "report, which is when the fallback applies"),
+        ):
+            assert gone not in block, f"{rel}: {why}"
+        for fragment, why in (
+            ("**Its absence claims nothing.**",
+             "rule 1 never says the missing line proves nothing"),
+            ("So on **every** poll, compare the",
+             "rule 1 makes the `models:` comparison conditional again; one "
+             "model finishing in the gap and a second during the wait share "
+             "one `just finished:` line that names only the second"),
+            ("name the row or rows that are newly terminal",
+             "rule 1 gives the agent no fallback when the counts moved and no "
+             "line printed"),
+            ("copying the spec and the state word straight out of",
+             "rule 1 does not say the fallback is a COPY out of the row"),
+            ("a copy, not a recomputation",
+             "rule 1 never reconciles the fallback with the counts rule, so "
+             "the two read as a contradiction"),
+            ("never re-derived by counting rows",
+             "rule 1 lost the rule that has not moved: counts come from the "
+             "rendered line"),
+        ):
+            assert fragment in block, f"{rel}: {why} (missing {fragment!r})"
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_rule_one_says_what_the_models_table_is_relayed_for(self, rel):
+        """Rule 1 and the roster step used to contradict each other.
+
+        Rule 1 ended "Nothing else from the view is relayed mid-run — not the
+        `models` table" while the step above it relays exactly that table at
+        launch, and correction 1 makes the table the fallback for naming a
+        finish as well. One rule governs it now: it names the two things the
+        table IS relayed for and keeps the list of what is still never relayed.
+        """
+        block = _rules_paragraph(rel)
+        assert "not the `models` table" not in block, (
+            f"{rel}'s rule 1 still forbids the `models` table wholesale while "
+            "the roster step relays it at launch and rule 1 itself now falls "
+            "back to it"
+        )
+        for fragment, why in (
+            ("the roster, once, before the loop",
+             "rule 1 does not say the table is relayed as the roster"),
+            ("naming a row no", "rule 1 does not name the second use"),
+            ("no partial results", "rule 1 stopped forbidding partial results"),
+            ("speculation about what a slow model is doing",
+             "rule 1 stopped forbidding speculation"),
+            ("never the table re-listed in",
+             "rule 1 stopped forbidding a whole-table relay every poll"),
+        ):
+            assert fragment in block, f"{rel}: {why} (missing {fragment!r})"
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_printed_poll_command_is_described_as_it_really_prints(self, rel):
+        """F-2026-09-20: "it already carries `--run-id` and `--host`" was false.
+
+        ``detach.launch`` builds the banner's poll line with
+        ``run_id=run_id if ask_slug else None``, so three of the four fan-out
+        lanes print no ``--run-id`` at all — an agent told to copy a flag that
+        is not on the line either composes one or reports the wrong run. The
+        same call now appends ``--wait`` (and deliberately no ``--timeout``, so
+        the deadline resolves to ``progress.poll_s`` and is clamped under the
+        ``--host`` the command already carries).
+
+        Pinned against the builder rather than against the prose: greping the
+        four cores for a sentence the same edit wrote proves only that the
+        sentence is there, so the shape below is read off
+        ``status_command_for`` and the prose is checked to agree with it.
+        """
+        from utils import detach
+
+        ask_cmd = detach.status_command_for(
+            "/p.md", phase="ask", run_id="R1", host="codex"
+        )
+        plain = detach.status_command_for(
+            "/p.md", phase="review-plan", run_id=None, host="codex"
+        )
+        assert "--run-id R1" in ask_cmd, ask_cmd
+        assert "--run-id" not in plain, (
+            "the launcher's poll command now carries a run id on every lane; "
+            "the four cores say it carries one only on an `ask` run"
+        )
+        for command in (ask_cmd, plain):
+            assert "--host codex" in command, command
+            assert "--wait" in command, command
+            assert "--timeout" not in command, command
+
+        flat = " ".join((SKILL_ROOT / rel).read_text(encoding="utf-8").split())
+        assert "it already carries `--run-id` and `--host`" not in flat, (
+            f"{rel} still claims the printed command always carries `--run-id`; "
+            "`detach.status_command_for` passes one only for an `ask` run"
+        )
+        assert detach.status_command_for("/p.md", phase="review-plan") == (
+            detach.status_command_for("/p.md", phase="review-plan", host=None)
+        )
+        assert "--host" not in detach.status_command_for(
+            "/p.md", phase="review-plan"
+        ), (
+            "`--host` is omitted when the run recorded none, so the cores must "
+            "not promise it unconditionally"
+        )
+        for fragment, why in (
+            ("it carries the `--host` the launch itself carried",
+             "the core does not say where the printed `--host` comes from"),
+            ("which is omitted when the launch recorded none",
+             "the core promises `--host` unconditionally, which is false for a "
+             "launch that carried none"),
+            ("and `--run-id` on an `ask` run",
+             "the core does not say which of the two flags is conditional"),
+            ("It carries `--wait` too, with no `--timeout` of its own",
+             "the core does not say the printed command waits"),
+            ("clamped under the `--host` it is already carrying",
+             "the core does not say what bounds that wait"),
+        ):
+            assert fragment in flat, f"{rel}: {why} (missing {fragment!r})"
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_roster_step_can_spot_the_previous_runs_table(self, rel):
+        """F-2026-09-20: the roster step's only escape hatch never fired.
+
+        It said "If it prints no `models:` table the run has not written its
+        roster yet" — but on a re-used phase dir a table *always* prints, the
+        predecessor's, so the agent relayed a finished run's models as this
+        run's roster. The three launch writes drop the predecessor's
+        ``progress`` in the write that claims the dir, which leaves one window:
+        before that write lands, where the whole checkpoint is still the
+        predecessor's and therefore agrees with itself.
+
+        The discriminator the step now names is on screen in that window, and
+        it is pinned against the code that renders it: the head line's tense
+        (``run_status._verdict_text``) and the ``progress:`` step, which is
+        ``fanout`` for a live fan-out on all three lanes and ``complete`` for a
+        predecessor that finished.
+        """
+        from utils import detach, run_status
+
+        def head(state, step, done):
+            return run_status._verdict_text({
+                "verdict": detach.VERDICT_NO_RUN,
+                "run": {},
+                "state": state,
+                "progress": {
+                    "step": step, "models_total": 2, "models_done": done,
+                },
+            })
+
+        assert head("complete", "complete", 2) == (
+            "finished in foreground (2/2 models, no detached run record)"
+        ), "the head line no longer renders the tense the roster step reads"
+        assert head("models_running", "fanout", 0).startswith("running in"), (
+            "a live fan-out no longer renders `running`, so the roster step's "
+            "tense discriminator cannot tell the two runs apart"
+        )
+        assert "complete" in run_status.CHECKPOINT_TERMINAL_STEPS
+        for src in (
+            "utils/review_orchestrator_base.py",
+            "ask_orchestrator.py",
+            "code_review_orchestrator.py",
+        ):
+            body = (SKILL_ROOT / src).read_text(encoding="utf-8")
+            assert 'step="fanout"' in body, (
+                f"{src} no longer reports `fanout` as the fan-out's step, so "
+                "the roster step's discriminator names a word nothing writes"
+            )
+            assert '"progress": None' in body, (
+                f"{src} no longer drops the predecessor's `progress` in the "
+                "write that claims the dir, which re-opens the window the "
+                "roster step describes as closed"
+            )
+            assert '"run": None' not in body, (
+                f"{src} now drops the predecessor's `run` record in its own "
+                "claim write. Only `status_file.claim_run` — the detached "
+                "worker's — did, which is why the head line's tense is no "
+                "part of the roster test; if that changed, the four cores, "
+                "the `native` verb sentence and this pin move together"
+            )
+
+        flat = " ".join((SKILL_ROOT / rel).read_text(encoding="utf-8").split())
+        for fragment, why in (
+            ("A table that *does* print can still be the **previous** run's",
+             "the roster step still treats a printed table as this run's"),
+            ("The head line's tense",
+             "the roster step names no tense discriminator"),
+            ("The test is the `progress:` step",
+             "the roster step no longer names the step as THE test. F-2026-"
+             "09-21: keyed as an OR with the head line, a foreground re-run "
+             "over a dir an earlier detached run used never passes either "
+             "half, so the roster is re-called forever"),
+            ("`finished in foreground (2/2 models, …)`",
+             "the roster step shows no example of a finished head line"),
+            ("this fan-out's is `fanout`, a finished predecessor's is `complete`",
+             "the roster step names no step discriminator"),
+            ("make the call again rather than relaying it",
+             "the roster step says what to look for and not what to do"),
+            ("**aborted** mid-fan-out",
+             "the roster step overclaims: a predecessor aborted mid-fan-out "
+             "passes both tests"),
+            ("`30m00s/30m`",
+             "the roster step names the row elapsed without showing an aged one"),
+        ):
+            assert fragment in flat, f"{rel}: {why} (missing {fragment!r})"
+        assert "A roster whose head line says the run has finished" not in flat, (
+            f"{rel}'s roster step ORs the head line back into the test. The "
+            "foreground claim write drops only `progress`, so over a re-used "
+            "phase dir the head line keeps reading the predecessor's terminal "
+            "verdict and that OR never accepts this run's own roster"
+        )
+
+    def test_an_empty_selection_is_a_wait_not_an_instant_return(self, tmp_path):
+        """F-2026-09-20: rule 2's "instant return" had a second cause.
+
+        ``--wait`` used to come back immediately when it selected **no** view at
+        all — the first poll of every launch, before the checkpoint lands — so
+        "it comes back early only on a terminal `run` record" was false and the
+        agent read a same-second exit 2 as a run it could not see. The loop
+        keys on ``not views or any(_live(v) …)`` now, and this is the
+        behavioural pin for the sentence rule 2 makes of it.
+        """
+        import argparse
+        import time
+
+        from utils import run_status
+
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        args = argparse.Namespace(
+            phase=None, run_id=None, question=None, include_all=False,
+            timeout=1.0,
+        )
+        started = time.monotonic()
+        views = run_status._wait_for_terminal(plan, args, [])
+        elapsed = time.monotonic() - started
+        assert views == []
+        assert elapsed >= 0.9, (
+            "`--wait` returned instantly over an empty selection, so rule 2's "
+            "reading of an instant return — a terminal `run` record was read — "
+            f"is false again (returned in {elapsed:.2f}s)"
+        )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_rule_two_reads_an_instant_return_against_the_two_halves(self, rel):
+        """The words rule 2 tells the agent to look for are the real ones.
+
+        ``models_running`` is what all three launch writes put in the
+        checkpoint's ``state`` and is deliberately *not* a terminal checkpoint
+        word (so it also keeps ``--wait`` waiting); ``complete`` is. A rule that
+        named anything else would send the agent looking for a word the file
+        never holds.
+        """
+        from utils import run_status
+
+        assert "models_running" not in run_status.CHECKPOINT_TERMINAL_STATES
+        assert "complete" in run_status.CHECKPOINT_TERMINAL_STATES
+        block = " ".join(_rules_paragraph(rel).split())
+        assert "`--wait` comes back before its own deadline only on a" not in block
+        for fragment, why in (
+            ("holds its whole deadline for a selection that is still empty",
+             "rule 2 does not say an empty selection keeps waiting, which is "
+             "the half of the old claim that was false"),
+            ("`models_running` over rows with a fresh elapsed is this run",
+             "rule 2 names no way to tell this run's halves from the last "
+             "run's"),
+            ("`complete` over rows aged to",
+             "rule 2 names no way to recognise the predecessor's halves"),
+        ):
+            assert fragment in block, f"{rel}: {why} (missing {fragment!r})"
+
+    def test_the_ask_lane_never_selects_by_phase(self):
+        """`--phase ask` names every question ever asked under the plan.
+
+        One dir per *question* there, and on a host that records no run every
+        historical ask checkpoint is `no_run` — non-terminal — so a `--phase ask`
+        poll relays a wall of unrelated questions' tables and holds exit 2 long
+        after this invocation finished.
+        """
+        text = (SKILL_ROOT / "instructions/ask.md").read_text(encoding="utf-8")
+        polls = [
+            command for _, command in _command_units(text) if " status " in command
+        ]
+        assert polls
+        for command in polls:
+            assert "--phase ask" not in command, (
+                "ask.md polls by `--phase ask`, which selects every question "
+                f"ever asked under the plan:\n  {command}"
+            )
+        assert "`--phase ask` is never this mode's selector" in text, (
+            "ask.md picks `--question` without saying why `--phase ask` is wrong; "
+            "a rule with no reason beside it is a rule an agent talks itself out of"
+        )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_five_rules_are_present(self, rel):
+        block = _rules_paragraph(rel)
+        for rule in (
+            "**Relay the rendered line, and only that.**",
+            "**Exit code to action, never prose.**",
+            "**No movement is reported, not judged.**",
+            "**A ceiling, and the kill path in the first line.**",
+            "**The interval is a UX cost, and that is what sets it.**",
+        ):
+            assert rule in block, f"{rel} lost the rule {rule!r}"
+        # The three facts each rule turns on, spelled rather than implied.
+        assert 'status "<plan>" --abort`' in block  # rule 4's kill path
+        assert "120 to 300 seconds" in block  # rule 5's range
+        assert "<LOG>" in block              # rule 2's terminal read
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_rule_four_names_a_kill_path_that_works_on_this_host(self, rel):
+        """F2, 2026-09-20: `--abort` kills nothing on the lane this was written for.
+
+        Rule 4 puts the kill path in the **first** relayed line, and all four
+        cores named `status … --abort` as "the one kill path". On the Claude Code
+        lane the run is foreground with no `run` record, so `--abort` prints
+        `nothing was running (no_run)` and exits 2 — and over a re-used phase dir
+        it reports `not_running` for the *predecessor's* record. The user was
+        handed a way out that does nothing, in the one line the rule exists to
+        put it in.
+
+        Both commands are named now, branched on the **verb** (which is what a
+        rendered shim resolves for the agent) and never on a host name — naming
+        one would put a host in the shared core, which the neutrality lint above
+        forbids for exactly this reason.
+        """
+        block = _rules_paragraph(rel)
+        rule_four = block.split(
+            "**A ceiling, and the kill path in the first line.**", 1
+        )[1].split("\n5.", 1)[0]
+        assert 'status "<plan>" --abort`' in rule_four, (
+            f"{rel}'s rule 4 no longer names `--abort`, which is still the kill "
+            "path for a run launched with `--detach`"
+        )
+        for fragment in (
+            "*run detached*",       # the branch is on the verb …
+            "`--detach`",           # … and both of its resolutions are named
+            "background mechanism",
+            "no_run",               # what `--abort` actually answers there
+        ):
+            assert fragment in rule_four, (
+                f"{rel}'s rule 4 is missing {fragment!r}. It hands the user one "
+                "kill command in the first relayed line, so it has to be the one "
+                f"that works on the host reading it:\n{rule_four}"
+            )
+        assert "claude" not in rule_four.lower(), (
+            f"{rel}'s rule 4 names a host. The shared core branches on the "
+            "capability verb; the host is resolved in the shim (D5)."
+        )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_every_number_a_rule_asks_for_is_one_the_agent_can_produce(self, rel):
+        """Three 2026-09-20 fixes, each an instruction that named no referent.
+
+        Rule 2 said what each exit code means and nothing about an *instant*
+        return, which on a re-used phase dir is the common case: a predecessor's
+        terminal `run` record over a live checkpoint makes `--wait` answer in
+        0.11 s with exit 0, and rule 2 then reads as "terminal: stop polling".
+        Rule 3's clause was `this slot's budget runs to <timeout_s>` with no row
+        named, which is undefined the moment two slots are live — and they
+        normally are. Rule 5 told the agent to state "the interval" and named
+        120-300 s, but an agent polling the launcher's printed command passes no
+        `--timeout` and waits `progress.poll_s`, so it would have announced a
+        number it was not using.
+        """
+        block = _rules_paragraph(rel)
+        for fragment, why in (
+            ("An **instant** return is itself a reading",
+             "rule 2 never says what a same-second exit 0 means"),
+            ("`phase state:`",
+             "rule 2 points at no half of the view that a foreground run writes"),
+            ("<model spec>'s budget runs to",
+             "rule 3's no-movement clause names no row"),
+            ("running longest",
+             "rule 3 does not say which row to name when several are live"),
+            ("the gap you will **actually** wait",
+             "rule 5 still asks for 'the interval' rather than the wait"),
+            ("`progress.poll_s` resolves to",
+             "rule 5 never names the number a launcher-printed poll really waits"),
+        ):
+            assert fragment in block, f"{rel}: {why} (missing {fragment!r})"
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_call_timeout_margin_is_the_constant_not_a_typed_number(self, rel):
+        """F6, 2026-09-20: `30` was typed out in six places, pinned in none.
+
+        `run_status`'s comment claimed the margin was "named once here rather
+        than twice so the two cannot drift" while the number was spelled out in
+        the constant, the `native` *run detached* sentence, `SKILL.md`,
+        `references/host-capabilities.md` and these four cores — and the one test
+        that looked at it pinned the literal string `"plus 30 s"`, so moving the
+        constant would have left every agent-read surface on the old number and
+        the suite green. The generated surfaces follow the constant by
+        construction now (the verb sentence interpolates it); these four are
+        hand-written, so they are pinned against it here.
+        """
+        from utils import host_capabilities as caps
+
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        expected = f"plus {caps.WAIT_CAP_MARGIN_S:.0f} seconds"
+        assert text.count(expected) == 1, (
+            f"{rel} does not say {expected!r} exactly once. The per-call timeout "
+            "a poll has to set is `<interval>` plus "
+            "`host_capabilities.WAIT_CAP_MARGIN_S`; if that constant moved, this "
+            "sentence moves with it in all four cores."
+        )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_call_timeout_says_where_its_unit_is_stated(self, rel):
+        """F-2026-09-21, the core half of the `native` sentence's own fix.
+
+        `<interval>` plus the margin is a **duration**, and the thing it is
+        handed to is a host tool parameter whose unit is the host's business:
+        on Claude Code it is the Bash tool's `timeout`, in milliseconds, so the
+        seconds figure these cores state is off by a thousand there. The
+        `native` *run detached* sentence was given the unit, one worked value
+        and the value it is *not* — but an agent composing a poll reads the
+        core, not the shim's verb list, so the core is where it learns the
+        number needs converting at all.
+
+        The pointer, never the unit: these four files are host-neutral by
+        design (D5 — the core names the verbs and the shim resolves them), so
+        stating milliseconds here would be true of one host and a guess about
+        every other. Both halves are asserted, because either alone is the
+        defect: the pointer without the prohibition is a core that hard-codes
+        a unit tomorrow, and the prohibition without the pointer is the
+        unit-less sentence this fixes.
+        """
+        flat = " ".join((SKILL_ROOT / rel).read_text(encoding="utf-8").split())
+        for fragment, why in (
+            ("in whatever unit that parameter takes",
+             "the core still states a call timeout with no unit at all"),
+            ("*run detached* answer states it",
+             "the core names no place the host-specific unit is stated"),
+            ("a host whose unit is not seconds",
+             "the core does not say the number may need converting"),
+        ):
+            assert fragment in flat, f"{rel}: {why} (missing {fragment!r})"
+        for token in ("millisecond", "330000"):
+            assert token not in flat, (
+                f"{rel} hard-codes {token!r}. The per-call timeout's unit is "
+                "host-specific; the core points at the host's *run detached* "
+                "answer and the shim states it (D5)."
+            )
+
+    def test_the_place_the_cores_point_at_really_states_the_unit(self):
+        """The pointer is only worth having if the target answers it.
+
+        Pinned against the renderer rather than the prose on both sides: the
+        cores say "your host's *run detached* answer states it", and the one
+        resolution that has a per-call timeout to state is `native`, whose
+        sentence `host_capabilities.verb_sentence` renders. If that sentence
+        ever drops the unit, the cores are pointing at nothing.
+        """
+        from utils import host_capabilities as caps
+
+        sentence = caps.verb_sentence("claude-code", "detach")
+        assert "in that parameter's own unit" in sentence, (
+            "the `native` *run detached* sentence no longer names the unit of "
+            "the per-call timeout, so the four cores' pointer resolves to "
+            f"nothing; sentence: {sentence}"
+        )
+        assert "milliseconds here" in sentence, sentence
+
+    def test_the_five_rules_do_not_drift_between_the_four_cores(self):
+        """Same paragraph, five slots — and the rules are none of the slots."""
+        blocks = {rel: _rules_paragraph(rel) for rel in FAN_OUT_POLL}
+        reference = blocks["instructions/review-plan.md"]
+        for rel, block in sorted(blocks.items()):
+            assert block == reference, (
+                f"{rel}'s five-rule paragraph has drifted from review-plan.md's. "
+                "The paragraph differs between modes only in the phase name, the "
+                "log path and the selector; everything else is one text with four "
+                "copies, so a wording change belongs in all of them."
+            )
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_launch_still_streams_into_the_log(self, rel):
+        """`PYTHONUNBUFFERED=1` is load-bearing for the ticker, not incidental.
+
+        `[PROGRESS]` reaches the log *while the run is still going* only because
+        every detached launch is spelled `PYTHONUNBUFFERED=1 uv run …`; under
+        block buffering a non-TTY pipe leaves the log empty for minutes and the
+        cadence a reader measures is the buffer's, not the ticker's.
+        """
+        text = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+        launches = [
+            command
+            for _, command in _command_units(text)
+            if "orchestrator-run.log" in command or "--detach" in command
+        ]
+        assert launches, f"{rel} shows no detached launch command"
+        for command in launches:
+            assert command.startswith("PYTHONUNBUFFERED=1 "), (
+                f"{rel} launches the orchestrator without PYTHONUNBUFFERED=1, so "
+                f"the ticker's lines reach the log in one block at the end:\n  {command}"
+            )
 
 
 # ===========================================================================

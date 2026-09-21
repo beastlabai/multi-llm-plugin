@@ -381,6 +381,22 @@ _DRIVER_COMMENTS = [
     "## exit rolls nothing back and ends the phase at exit 3.",
 ]
 
+_PROGRESS_COMMENTS = [
+    "## --- progress ---------------------------------------------------------------",
+    "## How often a running fan-out says it is still alive. TWO knobs, because one",
+    "## interval cannot serve two cadences: `interval_s` is the `[PROGRESS]` ticker's",
+    "## stdout cadence (priced in log readability — a print and nothing else),",
+    "## while `poll_s` is the host's poll cadence and the resolved `--wait` default",
+    "## (priced in TOOL TURNS, one per poll). The run's `.status.json` is a third",
+    "## cadence and is deliberately not configurable.",
+    "## NOT written by `--init`: uncomment a line to override it. `interval_s: 0` is",
+    "## the documented disable form — it silences the ticker LINES only, and the",
+    "## status file still records every transition. `poll_s` has no disable form (`0`",
+    "## is rejected) and is clamped under the host's shell cap. `progress:` is a",
+    "## CLOSED key set: an unknown key is REJECTED at load time rather than silently",
+    "## keeping the shipped cadence.",
+]
+
 _DEFAULTS_COMMENTS = [
     "## --- defaults ---------------------------------------------------------------",
 ]
@@ -478,6 +494,27 @@ def _emit_driver_block(driver_cfg: dict) -> "list[str]":
     return out
 
 
+def _emit_progress_block(progress_cfg: dict) -> "list[str]":
+    """Emit the base ``progress:`` block as fully-commented YAML lines (`# ` prefix).
+
+    Derived from the live base rather than hand-typed, for the reason
+    :func:`_emit_driver_block` is: the CI byte-diff reds whenever a base cadence
+    changes without the template being regenerated, so the shipped stanza cannot
+    drift from the values it claims to mirror. Flat where the driver emitter has
+    to descend into ``write_paths`` — both keys are plain scalars, and keeping it
+    that way is the check that a nested one was never meant to be here. The
+    stanza sits between the ``driver:`` and ``defaults:`` keys, where the
+    auto-uncomment FSM's section is ``None``, so the toggler passes it through
+    verbatim (nothing here is provider-detected) and a plain copy of the template
+    stays inert.
+    """
+    out = ["# progress:"]
+    for key, val in (progress_cfg or {}).items():
+        rendered = "null" if val is None else _yaml_scalar(val)
+        out.append(f"#   {key}: {rendered}")
+    return out
+
+
 def _yaml_item(val) -> str:
     """Render a list item, quoting the glob forms YAML would otherwise misread.
 
@@ -526,6 +563,9 @@ def build_template_text(base_config: "dict | None" = None) -> str:
     lines.append("")
     lines.extend(_DRIVER_COMMENTS)
     lines.extend(_emit_driver_block(base.get("driver", {}) or {}))
+    lines.append("")
+    lines.extend(_PROGRESS_COMMENTS)
+    lines.extend(_emit_progress_block(base.get("progress", {}) or {}))
     lines.append("")
     lines.append("")
     lines.extend(_DEFAULTS_COMMENTS)

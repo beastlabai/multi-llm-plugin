@@ -392,13 +392,13 @@ class TestInstalledShimPassesTheShippedGuard:
 #: asserts nothing. A template edit therefore lands as a failing test naming the
 #: file, which is where the author is asked whether the edit also moved the
 #: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
-PINNED_SHIM_VERSION = 3
+PINNED_SHIM_VERSION = 4
 
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "d5f1dd2cfc4208c6dc85b8026d00ad51e13a3bfc38117d94fe3080a3dd6c2454",
+        "47c85ee8341f9db4c1483db7bee3dcb698afbe9799809efe530263ed264783e6",
     "opencode":
-        "e8495e894ee76138b4f0f619df359a20b6041c3e78b0a0d5b13e6926f44507d5",
+        "8d091e60a543975c9bc21fb2e9b59ea267340741f12701a68166f5d0487a7c3b",
 }
 
 

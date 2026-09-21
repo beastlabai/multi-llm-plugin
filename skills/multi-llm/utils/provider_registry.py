@@ -22,6 +22,7 @@ List values *replace* wholesale on merge; only nested dicts deep-merge. A blank
 is a deliberate wipe-out. See the per-project override docs in docs/configuration.md.
 """
 import copy
+import math
 import os
 import sys
 import yaml
@@ -456,11 +457,14 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     config = base_config
     driver_overridden = False
     git_env_overridden = False
+    progress_overridden = False
     for layer_name, path in _override_paths(anchor):
         data = _load_override_layer(layer_name, path, permissive)
         if data:
             if "driver" in data:
                 driver_overridden = True
+            if "progress" in data:
+                progress_overridden = True
             layer_providers = data.get("providers")
             if "git_env" in data or (
                 isinstance(layer_providers, dict)
@@ -482,6 +486,18 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     # to "no runner configured", which is the failure this check exists for.
     if driver_overridden:
         validate_driver_block(config.get("driver"))
+
+    # `progress:` follows `driver:`'s rule exactly, and for `driver:`'s reason: a
+    # cadence that was silently dropped degrades to the shipped default, which is
+    # indistinguishable from the user's setting having worked — the failure the
+    # closed key set exists to catch — so permissive mode does not relax it
+    # either. Validated HERE rather than lazily inside the accessors because
+    # `interval_s` is first read at fan-out start (a ConfigError raised there
+    # kills a run that has already launched eight models) and `poll_s` is first
+    # read inside `status --wait`, i.e. in the agent's poll loop rather than at
+    # the command the user typed.
+    if progress_overridden:
+        validate_progress_block(config.get("progress"))
 
     # §2.2: `git_env:` follows the identical rule — validated only when an
     # override layer asked for it, rejected rather than ignored, because
@@ -627,6 +643,68 @@ def get_provider_timeout(provider_name: str,
     # Fallback to provider's built-in default
     provider = get_provider(provider_name)
     return provider.default_timeout if provider else 1200
+
+
+# ---------------------------------------------------------------------------
+# progress: — the two feedback cadences, read the same anchored way
+# ---------------------------------------------------------------------------
+# The typed reads sit beside `get_provider_timeout` because they answer the same
+# question shape ("how long / how often, for THIS run"), but `progress:` is a
+# TOP-LEVEL block, not a per-provider one: `get_provider_timeout` indexes
+# `config["providers"][name]`, and copying that literally is the wrong shape. The
+# block's closed key set, its fallbacks and its validator live with the other
+# top-level blocks further down — search `PROGRESS_KEYS`.
+
+
+def _progress_seconds(key: str, anchor: Optional[Union[str, Path]]) -> float:
+    """The one read path both accessors share: merged ``progress.<key>``, seconds.
+
+    The fallback covers exactly one case — a merged config carrying no
+    ``progress:`` block at all (a test fixture, or a base predating the block),
+    mirroring :data:`DRIVER_FALLBACKS`. A key that IS present is returned as
+    written rather than re-checked: :func:`validate_progress_block` already ran
+    at load time on every override layer that named one, so a value reaching here
+    is either the shipped base's or one that passed the closed-set check.
+    """
+    progress = load_config(anchor=anchor).get("progress")
+    if not isinstance(progress, dict) or key not in progress:
+        return PROGRESS_FALLBACKS[key]
+    return float(progress[key])
+
+
+def get_progress_interval(anchor: Optional[Union[str, Path]] = None) -> float:
+    """``progress.interval_s`` — the ``[PROGRESS]`` ticker cadence, in seconds.
+
+    A stdout cadence, not a write cadence: it governs the ticker lines and
+    nothing else. ``0.0`` is the documented disable form — the lines stop, the
+    status file still records every event-driven transition, and ``--wait`` is
+    unaffected (turning the ticker off cannot turn a poll into an instant
+    return).
+
+    Args:
+        anchor: Discovery anchor (plan path / repo dir) threaded to
+            :func:`load_config`, so a run started from a foreign CWD still
+            resolves the *project's* cadence rather than the CWD's (§9.3.c — the
+            bug :func:`get_provider_timeout`'s own docstring names). Never read
+            as ``config["progress"]["interval_s"]`` at a call site: a layer that
+            omitted the key would KeyError, and an unanchored read is the §9.3.c
+            defect by construction.
+    """
+    return _progress_seconds("interval_s", anchor)
+
+
+def get_progress_poll(anchor: Optional[Union[str, Path]] = None) -> float:
+    """``progress.poll_s`` — the host poll cadence, in seconds.
+
+    The resolved ``--wait`` default (an explicit ``--timeout`` wins over it), and
+    a value the caller still clamps under the host's shell cap. Unlike the ticker
+    it has no disable form: ``0`` is rejected at load, because a poll of zero
+    means one that returns instantly, not one that is switched off.
+
+    Args:
+        anchor: as :func:`get_progress_interval`.
+    """
+    return _progress_seconds("poll_s", anchor)
 
 
 def _collect_configured_specs(anchor: Optional[Union[str, Path]] = None) -> set:
@@ -1412,6 +1490,159 @@ def get_write_paths(anchor: Optional[Union[str, Path]] = None) -> Dict[str, List
 def get_subagent_retries(anchor: Optional[Union[str, Path]] = None) -> int:
     """``driver.subagent_retries`` — transport-shaped re-dispatches only."""
     return int(get_driver_config(anchor=anchor)["subagent_retries"])
+
+
+# ---------------------------------------------------------------------------
+# progress: — the fan-out's feedback cadences (the block `get_progress_interval`
+# and `get_progress_poll`, defined beside `get_provider_timeout`, read)
+# ---------------------------------------------------------------------------
+
+#: The base `progress:` block's keys. CLOSED, like `driver:` and unlike the open
+#: blocks: an unknown key is REJECTED rather than ignored, because a typo
+#: (`interval:`) would otherwise be a silent no-op that keeps the shipped cadence
+#: while the user believes they configured a ticker.
+PROGRESS_KEYS = ("interval_s", "poll_s")
+
+#: Values used when the merged config carries no `progress:` block at all (a test
+#: fixture config, or a base predating the block), mirroring
+#: :data:`DRIVER_FALLBACKS`. The shipped base declares both keys, so in a real
+#: run these are never reached.
+PROGRESS_FALLBACKS: Dict[str, float] = {
+    "interval_s": 30.0,
+    "poll_s": 90.0,
+}
+
+
+def _progress_floor_s() -> float:
+    """The floor both keys share: ``run_status.WAIT_POLL_INTERVAL_S`` (5 s).
+
+    Single-sourced rather than retyped, because the two numbers are the same one
+    by construction: a cadence faster than the loop that re-reads the status file
+    learns nothing new. Imported lazily because ``utils.run_status`` pulls in the
+    detach/status/metrics subtree, and this module is imported by every entry
+    point — a module-level import would make the registry drag the whole status
+    stack behind it for a constant only the validator reads.
+    """
+    from .run_status import WAIT_POLL_INTERVAL_S
+
+    return float(WAIT_POLL_INTERVAL_S)
+
+
+def _progress_error(key: str, value: object, reason: str) -> str:
+    """One rejection surface for a bad `progress.*` value: key, value, reason."""
+    return f"multi-llm config error: progress.{key} is {value!r} — {reason}."
+
+
+def _is_finite_number(value: Union[int, float]) -> bool:
+    """``math.isfinite``, with an un-representable ``int`` counted as NOT finite.
+
+    PyYAML resolves a bare digit string of any length to a Python ``int``, and
+    ``math.isfinite(10**400)`` raises ``OverflowError`` ("int too large to
+    convert to float") rather than returning False. Absorbing that here keeps an
+    oversized integer on the same :class:`ConfigError` as ``.inf`` / ``.nan``
+    instead of escaping :func:`load_config` as an uncaught OverflowError.
+    """
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def validate_progress_block(progress: object) -> None:
+    """Validate a merged ``progress:`` block, raising :class:`ConfigError`.
+
+    Fail-fast and total, modeled on :func:`validate_driver_block`: every key is
+    checked, unknown keys are rejected, and each message names the key, the value
+    and the reason. Called from :func:`load_config` whenever an **override** layer
+    carried a ``progress:`` key — the base is ours (a broken base is a test
+    failure, not a user's problem) and permissive mode does not relax it, because
+    a silently ignored cadence degrades to the default, which is the failure this
+    check exists for.
+    """
+    if progress is None:
+        return
+    if not isinstance(progress, dict):
+        raise ConfigError(
+            f"multi-llm config error: `progress:` must be a mapping of "
+            f"{' / '.join(PROGRESS_KEYS)}, got {type(progress).__name__} "
+            f"({progress!r})"
+        )
+
+    unknown = sorted(
+        f"{key}: {value!r}"
+        for key, value in progress.items()
+        if key not in PROGRESS_KEYS
+    )
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under `progress:`: "
+            f"{'; '.join(unknown)}. Known keys: {', '.join(PROGRESS_KEYS)}. A typo "
+            f"here would otherwise be a silent no-op — the shipped cadence kept "
+            f"while the config reads as if it had been changed — so it is "
+            f"rejected instead of ignored."
+        )
+
+    floor = _progress_floor_s()
+    for key in PROGRESS_KEYS:
+        if key not in progress:
+            continue
+        value = progress[key]
+        # TYPE BEFORE FLOOR, and "numeric" means FINITE numeric. Both keys are
+        # seconds, so — unlike DRIVER_POSITIVE_INT_KEYS — a float is legal and an
+        # `isinstance(value, int)` guard is not enough on its own. Every value
+        # this rejects is one YAML actually produces: `true` is an `int` in
+        # Python and would read as a 1 s ticker; a quoted `"30"` would raise
+        # TypeError from a comparison deep inside the ticker rather than here; a
+        # nested mapping reaches the accessor as a non-number; and `.nan` /
+        # `.inf` parse as real floats the floor alone does not handle —
+        # `nan >= 5` is False, so a floor check would reject it with a message
+        # about a floor rather than about a nonsense value, while `inf >= 5` is
+        # True, so an `inf` would sail straight THROUGH and mean a ticker that
+        # never fires and a `--wait` that never returns.
+        #
+        # `null` is deliberately NOT on that list. A blank key (`poll_s:` with
+        # nothing after it) is :func:`_deep_merge`'s documented blank-keeps-base
+        # form: the override value is SKIPPED, the shipped base's number
+        # survives, and the merged block reaching here is the base's. That is the
+        # rule every other key follows and the one the `--init` template's
+        # commented-out `progress:` stanza relies on, so making this one block
+        # the exception would surprise in the other direction. The `None` the
+        # type check below still catches is the residual case with no base value
+        # to keep — a merged block whose `progress:` came from a layer that
+        # REPLACED rather than merged, i.e. a base carrying no `progress:` at all
+        # (a fixture) — where `float(None)` would otherwise raise inside the
+        # accessor, at fan-out start or in the agent's poll loop.
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not _is_finite_number(value)
+        ):
+            raise ConfigError(_progress_error(
+                key, value,
+                "expected a finite number of seconds (YAML's `true`, a quoted "
+                "\"30\", a nested mapping, `.nan` and `.inf` all parse to "
+                "something this cadence cannot be)",
+            ))
+        # `interval_s: 0` is the DOCUMENTED disable form, accepted explicitly:
+        # it silences the ticker lines and changes nothing else. `poll_s: 0` has
+        # no such meaning — a poll of zero returns instantly rather than being
+        # switched off — so it is rejected by the floor like any other value
+        # under it.
+        if key == "interval_s" and value == 0:
+            continue
+        if value < floor:
+            if key == "interval_s":
+                reason = (
+                    f"expected 0 (the documented disable form: it silences the "
+                    f"[PROGRESS] ticker lines only) or at least {floor:g} seconds"
+                )
+            else:
+                reason = (
+                    f"expected at least {floor:g} seconds — `poll_s` has no "
+                    f"disable form, because 0 means a poll that returns instantly "
+                    f"rather than a poll that is switched off"
+                )
+            raise ConfigError(_progress_error(key, value, reason))
 
 
 # ---------------------------------------------------------------------------

@@ -69,7 +69,9 @@ from utils.json_extractor import sanitize_model_name
 from utils.llm_client import invoke_with_provider
 from utils.git_utils import get_project_root
 from utils.detach import record_output_files, report_progress
+from utils.progress_tracker import FanoutProgress, PhaseProgress
 from utils.review_orchestrator_base import (
+    backfill_deadline_losses,
     bypass_ignore_prefixes,
     bypass_write_violation,
     maybe_detach,
@@ -898,6 +900,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
         "question_slug": slug,
         "plan_hash": plan_hash,
         "answers_md": os.path.join(question_dir, "answers.md"),
+        # Drop the predecessor's per-model map with the same move `claim_run`
+        # makes on the detached lane, and for the reason spelled out in the
+        # review base's copy of this write (F1, 2026-09-20): on the foreground
+        # lane nothing else ever drops it, so a re-asked question opened on the
+        # last run's rows and `just finished:` could never announce a model that
+        # the stale map already called terminal. `report_progress` below rebuilds
+        # it.
+        "progress": None,
     })
     if unattended and not args.models and not args.quick:
         # D6 row 2, recorded rather than merely applied (see review base).
@@ -906,15 +916,70 @@ async def main(argv: Optional[List[str]] = None) -> int:
             unattended_mod.row(2).site_id,
             "defaults.models: " + ", ".join(model_specs),
         )
+    # Counters only, deliberately: the per-model map is written by the tracker's
+    # seed inside the fan-out (below), and `progress` merges key by key at its
+    # top level, so a `models` key here would only race the seed to write the
+    # same thing twice.
     report_progress(
         question_dir, step="fanout",
-        models_total=len(model_specs), models_done=0,
+        models_total=len(model_specs), models_done=0, models_succeeded=0,
+    )
+
+    # The fan-out's per-model map, and the [PROGRESS] ticker that narrates it.
+    #
+    # Built against `question_dir` and **not** the `ask` phase dir the other
+    # three modes' pattern would predict: ask's checkpoint lives one level
+    # below, at `{plan}/ask/<slug>-<hash8>/.status.json` (see
+    # `resolve_question_dir`), because two different questions asked about one
+    # plan are two independent runs with two answer sets and two `.status.json`
+    # files. A tracker anchored on `{plan}/ask/` would merge both questions'
+    # models into a single map — and hand a poller a map it cannot attribute to
+    # either question. It is the same fact that makes the Layer 2 poll select by
+    # `--question` and never by `--phase ask`.
+    #
+    # `timeout=args.timeout` mirrors `ask_one`'s own budget rule (the CLI
+    # override when given, each provider's configured timeout otherwise), so a
+    # queued row renders `0m00s/30m` against the budget the slot will really
+    # get rather than a blank denominator.
+    #
+    # Constructed **above** the two coroutines rather than beside the
+    # `run_models_concurrent` call it is passed to, because `ask_one` now takes
+    # a transition of its own (the `running` one below) and a closure reading a
+    # name defined forty lines further down is a trap the next edit springs.
+    #
+    # The division of labour with the helper: it seeds the map before the tasks
+    # exist, marks the stagger wait, turns every slot terminal from the result
+    # `ask_one` (or `skip_existing_answer`) returned, names the deadline as the
+    # sweep reason, and cancels *and awaits* the ticker in its `finally` before
+    # returning. What it cannot do is say when a slot left the queue for a
+    # provider — only the coroutine that dispatches sees that — which is why
+    # `ask_one` calls `tracker.running()` itself, exactly as
+    # `run_single_model` and `run_single_review` do on the other two lanes.
+    tracker = FanoutProgress(
+        question_dir, model_specs, anchor=plan_path, timeout=args.timeout,
     )
 
     def skip_existing_answer(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
         # short-circuit models that already have a non-empty answer so resume
         # stays fast. Returns None when the model must (re)run.
+        #
+        # The returned dict is also this slot's *progress transition*: the
+        # fan-out feeds it to `FanoutProgress.record_result`, which reads
+        # `success` and `source` and freezes the entry as `done` /
+        # `source: "resume"` with `attempt: 0` and `elapsed_s: 0` — terminal the
+        # moment it is seeded, because the answer exists and no attempt is ever
+        # dispatched. That is why a skipped model counts on **both** numbers,
+        # `models_done` and `models_succeeded`: it has finished its slot *and*
+        # it has a usable result, so a resumed run of four models that finds
+        # three on disk reads 3/4 at the first poll instead of 0/4. Leaving it
+        # `queued` would make the counts and the rendered table lie about a run
+        # with nothing left to do, and the write that claims the question dir
+        # drops the predecessor's `progress` wholesale, so there is no earlier
+        # entry to fall back on. (`claim_run` does that on the detached lane; on
+        # the foreground one the launch write above does — F1, 2026-09-20.)
+        # There is no separate `skipped` state; the distinction lives in
+        # `source`.
         if not skip_existing:
             return None
         sanitized = sanitize_model_name(model_spec)
@@ -987,6 +1052,21 @@ async def main(argv: Optional[List[str]] = None) -> int:
             else get_provider_timeout(provider_name, anchor=plan_path)
         )
 
+        # F1, 2026-09-20: this lane had **no** `running` transition at all, and
+        # the omission was justified by an argument about *terminal* transitions
+        # — `run_models_concurrent` takes those from the returned result dict,
+        # so `ask_one` needs none of its own. `running` is not terminal, and it
+        # is the one transition the helper cannot take: it knows a slot left the
+        # stagger, never that a provider was actually dispatched. Measured on a
+        # 2-model ask fan-out: every line of the whole run read `[PROGRESS] 0/2
+        # done (0 ok, 0 failed) | staggering 1 | queued 1` — never a model name,
+        # never an elapsed/budget — and `status --view run` showed the index-0
+        # model `queued` for its entire 30-minute slot. `attempt=1` because this
+        # lane makes exactly one dispatch and has no ladder to count; `timeout_s`
+        # is the slot's whole budget, which is the seed's value unless a
+        # per-slot override moved it — the one thing the seed could not know.
+        tracker.running(model_spec, attempt=1, timeout_s=per_model_timeout)
+
         result = await asyncio.to_thread(
             invoke_with_provider,
             prompt=prompt,
@@ -1058,47 +1138,135 @@ async def main(argv: Optional[List[str]] = None) -> int:
         model_specs, ask_one, args.timeout, args.max_parallel,
         skip_predicate=skip_existing_answer,
         anchor=plan_path,
+        tracker=tracker,
     )
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # T5: the fan-out is not the phase, and a ticker that dies with it leaves
+    # the rest of the run silent. `run_models_concurrent` returns the moment the
+    # last slot does — having cancelled *and awaited* its own ticker first, so
+    # no [PROGRESS] line can interleave with the per-model summary — but ask
+    # then rescans the question dir, resolves the failed map and rewrites
+    # answers.md, which on a large answer set is the second silence this feature
+    # exists to remove. This second ticker is what reports that window — with
+    # one line rather than a line per interval, for the reason spelled out under
+    # the yield below. It holds
+    # no per-model map and writes nothing at all (it re-reads the checkpoint and
+    # prints), so the terminal map the sweep froze stays byte-for-byte as it was
+    # and a table rendered afterwards still shows each model's real duration
+    # rather than a clock that kept running.
+    phase_progress = PhaseProgress(question_dir, anchor=plan_path)
+    phase_progress.start_ticker()
+    # One turn of the loop, so the task actually starts. `start_ticker` only
+    # *schedules* it, and everything below this line is synchronous — the answer
+    # scan, the failed map and the answers.md rewrite are all plain file I/O —
+    # so without a yield here the ticker would never get a turn at all, would be
+    # cancelled before its body ever ran, and would print nothing: not its
+    # interval lines and not the teardown line that names the terminal step.
+    # Given the turn, it reaches its first `await` and the teardown cancel lands
+    # there, which is what guarantees that last line. (What this lane gets is
+    # therefore that one line and no interval lines at all — ask's post-fan-out
+    # window is short and wholly synchronous, so an interval expiring inside it
+    # cannot be serviced until it ends. F6, 2026-09-20: the parenthesis here
+    # used to say a lane whose post-fan-out work awaits "also gets the interval
+    # lines", offered as the contrast that made ask's single line the exception
+    # — and on the review lanes' executor path it was false, because their
+    # `dispatch_subagent_tasks` blocked the loop for the whole validation
+    # window. Those two call sites are `asyncio.to_thread`-awaited now, so the
+    # contrast is true as stated; ask has no such call to await.)
+    await asyncio.sleep(0)
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Read-only scan to determine which models succeeded, so we can build the
-    # failed map before writing answers.md exactly once (no transient on-disk
-    # version missing the ## Failed Models section).
-    completed = [spec for spec, _ in collect_completed(question_dir, model_specs)]
-    completed_set = set(completed)
+        # Read-only scan to determine which models succeeded, so we can build the
+        # failed map before writing answers.md exactly once (no transient on-disk
+        # version missing the ## Failed Models section).
+        completed = [spec for spec, _ in collect_completed(question_dir, model_specs)]
+        completed_set = set(completed)
 
-    # Every requested model is either completed (has a usable answer file) or
-    # failed; build the failed map for the report from that invariant so
-    # ## Failed Models and the live results agree.
-    failed_models: Dict[str, str] = {}
-    for spec in model_specs:
-        if spec in completed_set:
-            continue
-        res = results.get(spec, {})
-        reason = (res.get("error") if isinstance(res, dict) else None) \
-            or "No answer produced (model did not complete)"
-        failed_models[spec] = reason
+        # Every requested model is either completed (has a usable answer file)
+        # or failed, and the map is built in the same three steps the review
+        # lanes build theirs — F4, 2026-09-20. It used to be one loop over
+        # `model_specs` ending in a bare `or "No answer produced (model did not
+        # complete)"`, which made this lane the **third** wording for the one
+        # cause the other two name once: a slot the fan-out's deadline
+        # cancelled was reported that sentence in `answers.md` and in
+        # `models_failed` while the map's own swept entry — written by the same
+        # run, one file over — said `no result (cancelled at the fan-out
+        # deadline)`. One cause, two labels, and the table and the report
+        # disagreeing about a model is precisely what `DEADLINE_ERROR` exists
+        # to stop.
+        #
+        # 1. What the fan-out itself returned: a slot that ran and lost carries
+        #    its own reason, which is more informative than any backfill.
+        failed_models: Dict[str, str] = {}
+        for spec, res in results.items():
+            if not isinstance(res, dict) or res.get("success"):
+                continue
+            failed_models[spec] = res.get("error") or "No usable answer produced"
+        # 2. F11's backfill, the same call with the same helper the review base
+        #    and review-code make: a spec in neither `results` nor
+        #    `failed_models` never returned at all, and it is named
+        #    `DEADLINE_ERROR` here and in the map by one pass. The tracker's own
+        #    sweep has normally already retired it with that same string (the
+        #    transitions are idempotent, so the first writer wins); this is the
+        #    belt that catches a fan-out which returned by a path the sweep
+        #    missed.
+        backfill_deadline_losses(model_specs, results, failed_models, tracker=tracker)
+        # 3. Reconcile against the disk scan, which is this lane's source of
+        #    truth for "answered" (`collect_completed` reads the answer files,
+        #    and `answers.md` and `models_completed` are built from the same
+        #    scan). A slot with a file is completed whatever its result said; a
+        #    slot with neither a file nor a reason claimed success and wrote
+        #    nothing, which is a different cause from the deadline and keeps the
+        #    sentence that has always described it.
+        for spec in model_specs:
+            if spec in completed_set:
+                failed_models.pop(spec, None)
+            elif spec not in failed_models:
+                failed_models[spec] = "No answer produced (model did not complete)"
 
-    # Write answers.md once, with the resolved failed-models section.
-    answers_md, completed = write_answers_md(
-        question_dir, question, plan_path, model_specs, failed_models, timestamp
-    )
+        # Write answers.md once, with the resolved failed-models section.
+        answers_md, completed = write_answers_md(
+            question_dir, question, plan_path, model_specs, failed_models, timestamp
+        )
 
-    if completed and not failed_models:
-        state = "completed"
-    elif completed:
-        state = "partial"
-    else:
-        state = "failed"
+        if completed and not failed_models:
+            state = "completed"
+        elif completed:
+            state = "partial"
+        else:
+            state = "failed"
 
-    # A detached ask hands its answers back through `status`, not through a
-    # stdout nobody read (no-op in the foreground).
-    record_output_files(question_dir, answers=answers_md)
-    report_progress(
-        question_dir, step="complete", models_total=len(model_specs),
-        models_done=len(completed),
-    )
+        # A detached ask hands its answers back through `status`, not through a
+        # stdout nobody read (no-op in the foreground).
+        record_output_files(question_dir, answers=answers_md)
+        # Both counters, and they do not mean the same thing — getting them the
+        # wrong way round is exactly the bug the plan's "a live progress line
+        # cannot use the second meaning" bullet describes. `models_done` counts
+        # **finished slots**, read off the map the fan-out just froze: every slot
+        # is terminal by now, so on a lossy run it still reads 4/4 instead of
+        # walking backwards to the 3/4 a success count would write at the end of a
+        # run whose numerator had already reached 4. `models_succeeded` carries
+        # what this restatement has always computed, `len(completed)` — and that
+        # number is deliberately the *disk* scan (`collect_completed`), the same
+        # source `answers.md` and `models_completed` are built from, so the report,
+        # the checkpoint and the progress line cannot disagree about which models
+        # answered.
+        #
+        # Counters only: no `models` key, so `update_status`'s one-level merge
+        # leaves the frozen map exactly as the fan-out's sweep wrote it.
+        models_done = tracker.counts()[0]
+        report_progress(
+            question_dir, step="complete", models_total=len(model_specs),
+            models_done=models_done, models_succeeded=len(completed),
+        )
+    finally:
+        # Stopped only *after* the terminal `progress.step` is on disk: the
+        # ticker's teardown line re-reads the checkpoint, so stopping it any
+        # earlier would leave the log's last [PROGRESS] trailing off at
+        # `fanout`. Cancel-and-await, so that line lands before the run's own
+        # report rather than in the middle of it.
+        await phase_progress.stop_ticker()
 
     update_status(question_dir, {
         "state": state,

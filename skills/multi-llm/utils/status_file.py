@@ -16,9 +16,10 @@ merge semantics — so every existing consumer and test keeps its meaning.
 orchestrator checkpoint: ``ask_orchestrator`` reads ``question`` byte-for-byte as
 its slug-collision guard and ``plan_hash`` for the stale-answers warning, and
 ``build_unsanitize_map`` reads ``models_requested``/``models_completed`` to
-restore colon-bearing model specs during reaggregation. A detached run therefore
-adds keys to the *same* document under two reserved objects rather than writing a
-second file with a private shape:
+restore colon-bearing model specs during reaggregation. The run machinery
+therefore adds keys to the *same* document under two reserved objects rather than
+writing a second file with a private shape — ``run`` only ever on a detached run,
+``progress`` on **every** run:
 
 * ``run``: ``{run_id, pid, process_start_time, pgid, detached, host, mode, cwd,
   log_path, heartbeat_at, heartbeat_interval_s, state, exit_code, error,
@@ -33,8 +34,35 @@ second file with a private shape:
   **not** process state — ``update_run``'s successor-state guard does not
   apply to it, and ``claim_run`` writes it once at start and never again.
 * ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
-  failed_task_ids, models_done, models_total}`` — reporting only; no external
-  actor advances it.
+  failed_task_ids, models, models_done, models_succeeded, models_total,
+  interval_s}`` — reporting only; no external actor advances it, and nothing
+  resumes, reaggregates or branches on it. That is why it is the one reserved
+  object a **foreground** run writes too, and why ``detach.report_progress``
+  writes on *every* path: the run handle it consults picks the **door**, never
+  whether the write happens. It goes through ``handle.progress`` (which stamps
+  that run's heartbeat with it) only when the handle owns the dir being written,
+  and straight through :func:`update_progress` otherwise — both when there is no
+  handle at all (the foreground) and when the handle owns a *different* dir, as
+  ``full --detach`` does: it claims ``{plan}/full/`` and then runs each phase in
+  process against ``{plan}/<phase>/``. This docstring used to say the fallback
+  was "when no run handle owns the phase dir", which reads as covering that
+  second case while the code silently dropped it — every phase of a detached
+  ``full`` reported nothing at all (F3, 2026-09-20). So: a foreground
+  ``.status.json`` gains a ``progress`` object and still no ``run`` object, and
+  a phase dir written by a run that owns a different one gains the same.
+  ``models`` is the per-model map the fan-out keeps, keyed by model spec —
+  ``{state: queued|staggering|running|retrying|done|failed, started_at,
+  updated_at, ended_at, elapsed_s, timeout_s, attempt, retry_after_s,
+  stagger_until, error, source}`` — ``stagger_until`` is the stamp a
+  ``staggering`` slot's launch sleep ends at, which ``status`` renders as
+  ``starts in 4s`` and the slot drops the moment it moves on. ``models_done`` counts *finished* slots (``done`` + ``failed``,
+  which is why it never walks backwards mid-run) and its sibling
+  ``models_succeeded`` counts the slots that produced a usable result;
+  ``models_total`` is the number of specs requested. ``interval_s`` is the
+  ticker cadence the run resolved. This enumeration is the in-code contract for
+  the object — a reader who finds a key missing from it concludes the key is not
+  part of the schema and writes a second file for it, so a new ``progress`` key
+  lands here in the same commit as its writer.
 
 ``run.state`` is **not** the top-level ``state``. The top-level field stays the
 *phase* machine (``models_running`` → ``models_complete``/``grouping_complete`` →

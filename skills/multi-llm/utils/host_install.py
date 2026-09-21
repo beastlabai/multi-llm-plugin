@@ -114,7 +114,14 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
 #: 3: :func:`render` gained a fourth token, ``{NEEDS_HUMAN_RULE}``, so a shim
 #: rendered before it carries no exit-3 decision rule at all — a shape change
 #: no template digest sees on its own.
-SHIM_VERSION = 3
+#:
+#: 4: the poll command gained ``--host <id>``. The wait is clamped under the
+#: ceiling that flag names, so a shim rendered before this one polls with a wait
+#: clamped against the tightest ceiling on record instead of its own host's —
+#: silently, and on every poll. A changed command form, which is exactly what
+#: this counter is for, and it moves for the same reason the ``--exec-subagents``
+#: case above did.
+SHIM_VERSION = 4
 
 #: The key that identifies a file as ours. ``uninstall-host`` removes files by
 #: this block and **never** by filename, so a user's own `multi-llm.md` is safe.

@@ -70,6 +70,19 @@ prints the path), so you can port any custom settings into the regenerated file.
   the bound is on the command's whole process group rather than on the
   `/bin/sh` that started it, so a hung `tsc` is killed rather than orphaned.
   The markdown apply phases never run it.
+- **`progress.interval_s` / `progress.poll_s` price two different cadences.**
+  `interval_s` (default 30 s) is how often a running fan-out prints a
+  `[PROGRESS]` ticker line — a stdout cadence only, so `interval_s: 0` is the
+  documented **disable form**: the lines stop, while the run's status file still
+  records every transition and `--wait` is untouched. `poll_s` (default 90 s) is
+  how often the agent host polls that run, and the resolved `--wait` default — a
+  poll costs a **tool turn**, which is why it is a separate knob rather than the
+  same number. It is **clamped under the host's shell cap** (the tightest
+  surveyed ceiling is OpenCode's 120 s, less a 30 s margin — which is where 90
+  comes from), so raising it past that cap buys nothing. Both floors are 5 s;
+  `poll_s` has **no** disable form (`0` is rejected, since it would mean a poll
+  that returns instantly rather than one switched off), and an unknown key under
+  `progress:` is rejected at load rather than silently keeping the default.
 
 ## Safety
 

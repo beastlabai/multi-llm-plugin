@@ -37,6 +37,8 @@ import contextlib
 import json
 import shutil
 import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -46,7 +48,9 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 import code_review_orchestrator as cro  # noqa: E402
+from utils import progress_tracker  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
+from utils import run_status  # noqa: E402
 from utils import subagent_tasks as subagent_tasks_mod  # noqa: E402
 from utils.status_file import write_status  # noqa: E402
 
@@ -810,6 +814,20 @@ def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
 #: Two specs whose sanitized stems are lossy in both of the ways that matter: the
 #: `:` that separates provider from model and the `.` inside a version number.
 _REAL_SPECS = ["claude-code:sonnet-4.6", "cursor-agent:cursor-grok-4.6-xhigh"]
+
+#: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
+#: enumerates them. A foreground run writes this object now (``report_progress``
+#: falls back to ``status_file.update_progress`` when no run handle owns the phase
+#: dir), so the foreground assertion below pins its *shape*: the keys a reader of
+#: the checkpoint is allowed to meet, and never a ``run`` object beside them.
+_RESERVED_PROGRESS_KEYS = {
+    "step", "batch_index", "batches_total", "tasks_done", "tasks_total",
+    "failed_task_ids", "models", "models_done", "models_succeeded",
+    "models_total", "interval_s",
+    # Written straight through ``update_status`` by the two executor mirrors,
+    # so they already reach a foreground checkpoint.
+    "subagents", "write_subagents", "sandbox_bypassed",
+}
 
 
 class TestReviewCodeWritesTheCheckpointReaggregationReads:
@@ -2141,10 +2159,36 @@ class TestAResultFileThatLandedAfterGroupingIsFoldedIn:
         status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
         assert status["models_completed"] == _REAL_SPECS + [_LATE_SPEC]
         assert status["models_failed"] == {}
-        # A foreground run publishes no `progress` object (`detach.report_progress`
-        # is a no-op without a run handle); the detached leg's `models_done`
-        # follow-through is pinned in `TestRecordModelsPresent`.
-        assert "progress" not in status
+        # `report_progress` gained a foreground write path, so this reaggregate
+        # publishes a `progress` object of its own — the same reserved object,
+        # in the same shape, a detached run writes, which is what lets one
+        # renderer serve both. The invariant that survives is the narrower one:
+        # a foreground `.status.json` gains `progress` and still no `run`
+        # object, because only a detached worker's `claim_run` writes process
+        # state. The detached leg's `models_done` follow-through is pinned in
+        # `TestRecordModelsPresent`.
+        #
+        # The step is `validation_pending`, not `complete` (2026-09-21, the
+        # finding `TestTheHostValidationHandOffIsTerminal` in
+        # test_code_review_orchestrator.py pins: neither review-code hand-off
+        # said the phase had ended). This reaggregate runs *with* validation, so
+        # it writes the fresh round, hands it to the host at the marker its
+        # sibling `test_the_bound_round_is_retired_and_the_dir_is_regrouped`
+        # asserts on the same fixture (`[VALIDATION_BATCHES_PENDING]` /
+        # `[VALIDATION_PENDING]`), and returns. A run whose validation the host
+        # still owes is not complete, so `complete` was exactly the inaccurate
+        # word that finding removed. `validation_pending` IS in
+        # `run_status.CHECKPOINT_TERMINAL_STEPS`, so the checkpoint still reads
+        # settled rather than in flight — which is the whole point of the fix.
+        progress = status.get("progress") or {}
+        assert progress.get("step") == "validation_pending"
+        assert progress.get("models_total") == len(status["models_requested"])
+        assert progress.get("models_done") == progress["models_total"]
+        assert set(progress) <= _RESERVED_PROGRESS_KEYS, progress
+        assert "run" not in status, (
+            "a foreground reaggregate claims no run; `progress` is the only "
+            "reserved object it writes"
+        )
 
     def test_the_documented_flow_then_completes_with_every_model_in_the_report(
         self, tmp_path, capsys
@@ -2442,6 +2486,24 @@ class TestARetiredBatchIsNotValidationInProgress:
         assert validation_mod.stale_validation_reason(legacy, grouped) is None
 
 
+def _terminal(state, **over):
+    """One frozen `progress.models` entry, as the fan-out's sweep left it."""
+    entry = {
+        "state": state,
+        "started_at": "2026-09-17T10:00:00Z",
+        "updated_at": "2026-09-17T10:04:00Z",
+        "ended_at": "2026-09-17T10:04:00Z",
+        "elapsed_s": 240,
+        "timeout_s": 1800,
+        "attempt": 1,
+        "source": "file" if state == "done" else None,
+    }
+    if state == "failed":
+        entry["error"] = "c exited with code 1"
+    entry.update(over)
+    return entry
+
+
 class TestRecordModelsPresent:
     def _checkpoint(self, tmp_path, **over):
         data = {
@@ -2450,7 +2512,17 @@ class TestRecordModelsPresent:
             "models_requested": ["a:x", "b:y", "c:z"],
             "models_completed": ["a:x", "b:y"],
             "models_failed": {"c:z": "c exited with code 1"},
-            "progress": {"models_total": 3, "models_done": 2, "step": "complete"},
+            "progress": {
+                "models_total": 3,
+                "models_done": 3,
+                "models_succeeded": 2,
+                "step": "complete",
+                "models": {
+                    "a:x": _terminal("done"),
+                    "b:y": _terminal("done"),
+                    "c:z": _terminal("failed"),
+                },
+            },
         }
         data.update(over)
         write_status(str(tmp_path), data)
@@ -2465,8 +2537,26 @@ class TestRecordModelsPresent:
         status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
         assert status["models_completed"] == ["a:x", "b:y", "c:z"]
         assert status["models_failed"] == {}
-        assert status["progress"]["models_done"] == 3
-        assert status["progress"]["step"] == "complete"
+        progress = status["progress"]
+        # `models_succeeded`, NOT `models_done`. This writer counts completed
+        # RESULTS; `models_done` counts finished slots, and the salvaged model's
+        # slot finished long ago — as `failed`. So the terminal count is left
+        # exactly where the fan-out left it and only the success count moves.
+        assert progress["models_succeeded"] == 3
+        assert progress["models_done"] == 3
+        assert progress["step"] == "complete"
+        # The map is flipped in the same write, so a reader never meets a model
+        # the report calls completed while the table still calls it failed.
+        recovered = progress["models"]["c:z"]
+        assert recovered["state"] == "done"
+        assert recovered["source"] == "existing_file"
+        assert "error" not in recovered
+        # Frozen: the slot really did end when it ended, and this is a later
+        # reading of the same slot's outcome, not a second run of it.
+        assert recovered["ended_at"] == "2026-09-17T10:04:00Z"
+        assert recovered["elapsed_s"] == 240
+        # The two it did not touch are byte-identical.
+        assert progress["models"]["a:x"] == _terminal("done")
 
     def test_a_completed_model_whose_file_is_gone_keeps_its_entry(self, tmp_path):
         phase_dir = self._checkpoint(tmp_path)
@@ -2476,7 +2566,9 @@ class TestRecordModelsPresent:
         status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
         assert status["models_completed"] == ["a:x", "b:y"]
         assert status["models_failed"] == {"c:z": "c exited with code 1"}
-        assert status["progress"]["models_done"] == 2
+        assert status["progress"]["models_done"] == 3
+        assert status["progress"]["models_succeeded"] == 2
+        assert status["progress"]["models"]["c:z"]["state"] == "failed"
 
     def test_a_checkpoint_without_outcomes_gains_nothing(self, tmp_path):
         write_status(str(tmp_path), {"phase": "code-review", "state": "complete"})
@@ -2489,6 +2581,255 @@ class TestRecordModelsPresent:
     def test_no_checkpoint_at_all_writes_none(self, tmp_path):
         assert rob.record_models_present(str(tmp_path), ["a:x"]) == []
         assert not (tmp_path / ".status.json").exists()
+
+
+class TestASalvagedModelIsNotRenderedAsSkipped:
+    """2026-09-21: `flip_map_entries_to_done` serves two events and only one of
+    them is "this slot never dispatched".
+
+    `record_models_present` (the `--reaggregate` path) stamps `existing_file`,
+    which is in `run_status.SKIPPED_SOURCES` / `progress_tracker.RESUME_SOURCES`,
+    so `_model_state_label` renders that row **skipped** — true there, the slot
+    really never ran on this run. The helper stamped the same word for
+    `record_models_salvaged`, whose slot dispatched, ran, failed to parse and was
+    repaired in-process, so every salvaged model was announced as skipped in the
+    `models:` table and on `just finished:` — the opposite of what happened.
+    The source word is now the caller's to supply, and salvage supplies one that
+    is in neither set.
+    """
+
+    SPEC = "c:z"
+    OTHER = "a:x"
+
+    def _checkpoint(self, tmp_path, *, still_failed):
+        """The checkpoint each event actually meets.
+
+        Salvage runs *after* the fan-out's own `del failed_models[spec]`, so the
+        report side already reads completed and only the map is behind. A
+        reaggregate meets the model still under `models_failed`.
+        """
+        write_status(str(tmp_path), {
+            "phase": "code-review",
+            "state": "complete",
+            "models_requested": [self.OTHER, self.SPEC],
+            "models_completed": (
+                [self.OTHER] if still_failed else [self.OTHER, self.SPEC]
+            ),
+            "models_failed": (
+                {self.SPEC: "c exited with code 1"} if still_failed else {}
+            ),
+            "progress": {
+                "models_total": 2,
+                "models_done": 2,
+                "models_succeeded": 1 if still_failed else 2,
+                "step": "complete",
+                "models": {
+                    self.OTHER: _terminal("done"),
+                    self.SPEC: _terminal("failed"),
+                },
+            },
+        })
+        return tmp_path
+
+    def _progress(self, phase_dir):
+        return json.loads(
+            (phase_dir / ".status.json").read_text(encoding="utf-8")
+        )["progress"]
+
+    def _view(self, phase_dir):
+        return {"phase_dir": str(phase_dir), "progress": self._progress(phase_dir)}
+
+    def _row(self, lines, spec):
+        rows = [line for line in lines if line.strip().startswith(f"{spec} ")]
+        assert len(rows) == 1, lines
+        return rows[0]
+
+    def test_salvage_stamps_a_source_that_is_in_neither_skip_set(self, tmp_path):
+        phase_dir = self._checkpoint(tmp_path, still_failed=False)
+
+        rob.record_models_salvaged(str(phase_dir), [self.SPEC])
+
+        entry = self._progress(phase_dir)["models"][self.SPEC]
+        assert entry["state"] == "done", entry
+        assert entry["source"] == "salvage", entry
+        assert entry["source"] not in run_status.SKIPPED_SOURCES
+        assert entry["source"] not in progress_tracker.RESUME_SOURCES
+        # Everything the shared helper already guaranteed still holds: the
+        # pre-salvage error is gone and the freeze is not re-stamped.
+        assert "error" not in entry, entry
+        assert entry["ended_at"] == "2026-09-17T10:04:00Z"
+        assert entry["elapsed_s"] == 240
+
+    def test_the_models_table_calls_a_salvaged_model_done(self, tmp_path):
+        phase_dir = self._checkpoint(tmp_path, still_failed=False)
+
+        rob.record_models_salvaged(str(phase_dir), [self.SPEC])
+
+        view = self._view(phase_dir)
+        assert run_status._model_state_label(
+            view["progress"]["models"][self.SPEC]
+        ) == "done"
+        row = self._row(run_status._model_table_lines(view), self.SPEC)
+        assert "done" in row, row
+        assert "skipped" not in row, row
+
+    def test_just_finished_calls_a_salvaged_model_done(self, tmp_path):
+        phase_dir = self._checkpoint(tmp_path, still_failed=False)
+
+        rob.record_models_salvaged(str(phase_dir), [self.SPEC])
+
+        view = self._view(phase_dir)
+        # An empty baseline for this dir: every terminal row in it went terminal
+        # during the wait, which is what a poll that opened before the salvage
+        # landed sees.
+        run_status._attach_finished_during_wait({str(phase_dir): {}}, [view])
+        text = run_status._just_finished_text(view)
+        assert self.SPEC in text, text
+        assert "skipped" not in text, text
+        assert f"{self.SPEC} (" in text and "done" in text, text
+
+    def test_reaggregate_still_stamps_existing_file_and_still_reads_skipped(
+        self, tmp_path
+    ):
+        """The other caller is deliberately unchanged: that slot never ran."""
+        phase_dir = self._checkpoint(tmp_path, still_failed=True)
+
+        assert rob.record_models_present(str(phase_dir), [self.OTHER, self.SPEC]) == [
+            self.SPEC
+        ]
+
+        view = self._view(phase_dir)
+        entry = view["progress"]["models"][self.SPEC]
+        assert entry["state"] == "done", entry
+        assert entry["source"] == "existing_file", entry
+        assert entry["source"] in run_status.SKIPPED_SOURCES
+        assert entry["source"] in progress_tracker.RESUME_SOURCES
+        assert run_status._model_state_label(entry) == "skipped"
+        assert "skipped" in self._row(
+            run_status._model_table_lines(view), self.SPEC
+        )
+
+
+class TestFlippingALiveRowStopsItsClock:
+    """2026-09-21: the flip froze the verdict and left the clock running.
+
+    ``entry_elapsed_s`` decides at *read* time which branch a row is on, and
+    the discriminator is ``ended_at``: present -> the stored ``elapsed_s``,
+    absent -> ``now - started_at`` recomputed on every read and clamped only at
+    the slot's own budget. ``flip_map_entries_to_done`` stamped neither, which
+    is right for the entry it was written for (a ``failed`` row, already frozen
+    by the fan-out's own terminal transition) and wrong for the one it can also
+    meet: a ``--reaggregate`` over a checkpoint whose map still holds a live
+    row — a foreground run killed with no close-out reaches neither the
+    fan-out's ``finally`` sweep nor ``retire_live_entries`` — flipped it to
+    ``done`` with no ending at all, so the table rendered a finished model
+    whose elapsed kept climbing until it pinned at the budget and stayed there.
+    """
+
+    SPEC = "c:z"
+    OTHER = "a:x"
+
+    def _live(self, state, *, ago_s, timeout_s=1800):
+        """A row as a killed fan-out leaves it: live, with no ending."""
+        started = (datetime.now() - timedelta(seconds=ago_s)).isoformat()
+        return {
+            "state": state,
+            "started_at": started,
+            "updated_at": started,
+            "timeout_s": timeout_s,
+            "attempt": 1,
+            "source": None,
+        }
+
+    def test_a_live_row_is_given_an_ending_when_it_is_flipped(self):
+        models_map = {self.SPEC: self._live("running", ago_s=90)}
+
+        assert rob.flip_map_entries_to_done(models_map, [self.SPEC]) is True
+
+        entry = models_map[self.SPEC]
+        assert entry["state"] == "done", entry
+        assert entry["ended_at"], entry
+        frozen = entry["elapsed_s"]
+        assert 85 <= frozen <= 150, entry
+        # The read-time rule now takes its frozen branch, so the row reads the
+        # same duration however long afterwards the table is rendered.
+        assert progress_tracker.entry_elapsed_s(entry) == frozen
+        assert progress_tracker.entry_elapsed_s(entry, time.time() + 3600) == frozen
+
+    def test_a_queued_row_never_dispatched_is_closed_out_too(self):
+        """The other live state a killed run leaves behind, and the clamp.
+
+        Ten hours against a 30-minute budget is what the pre-fix row rendered
+        forever: the live branch clamps at ``timeout_s``, so the clock stopped
+        moving but the number was the budget rather than anything the slot did.
+        Frozen, it is still the budget — the honest reading of a row nobody
+        closed out — but it is frozen, and it lands as a bare int the way every
+        other duration in the checkpoint does.
+        """
+        models_map = {self.SPEC: self._live("queued", ago_s=10 * 3600)}
+
+        rob.flip_map_entries_to_done(models_map, [self.SPEC])
+
+        entry = models_map[self.SPEC]
+        assert entry["elapsed_s"] == 1800, entry
+        assert isinstance(entry["elapsed_s"], int), entry
+        assert progress_tracker.entry_elapsed_s(entry, time.time() + 86400) == 1800
+
+    def test_an_already_terminal_row_keeps_the_ending_the_fanout_gave_it(self):
+        """The freeze rule the helper was written for is untouched."""
+        models_map = {self.SPEC: _terminal("failed")}
+
+        rob.flip_map_entries_to_done(models_map, [self.SPEC])
+
+        entry = models_map[self.SPEC]
+        assert entry["state"] == "done", entry
+        assert entry["ended_at"] == "2026-09-17T10:04:00Z", entry
+        assert entry["elapsed_s"] == 240, entry
+
+    def test_a_reaggregate_over_an_unclosed_map_writes_a_finished_row(
+        self, tmp_path
+    ):
+        """End to end through the caller that meets this map in the wild."""
+        write_status(str(tmp_path), {
+            "phase": "code-review",
+            "state": "running",
+            "models_requested": [self.OTHER, self.SPEC],
+            "models_completed": [self.OTHER],
+            "models_failed": {},
+            "progress": {
+                "models_total": 2,
+                "models_done": 1,
+                "models_succeeded": 1,
+                "step": "fanout",
+                "models": {
+                    self.OTHER: _terminal("done"),
+                    self.SPEC: self._live("running", ago_s=300),
+                },
+            },
+        })
+
+        # Nothing is "recovered" here — a run killed mid-fan-out never wrote
+        # this model under `models_failed`, so the return is empty and the
+        # whole repair is the checkpoint it leaves behind.
+        assert rob.record_models_present(str(tmp_path), [self.OTHER, self.SPEC]) == []
+
+        status = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == [self.OTHER, self.SPEC]
+        progress = status["progress"]
+        entry = progress["models"][self.SPEC]
+        assert entry["state"] == "done", entry
+        assert entry["ended_at"], entry
+        assert progress_tracker.entry_elapsed_s(entry, time.time() + 7200) == (
+            entry["elapsed_s"]
+        )
+        # And the row renders as a finished one rather than a running clock.
+        view = {"phase_dir": str(tmp_path), "progress": progress}
+        rows = [
+            ln for ln in run_status._model_table_lines(view)
+            if ln.strip().startswith(f"{self.SPEC} ")
+        ]
+        assert len(rows) == 1, rows
+        assert "running" not in rows[0], rows
 
 
 # ---------------------------------------------------------------------------

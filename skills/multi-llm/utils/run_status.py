@@ -45,13 +45,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import cli_common, detach, metrics, process_control, status_file
+from . import (
+    cli_common,
+    detach,
+    host_capabilities,
+    metrics,
+    process_control,
+    status_file,
+)
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -66,7 +74,24 @@ from .cli_common import (
     record_mode_phase,
     record_next,
     record_notice,
+    record_progress,
+    record_progress_lines,
     record_state,
+)
+from .progress_tracker import (
+    STATE_DONE,
+    STATE_FAILED,
+    STATE_QUEUED,
+    STATE_RETRYING,
+    TERMINAL_STATES,
+    entry_budget,
+    entry_elapsed_s,
+    entry_stagger_remaining_s,
+    format_budget,
+    format_elapsed,
+    one_line_ascii,
+    render_progress_line,
+    render_roster_line,
 )
 from .output_handler import (
     PHASE_DIRECTORIES,
@@ -86,9 +111,149 @@ DEFAULT_WAIT_TIMEOUT_S = 90.0
 #: faster cadence learns nothing; 5 s keeps the returned view fresh.
 WAIT_POLL_INTERVAL_S = 5.0
 
+#: How far *below* a host's ``timeout_ceiling_s`` a resolved ``--wait`` is
+#: clamped. This is the number that explains :data:`DEFAULT_WAIT_TIMEOUT_S`:
+#: OpenCode's ceiling is 120 s and 120 - 30 = 90.
+#:
+#: The margin is **startup, not slack**. A poll spends process start,
+#: ``load_config`` and the checkpoint read before ``--wait`` begins sleeping, and
+#: ``_wait_for_terminal`` re-checks on a :data:`WAIT_POLL_INTERVAL_S` grid, so it
+#: returns a little *after* its own deadline — clamping to the cap itself would
+#: put the return on the wrong side of it. The same constant bounds the tool-call
+#: ``timeout`` a Claude Code poll has to set (``interval + 30``).
+#:
+#: **Re-exported, not defined here** (F6, 2026-09-20). The comment this replaces
+#: said the number was "named once here rather than twice so the two cannot
+#: drift"; it was in fact typed out in six places — this constant, the ``native``
+#: *run detached* sentence, ``SKILL.md``, ``references/host-capabilities.md`` and
+#: four instruction cores — so "30" could have been moved here and left standing
+#: on every surface an agent actually reads. It is owned by
+#: :data:`host_capabilities.WAIT_CAP_MARGIN_S`, beside the ceilings it is
+#: subtracted from; the verb sentence interpolates it (carrying ``SKILL.md`` and
+#: the generated reference with it) and the four cores are pinned against it by
+#: ``tests/test_instruction_portability.py``.
+WAIT_CAP_MARGIN_S = host_capabilities.WAIT_CAP_MARGIN_S
+
 VIEW_WORKFLOW = "workflow"
 VIEW_RUN = "run"
 VIEW_ALL = "all"
+
+#: ``progress.step``'s two terminal values. ``progress_tracker.PhaseProgress``
+#: owns the pair and names them in its own docstring: ``complete``, and the
+#: host-driven ``validation_pending`` early return where the process exits and
+#: the agent's own subagents take over. Anything else means the phase is still
+#: working.
+CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending"})
+
+#: The *phase* machine's terminal words — ``status_file``'s
+#: ``models_running -> models_complete/grouping_complete -> validation_pending ->
+#: complete`` ladder plus the ways a phase stops without reaching ``complete``
+#: (``task_generation_pending``'s host hand-off, ``subagents_failed``, an
+#: explicit failure or abort).
+#:
+#: **The ask lane ends on its own three words**, and they are not the review
+#: lanes'. ``ask_orchestrator`` closes a finished fan-out with ``completed``
+#: (every model answered), ``partial`` (some did) or ``failed`` (none did) — the
+#: same words it reports as ``MULTI_LLM_RESULT.state``, which is why the lane is
+#: widened into here rather than made to write ``complete``. Two of the three
+#: were missing and ``failed`` was already present by coincidence, so
+#: :func:`_checkpoint_in_flight` answered ``True`` for every ask that ever
+#: *succeeded*: a finished foreground ask rendered ``running in foreground (5/5
+#: models, no detached run record)`` for the rest of the phase dir's life, and
+#: ``--wait --question …`` over a detached ask whose ``run.state`` was already
+#: ``done`` spent the whole resolved ``poll_s`` on every poll before exiting 0.
+#:
+#: **A refusal close-out is an ending too**, and the two words it writes were
+#: the same gap one lane further on. ``review_orchestrator_base``'s
+#: ``_print_executor_refusal`` is the exit-3 block for a run that dispatched
+#: nothing, and the one caller it has ``sys.exit``\ s on the very next line — so
+#: ``runner_rejected`` (the runner spec itself was rejected) and
+#: ``executor_refused`` (every other pre-dispatch refusal) are the last thing
+#: that run will ever write. Missing from here, they read as "still going": the
+#: head line called a refused phase ``running in foreground (…)`` for the rest
+#: of the dir's life and ``--wait`` spent its whole resolved deadline before
+#: exiting 2 with a ``next`` that polls it again — F2's loop, over a run that
+#: cannot move. The document was already being read both ways at once:
+#: :func:`_resume_shape` treats a top-level ``runner_rejected`` as the refusal's
+#: durable classification and renders the repair off it.
+#:
+#: Everything else — including a word this set has never heard of — reads as
+#: "still going", which is the safe direction: being wrong that way costs a
+#: ``--wait`` its own timeout, never an unbounded loop.
+CHECKPOINT_TERMINAL_STATES = frozenset({
+    "complete", "completed", "partial", "validation_pending",
+    "task_generation_pending", "subagents_failed", "failed", "aborted",
+    "stopped", "runner_rejected", "executor_refused",
+})
+
+
+class _WaitTimeoutRefused(Exception):
+    """``--wait`` cannot resolve a deadline it would be honest to wait on.
+
+    Its one job is to reach :func:`main` as a *message*, so the refusal prints
+    the ``ERROR:`` + exit 3 shape this codebase uses for "needs a human" instead
+    of whatever the raising layer's own exception would have become. Raised for
+    two unrelated causes with one disposition (F4/F7, 2026-09-20): a
+    ``ConfigError`` from anywhere in the config document, and a ``--timeout``
+    that is not a positive finite number. Both are a human's edit or a human's
+    command line, neither says anything about the run being polled, and exit 1
+    — which is what both used to produce — is read by the poll loop as "the run
+    state is unreadable, stop and report".
+    """
+
+
+def _checkpoint_in_flight(view: Dict[str, Any]) -> bool:
+    """Does the *checkpoint* say this phase is still working?
+
+    Deliberately a different question from the ``run`` record's verdict, and
+    asked of a different half of the file. ``run`` is the **process** machine and
+    only a detached worker writes it; the top-level ``state`` and
+    ``progress.step`` are the **phase** machine and every run writes them,
+    foreground included. A phase dir is re-used across runs by design (the same
+    ``{plan}/review-plan/`` every time), so the two halves can legitimately
+    disagree — and the disagreement that matters is a *predecessor's* terminal
+    ``run`` record sitting over a *successor's* live checkpoint.
+
+    F1, 2026-09-20: nothing drops the old ``run`` record on the foreground path,
+    so a host-background re-run over a dir an earlier ``--detach`` run used
+    inherits ``run.state: done``. ``--wait`` read that as terminal and came back
+    in **0.11 s** with exit 0, printing ``done`` directly above a table saying
+    ``running``; the instruction then relays nothing and polls again, turning a
+    120-300 s loop into a tight sequence of instant tool calls for the whole
+    10-30 minute run. Re-running a phase is the common path, not an edge case.
+
+    Evidence-based, never inference: a checkpoint carrying *neither* field is not
+    "in flight", so a genuinely finished foreground checkpoint still returns at
+    its own deadline with exit 2 (acceptance criterion 1) rather than waiting on
+    something that was never there.
+    """
+    state = view.get("state")
+    if isinstance(state, str) and state and state not in CHECKPOINT_TERMINAL_STATES:
+        return True
+    step = (view.get("progress") or {}).get("step")
+    if isinstance(step, str) and step and step not in CHECKPOINT_TERMINAL_STEPS:
+        return True
+    return False
+
+
+def _names_this_run(view: Dict[str, Any], run_id: Optional[str]) -> bool:
+    """Did the caller pin this poll to *this view's own* ``run`` record?
+
+    ``--run-id`` is the only selector that names a **run**. ``--phase`` and
+    ``--question`` name a *directory*, and a phase dir is re-used run after run
+    by design (``{plan}/review-plan/`` every time, one ask dir per question), so
+    neither can say which run the checkpoint under it belongs to. This one can:
+    the caller typed the id the record carries, so the terminal record in front
+    of them is the run they asked about rather than a predecessor's.
+
+    Prefix matching, exactly as :func:`_select` resolves the same flag — every
+    printed banner truncates the id to eight characters, so a prefix is what a
+    caller normally has to hand.
+    """
+    if not run_id:
+        return False
+    recorded = str((view.get("run") or {}).get("run_id") or "")
+    return bool(recorded) and recorded.startswith(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +500,24 @@ def render_run_text(
                 lines.append(f"      advance it with: {advance}")
         if view.get("progress"):
             lines.append(f"      progress:       {_progress_text(view['progress'])}")
+            # Between the counts and the table, and INSIDE this guard by
+            # decision rather than by accident: the delta is computed from
+            # `progress.models` (see `_attach_finished_during_wait`), so a
+            # non-empty one proves a non-empty `progress` and this guard can
+            # never suppress a line that had something to say. Putting it
+            # outside would be dead code that reads like a hedge. Its place in
+            # the block is the reading order the answer needs — "3/5 done" then
+            # "which three", then the roster they sit in.
+            just_finished = _just_finished_text(view)
+            if just_finished:
+                lines.append(f"      {JUST_FINISHED_LABEL} {just_finished}")
+            # ADDITIVE, and deliberately under the same guard: a models-only
+            # table that *replaced* the line above would hide the validation and
+            # write-phase mirrors, which are the only progress a dispatch-only
+            # phase such as `generate-tasks` records. A view whose `progress`
+            # carries no `models` map therefore renders exactly as it did before
+            # this table existed.
+            lines.extend(_model_table_lines(view))
         if run.get("host"):
             # The host that *launched* the run, which is not necessarily the one
             # reading this: without it nothing on screen said whose subagent
@@ -425,6 +608,47 @@ def _verdict_text(view: Dict[str, Any]) -> str:
         return f"running (last beat {age:.0f}s ago)"
     if verdict == detach.VERDICT_FAILED and view.get("reason") == "heartbeat_timeout":
         return "failed (heartbeat_timeout — the worker died without recording an outcome)"
+    if verdict == detach.VERDICT_NO_RUN:
+        # "Checkpoint but no run record" stopped being an oddity the moment a
+        # foreground run started writing `progress`: it is the normal Claude
+        # Code state, because that host is told never to pass `--detach` and
+        # only the detached worker ever calls `claim_run`. The bare word
+        # `no_run`, printed beside `run.state: (none)`, reads as "nothing
+        # happened here" for a phase that is at that moment dispatching eight
+        # models.
+        #
+        # ONLY THE TEXT CHANGES. The verdict constant stays `no_run`, so
+        # `TERMINAL_VERDICTS`, `exit_code_for`'s exit 2 and F1's rule that a
+        # `no_run` phase is never the `next` poll target are all untouched —
+        # making it terminal is explicitly out of scope, and `status --wait`
+        # terminating on a foreground checkpoint depends on it staying
+        # non-terminal.
+        #
+        # F3, 2026-09-20: the gate was `if progress:` alone, so the word
+        # "running" survived the phase it described. A finished foreground
+        # checkpoint — `state: complete`, `progress.step: complete` — still
+        # printed `running in foreground (2/2 models, no detached run record)`
+        # with `phase state: complete` two lines below it, and rule 1 tells the
+        # agent to relay that head line *verbatim*. Every completed Claude Code
+        # phase, and every historical ask dir a bare `status` lists, reported
+        # itself as running forever. The tense now comes from the checkpoint,
+        # which is the only half of the file a foreground run writes.
+        #
+        # "finished" claims exactly one thing — this phase is no longer
+        # working — and never that it succeeded: how it ended is the
+        # `phase state:` line right below, which prints `complete`,
+        # `subagents_failed` or whatever the phase wrote.
+        progress = view.get("progress") or {}
+        if progress:
+            tense = "running" if _checkpoint_in_flight(view) else "finished"
+            total = progress.get("models_total")
+            if isinstance(total, int) and not isinstance(total, bool) and total:
+                done = progress.get("models_done", 0)
+                return (
+                    f"{tense} in foreground ({done}/{total} models, no detached "
+                    "run record)"
+                )
+            return f"{tense} in foreground (no detached run record)"
     return str(verdict)
 
 
@@ -465,12 +689,39 @@ def _high_priority_text(high_priority: Any) -> Optional[str]:
     return f"high-priority groups: {count}"
 
 
+#: What ``_progress_text`` says when the checkpoint's ``progress`` object holds
+#: nothing it knows how to render. A sentinel rather than an empty string
+#: because the human view prints this line unconditionally and a blank after
+#: ``progress:`` reads as a renderer that failed; :func:`_current_state_text`
+#: reads it back to mean "there is nothing to show", which is the one caller
+#: that has somewhere else to go.
+NO_PROGRESS_RECORDED = "(none recorded)"
+
+
 def _progress_text(progress: Dict[str, Any]) -> str:
     parts = []
     if progress.get("step"):
         parts.append(str(progress["step"]))
     if progress.get("models_total"):
-        parts.append(f"models {progress.get('models_done', 0)}/{progress['models_total']}")
+        # `models_done` counts *finished slots* (done + failed), so it only ever
+        # moves forwards and reaches `models_total` even on a lossy run — which
+        # is what a live line needs. `models_succeeded` carries the other half:
+        # before it existed, the post-fan-out restatement recomputed successes
+        # into the same key and a run that lost a model ended on `models 3/4`,
+        # a numerator walking backwards at the very end. Rendered together the
+        # information survives as `8/8 done, 7 ok, 1 failed`.
+        #
+        # This one line is what Layer 2's rule 1 tells an agent to relay
+        # verbatim, so its shape is load-bearing; the clause degrades to today's
+        # bare `models 8/8` when `models_succeeded` is absent, which is every
+        # checkpoint written before the key existed.
+        done = progress.get("models_done", 0)
+        clause = f"models {done}/{progress['models_total']}"
+        succeeded = progress.get("models_succeeded")
+        if isinstance(succeeded, int) and not isinstance(succeeded, bool):
+            failed = done - succeeded if isinstance(done, int) else 0
+            clause += f" done, {succeeded} ok, {max(failed, 0)} failed"
+        parts.append(clause)
     if progress.get("tasks_total"):
         parts.append(f"tasks {progress.get('tasks_done', 0)}/{progress['tasks_total']}")
     if progress.get("batches_total"):
@@ -494,7 +745,645 @@ def _progress_text(progress: Dict[str, Any]) -> str:
     bypassed = progress.get("sandbox_bypassed")
     if isinstance(bypassed, list) and bypassed:
         parts.append(f"unsandboxed {', '.join(map(str, bypassed))}")
-    return ", ".join(parts) or "(none recorded)"
+    return ", ".join(parts) or NO_PROGRESS_RECORDED
+
+
+#: ``source`` values meaning "this model never dispatched on this run — its
+#: result came off disk". There is deliberately no ``skipped`` *state*: the
+#: terminal set stays ``done | failed`` so a resumed model counts in
+#: ``models_done`` **and** ``models_succeeded`` (it has a usable result), and the
+#: distinction lives in ``source``. This is the renderer reading it, which is
+#: what ``source`` is for.
+#:
+#: ``salvage`` (``review_orchestrator_base.record_models_salvaged``) is
+#: deliberately **not** in here: that slot dispatched, ran, failed to parse and
+#: was repaired in-process, so it renders as the plain ``done`` it is.
+SKIPPED_SOURCES = frozenset({"existing_file", "resume"})
+
+
+def _one_line(text: str) -> str:
+    """Collapse every run of whitespace, newlines included, into one space.
+
+    Applied to the one field in the ``models`` map that carries provider-authored
+    text: ``error``. Everything else in a row is a spec, a state word or a number
+    this module produced. An adapter that puts a stderr excerpt or a wrapped
+    provider message in there hands the renderers a string with ``\n`` in it, and
+    both of them are *line* renderers whose output has a consumer that assumes it:
+    Layer 2 rule 1 has the host agent relay ``just finished:`` **verbatim**, so a
+    two-line value turns one rule-bound line into two, the second with no label on
+    it, and the table's aligned columns come apart at the same time.
+
+    One helper for both sites on purpose — folding it into only the newer
+    renderer would leave the two spellings of one field disagreeing, which is the
+    drift this file keeps testing against (2026-09-20).
+    """
+    return " ".join(str(text).split())
+
+
+def _model_state_label(entry: Dict[str, Any]) -> str:
+    """The word in the row's state column."""
+    state = str(entry.get("state") or STATE_QUEUED)
+    if state == STATE_DONE and str(entry.get("source") or "") in SKIPPED_SOURCES:
+        return "skipped"
+    return state
+
+
+def _model_timing_text(entry: Dict[str, Any]) -> str:
+    """``2m10s/30m``, or ``""`` when the entry has no clock to read.
+
+    One read-time rule, and :func:`progress_tracker.entry_elapsed_s` owns it:
+    ``ended_at`` present -> the stored ``elapsed_s`` (a terminal row is frozen,
+    so a table rendered an hour later still shows the slot's real duration);
+    absent -> ``now - started_at`` clamped at ``timeout_s``. Nothing stores a
+    per-tick ``elapsed_s``, so this number is always fresh — including at
+    ``progress.interval_s: 0``, where the ticker prints nothing at all.
+
+    The denominator is the slot's **whole** budget, fixed for its life, never the
+    shrinking slice a retry ladder hands back for the next attempt: ``2m10s/30m``
+    against a shrinking denominator would overstate the budget left.
+
+    **A clock that cannot be read renders as no clock, never as a crash** —
+    and that covers the *denominator* too, which it did not until 2026-09-21:
+    the ``try`` below wraps :func:`entry_elapsed_s` and nothing else, so a
+    ``timeout_s: Infinity`` (a token ``json.loads`` accepts) sailed past it into
+    ``format_budget`` and raised ``OverflowError`` out of the same command this
+    paragraph promises will not crash. The budget now reads through
+    :func:`progress_tracker.entry_budget`, the one guard the roster and the
+    ticker also read, and an unrenderable one costs the denominator rather than
+    the row.
+
+    F5, 2026-09-20: ``detach._elapsed_since`` catches ``ValueError`` only, but
+    ``datetime.now() - <aware datetime>`` raises ``TypeError``, so a single
+    ``started_at: "2026-09-19T00:00:00Z"`` anywhere in the map took the *whole*
+    ``status`` command down with a traceback and exit 1 — which rule 2 maps to
+    "the run state is unreadable, stop and report", ending a poll loop over a
+    perfectly healthy run. Everything else in the map already degrades (garbage
+    strings, ints, ``None``, non-dict entries, a missing ``elapsed_s``); this is
+    the one shape that did not. The `models` map is the least trustworthy part of
+    the checkpoint — it is the only part written per slot, by whichever lane won
+    the race — so the catch is deliberately broad and belongs on the *reader*:
+    one malformed row costs its own column, never the command. The parser's own
+    half of this (``heartbeat_at`` reads the same way) is ``detach``'s to harden.
+    """
+    try:
+        elapsed = entry_elapsed_s(entry)
+    except Exception:
+        return ""
+    if elapsed is None:
+        return ""
+    budget = entry_budget(entry)
+    if budget is not None and budget > 0:
+        return f"{format_elapsed(elapsed)}/{format_budget(budget)}"
+    return format_elapsed(elapsed)
+
+
+def _model_detail_text(entry: Dict[str, Any]) -> str:
+    """The trailing clause: the attempt, the pending backoff, the failure reason.
+
+    ``attempt`` has no denominator on purpose — the ladder keeps transport
+    retries and rate-limit backoffs as two independent counters, so an entry can
+    never honestly render ``2/3`` — and it is only worth a column once it is past
+    the first. ``error`` is terminal-only, so a row carrying one has already
+    stopped.
+    """
+    details: List[str] = []
+    attempt = entry.get("attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 1:
+        details.append(f"attempt {attempt}")
+    if str(entry.get("state") or "") == STATE_RETRYING:
+        retry_after = entry.get("retry_after_s")
+        if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
+            details.append(f"retry in {retry_after:.0f}s")
+    # `starts in 4s`: the launch ramp, named. Slots dispatch
+    # `index * PROVIDER_STAGGER_DELAY` apart, and the launch-time poll — taken at
+    # second zero on purpose, for the roster — met every row but the first
+    # reading `staggering`, which a reader took for the fan-out running its
+    # models one at a time (2026-09-21). The state word is the lifecycle's and
+    # stays; the clause says how long, in the shape `retry in 20s` already
+    # has. Rounded *up*, so a slot 0.4 s from dispatch reads `1s`, never `0s`
+    # — and `entry_stagger_remaining_s` is `None` once the stamp is past, so
+    # a poll landing on the flip renders no clause rather than a countdown
+    # that reached zero and stayed.
+    remaining = entry_stagger_remaining_s(entry)
+    if remaining is not None:
+        details.append(f"starts in {math.ceil(remaining)}s")
+    error = entry.get("error")
+    if error:
+        details.append(_one_line(error))
+    return ", ".join(details)
+
+
+def _model_row_specs(view: Dict[str, Any], models: Dict[str, Any]) -> List[str]:
+    """Which specs get a row, in the order the run requested them.
+
+    The tracker seeds every requested spec ``queued`` *before* it creates the
+    tasks, so in the normal case the map is already complete and its own keys are
+    the answer. The exception is the window between a run's launch and that seed
+    — and on a re-run of a phase dir, what a poll lands in that window reads is
+    the *predecessor's* map. Dropping the specs that are missing from it would
+    make the table quietly disagree with the ``models N/M`` count one line above,
+    so they are rendered ``queued`` with no timings instead.
+
+    That makes the row count **at least** ``models_total``, not exactly it: any
+    key the map holds that ``models_requested`` does not is appended rather than
+    hidden, because the one way a map grows such a key is
+    ``FanoutProgress._entry`` seeding a spec some lane transitioned without
+    requesting — a wiring mistake, and hiding it in the one table that could show
+    it would be the wrong trade. The two lists agreeing is the normal state: the
+    three launch writes drop the predecessor's ``progress`` outright (F1,
+    2026-09-20), so a map surviving next to a *different* run's
+    ``models_requested`` is no longer a shape this can meet.
+
+    The checkpoint's top-level ``models_requested`` is the only record of the
+    canonical spec list, and ``classify_run``'s view does not carry it (it is a
+    top-level key, not a ``progress`` one), so it is read here — on the one path
+    that needs it, gated on the map actually being short. ``render_run_text``
+    already reads a file on a branch of its own (``detach._log_tail``), so the
+    precedent for a read in the renderer is in the same function.
+    """
+    specs = [str(spec) for spec in models]
+    total = (view.get("progress") or {}).get("models_total")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= len(specs):
+        return specs
+    requested = view.get("models_requested")
+    if not isinstance(requested, list):
+        try:
+            requested = status_file.read_status(
+                str(view.get("phase_dir") or "")
+            ).get("models_requested")
+        except Exception:  # pragma: no cover - an unreadable dir renders the map
+            requested = None
+    if not isinstance(requested, list):
+        return specs
+    ordered: List[str] = []
+    for raw in requested:
+        spec = str(raw)
+        if spec not in ordered:
+            ordered.append(spec)
+    for spec in specs:
+        if spec not in ordered:
+            ordered.append(spec)
+    return ordered
+
+
+def _model_table_lines(view: Dict[str, Any]) -> List[str]:
+    """The per-model rows beneath the one-line ``progress:`` summary.
+
+    Rendered for **every** verdict, ``no_run`` included: a foreground run is the
+    normal Claude Code state and holds no ``run`` record at all, so a table
+    behind a "live run" guard would be invisible on the one host this feature is
+    written for.
+
+    ASCII only. Every host redirects the orchestrator's stdout to a file and a
+    poll's output is read back through whatever codec that file took, so a
+    separator that survives as ``?`` is worse than one that was ASCII to begin
+    with.
+
+    **An absent map is not an absent roster** (2026-09-20). The child writes
+    ``models_requested`` and calls ``report_progress(step="fanout",
+    models_total=N)`` *before* it constructs the tracker that seeds the map, so
+    for the first seconds of every fan-out the view knows the whole roster and
+    this rendered nothing at all: the launch-time poll printed ``running in
+    foreground (1/5 models, no detached run record)`` over ``models 1/5 done``
+    and never said which CLI was running which model — the question the user
+    asked for after watching a real run. An absent or non-dict map is therefore
+    read as ``{}`` rather than taken as a reason to return, and
+    :func:`_model_row_specs` answers from ``models_requested``.
+
+    The *empty* answer is still the empty table, and that is load-bearing in the
+    other direction: a dispatch-only phase such as ``generate-tasks`` records no
+    ``models_total`` (its only progress is the executor's mirror), so
+    ``_model_row_specs`` returns nothing for it and it grows no bare ``models:``
+    header — which is what it did before this table existed and what
+    ``test_a_progress_object_with_no_models_map_renders_as_it_always_did``
+    pins.
+    """
+    progress = view.get("progress") or {}
+    models = progress.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    specs = _model_row_specs(view, models)
+    if not specs:
+        return []
+    rows: List[Tuple[str, str, str, str]] = []
+    for spec in specs:
+        entry = models.get(spec)
+        entry = entry if isinstance(entry, dict) else {}
+        rows.append((
+            spec,
+            _model_state_label(entry),
+            _model_timing_text(entry),
+            _model_detail_text(entry),
+        ))
+    spec_width = max(len(row[0]) for row in rows)
+    label_width = max(len(row[1]) for row in rows)
+    timing_width = max(len(row[2]) for row in rows)
+    lines = ["      models:"]
+    for spec, label, timing, detail in rows:
+        cells = f"{spec.ljust(spec_width)}  {label.ljust(label_width)}"
+        if timing_width:
+            cells = f"{cells}  {timing.ljust(timing_width)}"
+        if detail:
+            cells = f"{cells}  {detail}"
+        lines.append(f"        {cells.rstrip()}")
+    return lines
+
+
+#: The label on the line that names what crossed the line during the wait.
+#:
+#: One spelling, two readers: :func:`render_run_text` prints it indented under
+#: the ``progress:`` line, and :func:`_progress_lines` prefixes the same
+#: renderer's output with it for a host that shows the line on its own, where a
+#: bare list of specs and durations would not say what it was a list *of*.
+JUST_FINISHED_LABEL = "just finished:"
+
+
+def _just_finished_text(view: Dict[str, Any]) -> str:
+    """``codex:gpt-6-astra:xhigh (4m12s, done)``, or ``""`` when nothing did.
+
+    Renders ``view["finished_during_wait"]``, which only ``--wait`` ever writes
+    (see :func:`_attach_finished_during_wait`): the specs that crossed into a
+    terminal state *while this very command was waiting*. That window is the
+    whole claim — ``just`` is a tense, and a plain poll can prove a row is
+    finished but not that it finished since anyone last looked.
+
+    Why it exists at all: the ``progress:`` line one row above carries counts
+    (``models 3/5 done, 3 ok, 0 failed``) and Layer 2 rule 1 forbids relaying
+    anything else mid-run, so a user watching a fan-out was told *how many* had
+    finished and never *which*. A spec is the CLI and the model — nothing has to
+    be derived to answer it.
+
+    Three shape decisions, all deliberate:
+
+    * Clauses are joined with ``; `` and **not** ``, ``, because the clause's own
+      interior is comma-separated (``4m12s, done``); a comma join would render
+      two models as four indistinguishable fields.
+    * The state word is :func:`_model_state_label`'s, so this line and the table
+      under it use one vocabulary for one row: ``done``, ``failed``, or
+      ``skipped`` for a resume that landed mid-wait. ``ok`` is deliberately not
+      in it — that is the *counting* line's word for a slot that produced a
+      usable result, and a row labelled ``ok`` here would sit directly above the
+      same row labelled ``skipped`` in the table.
+    * The elapsed is the frozen duration with **no** ``/budget`` denominator.
+      Every table row carries one because a live row needs the comparison; a row
+      that has stopped does not, and ``4m12s/30m`` invites reading the budget as
+      time still available.
+
+    One line and ASCII, through the **same** scrub the roster takes
+    (:func:`progress_tracker.one_line_ascii`), applied to the whole composed
+    line rather than to one field of it. That claim used to be made here and
+    not kept: ``_one_line`` covered ``error`` alone, no ASCII scrub ran at all,
+    so ``codex:gpt–5`` (en dash, out of a config file) and ``café`` went
+    through, and a spec key carrying a newline put a second, unlabelled line
+    into a renderer whose whole contract is one line — which on the OpenCode
+    package route, where ``toastMessage`` joins the supplied lines with a
+    newline, is a line forged in a display the user reads as the dispatcher's
+    own. The two renderers that feed ``progress_lines`` now scrub identically;
+    that is the point of the shared helper, since a spec reaches both of them
+    by the same route.
+
+    ``_one_line`` still runs on ``error`` here, where it also runs in the table
+    (one spelling of one field), and the whole-line pass behind it is what
+    covers the spec and every separator this function composes.
+
+    A clause that cannot be built is dropped rather than raising — same rule as
+    :func:`_model_timing_text`, for the same reason: ``status`` is the command a
+    poll loop runs, so one malformed entry costs its own clause and never the
+    command. The elapsed was already reduced to a plain number by the attach
+    side, so the only raising left here would be a caller-supplied entry that is
+    not a dict.
+    """
+    entries = view.get("finished_during_wait")
+    if not isinstance(entries, list):
+        return ""
+    clauses: List[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        spec = str(entry.get("spec") or "")
+        if not spec:
+            continue
+        label = str(entry.get("state") or "") or STATE_DONE
+        error = entry.get("error")
+        if label == STATE_FAILED and error:
+            label = f"{label}: {_one_line(error)}"
+        fields: List[str] = []
+        elapsed = entry.get("elapsed_s")
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            fields.append(format_elapsed(elapsed))
+        fields.append(label)
+        clauses.append(f"{spec} ({', '.join(fields)})")
+    return one_line_ascii("; ".join(clauses))
+
+
+def _progress_lines(view: Dict[str, Any]) -> List[str]:
+    """The run's progress as **rendered text**, for a reader that cannot render.
+
+    The `progress` object rides the result line whole (`record_progress`), which
+    is the right shape for a reader that can turn a map into a sentence. The
+    OpenCode **package** route cannot: there is no agent in its poll loop at all
+    — the plugin's `execute` supervises the run and the model makes one blocking
+    tool call — so nothing there reads `instructions/*.md`, nothing relays a
+    `[PROGRESS]` line out of a log the plugin never opens, and the plugin's own
+    rule forbids it to compose a sentence about a run. Measured 2026-09-21: a
+    5 m 40 s four-model fan-out reached the user as silence and then one
+    compressed line, with a complete `progress.models` map and twelve ticker
+    lines sitting in artifacts nobody on that route reads.
+
+    So the lines are composed here, by the renderers that already own their
+    wording, and shipped ready to display:
+
+    * the fan-out roster (:func:`render_roster_line`) — what the run is *over*,
+      which never changes, so a reader that shows it once has said it;
+    * the current state (:func:`_current_state_text`) — the fan-out ticker's own
+      ``[PROGRESS]`` line while a slot is live, the ``progress:`` line the human
+      view prints once they are all terminal. It is the line that is there on
+      **every** poll, changed or not, which is what keeps a host from falling
+      back to a serialized object on the ordinary poll where nothing finished;
+    * the ``just finished:`` line (:func:`_just_finished_text`) — what crossed
+      into terminal *during this call's own wait*, which is the one thing the
+      counts structurally cannot say and the only news a poll carries.
+
+    Order is roster, state, news — what the run is over, what it is doing, what
+    moved — which is the reading order and the order they are composed in below.
+    The last two are also the order the human view prints them in
+    (``progress:`` then ``just finished:``).
+
+    The **roster** is the one this list adds. It used to be claimed that all of
+    this was "the order `render_run_text` prints them in", which was false:
+    that renderer prints the counts line, then `just finished:`, then the
+    per-model table, and it never prints the roster at all —
+    `render_roster_line` occurs in this module at its import and in this
+    function, and nowhere else. The roster's
+    own homes are the orchestrator log (`FanoutProgress.seed` emits it there)
+    and the `--detach` launch's result line (`detach.launch` renders it from the
+    resolved selection) — both surfaces this route cannot read, which is the
+    whole reason the line is composed here as well. So only the second of these
+    two lines is also a line a human reading `status` sees; the first is one
+    that view never had.
+
+    Nothing is invented for this surface either way: both strings come from
+    renderers that exist independently of it, and neither is reworded here.
+
+    The two renderers are called bare, which is the same decision
+    :func:`render_run_text` makes two inches away: both answer a checkpoint they
+    do not control, so each one type-checks what it reads
+    (:func:`render_roster_line` per budget, :func:`_just_finished_text` per
+    clause) and a caller that wrapped a second hedge around them would be
+    hedging against a defence it can see. A view with no map — ``generate-tasks``,
+    an apply phase, a run predating the tracker — simply renders nothing, and
+    the key never reaches the result line at all.
+
+    The one thing that **is** checked here is that ``progress`` is a mapping,
+    and that check is about the *caller*, not about the file:
+    :func:`detach.classify_run` coerces a torn ``progress`` to ``{}`` while it
+    builds the view (pinned by
+    ``test_the_view_carries_a_mapping_whatever_the_file_says``), so no view this
+    module assembles can fail it. It is kept because this is a plain module
+    function over a dict and the result-line site calls it *outside* the
+    ``if view.get("progress")`` guard the text renderer sits behind — an
+    ``AttributeError`` here is exit 1, which rule 2 reads as "the run state is
+    unreadable, stop and report", paid for a key that is display-only. Pinned at
+    that level, directly, rather than through a checkpoint that can no longer
+    produce the shape.
+    """
+    progress = view.get("progress")
+    if not isinstance(progress, dict):
+        return []
+    lines: List[str] = []
+    roster = render_roster_line(progress.get("models"))
+    if roster:
+        lines.append(roster)
+    current = _current_state_text(progress)
+    if current:
+        lines.append(current)
+    just_finished = _just_finished_text(view)
+    if just_finished:
+        lines.append(f"{JUST_FINISHED_LABEL} {just_finished}")
+    return lines
+
+
+def _has_live_row(models: Any) -> bool:
+    """Is any slot still queued, staggering, running or retrying?
+
+    The boundary between the two tickers the orchestrator log already switches
+    between: :class:`progress_tracker.FanoutProgress` narrates while this is
+    true and :class:`progress_tracker.PhaseProgress` takes over when it is not.
+    :func:`_current_state_text` picks the same way, from the checkpoint, so the
+    package route sees the same changeover a log reader does.
+
+    A row that is not a mapping is not live — it is a row nothing can be said
+    about, which is how every other renderer treats it — and a mapping with no
+    ``state`` is, matching :func:`_model_state_label`'s ``queued`` default.
+    """
+    if not isinstance(models, dict):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and str(entry.get("state") or "") not in TERMINAL_STATES
+        for entry in models.values()
+    )
+
+
+def _current_state_text(progress: Dict[str, Any]) -> str:
+    """One line saying what the run is doing *now*, or ``""`` when nothing is.
+
+    The third thing a reader with no agent in the loop needs, beside the roster
+    ("what is this over") and the news ("what just moved"): **the state**, on
+    every poll, whether or not anything changed. Without it the plugin's toast
+    fell back to ``JSON.stringify(update)`` on any poll whose window contained
+    no completion — measured 2026-09-21 on a 363 s run, a multi-KB blob, and
+    that is the ordinary case rather than an edge one, since a 90 s window
+    containing a completion is the exception.
+
+    Two renderers, picked by the boundary the log already switches at
+    (:func:`_has_live_row`) and neither of them new:
+
+    * while a slot is still live, :func:`progress_tracker.render_progress_line`
+      — the fan-out ticker's own ``[PROGRESS]`` line, counts plus the live rows
+      with their elapsed. That elapsed is derived at read time from
+      ``started_at``, so two polls ninety seconds apart really do render
+      different strings, which is what the host's shown-once memory needs to
+      keep showing it;
+    * once every slot is terminal — validation, grouping, a write phase, a
+      dispatch-only phase like ``generate-tasks`` that has no map at all —
+      :func:`_progress_text`, the ``progress:`` line the human view prints and
+      the one Layer 2 rule 1 already has an agent relay verbatim. It carries the
+      step and the executor mirrors, which is what moves in that window.
+
+    Neither is reworded here and no third spelling is introduced; ``status``
+    simply says which of its own two lines answers the question right now.
+    ``(none recorded)`` is a renderer with nothing to say, not a state, so it is
+    dropped rather than displayed — that is the one case that still leaves a
+    poll with no line of its own.
+    """
+    models = progress.get("models")
+    if _has_live_row(models):
+        line = render_progress_line(models)
+        if line:
+            return line
+    text = _progress_text(progress)
+    return "" if text == NO_PROGRESS_RECORDED else text
+
+
+def _terminal_fingerprints(view: Dict[str, Any]) -> Optional[Dict[str, tuple]]:
+    """Per terminal spec, *which* ending it is — not merely that it has one.
+
+    ``done | failed`` is the whole terminal set (there is no ``skipped`` state,
+    see :data:`SKIPPED_SOURCES`), and a row that is not a dict or whose ``state``
+    is a word nothing has ever written reads as not terminal.
+
+    The value is ``(state, ended_at, elapsed_s)`` rather than the bare spec, and
+    that is the whole point of this function. A phase dir is re-used run after
+    run, so "this spec was already terminal when the wait began" does **not**
+    mean "it did not finish during the wait": a re-review of the same plan finds
+    the predecessor's finished rows on disk, the new run seeds the same specs
+    ``queued``, and each one finishes again with a *new* ``ended_at``. Keyed on
+    the spec alone, every one of those completions was swallowed — it was in the
+    baseline before this run seeded it, and in the next poll's baseline after it
+    really finished, so no poll ever announced it (F1, 2026-09-20; the source of
+    the stale map is fixed at the three launch writes, and this is the half that
+    still holds when a poll lands in the window *before* one of them).
+
+    ``None`` — distinct from an empty mapping — means the map could not be read
+    at all. The caller treats that as "no baseline", because an unreadable map
+    that heals into a healthy one mid-wait would otherwise announce every row in
+    it as having just finished.
+
+    **A ``models`` key that is simply absent is the honest empty baseline**, not
+    an unreadable one, and the two used to collapse into the same ``None``. The
+    window is real and it is the launch window: the claim write drops the
+    predecessor's ``progress`` outright and ``seed()`` writes this run's roster a
+    moment later, so a poll landing between them reads a checkpoint carrying no
+    map at all. Nothing had finished yet — which is exactly what ``{}`` says, and
+    every row that turns terminal afterwards really did turn terminal during this
+    wait. Read as ``None`` the whole first wait was skipped instead, so a
+    ``--wait`` that spanned the launch printed no ``just finished:`` line however
+    many specs ended inside it (F1, 2026-09-21). ``None`` now means only what the
+    paragraph above describes: a ``models`` that is *present and not a dict*.
+    """
+    progress = view.get("progress") or {}
+    if not isinstance(progress, dict):
+        return None
+    models = progress.get("models")
+    if models is None:
+        return {}
+    if not isinstance(models, dict):
+        return None
+    fingerprints: Dict[str, tuple] = {}
+    for raw_spec, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        state = str(entry.get("state") or "")
+        if state not in TERMINAL_STATES:
+            continue
+        fingerprints[str(raw_spec)] = (
+            state, str(entry.get("ended_at") or ""), str(entry.get("elapsed_s")),
+        )
+    return fingerprints
+
+
+def _attach_finished_during_wait(
+    baseline: Dict[str, Optional[Dict[str, tuple]]], views: Sequence[Dict[str, Any]]
+) -> None:
+    """Record, on each returned view, which specs went terminal during the wait.
+
+    *baseline* is what :func:`_wait_for_terminal` saw when it was entered, keyed
+    by ``phase_dir`` — per phase dir and not one flat set, because a poll with no
+    selector lists every phase under the plan and two of them can legitimately be
+    running the same spec; one flat set would let one phase's model silence the
+    other's.
+
+    Order is the map's own key order, which is the tracker's seed order (the
+    order the run requested the models in), matching the table below it. It is
+    deliberately *not* sorted by ``ended_at``: the stamps are written by whichever
+    lane won the race and two rows finishing in the same second would reorder a
+    line whose only job is to be read next to the table.
+
+    A view whose ``phase_dir`` is not in the baseline is skipped rather than
+    treated as an empty baseline. Such a view was discovered *during* the wait
+    (another process opened a phase dir under this plan), so nothing here saw its
+    "before" — and every terminal row in it would be announced as having just
+    finished on no evidence at all. A dir that appeared mid-wait gets its roster
+    from the table like any other first sighting. A dir whose baseline is
+    ``None`` is skipped for the same reason: its map was unreadable when the wait
+    began, so nothing was observed about it either (F4, 2026-09-20).
+
+    A spec is announced when its terminal *fingerprint* differs from the one the
+    baseline holds — a different ending, not merely a second sighting of the same
+    one. That is what makes the line survive a re-used phase dir, where the specs
+    that finish during the wait are exactly the specs a predecessor already left
+    terminal on disk; see :func:`_terminal_fingerprints`.
+
+    **The key is set only when the list is non-empty**, and that is a
+    compatibility constraint, not tidiness: ``--json`` serializes these view
+    dicts raw (``payload = {"runs": views}``), so an always-present key — even
+    ``[]`` — would change the bytes of every JSON poll ever made. Every value
+    written here is a ``str``, a ``float`` or ``None`` for the same reason.
+
+    **The key rides ``--json`` like every other view key.** The paragraph two
+    above says why — ``payload = {"runs": views}`` serializes these dicts raw —
+    so a poll run with ``--wait --json`` really does hand back
+    ``runs[0]["finished_during_wait"]``. This paragraph used to claim the
+    opposite ("this key itself still never leaves the view"), contradicting its
+    own neighbour and in the one direction that costs something: a consumer told
+    a key cannot reach it does not handle the day it does.
+
+    What is true is narrower, and it is about ``MULTI_LLM_RESULT`` rather than
+    about ``--json``: **these dicts are not put on the result line**. The
+    OpenCode package route — the one host with no agent in the loop to read a
+    rendered line — gets the *rendered* line there instead:
+    :func:`_progress_lines` runs
+    :func:`_just_finished_text` over this key and puts the result on the
+    ``MULTI_LLM_RESULT`` line beside the roster, through
+    :func:`cli_common.record_progress_lines`. That is deliberate and is not the
+    same thing as carrying the key: the route has no renderer, so handing it
+    these dicts would leave it composing the sentence itself — which the
+    plugin's own rule forbids — while handing it the sentence costs it nothing
+    but a display. The structured half is still there too: ``progress.models``
+    rides the same line whole, states and stamps included, so a consumer that
+    wants to compute rather than display never has to parse the text.
+    """
+    for view in views:
+        key = str(view.get("phase_dir") or "")
+        if key not in baseline:
+            continue
+        before = baseline[key]
+        if before is None:
+            continue
+        models = (view.get("progress") or {}).get("models")
+        if not isinstance(models, dict):
+            continue
+        finished: List[Dict[str, Any]] = []
+        for raw_spec, raw_entry in models.items():
+            spec = str(raw_spec)
+            entry = raw_entry if isinstance(raw_entry, dict) else {}
+            state = str(entry.get("state") or "")
+            if state not in TERMINAL_STATES:
+                continue
+            now = (
+                state, str(entry.get("ended_at") or ""), str(entry.get("elapsed_s")),
+            )
+            if before.get(spec) == now:
+                continue
+            try:
+                elapsed = entry_elapsed_s(entry)
+            except Exception:
+                # The `started_at: "...Z"` shape that used to take the whole
+                # command down (F5, 2026-09-20). A clause with no clock is worth
+                # more than a traceback.
+                elapsed = None
+            if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
+                elapsed = None
+            error = entry.get("error")
+            finished.append({
+                "spec": spec,
+                "state": _model_state_label(entry),
+                "elapsed_s": float(elapsed) if elapsed is not None else None,
+                "error": str(error) if error else None,
+            })
+        if finished:
+            view["finished_during_wait"] = finished
 
 
 def _mirror_text(key: str, mirror: Any) -> List[str]:
@@ -537,7 +1426,14 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     for row in in_flight:
         if not isinstance(row, dict) or not row.get("task_id"):
             continue
-        elapsed = detach._elapsed_since(row.get("dispatched_at"))
+        # Same defensive read as `_model_timing_text`, same reason (F5,
+        # 2026-09-20): `dispatched_at` goes through the same `ValueError`-only
+        # parser, so one tz-aware stamp written by a future mirror would take
+        # the whole poll down instead of costing this row its `(since …)`.
+        try:
+            elapsed = detach._elapsed_since(row.get("dispatched_at"))
+        except Exception:
+            elapsed = None
         since = (
             f" (since {metrics.format_duration(int(elapsed * 1000))})"
             if elapsed is not None else ""
@@ -930,7 +1826,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "exit codes: 0 = terminal and successful | 2 = non-terminal (still "
             "running, or no run recorded) | 3 = terminal and needs a human | 1 = "
             "the phase dir could not be read.\n\n"
-            "The exit code IS the poll-loop condition; poll again in ~15s on 2, "
+            "The exit code IS the poll-loop condition; with --wait the waiting "
+            "is already in the call, so poll again on 2 from your own turn loop "
             "and never put `sleep` and `status` in the same shell call."
         ),
     )
@@ -964,13 +1861,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
              "tightest host shell cap), then return the non-terminal view with exit 2",
     )
     parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT_S,
-        help="--wait timeout in seconds",
+        # A SENTINEL, not a value: `None` is what lets `main` tell "the caller
+        # asked for this many seconds" from "the caller said nothing", which is
+        # the whole of the resolution order below (and of which of the two
+        # clamps is loud). Carrying `DEFAULT_WAIT_TIMEOUT_S` here instead would
+        # make `progress.poll_s` unreachable — argparse would have already
+        # answered the question.
+        "--timeout", type=float, default=None,
+        help=f"--wait timeout in seconds (default: progress.poll_s, else "
+             f"{DEFAULT_WAIT_TIMEOUT_S:.0f}s; clamped under the host's shell cap)",
     )
     parser.add_argument(
         "--abort", action="store_true",
         help="Stop the selected detached run(s): identity probe, process-group "
-             "SIGTERM, 10s, SIGKILL, then run.state: aborted. The only kill path.",
+             "SIGTERM, 10s, SIGKILL, then run.state: aborted. It reaches a run "
+             "that recorded one: a foreground run holds no run record, so there "
+             "it answers `nothing was running` and the kill path is the host's "
+             "own background job handle.",
     )
     parser.add_argument(
         "--sweep", action="store_true",
@@ -1081,6 +1988,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     views = _collect(plan_path, args)
     if args.wait:
+        # `--timeout` is a sentinel out of argparse, and this is the one place
+        # it becomes a number: between `parse_args` and the `--wait` branch,
+        # where the resolution can see both the flag and the config. Resolved
+        # only under `--wait`, so a plain `status` still pays no `load_config`
+        # on a path that would never use the answer.
+        try:
+            args.timeout = _resolve_wait_timeout(args, plan_path)
+        except _WaitTimeoutRefused as exc:
+            # Exit 3, and nothing on stdout: rule 2 stops the loop on a `3` and
+            # relays the message verbatim because it names the fix, while exit 1
+            # would have the agent report the *run* as unreadable. Stderr keeps
+            # `--json`'s stdout parseable — what there is of it, which is
+            # nothing, because no view was resolved to print (F4/F7, 2026-09-20).
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return EXIT_NEEDS_HUMAN
         views = _wait_for_terminal(plan_path, args, views)
 
     # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
@@ -1097,8 +2019,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # `status`/`None`: no single run is "the" answer there. F3, 2026-09-17:
     # what makes a poll "the watched run's" is the selector, not whether it
     # also waited, so this sits outside `if args.wait` — a single-view poll
-    # without `--wait` was still emitting the old `status`/`null` pair.
-    if len(views) == 1 and (args.phase or args.run_id):
+    # without `--wait` was still emitting the old `status`/`null` pair. F8a,
+    # 2026-09-20: `--question` joined the pair. The selector list `status`
+    # documents is `--phase`/`--question`/`--run-id`, and `ask` is the one mode
+    # whose instruction core forbids `--phase` outright (`--phase ask` selects
+    # every question ever asked under the plan), so the ask lane polls by
+    # `--question` and by nothing else — leaving the one mode that always pins
+    # exactly one run as the one mode whose result line carried no `progress`.
+    # The rule the test below is written to is "did the caller name one run?",
+    # and all three selectors answer it.
+    if len(views) == 1 and (args.phase or args.question or args.run_id):
         watched = views[0]
         watched_run = watched.get("run") or {}
         watched_mode = str(
@@ -1106,6 +2036,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ) or None
         watched_phase = str(watched.get("phase") or "") or None
         record_mode_phase(watched_mode, watched_phase)
+        # Same selector, same reason one step further: a supervised poll that
+        # pins one run reads its own `MULTI_LLM_RESULT` verbatim and never opens
+        # the rendered text, so the per-model map has to ride the result line or
+        # that caller would have to regex a human table to relay anything
+        # mid-run. Whole and unreworded — the numbers come from the status file,
+        # which is the point of producing them there.
+        record_progress(watched.get("progress"))
+        # And beside it, the same run rendered (`_progress_lines`). The map
+        # alone was only half an answer for the one caller that has no agent in
+        # its loop: it could relay nothing without composing a sentence about
+        # the run, which is precisely what the OpenCode plugin may not do. A
+        # separate key rather than one more key inside `progress`, so that
+        # object stays what the status file wrote.
+        record_progress_lines(_progress_lines(watched))
 
     exit_code = exit_code_for(views)
 
@@ -1201,17 +2145,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if v["verdict"] not in detach.TERMINAL_VERDICTS
             and v["verdict"] != detach.VERDICT_NO_RUN
         ]
-        first = live_views[0] if live_views else views[0]
-        record_next(
-            detach.status_command_for(
-                str(plan_path),
-                phase=first.get("phase"),
-                run_id=str(first["run"].get("run_id") or "") or None,
-                # The run's own host, so the poll this hands back reports the
-                # run's runner rather than the reader's (F6, 2026-09-16).
-                host=str(first["run"].get("host") or "") or None,
+        # F2, 2026-09-21: the fallback was a bare `views[0]`, so on a plan whose
+        # every phase ran in the foreground it handed back a poll of a `no_run`
+        # view — F1's rule broken through the back door, because the guard above
+        # only ever chose *between* views. It used to break cheaply
+        # (`status_command_for` returned an instant poll); now that the command
+        # carries `--wait`, following it spends the whole clamped `poll_s` and
+        # still returns exit 2 with the identical `next`, forever. So the
+        # fallback skips `no_run` as well, leaving the already-finished run this
+        # branch means by "nothing to do" — whose poll exits 0 or 3 and ends the
+        # loop. When that leaves nothing at all, *no* `next` is handed back: a
+        # plan with no run recorded anywhere has nothing to poll, and a host
+        # following `next` mechanically is owed a command that can change its
+        # own answer.
+        candidates = live_views or [
+            v for v in views if v["verdict"] != detach.VERDICT_NO_RUN
+        ]
+        if candidates:
+            first = candidates[0]
+            record_next(
+                detach.status_command_for(
+                    str(plan_path),
+                    phase=first.get("phase"),
+                    run_id=str(first["run"].get("run_id") or "") or None,
+                    # The run's own host, so the poll this hands back reports
+                    # the run's runner rather than the reader's (F6,
+                    # 2026-09-16).
+                    host=str(first["run"].get("host") or "") or None,
+                )
             )
-        )
         # The exit code stays 2 — the poll loops key off it, never off this
         # word — but "nothing-to-do" is a false alarm when the reason is a run
         # still in flight rather than an already-finished or unrecorded one
@@ -1226,6 +2188,177 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return exit_code
 
 
+def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:
+    """``(host, its foreground command cap)`` a ``--wait`` is clamped against.
+
+    ``None`` means *do not clamp*, and there are exactly two ways to get it:
+    the named host declares ``timeout_ceiling_s: 0``, which is the documented
+    "no documented cap" value rather than a cap of zero (codex ships it), and
+    the capability data could not be read at all. The second follows
+    ``render_runner_text`` and ``effective_ceiling``: unreadable capability data
+    bounds nothing rather than failing, because ``status`` is the command a poll
+    loop runs and a capability read is not what a poll is about.
+
+    With no host *declared at all* — neither ``--host`` nor ``$MULTI_LLM_HOST``,
+    see :func:`_declared_host_id` — the clamp falls back to the tightest declared
+    cap rather than being skipped: an unrouted poll could be running under any
+    host, and overshooting one of their caps by accident is the failure the
+    clamp exists for.
+    """
+    try:
+        from . import host_capabilities as caps
+
+        if host_id:
+            ceiling = caps.timeout_ceiling_s(host_id)
+            return (host_id, ceiling) if ceiling else None
+        return caps.tightest_timeout_ceiling()
+    except Exception:
+        return None
+
+
+def _declared_host_id(args: argparse.Namespace) -> Optional[str]:
+    """The host this invocation *declared*, or ``None`` when neither channel did.
+
+    :func:`host_capabilities.resolve_host_id` owns the ladder — ``--host`` →
+    ``$MULTI_LLM_HOST`` → :data:`DEFAULT_HOST` — and it is what
+    :func:`render_runner_text` resolves in this same invocation and what the
+    dispatcher validates ``--host`` against. The clamp asks it the same question
+    and differs only in the last rung: a host nobody named is not a host to
+    clamp against, so the default is *not* substituted here and the caller falls
+    back to the tightest declared cap instead.
+
+    F3, 2026-09-21: the clamp read ``args.host`` alone, so a poll routed entirely
+    through the env var — which is how an installer routes one — was clamped
+    against the tightest ceiling on record (90 s) instead of its own host's, and
+    the stderr note explaining the clamp told the caller no ``--host`` had been
+    given when a host had in fact been declared.
+    """
+    from . import host_capabilities as caps
+
+    explicit = getattr(args, "host", None)
+    if not explicit and not os.environ.get(caps.HOST_ENV):
+        return None
+    return caps.resolve_host_id(explicit=explicit)
+
+
+def _resolve_wait_timeout(args: argparse.Namespace, plan_path: Path) -> float:
+    """``--wait``'s deadline: resolve the source, then clamp the *resolved value*.
+
+    Order, and nothing else reads ``progress.interval_s`` on the way through:
+
+    1. an explicit ``--timeout`` wins;
+    2. else ``progress.poll_s`` — anchored on the plan, so a poll issued from a
+       foreign CWD still resolves the *project's* cadence;
+    3. else :data:`DEFAULT_WAIT_TIMEOUT_S`. ``poll_s`` itself ships at 90 s, so a
+       project that configures nothing keeps exactly today's wait.
+
+    ``interval_s`` is the ticker knob and is deliberately not consulted:
+    silencing the ticker lines must not turn a poll into an instant return.
+
+    **The clamp binds whichever source won, an explicit ``--timeout`` included.**
+    "Wins" settles precedence, not the ceiling. The rendered poll command Layer 2
+    tells an agent to run always passes ``--timeout <interval>``, so a clamp
+    guarding only the ``poll_s`` path would leave the one command the
+    instructions actually emit unguarded: a ``--timeout 300`` on OpenCode asks
+    for a 300 s foreground command under a documented 120 s cap and is killed
+    mid-wait with no view rendered at all.
+
+    The two paths differ only in **loudness**. A clamped ``poll_s`` is silent —
+    the user configured a cadence, not a deadline, and shortening a cadence
+    costs them one extra poll. A clamped explicit ``--timeout`` prints one
+    stderr line naming the requested value, the clamped value and the host,
+    because that caller asked for a specific number and is getting another.
+    Stderr, not stdout, so ``--json``'s output stays parseable.
+
+    **Two ways this refuses, and both wear the same clean exit-3 shape.**
+
+    A ``ConfigError`` — from a rejected ``progress.poll_s`` (``0``, or below the
+    5 s floor), *or* from any unrelated block in the same override file, because
+    ``load_config`` validates the whole document — is caught and re-raised as
+    :class:`_WaitTimeoutRefused` for ``main`` to print. F4, 2026-09-20: it used
+    to propagate, and the dispatcher turned it into a traceback plus **exit 1**.
+    Measured with ``MULTI_LLM_PROVIDERS_CONFIG`` pointing at a config carrying a
+    bogus ``driver:`` key: plain ``status`` exited 2 normally while ``status
+    --wait --json`` exited 1 with a stack trace on stderr and no JSON on stdout.
+    Rule 2 reads exit 1 as "the run state is unreadable — stop and report", so a
+    config edit made *during* a run ended the poll loop on a misdiagnosis of the
+    run. Exit 3 is this codebase's "needs a human", which is exactly what a
+    rejected config key is; the rejection still surfaces, named, which was the
+    point of validating at load.
+
+    And a non-finite or negative explicit ``--timeout`` is refused here rather
+    than obeyed. ``--timeout nan``/``inf``/``-1`` all parse as floats, and with
+    ``--host codex`` (``timeout_ceiling_s: 0``, so no clamp) they reach
+    ``_wait_for_terminal`` intact: ``time.time() >= nan`` is ``False`` forever
+    and the poll never returns. ``validate_progress_block`` rejects ``.nan`` and
+    ``.inf`` for ``poll_s`` **precisely** to prevent "a ``--wait`` that never
+    returns", and the CLI path was undoing that one layer up (F7, 2026-09-20).
+    """
+    from .provider_registry import ConfigError, get_progress_poll
+
+    explicit = args.timeout is not None
+    if explicit:
+        requested = float(args.timeout)
+        if requested != requested or requested in (float("inf"), float("-inf")):
+            raise _WaitTimeoutRefused(
+                f"--timeout {args.timeout!r} is not a finite number of seconds. "
+                "A non-finite deadline is never reached, so `--wait` would poll "
+                "forever with nothing to hand back. Pass a positive number of "
+                "seconds, or drop `--timeout` and let `progress.poll_s` answer."
+            )
+        if requested <= 0:
+            raise _WaitTimeoutRefused(
+                f"--timeout {requested:g} is not a positive number of seconds. "
+                "A zero or negative deadline returns before the first re-read, "
+                "which is the instant-return failure `progress.poll_s: 0` is "
+                "rejected for. Pass a positive number of seconds, or drop "
+                "`--timeout` and let `progress.poll_s` answer."
+            )
+    try:
+        resolved = (
+            float(args.timeout) if explicit
+            else float(get_progress_poll(anchor=str(plan_path)))
+        )
+    except ConfigError as exc:
+        raise _WaitTimeoutRefused(
+            f"{exc}\n`--wait` resolves its deadline through the config layer, so "
+            "a config this run cannot read stops the poll rather than guessing a "
+            "cadence. Fix the config and poll again; the run itself is untouched "
+            "(`status` without `--wait` still reports it)."
+        ) from exc
+
+    host_id = _declared_host_id(args)
+    ceiling = _wait_clamp_ceiling(host_id)
+    if ceiling is None:
+        return resolved
+    capped_host, cap_s = ceiling
+    # A margin below the cap, never the cap itself: the poll spends process
+    # start, `load_config` and the checkpoint read before `--wait` begins
+    # sleeping, and `_wait_for_terminal` re-checks on a 5 s grid, so it returns a
+    # little after its own deadline. The floor is arithmetic hygiene for a
+    # hypothetical host whose cap is under the margin — a wait clamped to zero
+    # would return instantly, which is exactly what `poll_s: 0`'s rejection
+    # exists to prevent.
+    clamped = max(float(cap_s) - WAIT_CAP_MARGIN_S, WAIT_POLL_INTERVAL_S)
+    if resolved <= clamped:
+        return resolved
+    if explicit:
+        unrouted = (
+            "" if host_id
+            else " (no --host and no $MULTI_LLM_HOST, so the clamp used the "
+                 "tightest declared cap)"
+        )
+        print(
+            f"NOTE: --timeout {resolved:.0f}s is above host {capped_host}'s "
+            f"{cap_s}s foreground command cap{unrouted}; waiting "
+            f"{clamped:.0f}s instead (the cap less the "
+            f"{WAIT_CAP_MARGIN_S:.0f}s startup margin). Poll again to keep "
+            "watching.",
+            file=sys.stderr,
+        )
+    return clamped
+
+
 def _wait_for_terminal(
     plan_path: Path, args: argparse.Namespace, views: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -1234,13 +2367,84 @@ def _wait_for_terminal(
     Compresses the poll loop into a single turn for hosts that would rather spend
     one turn than ten; it never replaces the terminal-state check, and at timeout
     it returns the non-terminal view (exit 2) so the caller simply calls again.
+
+    **A view is "still going" when either half of the file says so.** The
+    ``run`` record is the process machine and the checkpoint is the phase
+    machine, and on a re-used phase dir the two belong to *different runs*: a
+    host-background run over a dir an earlier ``--detach`` run used inherits that
+    predecessor's terminal ``run`` record, because nothing drops it on the
+    foreground path. Keying the loop on the verdict alone therefore returned in
+    0.11 s with exit 0 over a live fan-out — see :func:`_checkpoint_in_flight`
+    for the incident (F1, 2026-09-20). Erring toward waiting cannot spin: the
+    deadline is checked on every pass and a wait that guessed wrong costs its own
+    timeout and exits 2, which is the caller's normal "poll again".
+
+    It also takes the **before** picture that ``just finished:`` is a difference
+    against. This is the only place that can: ``--wait`` is the one invocation
+    that spans two readings of the same file, so it is the one invocation that
+    can prove a spec finished *recently* rather than merely that it is finished.
+    A loop that exits without iterating (everything was already terminal) leaves
+    the views it was handed untouched, the difference is empty, and no key is
+    attached — which is the right answer, not a missed case: nothing finished
+    during a wait that never waited.
+
+    **The checkpoint's vote is a vote about a *successor*, so a poll that names
+    the run does not get it.** The phase half of a failed or aborted run is
+    routinely left wherever the failure found it — ``state: models_running``,
+    ``progress.step: fanout``, because nothing walks those fields back — so a
+    caller polling ``--run-id <that run> --wait`` was held for the whole resolved
+    timeout (90 s by default) before being told about an outcome that had been on
+    disk since before the call. That is the mirror image of F1, not a softening
+    of it: there the terminal record belonged to a *predecessor* and the live
+    checkpoint to the run being watched, and the checkpoint deserved the vote
+    precisely because the two halves described different runs. Here the caller
+    has named the record's own id, so there is no second run left for the stale
+    phase fields to be describing. Only an identified run is excused
+    (:func:`_names_this_run`) — ``--phase`` and ``--question`` name a re-used
+    directory rather than a run, and a bare poll names nothing at all, so every
+    shape F1 covers keeps waiting exactly as it did.
+
+    **``no_run`` is not a vote either way, so the checkpoint casts the only one.**
+    The verdict is non-terminal purely because there is nothing to be terminal
+    about — every foreground phase (all of them on Claude Code) leaves a
+    checkpoint and no ``run`` record — and reading that as "still going" made a
+    *finished* foreground phase hold every poll for its whole deadline and then
+    exit 2 with a ``next`` that polls it again: a loop nothing in it can ever
+    end (F2, 2026-09-21). Asking :func:`_checkpoint_in_flight` instead loses
+    nothing, because on this lane the checkpoint is the only half of the file
+    that was ever written: a live foreground fan-out still holds the wait to its
+    deadline (acceptance criterion 1), and a completed one now comes back at
+    once.
     """
+    baseline = {
+        str(view.get("phase_dir") or ""): _terminal_fingerprints(view)
+        for view in views
+    }
     deadline = time.time() + max(args.timeout, 0.0)
-    while views and any(v["verdict"] not in detach.TERMINAL_VERDICTS for v in views):
+
+    def _live(view: Dict[str, Any]) -> bool:
+        verdict = view["verdict"]
+        if (verdict not in detach.TERMINAL_VERDICTS
+                and verdict != detach.VERDICT_NO_RUN):
+            return True
+        if _names_this_run(view, getattr(args, "run_id", None)):
+            return False
+        return _checkpoint_in_flight(view)
+
+    # `not views` is a waiting state, not a terminal one. A poll issued before
+    # the run has written its checkpoint — the first poll of every launch —
+    # selects nothing, and a loop keyed on "any view is live" exits instantly
+    # over an empty list. Both the exit code and the documented reading of it say
+    # otherwise: `2` explicitly covers "no run recorded yet, poll again", so
+    # returning in 0.13 s turned the one call that exists to hold a turn into a
+    # spin the agent repeats as fast as its host will let it (F4, 2026-09-20).
+    # Waiting costs at most this call's own deadline and then still exits 2.
+    while not views or any(_live(v) for v in views):
         if time.time() >= deadline:
             break
         time.sleep(min(WAIT_POLL_INTERVAL_S, max(deadline - time.time(), 0.05)))
         views = _collect(plan_path, args)
+    _attach_finished_during_wait(baseline, views)
     return views
 
 

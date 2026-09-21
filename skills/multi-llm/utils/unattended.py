@@ -936,8 +936,11 @@ def record_resolution(
     <decision>`` and, when a detached run owns *phase_dir*, appends the entry to
     ``{phase}/.status.json`` ``run.resolutions`` (D4c) — which is what
     ``status --view run`` reports. A foreground run's ``.status.json`` still gains
-    no new keys, so "with ``--detach`` unset, behavior is unchanged" stays
-    literally true; the marker line is the foreground record.
+    no ``run`` keys: ``detach.record_resolution`` keeps its handle guard, because
+    a resolution is part of the detached hand-back and the ``[AUTO_RESOLVED]``
+    marker line *is* the foreground record. (Only ``progress`` reaches a
+    foreground checkpoint, via ``detach.report_progress``; ``run`` stays the
+    detached worker's alone.)
     """
     if site_id not in _ROWS_BY_SITE:  # pragma: no cover - guarded by tests
         raise KeyError(f"unknown D6 site id: {site_id!r}")

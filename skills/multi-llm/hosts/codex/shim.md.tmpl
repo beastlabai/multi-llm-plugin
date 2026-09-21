@@ -78,12 +78,13 @@ Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complet
 `state`, `artifacts` and `next` from it rather than mining the transcript.
 {NEEDS_HUMAN_RULE}
 
-A fan-out mode outlives one shell call, so add `--detach` and then poll — one call
-per turn, reading the **exit code** (`0` finished, `2` still running, `3` needs a
-human, `1` unreadable) and never spelling the wait as a sleep in the same command:
+A fan-out mode outlives one shell call, so add `--detach`, then poll the command the launcher printed —
+it carries `--host`, `--run-id` on an `ask` run, and `--wait` with no `--timeout` — one call per turn:
+read the **exit code** (`0` finished, `2` still running, `3` needs a human, `1` unreadable), relay the
+view's `progress:` line verbatim, and never sleep in one command. That wait is `progress.poll_s` (90 s) in full — codex documents no shell-command cap for it to sit under:
 
 ```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan-path>" --view run --wait
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "<plan-path>" --host codex --view run --wait
 ```
 
 ## 6. Examples — the argument forms, however this host invokes the skill

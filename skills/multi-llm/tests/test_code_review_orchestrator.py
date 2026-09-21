@@ -8,8 +8,10 @@ report generation.
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,8 +21,84 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
-from utils import cli_common, status_file
+from utils import cli_common, progress_tracker, status_file
 from utils import review_orchestrator_base as base
+
+SKILL_ROOT = Path(__file__).parent.parent
+
+
+def _answering_review(source: str = "file"):
+    """A `run_single_review` stand-in that retires its own slot.
+
+    Not a convenience: `run_single_review` **owns** both of its slot's
+    transitions — the dispatch that turns the row `running`, and the terminal
+    one, which is the only site that knows the `source` the completion print
+    names or the error the failure print names. A stand-in that skips them
+    leaves the slot live and the fan-out's `finally` sweep retires it as
+    `cancelled`; that is the behaviour, not a test artifact, which is why every
+    fake here transitions the way the real function does.
+    """
+
+    async def fake_review(model_spec, *args, **kwargs):
+        tracker = kwargs.get("tracker")
+        assert tracker is not None, "the fan-out did not hand this slot a tracker"
+        tracker.running(model_spec, attempt=1)
+        tracker.done(model_spec, source=source)
+        return True, [], None
+
+    return fake_review
+
+
+class _FakeClock:
+    """A monotonic clock the *ticker* advances, which is what makes the
+    cadence assertions exact.
+
+    The ticker's only wait is ``progress_tracker._tick_sleep``; patched to
+    :meth:`sleep`, every interval it would have spent moves the clock by
+    exactly that interval and yields to the loop, so a test never waits out a
+    real 30 s and the number of lines is a property of the script rather than
+    of the machine the suite runs on. The same three seams the tracker's own
+    unit tests use (``tests/test_progress_tracker.py``).
+    """
+
+    def __init__(self, start: float = 10_000.0) -> None:
+        self.now = float(start)
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.now += float(delay)
+        await asyncio.sleep(0)
+
+
+@contextlib.contextmanager
+def _realtime_ticker(interval_s: float = 0.01):
+    """Both tickers on a real (tiny) interval rather than on :class:`_FakeClock`.
+
+    The fake clock only advances when the *ticker* is scheduled, which is the
+    right seam for a cadence assertion and the wrong one for measuring whether
+    the loop was **free** during a particular window: a ticker that never got a
+    turn advances nothing and looks identical to one that was starved. A real
+    10 ms interval measures what "the ticker kept printing while the dispatch
+    blocked" actually claims. The twin of
+    ``tests/test_review_plan_orchestrator._realtime_ticker``.
+    """
+    emitted: list = []
+
+    async def sleep(_delay):
+        await asyncio.sleep(interval_s)
+
+    def emit(line):
+        emitted.append(line)
+        # Still printed, so a test that cares about ORDER against the phase's
+        # own output reads one stream.
+        print(line, flush=True)
+
+    with patch.object(progress_tracker, "_tick_sleep", sleep), patch.object(
+        progress_tracker, "_emit", emit
+    ):
+        yield emitted
 
 
 def _make_args(plan_path: Path, **overrides) -> argparse.Namespace:
@@ -83,6 +161,87 @@ def _assert_between(
     assert start_idx < tgt_idx < end_idx, (
         f"expected {target} between {start} and {end}; got order {names}"
     )
+
+
+class TestTheLaunchWriteDropsAPredecessorsMap:
+    """F1, 2026-09-20 — the review-code lane's copy of the launch write.
+
+    A phase dir is re-used run after run, and on the FOREGROUND lane nothing
+    dropped the predecessor's `progress`: `claim_run` is the only writer of
+    `progress: None` and only the detached worker calls it, while `write_status`
+    carries the reserved objects over from disk by design. So a second review of
+    the same plan opened on the last run's rows — every slot `done`, its own
+    `models_succeeded` — under this run's `models 0/N done`. The launch write
+    now drops it, and this pins that it does on this lane too: the fix is three
+    separate copies in three orchestrators, so two lanes passing says nothing
+    about the third.
+    """
+
+    def test_the_launch_write_drops_a_predecessors_map(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        phase = tmp_path / "phase"
+        phase.mkdir()
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "models_requested": ["gemini:old-a", "pi:old-b"],
+            "progress": {
+                "step": "complete", "models_total": 2, "models_done": 2,
+                "models_succeeded": 2,
+                "models": {
+                    "gemini:old-a": {"state": "done", "elapsed_s": 300},
+                    "pi:old-b": {"state": "done", "elapsed_s": 240},
+                },
+            },
+        })
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.state = {"phases_completed": {}}
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+
+        # The window is between the launch `write_status` and the tracker's
+        # seed: the seed replaces `models` wholesale, so a final-state assertion
+        # would pass either way. `report_progress` is the first call after that
+        # write, so the disk as it is entered is what a poll landing there reads.
+        snapshots = []
+        real = cro.report_progress
+
+        def record(phase_dir, **updates):
+            if not snapshots:
+                snapshots.append(
+                    status_file.read_status(str(phase_dir)).get("progress")
+                )
+            real(phase_dir, **updates)
+
+        with patch.object(cro, "parse_args",
+                          return_value=_make_args(plan_path)), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "report_progress", record), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, [], None)})), \
+             patch.object(cro, "generate_review_report",
+                          return_value="# report\n"), \
+             patch.object(cro, "get_phase_dir", return_value=phase):
+            asyncio.run(cro.main())
+
+        assert snapshots, "the launch never reported progress"
+        assert not snapshots[0], (
+            f"the predecessor's progress survived the launch write: "
+            f"{snapshots[0]}"
+        )
 
 
 class TestMainWrapsPipelineWithIntentToAdd:
@@ -456,6 +615,94 @@ class TestAFanoutModelLostToTheGatherDeadline:
         assert "claude-code:sonnet" in report
 
 
+class TestAnInProcessSalvageMovesTheMapWithTheReport:
+    """F3, 2026-09-20, the same defect on this lane.
+
+    Under ``--exec-subagents`` the run repairs an unparseable review, folds the
+    issues back into ``results`` and ``del failed_models[spec]`` — so the
+    checkpoint below lists that model under ``models_completed`` and restates
+    ``models_succeeded`` to include it, while the per-model map went on saying
+    ``failed`` with the pre-salvage error on the row.  ``tracker.done()`` cannot
+    fix it: terminal transitions are idempotent, so a second one against a
+    frozen ``failed`` entry is a silent no-op.
+    """
+
+    def test_a_salvaged_model_is_done_on_the_map_not_only_in_the_counters(
+        self, tmp_path
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+        good, bad = specs
+        issues = [{"title": "Bug", "desc": "d", "importance": "low",
+                   "file": "src/a.py", "type": "bug"}]
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        args = _make_args(plan_path, models=list(specs), exec_subagents=True)
+
+        async def fake_run_all_reviews(*_a, **kw):
+            # A real fan-out's two endings, through the real tracker, so the map
+            # this test starts from is the one production leaves behind.
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            tracker = progress_tracker.FanoutProgress(
+                str(phase_dir), specs, anchor=str(plan_path), interval_s=0
+            )
+            kw["tracker_out"].append(tracker)
+            tracker.seed()
+            tracker.done(good, source="file")
+            tracker.failed(bad, error="Expected JSON array, got dict", source="stdout")
+            return {good: (True, issues, None),
+                    bad: (False, None, "Expected JSON array, got dict")}
+
+        def fake_salvage(_args, *, phase_dir, phase, plan_path=None):
+            recovered = Path(phase_dir) / f"{cro.sanitize_model_name(bad)}.json"
+            recovered.write_text(json.dumps(issues), encoding="utf-8")
+            return [str(recovered)]
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models", return_value=list(specs)), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "dispatch_salvage_tasks", new=fake_salvage), \
+             patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
+            assert asyncio.run(cro.main()) == 0
+
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_failed"] == {}
+        assert sorted(status["models_completed"]) == sorted(specs)
+        progress = status["progress"]
+        assert progress["models_succeeded"] == 2
+
+        entry = progress["models"][bad]
+        assert entry["state"] == "done", entry
+        # Not `existing_file` (2026-09-21): that word is in
+        # `progress_tracker.RESUME_SOURCES` / `run_status.SKIPPED_SOURCES` and
+        # renders the row **skipped**, which is a lie about a slot that
+        # dispatched, ran, failed to parse and was repaired in-process.
+        assert entry["source"] == "salvage", entry
+        assert entry["source"] not in progress_tracker.RESUME_SOURCES
+        assert "error" not in entry, entry
+        # The freeze stands: this is a later reading of the same slot's outcome,
+        # not a second run of it.
+        assert entry["ended_at"] and "elapsed_s" in entry
+
+
 class TestReaggregateRecordsArtifacts:
     """F2/F3: `reaggregate_from_existing_files` never called `record_artifacts`
     or `record_output_files` at all — main()'s own completion site had the
@@ -808,13 +1055,27 @@ class TestTheFanoutReportsProgressWhileItRuns:
     """F6: `run_all_reviews` never advanced `progress.models_done` — it was
     written `0` once before dispatch and recomputed only after the last model
     returned, so a mid-run poll read `models 0/4` beside three finished
-    reviewers (measured 2026-09-16: 646 s of an 833 s run). The counter is
+    reviewers (measured 2026-09-16: 646 s of an 833 s run). The counter was
     the base's `fanout_slot_counter` (shared with `run_all_models`, tested in
-    test_review_plan_orchestrator.py), which reports through the base's own
-    `_detach` — the seam patched here.
+    test_review_plan_orchestrator.py), which reported through the base's own
+    `_detach`; the tracker writes through that same module-level door
+    (`detach.report_progress`), so it is still the seam patched here.
+
+    That counter is **deleted** now and the per-model map has taken the key
+    over, because a map-derived count beside a counter is two writers for one
+    key and they can only disagree: the counter ticked at slot exit while the
+    map turns terminal at the completion print, so a lane running both flickers
+    between counter-order and map-order.  The consolidation changes the *call
+    sequence* — a tracker that seeds the map and writes on every transition
+    makes many more `report_progress` calls than one tick per slot — so these
+    tests assert the property the F6 regression was actually about rather than
+    the literal `[1, 2, 3]` / `[1, 2]` they used to pin: the number read off
+    `models_done` never decreases, it reaches `models_total`, and on a resumed
+    run it is already at the skipped count while the models that really dispatch
+    are still running, instead of sitting at `0` for the length of the fan-out.
     """
 
-    def test_each_finished_slot_advances_the_counter(self, tmp_path):
+    def test_models_done_never_decreases_and_reaches_the_total(self, tmp_path):
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# plan\n", encoding="utf-8")
         calls = []
@@ -822,10 +1083,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
         def record(phase_dir, **updates):
             calls.append(dict(updates))
 
-        async def fake_review(*args, **kwargs):
-            return True, [], None
-
-        with patch.object(cro, "run_single_review", new=fake_review), \
+        with patch.object(cro, "run_single_review", new=_answering_review()), \
              patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
@@ -835,11 +1093,16 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         assert len(results) == 3
         counted = [c["models_done"] for c in calls if "models_done" in c]
-        # One call per finished slot — no opening zero here, unlike the base's
-        # fan-out, because this lane's own `0` is written by `main()` before
-        # `run_all_reviews` is ever called, not by this function itself.
-        assert counted == [1, 2, 3]
+        # Many more writes than slots now (seed, stagger, dispatch, completion),
+        # so the shape that matters is the monotonicity, not the length.
+        assert counted, "the fan-out wrote no progress at all"
+        assert counted == sorted(counted), f"models_done walked backwards: {counted}"
+        assert counted[-1] == 3
         assert all(c["models_total"] == 3 for c in calls if "models_total" in c)
+        # The other half of the pair, which the slot counter never wrote: every
+        # slot produced a usable result here, so the two numbers end equal.
+        succeeded = [c["models_succeeded"] for c in calls if "models_succeeded" in c]
+        assert succeeded[-1] == 3
 
     def test_a_resumed_run_counts_the_skipped_slots_too(self, tmp_path):
         """A model answered from an existing `{model}.json` has finished its
@@ -855,10 +1118,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
         def record(phase_dir_arg, **updates):
             calls.append(dict(updates))
 
-        async def fake_review(*args, **kwargs):
-            return True, [], None
-
-        with patch.object(cro, "run_single_review", new=fake_review), \
+        with patch.object(cro, "run_single_review", new=_answering_review()), \
              patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
@@ -868,7 +1128,1009 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         assert len(results) == 2
         counted = [c["models_done"] for c in calls if "models_done" in c]
-        assert counted == [1, 2]
+        assert counted == sorted(counted), f"models_done walked backwards: {counted}"
+        assert counted[-1] == 2
+
+        # D4a on the one lane where nothing dispatches at all: by the time the
+        # model that really runs is dispatched, the skipped one is already
+        # counted. The old failure is exactly the `0` this forbids.
+        dispatching = [
+            call for call in calls
+            if any(
+                entry["state"] == "running"
+                for entry in (call.get("models") or {}).values()
+            )
+        ]
+        assert dispatching, "no write caught a model in flight"
+        assert dispatching[0]["models_done"] == 1
+        assert dispatching[0]["models_succeeded"] == 1
+
+
+class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
+    """review-code reaches neither shared helper.
+
+    `run_all_reviews` is a duplicate fan-out — its own `run_with_semaphore`,
+    its own stagger loop, its own `asyncio.gather` — so instrumenting
+    `run_models_concurrent` reaches nothing here.  These assert the three
+    properties on *this* function's own code path: the map is complete at the
+    first poll rather than filling in as models start, a `[PROGRESS]` ticker
+    really ran while it was fanning out, and nothing is left live once it
+    returns.
+    """
+
+    def test_the_map_is_complete_at_the_first_write(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
+        calls = []
+        real_report_progress = base._detach.report_progress
+
+        def record(phase_dir, **updates):
+            calls.append(dict(updates))
+            real_report_progress(phase_dir, **updates)
+
+        with patch.object(cro, "run_single_review", new=_answering_review()), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base._detach, "report_progress", record):
+            asyncio.run(cro.run_all_reviews(specs, plan_path, tmp_path, 30, 3))
+
+        seeded = calls[0]["models"]
+        assert sorted(seeded) == sorted(specs), (
+            "a poller's first read has to see every requested model"
+        )
+        assert {entry["state"] for entry in seeded.values()} == {"queued"}
+        for entry in seeded.values():
+            # A queued row renders `0m00s/30m`, not a blank denominator.
+            assert entry["timeout_s"] == 30
+            assert entry["attempt"] == 0
+            assert entry["source"] is None
+            assert entry["started_at"]
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        stored = status_file.read_status(str(phase_dir))["progress"]["models"]
+        assert {entry["state"] for entry in stored.values()} == {"done"}
+
+    def test_a_ticker_runs_on_this_functions_own_code_path(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        clock = _FakeClock()
+        emitted = []
+
+        async def fake_review(model_spec, *args, **kwargs):
+            kwargs["tracker"].running(model_spec, attempt=1)
+            # Three suspension points, so the ticker task the fan-out started
+            # is scheduled whatever order the loop picks — and so at least one
+            # line is rendered while a row really is `running`.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            kwargs["tracker"].done(model_spec, source="file")
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(progress_tracker, "_monotonic", clock.monotonic), \
+             patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
+             patch.object(progress_tracker, "_emit", emitted.append):
+            asyncio.run(cro.run_all_reviews(
+                ["cursor-agent:auto", "claude-code:sonnet"],
+                plan_path, tmp_path, 30, 2,
+            ))
+
+        assert any("done (" in line for line in emitted), (
+            "run_all_reviews never ran a ticker of its own: " + repr(emitted)
+        )
+        assert all(line.startswith("[PROGRESS] ") for line in emitted)
+        # The last line is written after the teardown sweep, so it states the
+        # run's real totals rather than whatever the last interval caught.
+        assert emitted[-1].startswith("[PROGRESS] 2/2 done (2 ok, 0 failed)")
+
+    def test_nothing_is_left_live_when_the_fanout_returns(self, tmp_path):
+        """The mixed run: one model answers, one fails outright."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+
+        async def fake_review(model_spec, *args, **kwargs):
+            tracker = kwargs.get("tracker")
+            if model_spec == "claude-code:sonnet":
+                tracker.failed(model_spec, error="boom", source="unknown")
+                return False, None, "boom"
+            tracker.done(model_spec, source="file")
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            asyncio.run(cro.run_all_reviews(
+                ["cursor-agent:auto", "claude-code:sonnet"],
+                plan_path, tmp_path, 30, 2,
+            ))
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        progress = status_file.read_status(str(phase_dir))["progress"]
+        states = {spec: e["state"] for spec, e in progress["models"].items()}
+        assert states == {
+            "cursor-agent:auto": "done", "claude-code:sonnet": "failed",
+        }
+        assert progress["models_done"] == 2
+        assert progress["models_succeeded"] == 1
+        assert progress["models"]["claude-code:sonnet"]["error"] == "boom"
+        # `error` is terminal-only and never lands on a `done` row, so its
+        # presence is itself the signal that something went wrong there.
+        assert "error" not in progress["models"]["cursor-agent:auto"]
+
+
+class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
+    """2026-09-21, this lane's copy: the `max_parallel` wait read `staggering`.
+
+    `run_all_reviews` is its own fan-out, so the cure landed in
+    `run_models_concurrent` reaches nothing here. `staggering` fires *before*
+    both semaphores are acquired and `running` only inside
+    `run_single_review`, so a slot whose stagger sleep had already elapsed and
+    which was parked on `max_parallel` kept advertising a stagger it had
+    spent — while index 0, which never staggers, rendered the same wait as
+    `queued`. One wait, two words, on the one lane that still had it.
+    """
+
+    MODELS = ["cursor-agent:auto", "claude-code:sonnet"]
+
+    def test_the_parked_slot_reads_queued_and_not_staggering(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        head, tail = self.MODELS
+        dispatched = asyncio.Event()
+        release = asyncio.Event()
+        seen = {}
+        trackers: list = []
+
+        async def fake_review(model_spec, *args, **kwargs):
+            tracker = kwargs["tracker"]
+            tracker.running(model_spec, attempt=1)
+            if model_spec == head:
+                dispatched.set()
+                await release.wait()
+            tracker.done(model_spec, source="file")
+            return True, [], None
+
+        async def drive():
+            task = asyncio.ensure_future(cro.run_all_reviews(
+                list(self.MODELS), plan_path, tmp_path, 30, 1,
+                tracker_out=trackers,
+            ))
+            # `max_parallel=1`, so while the head slot holds the semaphore the
+            # tail slot can only be waiting for it.
+            await dispatched.wait()
+            tracker = trackers[0]
+            deadline = time.monotonic() + 2.0
+            state = tracker.snapshot()[tail]["state"]
+            while state == "staggering" and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+                state = tracker.snapshot()[tail]["state"]
+            seen["tail"] = state
+            seen["head"] = tracker.snapshot()[head]["state"]
+            release.set()
+            await task
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            asyncio.run(drive())
+
+        assert seen["head"] == "running", seen
+        assert seen["tail"] == "queued", (
+            "a slot parked on `max_parallel` must not advertise a stagger it "
+            f"has already spent: {seen}"
+        )
+        # And the ending is unchanged: both slots still retire.
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        states = {
+            spec: entry["state"] for spec, entry in
+            status_file.read_status(str(phase_dir))["progress"]["models"].items()
+        }
+        assert states == {head: "done", tail: "done"}, states
+
+
+class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
+    """2026-09-21, this lane's copy: `run_all_reviews` names the sleep it takes.
+
+    The base's `run_models_concurrent` reaches nothing here, so the one
+    `tracker.staggering` call this fan-out makes has to pass `delay_s` itself
+    — without it the row reads `staggering` with no `starts in Ns`, on the
+    one lane a user watching a `--review-code` launch would see.
+    """
+
+    MODELS = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
+
+    def test_every_staggered_slot_is_stamped_with_its_own_delay(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        seen = {}
+        real = progress_tracker.FanoutProgress.staggering
+
+        def spy(self, spec, **kwargs):
+            real(self, spec, **kwargs)
+            # The row as a poll landing on this write would read it.
+            seen[spec] = (kwargs, dict(self.snapshot()[spec]))
+
+        async def fake_review(model_spec, *args, **kwargs):
+            tracker = kwargs["tracker"]
+            tracker.running(model_spec, attempt=1)
+            tracker.done(model_spec, source="file")
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.02), \
+             patch.object(progress_tracker.FanoutProgress, "staggering", spy):
+            asyncio.run(cro.run_all_reviews(
+                list(self.MODELS), plan_path, tmp_path, 30, 3,
+            ))
+
+        head, *tail = self.MODELS
+        assert head not in seen, "index 0 never staggers"
+        assert list(seen) == tail
+        for index, spec in enumerate(tail, start=1):
+            kwargs, row = seen[spec]
+            # This lane sleeps the bare product; it does not route the delay
+            # through `get_backoff_delay`, and the row must say what it slept.
+            assert kwargs == {"delay_s": pytest.approx(index * 0.02)}, (spec, kwargs)
+            assert row["state"] == "staggering"
+            assert "stagger_until" in row, (spec, row)
+        # And once dispatched, no row still carries a countdown.
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        rows = status_file.read_status(str(phase_dir))["progress"]["models"]
+        assert not [spec for spec, e in rows.items() if "stagger_until" in e]
+
+
+class TestEveryEndingRetiresEverySlotOnThisFanout:
+    """The sweep is in the `finally`, not on the timeout branch, and this is
+    the fan-out that proves why.
+
+    It used to prove it the hard way: `tasks` held **bare coroutines**, so the
+    first `task.done()` in the `except asyncio.TimeoutError` handler raised
+    `AttributeError` and the deadline branch could not finish — and the sweep,
+    hanging off the `finally` instead, retired every slot anyway.  F2
+    (2026-09-20) made them real tasks, because harvesting the slots that had
+    already answered needs a handle on them, so that branch now runs to the end
+    and `run_all_reviews` returns the partial results instead of raising out of
+    the orchestrator.  The sweep's placement is unchanged and still right: the
+    `finally` runs whichever way the fan-out ends.
+    """
+
+    def test_the_deadline_path_retires_every_slot_with_the_reports_wording(
+        self, tmp_path
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+
+        async def never_returns(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        # `timeout=0` makes `total_timeout` 0 with the stagger patched out, so
+        # `asyncio.wait_for` fires its deadline on the first suspension.
+        with patch.object(cro, "run_single_review", new=never_returns), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            results = asyncio.run(
+                cro.run_all_reviews(specs, plan_path, tmp_path, 0, 2)
+            )
+
+        # F2, 2026-09-20: this call used to be wrapped in
+        # `pytest.raises(AttributeError)` — the deadline branch crashed on
+        # `task.done()` over a bare coroutine and the whole fan-out raised out
+        # of `main()`, losing every review a slot HAD produced.  It returns now;
+        # nothing finished here, so the harvest finds nothing to keep.
+        assert results == {}
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        progress = status_file.read_status(str(phase_dir))["progress"]
+        models = progress["models"]
+        assert not [
+            spec for spec, entry in models.items()
+            if entry["state"] in ("queued", "staggering", "running", "retrying")
+        ], "a slot outlived the fan-out"
+
+        # One cause, named the same way in the table and in the report's
+        # failure list: the map's failed set is exactly what F11's backfill
+        # produced for the same run, error string included.
+        failed_models = {}
+        base.backfill_deadline_losses(specs, {}, failed_models)
+        assert failed_models == {
+            spec: progress_tracker.DEADLINE_ERROR for spec in specs
+        }
+        assert {
+            spec for spec, entry in models.items() if entry["state"] == "failed"
+        } == set(failed_models)
+        assert {spec: entry["error"] for spec, entry in models.items()} == failed_models
+        assert progress["models_done"] == 2
+        assert progress["models_succeeded"] == 0
+
+    def test_the_deadline_keeps_the_reviews_of_the_slots_that_finished(
+        self, tmp_path
+    ):
+        """F2, 2026-09-20: the mixed ending, on this lane.
+
+        `asyncio.wait_for` raises instead of assigning `completed`, so the
+        deadline branch returned nothing at all — including for the reviewer
+        that had already answered and whose `<model>.json` `save_model_result`
+        had written. `backfill_deadline_losses` walks `results`, so that model
+        was named a deadline loss in the report and in `models_failed` while the
+        map (written by `run_single_review`'s own completion site) called it
+        `done`, and the `models_succeeded` restatement counted it as lost.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+        issues = [{"title": "Bug", "desc": "d", "importance": "low",
+                   "file": "src/a.py", "type": "bug"}]
+
+        async def one_answers_one_straggles(model_spec, *args, **kwargs):
+            if model_spec == specs[1]:
+                await asyncio.Event().wait()
+            kwargs["tracker"].done(model_spec, source="file")
+            return True, issues, None
+
+        with patch.object(cro, "run_single_review", new=one_answers_one_straggles), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            results = asyncio.run(
+                cro.run_all_reviews(specs, plan_path, tmp_path, 0.05, 2)
+            )
+
+        assert list(results) == [specs[0]]
+        assert results[specs[0]] == (True, issues, None)
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        models = status_file.read_status(str(phase_dir))["progress"]["models"]
+        assert models[specs[0]]["state"] == "done"
+        assert models[specs[1]]["state"] == "failed"
+
+        # The report's failure list and the map name the same set — which is
+        # what the fix buys: F11 backfills only the model that produced nothing.
+        failed_models = {}
+        base.backfill_deadline_losses(specs, results, failed_models)
+        assert failed_models == {specs[1]: progress_tracker.DEADLINE_ERROR}
+        assert {
+            spec for spec, entry in models.items() if entry["state"] == "failed"
+        } == set(failed_models)
+
+    def test_a_slot_that_raises_records_its_own_ending_not_a_cancellation(
+        self, tmp_path
+    ):
+        """F5, 2026-09-20: two lanes, one event, two different answers.
+
+        `run_all_reviews` had no `except Exception` around `run_single_review`,
+        so a slot that raised past the transition sites inside it reached no
+        terminal transition of its own and was retired by the teardown sweep as
+        `cancelled` / `source: null` — the wording reserved for a slot whose ending
+        runs no transition site at all (a `KeyboardInterrupt` between slots, a
+        task the gather drops; NOT `--abort`, which runs no `finally` here at
+        all and is retired on disk instead).  The base lane's
+        `run_models_concurrent` records `source: "exception"` and the
+        exception's own text for the identical event, and the base lane is the
+        one that is right: the exception IS the ending, and it is the only place
+        the spec behind a task the gather drops is still known.  The sibling
+        assertion lives in
+        `tests/test_review_plan_orchestrator.py::TestEveryEndingRetiresEverySlot`.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+
+        async def one_explodes(model_spec, *args, **kwargs):
+            if model_spec == specs[1]:
+                raise RuntimeError("provider exploded")
+            kwargs["tracker"].done(model_spec, source="file")
+            return True, [], None
+
+        with patch.object(cro, "run_single_review", new=one_explodes), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            results = asyncio.run(
+                cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
+            )
+
+        # The raising slot never reaches `results` — it is printed as `Review
+        # exception:` and dropped — which is exactly why the map has to carry
+        # its reason.
+        assert list(results) == [specs[0]]
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        models = status_file.read_status(str(phase_dir))["progress"]["models"]
+        loser = models[specs[1]]
+        assert loser["state"] == "failed"
+        assert loser["error"] == "provider exploded", loser
+        assert loser["source"] == "exception", loser
+        # Not the sweep's wording, which is what it used to get.
+        assert loser["error"] != progress_tracker.CANCELLED_ERROR
+        assert models[specs[0]]["state"] == "done"
+
+    def test_the_cancel_all_path_uses_the_other_wording(self, tmp_path):
+        """A cancellation that reaches no transition site is `cancelled`, not
+        the deadline string. Those two are the only cancellation wordings; a
+        third invented at a transition site would split one cause across two
+        labels.
+
+        Renamed from `test_an_abort_uses_the_other_wording` (F1, 2026-09-20):
+        the body cancels the fan-out task, which is asyncio shutdown's
+        cancel-all, and `--abort` never reaches Python here at all. The real
+        `--abort` ending is pinned by
+        `test_detach.py::TestAbortRetiresTheMapOnDisk`."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        dispatched = asyncio.Event()
+
+        async def hang(*args, **kwargs):
+            dispatched.set()
+            await asyncio.Event().wait()
+
+        async def scenario():
+            task = asyncio.ensure_future(cro.run_all_reviews(
+                ["cursor-agent:auto", "claude-code:sonnet"],
+                plan_path, tmp_path, 30, 2,
+            ))
+            await dispatched.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with patch.object(cro, "run_single_review", new=hang), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            asyncio.run(scenario())
+
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        models = status_file.read_status(str(phase_dir))["progress"]["models"]
+        assert {entry["state"] for entry in models.values()} == {"failed"}
+        assert {entry["error"] for entry in models.values()} == {
+            progress_tracker.CANCELLED_ERROR
+        }
+
+
+class TestAResumedRunDoesNotReportSkippedModelsAsPending:
+    """Acceptance criterion 2, on the lane whose skip is inline.
+
+    `run_all_reviews`' resume branch answers from `{model}.json` and returns a
+    bare `(True, issues, None)` tuple carrying no `source` at all, so the
+    transition site supplies `existing_file` itself.  Left `queued` — the
+    default if the skip predicate writes nothing — `models_done` and the
+    rendered table would lie about a run that has nothing left to do, and
+    `claim_run`'s wholesale drop of the predecessor's `progress` means there is
+    no earlier entry to fall back on.
+    """
+
+    def test_every_skipped_model_is_done_and_counted(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "cursor-agent_auto.json").write_text("[]", encoding="utf-8")
+        (phase_dir / "claude-code_sonnet.json").write_text("[]", encoding="utf-8")
+
+        async def never_dispatched(*args, **kwargs):
+            raise AssertionError("a resumed slot must not dispatch")
+
+        with patch.object(cro, "run_single_review", new=never_dispatched), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+            results = asyncio.run(
+                cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
+            )
+
+        assert sorted(results) == sorted(specs)
+        progress = status_file.read_status(str(phase_dir))["progress"]
+        for spec in specs:
+            entry = progress["models"][spec]
+            assert entry["state"] == "done"
+            # There is no `skipped` state: the distinction lives in `source`,
+            # which is what a renderer reads to label the row.
+            assert entry["source"] == "existing_file"
+            assert entry["source"] in progress_tracker.RESUME_SOURCES
+            assert entry["attempt"] == 0
+            assert entry["elapsed_s"] == 0
+        # It has a usable result, so it counts on *both* numbers.
+        assert progress["models_done"] == 2
+        assert progress["models_succeeded"] == 2
+        assert progress["models_total"] == 2
+
+
+class TestThePhaseTickerCoversTheRestOfThePhase:
+    """T5: `run_all_reviews` returns the moment its last slot does, and this
+    phase then keeps working for minutes — grouping, the reviewed-code and plan
+    excerpts, validation-batch preparation, and under `--exec-subagents` the
+    whole validation dispatch and merge.  Without a second ticker that window
+    is where the log goes quiet, now at the *end* of the run instead of
+    throughout it.  It reuses `progress.subagents`, gets no second map, and
+    never touches `models`.
+    """
+
+    def test_it_starts_after_the_fanout_and_ends_on_the_terminal_step(
+        self, tmp_path
+    ):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        clock = _FakeClock()
+        emitted = []
+        snapshots = {}
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        args = _make_args(plan_path, models=["cursor-agent:auto"])
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+
+        async def fake_review(model_spec, *a, **kw):
+            kw["tracker"].running(model_spec, attempt=1)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            kw["tracker"].done(model_spec, source="file")
+            return True, [], None
+
+        real_fanout = cro.run_all_reviews
+
+        async def watched_fanout(*a, **kw):
+            results = await real_fanout(*a, **kw)
+            # The map exactly as the fan-out's sweep left it.
+            snapshots["after_fanout"] = json.dumps(
+                status_file.read_status(str(phase_dir))["progress"]["models"],
+                sort_keys=True,
+            )
+            snapshots["lines_at_fanout_end"] = len(emitted)
+            return results
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "run_single_review", new=fake_review), \
+             patch.object(cro, "run_all_reviews", new=watched_fanout), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(progress_tracker, "_monotonic", clock.monotonic), \
+             patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
+             patch.object(progress_tracker, "_emit", emitted.append):
+            assert asyncio.run(cro.main()) == 0
+
+        fanout_lines = emitted[: snapshots["lines_at_fanout_end"]]
+        phase_lines = emitted[snapshots["lines_at_fanout_end"] :]
+        assert any("done (" in line for line in fanout_lines)
+        # Rule 1: the fan-out's ticker dies before the caller's per-model
+        # summary, so no `step:` line can interleave with it.
+        assert not any("step:" in line for line in fanout_lines)
+        # Exactly one, and that is honest rather than a weak assertion:
+        # everything between the fan-out and the terminal step is synchronous,
+        # so an interval that expires while it runs cannot be serviced. The
+        # line that matters is the teardown one, emitted after the phase wrote
+        # `progress.step`, so the log's last [PROGRESS] says how the phase
+        # ended rather than trailing off at whatever the fan-out last printed.
+        assert phase_lines, "the phase after the fan-out narrated nothing"
+        assert phase_lines[-1].startswith("[PROGRESS] step: complete")
+
+        # It prints and does not write: the terminal map is byte-identical
+        # across the whole of the rest of the phase, so a table rendered while
+        # validation runs still shows each model's real duration rather than a
+        # clock that kept ticking after the model finished. (The counters
+        # restatement beside it therefore carries no `models` key either.)
+        after = json.dumps(
+            status_file.read_status(str(phase_dir))["progress"]["models"],
+            sort_keys=True,
+        )
+        assert after == snapshots["after_fanout"]
+
+        progress = status_file.read_status(str(phase_dir))["progress"]
+        assert progress["step"] == "complete"
+        assert progress["models_done"] == 1
+        assert progress["models_succeeded"] == 1
+
+    def test_lines_keep_arriving_through_the_in_process_salvage(self, tmp_path):
+        """T5, 2026-09-21: this lane's salvage window had no ticker at all.
+
+        In-process salvage (`--exec-subagents`, a model whose output would not
+        parse) runs *after* `run_all_reviews` returns — so the fan-out's ticker
+        has already been cancelled and awaited by lifetime rule 1 — and
+        *before* the phase ticker starts at grouping. `dispatch_salvage_tasks`
+        blocks the calling thread the way `dispatch_subagent_tasks` does (one
+        `subagent_executor.run_task_file` per request), so a salvage that took
+        minutes emitted no `[PROGRESS]` line at all while `progress.step` still
+        read `fanout`: the silent gap between the last model and the report
+        that T5 forbids. Same cure as the validation window, pinned the same
+        way — the blocking stub itself reports how many lines landed while it
+        was blocking, which is a statement about the production call site and
+        not about the stub.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        specs = ["cursor-agent:auto", "claude-code:sonnet"]
+        good, bad = specs
+        issues = [{"title": "Bug", "desc": "d", "importance": "low",
+                   "file": "src/a.py", "type": "bug"}]
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        args = _make_args(plan_path, models=list(specs), exec_subagents=True)
+
+        async def fake_run_all_reviews(*_a, **kw):
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            tracker = progress_tracker.FanoutProgress(
+                str(phase_dir), specs, anchor=str(plan_path), interval_s=0
+            )
+            kw["tracker_out"].append(tracker)
+            tracker.seed()
+            tracker.done(good, source="file")
+            tracker.failed(bad, error="Expected JSON array, got dict",
+                           source="stdout")
+            return {good: (True, issues, None),
+                    bad: (False, None, "Expected JSON array, got dict")}
+
+        def phase_lines():
+            return [ln for ln in emitted if ln.startswith("[PROGRESS] step: ")]
+
+        window = {}
+
+        def blocking_salvage(_args, *, phase_dir, phase, plan_path=None):
+            """`dispatch_salvage_tasks`' shape: it blocks, it does not await."""
+            recovered = Path(phase_dir) / f"{cro.sanitize_model_name(bad)}.json"
+            recovered.write_text(json.dumps(issues), encoding="utf-8")
+            # Read here, not afterwards: the point of the step is that a poll
+            # taken DURING the window names the work, rather than still reading
+            # the step the fan-out left behind.
+            window["step"] = status_file.read_status(phase_dir)["progress"]["step"]
+            window["before"] = len(phase_lines())
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                time.sleep(0.005)
+            window["after"] = len(phase_lines())
+            return [str(recovered)]
+
+        with _realtime_ticker() as emitted, \
+             patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "resolve_models", return_value=list(specs)), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "dispatch_salvage_tasks", new=blocking_salvage), \
+             patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
+            assert asyncio.run(cro.main()) == 0
+
+        assert window, "the in-process salvage was never reached"
+        assert window["step"] == "salvage", (
+            f"a poll during the salvage window still read `{window['step']}`"
+        )
+        # 0.2 s of blocking against a 10 ms interval: the honest floor is many
+        # lines and the defect's floor is zero, so two leaves the margin a
+        # loaded machine needs without weakening the discrimination.
+        assert window["after"] - window["before"] >= 2, (
+            f"the ticker was starved for the whole salvage window: "
+            f"{window} in {emitted}"
+        )
+        assert any(
+            ln.startswith("[PROGRESS] step: salvage") for ln in phase_lines()
+        ), phase_lines()
+        # The window closes on the phase's own terminal step, so the two
+        # tickers leave no gap between them either.
+        assert phase_lines()[-1].startswith("[PROGRESS] step: complete"), (
+            phase_lines()
+        )
+        # And the run still ends the way it did: the salvaged model is
+        # completed, on the report's side and on the map's.
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_failed"] == {}
+        assert sorted(status["models_completed"]) == sorted(specs)
+        assert status["progress"]["models"][bad]["state"] == "done"
+
+    def test_the_reaggregate_path_narrates_too(self, tmp_path):
+        """`--reaggregate` has no fan-out at all, so it is the phase ticker or
+        nothing — and its whole body is synchronous, which is the case that
+        catches a ticker out: `start_ticker()` only *schedules* the task, and a
+        task cancelled before the loop ever ran it is closed without executing
+        its `finally`, so the teardown line that carries the terminal step is
+        lost and nothing is printed at all. Asserting on the emitted lines is
+        the only assertion that can tell those apart — the checkpoint looks
+        identical either way.
+        """
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            '[{"title": "x", "desc": "y", "importance": "low", '
+            '"file": "src/a.py", "type": "style"}]',
+            encoding="utf-8",
+        )
+        emitted = []
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+
+        args = _make_args(plan_path, reaggregate=True, skip_validation=True)
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "build_unsanitize_map", return_value={}), \
+             patch.object(cro, "maybe_detach", return_value=None), \
+             patch.object(progress_tracker, "_emit", emitted.append):
+            asyncio.run(cro.main())
+
+        assert emitted, "the reaggregate phase narrated nothing at all"
+        assert emitted[-1].startswith("[PROGRESS] step: complete")
+        # No fan-out ran, so nothing here may claim per-model progress.
+        assert not any("done (" in line for line in emitted)
+
+
+class TestTheHostValidationHandOffIsTerminal:
+    """2026-09-21: neither review-code hand-off said the phase had ended.
+
+    `review_orchestrator_base` writes `state: validation_pending` and
+    `progress.step: validation_pending` where it hands validation to the host;
+    both of this lane's copies — the fan-out's and `--reaggregate`'s — only
+    called `record_next` and returned, leaving `state: models_complete` beside
+    `progress.step: grouping`. Neither word is in
+    `run_status.CHECKPOINT_TERMINAL_STATES` / `CHECKPOINT_TERMINAL_STEPS`, so
+    `_checkpoint_in_flight` read every host-validated code review as still
+    running: a foreground one rendered `running in foreground (…)` until
+    `--reaggregate` completed, and `next` on a finished detached one waited out
+    the whole `poll_s` before exiting 0. The host-driven return IS this
+    process's ending, and the checkpoint has to say so.
+    """
+
+    ISSUES = [{
+        "title": "accel deviates from the plan",
+        "desc": "src/a.py sets accel: 32 but the plan says 28",
+        "importance": "high", "file": "src/a.py", "line_range": [1, 2],
+        "type": "bug",
+    }]
+
+    @staticmethod
+    def _fake_state():
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+        return fake_state
+
+    @staticmethod
+    def _tree(tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n\n## accel: 28\n", encoding="utf-8")
+        (tmp_path / "src").mkdir(exist_ok=True)
+        (tmp_path / "src" / "a.py").write_text("accel = 32\n", encoding="utf-8")
+        return plan_path
+
+    def test_the_fanout_path_writes_both_words(self, tmp_path):
+        plan_path = self._tree(tmp_path)
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        args = _make_args(plan_path, skip_validation=False)
+        emitted = []
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state",
+                          return_value=self._fake_state()), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, self.ISSUES, None)})), \
+             patch.object(progress_tracker, "_emit", emitted.append):
+            asyncio.run(cro.main())
+
+        # The hand-off really happened rather than the run finishing.
+        assert (phase_dir / "validation_tasks.json").exists()
+        assert not (phase_dir / "report.md").exists()
+
+        status = status_file.read_status(str(phase_dir))
+        assert status["state"] == "validation_pending", status.get("state")
+        assert status["progress"]["step"] == "validation_pending", status["progress"]
+        # Both words are the ones the checkpoint readers treat as an ending,
+        # which is the whole point of writing them.
+        from utils import run_status
+        assert status["state"] in run_status.CHECKPOINT_TERMINAL_STATES
+        assert status["progress"]["step"] in run_status.CHECKPOINT_TERMINAL_STEPS
+        # The phase ticker's teardown line lands after the write, so the log's
+        # last [PROGRESS] names the ending too.
+        assert emitted[-1].startswith("[PROGRESS] step: validation_pending"), emitted
+
+    def test_the_reaggregate_path_writes_both_words(self, tmp_path):
+        plan_path = self._tree(tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self.ISSUES), encoding="utf-8"
+        )
+        args = _make_args(plan_path, reaggregate=True, skip_validation=False)
+
+        with patch.object(cro, "get_or_create_state",
+                          return_value=self._fake_state()), \
+             patch.object(cro, "get_phase_dir", return_value=phase_dir), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "build_unsanitize_map", return_value={}):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", out_dir, plan_path, args
+            ))
+
+        # It stopped at the marker: no report was rebuilt.
+        assert (phase_dir / "validation_tasks.json").exists()
+        status = status_file.read_status(str(phase_dir))
+        assert status["state"] == "validation_pending", status.get("state")
+        assert status["progress"]["step"] == "validation_pending", status["progress"]
+
+
+class TestTheValidationStretchIsNamedBeforeItIsDispatched:
+    """The word is written where the stretch begins, not where it may end.
+
+    `review_orchestrator_base` writes `state: validation_pending`
+    unconditionally at both of its own materialization sites, right after
+    `validation_tasks.json` lands and *before* `dispatch_subagent_tasks`. This
+    lane wrote it only inside the host-driven `else` — so under
+    `--exec-subagents`, which does not return there, the whole validation
+    dispatch ran under `state: models_complete` (the fan-out's last word) beside
+    `progress.step: validating`. That pair is the same disagreement the base
+    lane fixed on 2026-09-16 (`phase state: grouping_complete` / `progress:
+    validating` for the whole of a measured 62 s stretch), and
+    `utils/status_file.py` calls the ladder it breaks the in-code contract.
+
+    Not a `--wait` bug — `models_complete` is non-terminal, so
+    `_checkpoint_in_flight` kept answering True — which is why it survived the
+    hand-off fix above. What it costs is the reading: the `phase state:` line is
+    what rule 2 tells a polling agent to read before believing an instant exit
+    0, and a dir left at `models_complete` by a crashed or aborted validation
+    dispatch names a stretch that had already finished.
+
+    Observed *at dispatch time* rather than after the call, because the write
+    under test is transient: on the host-driven path the hand-off overwrites it
+    with the same word a few lines later, and on the executor path `complete`
+    overwrites it at the end of the phase.
+    """
+
+    ISSUES = TestTheHostValidationHandOffIsTerminal.ISSUES
+
+    @staticmethod
+    def _spy(phase_dir, seen):
+        """Stand in for `dispatch_subagent_tasks`, recording what it can see."""
+        def _dispatch(*_args, **_kwargs):
+            seen.append(status_file.read_status(str(phase_dir)).get("state"))
+            return False  # host-driven: the caller returns at its hand-off
+        return _dispatch
+
+    def test_the_fanout_path_names_the_stretch_before_dispatching(self, tmp_path):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        args = _make_args(plan_path, skip_validation=False)
+        seen = []
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal
+                          ._fake_state()), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, self.ISSUES, None)})), \
+             patch.object(cro, "dispatch_subagent_tasks",
+                          new=self._spy(phase_dir, seen)):
+            asyncio.run(cro.main())
+
+        assert (phase_dir / "validation_tasks.json").exists()
+        assert seen == ["validation_pending"], (
+            "the validation batch was dispatched under "
+            f"{seen!r}; the base lane's dispatch runs under "
+            "`validation_pending`, and a `--exec-subagents` run never reaches "
+            "the host hand-off that would otherwise write it"
+        )
+
+    def test_the_reaggregate_path_names_the_stretch_before_dispatching(
+        self, tmp_path
+    ):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self.ISSUES), encoding="utf-8"
+        )
+        args = _make_args(plan_path, reaggregate=True, skip_validation=False)
+        seen = []
+
+        with patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal
+                          ._fake_state()), \
+             patch.object(cro, "get_phase_dir", return_value=phase_dir), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "build_unsanitize_map", return_value={}), \
+             patch.object(cro, "dispatch_subagent_tasks",
+                          new=self._spy(phase_dir, seen)):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", out_dir, plan_path, args
+            ))
+
+        assert (phase_dir / "validation_tasks.json").exists()
+        assert seen == ["validation_pending"], (
+            "the re-dispatched validation batch ran under "
+            f"{seen!r} rather than the phase machine's own word for it"
+        )
+
+    def test_both_lanes_write_it_at_the_same_point_in_their_source(self):
+        """Parity with the base lane, asserted structurally rather than by run.
+
+        The two orchestrators materialize `validation_tasks.json` at four sites
+        between them, and the invariant is one sentence: every one of them
+        writes `state: validation_pending` before it reaches
+        `dispatch_subagent_tasks`. A behavioural test covers this lane's two;
+        this covers all four, so a fifth site added to either file is caught by
+        the same rule rather than by whoever remembers.
+        """
+        marker = '{"state": "validation_pending"}'
+        dispatch = "dispatch_subagent_tasks,"
+        for rel in ("code_review_orchestrator.py",
+                    "utils/review_orchestrator_base.py"):
+            body = (SKILL_ROOT / rel).read_text(encoding="utf-8")
+            sites = [
+                i for i in range(len(body))
+                if body.startswith("json.dump(batched_tasks", i)
+            ]
+            assert len(sites) == 2, (
+                f"{rel} materializes a validation document at {len(sites)} "
+                "sites; the parity rule below is written for two"
+            )
+            for start in sites:
+                nxt = body.index(dispatch, start)
+                assert marker in body[start:nxt], (
+                    f"{rel} dispatches a validation batch (offset {nxt}) without "
+                    "having written `state: validation_pending` since it "
+                    f"materialized the document (offset {start}). The stretch "
+                    "starts at the write, not at the host hand-off that may "
+                    "never be reached."
+                )
 
 
 # ---------------------------------------------------------------------------

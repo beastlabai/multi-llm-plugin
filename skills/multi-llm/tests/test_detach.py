@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
 from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
-from utils import status_file  # noqa: E402
+from utils import progress_tracker, status_file  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 POSIX_ONLY = pytest.mark.skipif(
@@ -892,6 +892,276 @@ class TestDetachGates:
 
 
 # ===========================================================================
+# `report_progress` — the one reserved object a foreground run writes
+# ===========================================================================
+
+class _HandleFor:
+    """Just enough of ``detach.RunHandle`` to own a phase dir.
+
+    The real handle needs a lock, a heartbeat thread and a claimed ``run``
+    record; what ``report_progress`` actually reads off it is two things — that
+    it exists, and which dir it owns — so a stand-in is the honest subject for
+    the dir-mismatch branch and keeps the test from claiming a second run.
+    """
+
+    def __init__(self, phase_dir):
+        self.phase_dir = str(phase_dir)
+        self.calls = []
+
+    def progress(self, **updates):
+        self.calls.append(updates)
+        status_file.update_progress(self.phase_dir, updates)
+
+
+class TestForegroundProgressWrites:
+    """`report_progress` was never a ``--detach`` check: it read the module-global
+    ``_ACTIVE`` handle, so a foreground run — and a Claude Code native-background
+    run, which is a foreground run inside a background Bash — wrote nothing at
+    all for the length of a fan-out.
+
+    The handle now picks the **door** and never whether the write happens: it
+    goes through ``handle.progress`` (which stamps that run's heartbeat with it)
+    only when the handle owns the dir being written, and straight through
+    ``status_file.update_progress`` otherwise — with no handle at all, and with a
+    handle that owns a *different* dir (F3, 2026-09-20)."""
+
+    def test_a_foreground_run_writes_progress_with_no_handle(
+        self, tmp_path, monkeypatch
+    ):
+        """The `handle is None` branch, gated on the handle and not on a flag."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setattr(detach, "_ACTIVE", None)
+
+        detach.report_progress(
+            str(phase), step="fanout", models_total=4, models_done=1
+        )
+
+        progress = status_file.read_status(str(phase)).get("progress") or {}
+        assert progress == {"step": "fanout", "models_total": 4, "models_done": 1}
+
+    def test_a_write_for_another_phase_dir_lands_where_the_caller_named(
+        self, tmp_path, monkeypatch
+    ):
+        """`full --detach` is this branch, and it used to lose every phase's map.
+
+        A handle whose ``phase_dir`` differs is not "no run" — it is a run that
+        owns a *different* dir, and the mode that does this every time is
+        ``full``: it claims ``{plan}/full/`` for its own ``.status.json``, log
+        and lock, then calls each phase's ``main()`` in process, where every
+        phase's tracker targets ``{plan}/<phase>/``. Dropping the write there
+        discarded **all** the progress of the longest-running mode the tool has —
+        ``[PROGRESS]`` lines in the log, and no ``models`` map, no counters and
+        no step under ``status --phase review-plan``.
+
+        The reason given for the drop conflated two directories that are never
+        the same one: a tracker writes to the dir it was *built for* and has no
+        way to address the handle's, so "one run's ticker scribbling into another
+        run's map" could not happen. What the handle really owns is its own
+        **record** — the heartbeat stamp and the ``run_id`` compare-and-set —
+        which is why a foreign dir goes straight through ``update_progress`` and
+        never through ``handle.progress`` (F3, 2026-09-20).
+        """
+        plan = _plan(tmp_path)
+        owned = _phase_dir(plan, "full")
+        other = _phase_dir(plan, "review-plan")
+        handle = _HandleFor(owned)
+        monkeypatch.setattr(detach, "_ACTIVE", handle)
+
+        detach.report_progress(
+            str(other), step="fanout", models_done=1, models_total=4
+        )
+
+        progress = status_file.read_status(str(other)).get("progress") or {}
+        assert progress == {"step": "fanout", "models_done": 1, "models_total": 4}
+        assert handle.calls == [], (
+            "not through the handle: its record, and its heartbeat, are not this "
+            "dir's to stamp"
+        )
+        # The run's own dir is untouched by a write aimed at the phase it drives:
+        # one checkpoint per dir, still.
+        assert "progress" not in status_file.read_status(str(owned))
+        assert "run" not in status_file.read_status(str(other)), (
+            "and the phase dir gains no `run` object - `full` owns the run"
+        )
+
+    def test_the_merge_cuts_both_ways_over_one_checkpoint(
+        self, tmp_path, monkeypatch
+    ):
+        """One checkpoint, three writers, nothing lost in either direction.
+
+        ``update_status`` merges `progress` key by key at its **top** level, and
+        that single fact has to hold two ways at once or the map and the rest of
+        the object take turns erasing each other: a `models` write must keep the
+        siblings other sites wrote (`step`, `sandbox_bypassed`, `models_total`,
+        and the `subagents` / `write_subagents` executor mirrors, which go
+        straight through ``update_status`` and so already reach a *foreground*
+        checkpoint), and a later write that is not about the map must leave the
+        stored map identical rather than clobbering it.
+
+        The merge is one level deep, though, so the nested `models` value is a
+        single key: a write that carries it replaces the stored map wholesale
+        and never deep-merges into it. That is why the fan-out holds the map in
+        memory and writes it whole, and why a counters-only write carries no
+        `models` key at all.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setattr(detach, "_ACTIVE", None)
+
+        # The siblings, written the way their real sites write them.
+        detach.report_progress(str(phase), step="fanout", models_total=2)
+        detach.report_progress(str(phase), sandbox_bypassed=["codex:gpt-6-astra"])
+        status_file.update_status(str(phase), {"progress": {
+            "subagents": {"kind": "validation", "total": 3, "ok": 1},
+            "write_subagents": {"total": 2, "ok": 2},
+        }})
+
+        first_map = {
+            "claude-code:sonnet-4.6": {"state": "done", "elapsed_s": 12},
+            "codex:gpt-6-astra": {"state": "running"},
+        }
+        detach.report_progress(
+            str(phase), models=first_map, models_done=1, models_succeeded=1,
+            models_total=2,
+        )
+
+        progress = status_file.read_status(str(phase))["progress"]
+        assert progress["models"] == first_map
+        assert progress["step"] == "fanout"
+        assert progress["sandbox_bypassed"] == ["codex:gpt-6-astra"]
+        assert progress["models_total"] == 2
+        assert progress["subagents"] == {"kind": "validation", "total": 3, "ok": 1}
+        assert progress["write_subagents"] == {"total": 2, "ok": 2}
+
+        # ... and back the other way: neither a counters-only write nor a
+        # `step=`-only one carries a `models` key, so the map stays byte-identical.
+        detach.report_progress(str(phase), models_done=1, models_succeeded=1)
+        detach.report_progress(str(phase), step="validating")
+
+        progress = status_file.read_status(str(phase))["progress"]
+        assert progress["models"] == first_map
+        assert progress["step"] == "validating"
+        assert progress["sandbox_bypassed"] == ["codex:gpt-6-astra"]
+
+        # One level deep: a write that *does* carry `models` replaces the stored
+        # map wholesale, which is what the seed and the teardown sweep depend on.
+        second_map = {"claude-code:sonnet-4.6": {"state": "done", "elapsed_s": 12}}
+        detach.report_progress(str(phase), models=second_map)
+        progress = status_file.read_status(str(phase))["progress"]
+        assert progress["models"] == second_map
+        assert progress["step"] == "validating"
+
+    def test_a_foreground_run_still_records_no_run_object(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The new write path adds `progress` keys and *nothing else*.
+
+        "With ``--detach`` unset, behavior is unchanged" narrows to "a foreground
+        `.status.json` gains a `progress` object and still no `run` object" —
+        and `run` is where every reader actually branches. ``claim_run`` is never
+        called, so `classify_run` still reads `no_run`, and F1's rule that a
+        `no_run` phase is not a `next` poll target still skips it in favor of a
+        genuinely detached run.
+        """
+        plan = _plan(tmp_path)
+        monkeypatch.setattr(detach, "_ACTIVE", None)
+
+        done = _phase_dir(plan, "review-plan")
+        status_file.write_status(
+            str(done), {"phase": "review-plan", "state": "complete"}
+        )
+        status_file.claim_run(str(done), {
+            "run_id": "run-detached-0002", "mode": "review-plan", "state": "done",
+            "exit_code": 0, "detached": True, "host": "opencode",
+        })
+        # Sorts after `review-plan`, so it cannot win on ordering alone — and it
+        # is now a phase dir with a populated `progress` object, which is exactly
+        # the thing F1 must not mistake for liveness.
+        foreground = _phase_dir(plan, "tasks")
+        status_file.write_status(
+            str(foreground), {"phase": "tasks", "state": "complete"}
+        )
+        detach.report_progress(
+            str(foreground), step="fanout", models_total=4, models_done=2
+        )
+
+        status = status_file.read_status(str(foreground))
+        assert (status.get("progress") or {}).get("models_done") == 2
+        assert "run" not in status
+
+        view = detach.classify_run(str(foreground))
+        assert view["verdict"] == detach.VERDICT_NO_RUN
+        assert view["progress"]["models_done"] == 2
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.next and "run-detached-0002" in context.next
+        assert "--phase tasks" not in context.next
+
+
+# ===========================================================================
+# A stamp this process did not write
+# ===========================================================================
+
+class TestAForeignTimestampNeverCrashesStatus:
+    """`_elapsed_since` is the one ISO reader for the whole checkpoint.
+
+    Every stamp *we* write is `status_file.now_iso` → `datetime.now()`, which is
+    naive, so an offset-bearing one means a hand-edited or foreign file — which
+    `read_status`'s own contract says must not make `status` crash. It did:
+    `datetime.fromisoformat("2026-09-19T10:14:03Z")` returns an **aware**
+    datetime on 3.11+ (that `Z` form is the plan's own schema example, and what
+    the JS tests emit), `datetime.now() - <aware>` raises **TypeError**, and this
+    reader caught only `ValueError` — so one such `started_at`, `heartbeat_at` or
+    per-model row took down the whole command, not just its own line (F4,
+    2026-09-20).
+    """
+
+    def test_an_aware_stamp_is_normalised_rather_than_raised(self):
+        from datetime import datetime, timezone
+
+        when = datetime(2026, 9, 19, 10, 14, 3, tzinfo=timezone.utc)
+        assert detach._elapsed_since(
+            when.isoformat(), now=when.timestamp() + 90
+        ) == 90.0
+        # The `Z` spelling: read on 3.11+, declined (`None`) on 3.10. Either is
+        # fine; raising is not.
+        assert detach._elapsed_since(
+            "2026-09-19T10:14:03Z", now=when.timestamp() + 90
+        ) in (90.0, None)
+
+    def test_garbage_is_still_declined_rather_than_guessed(self):
+        for stamp in ["not a date", "", None, 17, "2026-13-45T99:99:99"]:
+            assert detach._elapsed_since(stamp) is None
+
+    def test_an_aware_heartbeat_still_classifies_the_run(self, tmp_path):
+        """The reader's caller: one bad stamp must cost that *line*, not the view."""
+        from datetime import datetime, timezone
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-aware-0001", "mode": "review-plan", "state": "running",
+            "detached": True, "host": "opencode", "exit_code": None,
+            "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "started_at": stamp, "heartbeat_at": stamp,
+        })
+
+        view = detach.classify_run(str(phase), close_out=False)
+
+        assert view["verdict"] == detach.VERDICT_RUNNING
+        age = view["heartbeat_age_s"]
+        assert age is None or age >= 0.0
+
+
+# ===========================================================================
 # D4f / D4g — the status command surface
 # ===========================================================================
 
@@ -1072,6 +1342,21 @@ class TestStatusSurface:
         )
         # Never guessed: a run that recorded no host selects none (D5b).
         assert "--host" not in detach.status_command_for("/p.md", phase="review-plan")
+
+        # F2, 2026-09-20: and it WAITS. Four instruction cores tell an agent to
+        # poll this command instead of composing one, and all four describe it
+        # as waiting `progress.poll_s`. Without the flag every poll was a 0.13 s
+        # file read: the turn loop spun at the host's pace instead of the run's,
+        # the announced "back in ~90 s" was a gap nobody waited, and
+        # `just finished:` — a difference between two readings inside one call —
+        # could never print on a `--detach` lane at all. No `--timeout` rides
+        # with it: the resolved value is clamped under the `--host` above, and a
+        # number baked in here could not know the reader's shell cap.
+        printed = detach.status_command_for(
+            "/p.md", phase="review-plan", host="opencode"
+        )
+        assert "--wait" in printed
+        assert "--timeout" not in printed
 
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
@@ -1317,6 +1602,299 @@ class TestStatusSurface:
             "progress:       validating, models 4/4, validation 3/11 ok"
             in capsys.readouterr().out
         )
+
+    def test_a_foreground_fanout_renders_a_head_line_and_a_per_model_table(
+        self, tmp_path, capsys
+    ):
+        """The Claude Code lane, which is the lane this feature is written for.
+
+        Checkpoint written, ``claim_run`` never called — so there is no ``run``
+        object, ``classify_run`` returns ``no_run``, and before this the whole
+        run view of a phase dispatching four models was the bare word ``no_run``
+        beside ``run.state: (none)``, which reads as "nothing happened here".
+
+        Three things are pinned together because they are one screen: the head
+        line, the **additive** ``progress:`` summary (a models-only table that
+        replaced it would hide the mirrors, which are the only progress a
+        dispatch-only phase records), and one row per requested spec.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        models = {
+            "codex:gpt-5.6-sol": {
+                "state": "done", "started_at": beat, "updated_at": beat,
+                "ended_at": beat, "elapsed_s": 130, "timeout_s": 1800,
+                "attempt": 1, "source": "file",
+            },
+            # Answered from disk by the resume skip: terminal the moment it was
+            # seeded, no attempt ever dispatched. There is no `skipped` *state*
+            # — `source` is where that lives — so the row is labelled from it.
+            "opencode:auto": {
+                "state": "done", "started_at": beat, "updated_at": beat,
+                "ended_at": beat, "elapsed_s": 0, "timeout_s": 1800,
+                "attempt": 0, "source": "existing_file",
+            },
+            "gemini:gemini-3-pro": {
+                "state": "running", "started_at": beat, "updated_at": beat,
+                "timeout_s": 1800, "attempt": 1, "source": None,
+            },
+            "openai:gpt-5.2": {
+                "state": "queued", "started_at": beat, "updated_at": beat,
+                "timeout_s": 1800, "source": None,
+            },
+        }
+        requested = list(models)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "models_requested": requested,
+            "progress": {
+                "step": "fanout",
+                "models_total": 4, "models_done": 2, "models_succeeded": 2,
+                "interval_s": 30,
+                "tasks_total": 9, "tasks_done": 4,
+                "batches_total": 3, "batch_index": 1,
+                "subagents": {
+                    "kind": "validation", "invoker": "executor",
+                    "total": 11, "ok": 3, "counts": {"ok": 3},
+                    "failed_task_ids": [],
+                },
+                "write_subagents": {
+                    "kind": "implement", "invoker": "executor",
+                    "total": 9, "ok": 7, "counts": {"ok": 7, "timeout": 2},
+                    "failed_task_ids": ["t8", "t9"],
+                },
+                "sandbox_bypassed": ["codex:gpt-5.6-sol"],
+                "models": models,
+            },
+        })
+        assert "run" not in status_file.read_status(str(phase))
+        view = detach.classify_run(str(phase))
+        # The verdict constant is deliberately unchanged: only the text moved,
+        # so `TERMINAL_VERDICTS`, `exit_code_for`'s 2 and F1's "a `no_run` phase
+        # is never the `next` poll target" all still hold.
+        assert view["verdict"] == detach.VERDICT_NO_RUN
+        assert view["verdict"] not in detach.TERMINAL_VERDICTS
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+
+        assert "running in foreground (2/4 models, no detached run record)" in out
+        assert "no_run" not in out
+
+        # ADDITIVE: every clause `_progress_text` rendered before the table
+        # existed is still on the line, in order, and only the model count
+        # gained its second half.
+        assert (
+            "progress:       fanout, models 2/4 done, 2 ok, 0 failed, "
+            "tasks 4/9, batch 1/3, validation 3/11 ok, "
+            "implement 7/9 ok, timeout 2, failed t8, t9, "
+            "unsandboxed codex:gpt-5.6-sol"
+        ) in out
+
+        table = [line for line in out.splitlines() if line.startswith("        ")]
+        assert "      models:" in out.splitlines()
+        # One row per requested spec, `queued` rows included: a table that
+        # rendered only the entries that had started would disagree with the
+        # `models 2/4` count one line above it.
+        assert len(table) == len(requested)
+        assert table[0].split() == ["codex:gpt-5.6-sol", "done", "2m10s/30m"]
+        assert table[1].split() == ["opencode:auto", "skipped", "0m00s/30m"]
+        assert table[2].split() == ["gemini:gemini-3-pro", "running", "0m00s/30m"]
+        assert table[3].split() == ["openai:gpt-5.2", "queued", "0m00s/30m"]
+
+        # `--json` gains no key: the view already carries `progress` whole, so
+        # the map rides out exactly as `update_progress` wrote it — which is the
+        # shape the OpenCode package route reads instead of scraping the text.
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "run", "--json"]
+        ) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["runs"][0]["progress"]["models"] == models
+        assert payload["runs"][0]["progress"]["models_succeeded"] == 2
+
+    def test_a_spec_missing_from_a_half_seeded_map_still_gets_a_row(
+        self, tmp_path, capsys
+    ):
+        """Between a run's launch and the tracker's seed the map is short.
+
+        On a *re-run* of a phase dir that window renders the predecessor's map,
+        because `claim_run` — the one writer that drops the old `progress` — is
+        never called on a foreground run. Dropping the specs that are missing
+        would make the table quietly disagree with `models N/M`, so they render
+        `queued` with no timings and the row count still matches `models_total`.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "models_requested": ["codex:gpt-5.6-sol", "opencode:auto"],
+            "progress": {
+                "step": "fanout",
+                "models_total": 2, "models_done": 0, "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "running", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                        "source": None,
+                    },
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        table = [
+            line.strip() for line in capsys.readouterr().out.splitlines()
+            if line.startswith("        ")
+        ]
+        assert len(table) == 2
+        assert table[0].split() == ["codex:gpt-5.6-sol", "running", "0m00s/30m"]
+        # No timings at all, rather than a fabricated clock or a dropped row.
+        assert table[1] == "opencode:auto      queued"
+
+    def test_a_retrying_row_names_its_attempt_and_its_backoff(
+        self, tmp_path, capsys
+    ):
+        """`attempt` has no denominator on purpose — the ladder counts transport
+        retries and rate-limit backoffs independently, so `2/3` would be a lie —
+        and `retry_after_s` exists only while the slot is sleeping."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout",
+                "models_total": 2, "models_done": 1, "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "retrying", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 2,
+                        "retry_after_s": 20, "source": None,
+                    },
+                    "opencode:auto": {
+                        "state": "failed", "started_at": beat,
+                        "updated_at": beat, "ended_at": beat, "elapsed_s": 5,
+                        "timeout_s": 1800, "attempt": 1,
+                        "error": "no result (cancelled at the fan-out deadline)",
+                        "source": "failed",
+                    },
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "progress:       fanout, models 1/2 done, 0 ok, 1 failed" in out
+        assert "retrying  0m00s/30m  attempt 2, retry in 20s" in out
+        assert (
+            "failed    0m05s/30m  no result (cancelled at the fan-out deadline)"
+            in out
+        )
+
+    def test_a_staggering_row_says_when_it_starts(self, tmp_path, capsys):
+        """2026-09-21: the launch-time poll — taken at second zero on purpose,
+        for the roster — showed every row but the first as `staggering`, and a
+        reader took that for the models being run one at a time. The word is
+        the lifecycle's and stays; the detail column now says how long, in the
+        shape `retry in 20s` already has. Rounded up, so a slot 5.9 s out reads
+        `6s`; a stamp already past renders no clause — a poll landing on the
+        flip to `queued` must not print `starts in 0s`."""
+        from datetime import datetime, timedelta
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        ahead = (datetime.fromisoformat(beat) + timedelta(seconds=6)).isoformat()
+        behind = (datetime.fromisoformat(beat) - timedelta(seconds=6)).isoformat()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout",
+                "models_total": 3, "models_done": 0, "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "running", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                        "source": None,
+                    },
+                    "opencode:auto": {
+                        "state": "staggering", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 0,
+                        "stagger_until": ahead, "source": None,
+                    },
+                    "gemini:pro": {
+                        "state": "staggering", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 0,
+                        "stagger_until": behind, "source": None,
+                    },
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        table = [
+            line.strip() for line in out.splitlines() if line.startswith("        ")
+        ]
+        assert table[0].split() == ["codex:gpt-5.6-sol", "running", "0m00s/30m"]
+        assert table[1].split() == [
+            "opencode:auto", "staggering", "0m00s/30m", "starts", "in", "6s",
+        ]
+        assert table[2].split() == ["gemini:pro", "staggering", "0m00s/30m"]
+
+    def test_a_progress_object_with_no_models_map_renders_as_it_always_did(
+        self, tmp_path, capsys
+    ):
+        """The additive rule, from the other side: the table is appended under
+        the *existing* progress guard, so a dispatch-only phase — whose only
+        progress is the executor's mirror — grows no empty `models:` header."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(phase), {
+            "phase": "generate-tasks", "state": "dispatching",
+            "progress": {"subagents": {
+                "kind": "task_generation", "invoker": "executor",
+                "total": 1, "ok": 1, "counts": {"ok": 1},
+                "failed_task_ids": [],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "progress:       task_generation 1/1 ok" in out
+        assert "models:" not in out
+
+    def test_the_result_line_carries_the_progress_object_for_a_pinned_poll(
+        self, tmp_path, capsys
+    ):
+        """`MULTI_LLM_RESULT` carried no `progress` key at all, so the OpenCode
+        package route — which supervises its own poll and never opens the
+        rendered text — would have had to regex a human line to relay anything
+        mid-run. Same selector rule as `mode`/`phase`: only a poll pinned to
+        exactly one run is "the watched run's"."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        progress = {
+            "step": "fanout", "models_total": 2, "models_done": 1,
+            "models_succeeded": 1,
+            "models": {"codex:gpt-5.6-sol": {"state": "running"}},
+        }
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": progress,
+        })
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            ]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert context.payload(2)["progress"] == progress
+
+        # Present only when there is something to report, so every other
+        # invocation's line stays byte-for-byte what it was.
+        bare = cli_common.ResultContext(mode="review-plan")
+        assert "progress" not in bare.payload(0)
 
     def test_the_executor_mirror_is_progress_too(self, tmp_path, capsys):
         """A dispatch-only phase (`generate-tasks`) records no `step`; the
@@ -1708,8 +2286,156 @@ class TestStatusSurface:
         done.touch()
 
     def test_wait_default_sits_under_the_tightest_host_shell_cap(self):
+        """The shipped default is unchanged, and that is now the whole claim.
+
+        `progress.poll_s` ships at 90 s, so a project that configures nothing
+        keeps exactly today's wait — moving that number is a deliberate UX
+        change, not a side effect of wanting a chattier ticker. Its sibling
+        below drives the same two numbers against the real capability data
+        instead of restating them.
+        """
+        from utils.provider_registry import PROGRESS_FALLBACKS
+
         assert run_status.DEFAULT_WAIT_TIMEOUT_S == 90.0
         assert run_status.DEFAULT_WAIT_TIMEOUT_S < 120.0
+        assert PROGRESS_FALLBACKS["poll_s"] == run_status.DEFAULT_WAIT_TIMEOUT_S
+
+    def test_the_default_is_the_tightest_real_ceiling_less_the_margin(self):
+        """`WAIT_CAP_MARGIN_S` is the number that *explains* the 90 s default.
+
+        Asserted against `hosts/capabilities.yaml` rather than against a second
+        copy of `120`, so the day a host declares a tighter cap this goes red
+        here — where the arithmetic lives — rather than in whatever poll is
+        killed mid-wait.
+        """
+        from utils import host_capabilities as caps
+
+        assert run_status.WAIT_CAP_MARGIN_S == 30.0
+        host, ceiling = caps.tightest_timeout_ceiling()
+        assert (host, ceiling) == ("opencode", 120)
+        assert ceiling - run_status.WAIT_CAP_MARGIN_S == (
+            run_status.DEFAULT_WAIT_TIMEOUT_S
+        )
+        # `0` means *no documented cap*, not a cap of zero, so codex is skipped
+        # as the minimum rather than winning it.
+        assert caps.timeout_ceiling_s("codex") == 0
+
+    @POSIX_ONLY
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_wait_terminates_on_a_foreground_checkpoint(
+        self, tmp_path, monkeypatch, capsys, finished
+    ):
+        """Acceptance criterion 1, and the reason the verdict stays `no_run`.
+
+        A phase dir holding a checkpoint but no run record is *every* foreground
+        phase, and `no_run` is not in `TERMINAL_VERDICTS` — so `_wait_for_terminal`
+        spins to its own deadline and hands back the non-terminal view. That is
+        the designed behavior (`--wait` is a timed progress snapshot on this
+        lane, not a terminal signal), and what has to hold is that it comes
+        back: with the timeout now resolved from `progress.poll_s`, a regression
+        here is a poll that never returns.
+
+        Both halves of the checkpoint machine are driven (2026-09-20). The
+        **finished** row is the one F1's guard could have broken: keeping the
+        wait alive whenever the checkpoint looks live is right, and reading a
+        terminal checkpoint as live would turn every completed foreground phase
+        into a full-timeout poll forever. And the explicit `--timeout 1` is
+        gone — it made the *config-resolved* path unreachable, which is the path
+        every real poll takes; `poll_s: 5` is the floor, so this is the shortest
+        honest end-to-end wait.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        checkpoint = {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 4, "models_done": 1,
+                         "models_succeeded": 1},
+        }
+        if finished:
+            checkpoint["state"] = "complete"
+            checkpoint["progress"] = dict(
+                checkpoint["progress"], step="complete", models_done=4,
+                models_succeeded=4,
+            )
+        status_file.write_status(str(phase), checkpoint)
+        assert "run" not in status_file.read_status(str(phase))
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        out = capsys.readouterr().out
+        assert code == 2
+        assert elapsed < 30, f"--wait did not come back ({elapsed:.1f}s)"
+        if finished:
+            assert "finished in foreground (4/4 models, no detached run record)" in out
+            # F2, 2026-09-21: `< 30` with `poll_s: 5` could not tell a wait that
+            # *ended* from one that spent its whole deadline on a phase nothing
+            # was doing. The checkpoint is the only vote this lane casts, and a
+            # settled one ends the wait before it starts.
+            assert elapsed < 2.0, (
+                f"a settled foreground checkpoint held --wait {elapsed:.1f}s"
+            )
+        else:
+            assert "running in foreground (1/4 models, no detached run record)" in out
+            # ...and a live one still holds the turn, which is what `--wait` is
+            # for on this lane (acceptance criterion 1). The deadline is 5 s.
+            assert elapsed >= 1.0, (
+                f"--wait over a live foreground fan-out returned in {elapsed:.1f}s"
+            )
+
+    @POSIX_ONLY
+    def test_a_settled_foreground_phase_is_handed_back_as_no_poll_at_all(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F2, 2026-09-21: the `no_run` loop, and the half the guard above missed.
+
+        Every foreground phase is `no_run` forever — only the detached worker
+        calls `claim_run` — so on a plan whose phases all ran in the foreground
+        the `live_views` guard filtered *everything* and the fallback reached for
+        `views[0]`, which can only be one of those same `no_run` views. F1,
+        2026-09-17 already ruled that a `no_run` phase is never the next poll
+        target; this handed one back anyway, and once `status_command_for` began
+        carrying `--wait` the resulting loop stopped being merely tight and
+        became a poll that spends its whole clamped `poll_s`, returns exit 2 and
+        hands back the identical command, forever.
+
+        Two changes and both are asserted here: the wait ends at once because
+        the checkpoint is settled, and nothing is handed back to follow.
+        `test_the_next_poll_skips_a_phase_that_never_had_a_run` pins the other
+        side — a finished *detached* run under the same plan is still the
+        fallback, because its poll exits 0 and ends the loop.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "progress": {"step": "complete", "models_total": 2,
+                         "models_done": 2, "models_succeeded": 2},
+        })
+        assert "run" not in status_file.read_status(str(phase))
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            start = time.monotonic()
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+                "--wait",
+            ])
+            elapsed = time.monotonic() - start
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert code == 2
+        assert elapsed < 2.0, (
+            f"--wait held a settled foreground phase for {elapsed:.1f}s"
+        )
+        assert context.next is None, (
+            f"exit 2 handed back a poll of a `no_run` phase: {context.next!r}"
+        )
 
     def test_failed_run_hands_back_a_reason_and_the_log_tail(self, tmp_path,
                                                              capsys):
@@ -2543,6 +3269,362 @@ class TestWindowsSeam:
 # The documented poll loop
 # ===========================================================================
 
+class TestWaitTimeoutResolution:
+    """``--wait``'s deadline: which source wins, and what the clamp binds.
+
+    Everything here is driven through ``run_status.main`` rather than through
+    ``get_progress_poll`` alone, deliberately: ``--timeout`` is a *sentinel* out
+    of argparse and the gap between ``parse_args`` and the ``--wait`` branch is
+    exactly where a sentinel default gets lost. ``_wait_for_terminal`` is
+    replaced by a spy so a test asserting a 300 s wait does not take 300 s — the
+    subject is the number that reaches it, not the sleeping.
+    """
+
+    @staticmethod
+    def _config(tmp_path, monkeypatch, block: str) -> None:
+        """Point ``MULTI_LLM_PROVIDERS_CONFIG`` at a one-key `progress:` YAML.
+
+        The env layer is an *override* layer, which is what makes
+        `validate_progress_block` run over it — the base is never validated.
+        """
+        import utils.provider_registry as registry
+
+        override = tmp_path / "providers-override.yaml"
+        override.write_text(f"progress:\n{block}", encoding="utf-8")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
+        registry._config = None
+        registry._config_key = None
+
+    @staticmethod
+    def _resolved(tmp_path, monkeypatch, argv) -> float:
+        """Run ``status --wait`` through `main` and report the timeout it used."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+        })
+        seen = {}
+
+        def _spy(plan_path, args, views):
+            seen["timeout"] = args.timeout
+            return views
+
+        monkeypatch.setattr(run_status, "_wait_for_terminal", _spy)
+        run_status.main(["--plan-file", str(plan), "--view", "run", "--wait", *argv])
+        return seen["timeout"]
+
+    def test_the_two_knobs_resolve_independently(self, tmp_path, monkeypatch,
+                                                 capsys):
+        """`interval_s: 0` is the ticker's disable form and nothing else.
+
+        `--wait` never reads it, so silencing the `[PROGRESS]` lines must not
+        turn a poll into an instant return — with no `poll_s` configured the
+        wait is still the shipped 90 s.
+        """
+        self._config(tmp_path, monkeypatch, "  interval_s: 0\n")
+        assert self._resolved(tmp_path, monkeypatch, []) == 90.0
+        capsys.readouterr()
+
+    def test_a_configured_poll_s_is_the_wait_default(self, tmp_path, monkeypatch,
+                                                     capsys):
+        self._config(tmp_path, monkeypatch, "  poll_s: 60\n")
+        assert self._resolved(tmp_path, monkeypatch, ["--host", "opencode"]) == 60.0
+        assert capsys.readouterr().err == ""
+
+    def test_poll_s_clamps_under_opencode_and_stands_on_codex(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """120 - 30 = 90 on opencode; `timeout_ceiling_s: 0` is *no cap*, not
+        a cap of zero, so an explicitly-routed codex poll keeps its 300 s."""
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        assert self._resolved(tmp_path, monkeypatch, ["--host", "opencode"]) == 90.0
+        # Silent: the user configured a cadence, not a deadline.
+        assert capsys.readouterr().err == ""
+        assert self._resolved(tmp_path, monkeypatch, ["--host", "codex"]) == 300.0
+        assert capsys.readouterr().err == ""
+
+    def test_claude_codes_own_ceiling_admits_the_recommended_range(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """600 - 30 = 570, well above the 120-300 s the poll loop is built
+        around — which is why the *Bash* `timeout` parameter, and not this
+        clamp, is what actually keeps a Claude Code poll alive."""
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        assert self._resolved(
+            tmp_path, monkeypatch, ["--host", "claude-code"]
+        ) == 300.0
+        assert capsys.readouterr().err == ""
+
+    def test_an_unrouted_poll_clamps_against_the_tightest_ceiling(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """No `--host` clamps rather than skipping the clamp: an unrouted poll
+        could be running under any host, and overshooting one of their caps by
+        accident is the failure the clamp exists for."""
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        assert self._resolved(tmp_path, monkeypatch, []) == 90.0
+        assert capsys.readouterr().err == ""
+
+    def test_the_clamp_reads_the_host_the_env_var_declares(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F3, 2026-09-21: `--host` is not the only channel that names a host.
+
+        `resolve_host_id` is `--host` -> `$MULTI_LLM_HOST` -> the default, and
+        it is what `render_runner_text` resolves in this very invocation and
+        what the dispatcher validates against. The clamp read `args.host`
+        alone, so a poll routed entirely through the env var — which is how an
+        installer routes one — was clamped against the tightest ceiling on
+        record instead of its own host's: 90 s under a host that documents
+        600 s.
+        """
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        monkeypatch.setenv("MULTI_LLM_HOST", "claude-code")
+        assert self._resolved(tmp_path, monkeypatch, []) == 300.0
+        assert capsys.readouterr().err == ""
+        # ...and the env var is a declaration, not an exemption: a host that
+        # does document a cap still clamps.
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+        assert self._resolved(tmp_path, monkeypatch, []) == 90.0
+        assert capsys.readouterr().err == ""
+
+    def test_the_flag_still_beats_the_env_var(self, tmp_path, monkeypatch,
+                                              capsys):
+        """The ladder's order, not merely its rungs: `--host` wins."""
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        monkeypatch.setenv("MULTI_LLM_HOST", "codex")   # no documented cap
+        assert self._resolved(
+            tmp_path, monkeypatch, ["--host", "opencode"]
+        ) == 90.0
+        assert capsys.readouterr().err == ""
+
+    def test_the_clamp_note_stops_claiming_no_host_when_one_was_declared(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The loud path's prose has to match the ladder that produced it.
+
+        A caller who declared `opencode` through the environment and asked for
+        300 s was told the clamp used "the tightest declared cap" because "no
+        --host was given" — two wrong statements about a host they had named.
+        """
+        self._config(tmp_path, monkeypatch, "  poll_s: 60\n")
+        monkeypatch.setenv("MULTI_LLM_HOST", "opencode")
+        assert self._resolved(
+            tmp_path, monkeypatch, ["--timeout", "300"]
+        ) == 90.0
+        err = capsys.readouterr().err
+        assert "host opencode" in err
+        assert "no --host" not in err
+        assert err.count("\n") == 1, "exactly one stderr line"
+
+    def test_the_note_names_both_channels_when_neither_declared_a_host(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """With nothing declared the fallback stands — and now says so fully."""
+        self._config(tmp_path, monkeypatch, "  poll_s: 60\n")
+        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+        assert self._resolved(
+            tmp_path, monkeypatch, ["--timeout", "300"]
+        ) == 90.0
+        err = capsys.readouterr().err
+        assert "no --host and no $MULTI_LLM_HOST" in err
+        assert "opencode" in err, "the tightest declared cap is still named"
+
+    def test_an_explicit_timeout_beats_poll_s_and_is_itself_clamped(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """"Wins" settles precedence, not the ceiling.
+
+        Option A's rendered command always passes `--timeout <interval>`, so a
+        clamp guarding only the `poll_s` path would leave the one command the
+        instructions actually emit unguarded. This is the loud path: that caller
+        asked for a specific number and is getting another.
+        """
+        self._config(tmp_path, monkeypatch, "  poll_s: 60\n")
+        resolved = self._resolved(
+            tmp_path, monkeypatch, ["--host", "opencode", "--timeout", "300"]
+        )
+        assert resolved == 90.0
+        err = capsys.readouterr().err
+        assert "--timeout 300s" in err
+        assert "opencode" in err
+        assert "120s" in err
+        assert "waiting 90s instead" in err
+        assert err.count("\n") == 1, "exactly one stderr line"
+
+    def test_an_explicit_timeout_under_the_cap_is_silent_and_untouched(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._config(tmp_path, monkeypatch, "  poll_s: 300\n")
+        resolved = self._resolved(
+            tmp_path, monkeypatch, ["--host", "opencode", "--timeout", "45"]
+        )
+        assert resolved == 45.0
+        assert capsys.readouterr().err == ""
+
+    def test_with_no_config_at_all_the_wait_is_todays_ninety_seconds(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The `poll_s` fallback and `DEFAULT_WAIT_TIMEOUT_S` are the same
+        number, so codex and opencode keep exactly today's wait."""
+        assert self._resolved(tmp_path, monkeypatch, ["--host", "opencode"]) == 90.0
+        assert capsys.readouterr().err == ""
+
+    @staticmethod
+    def _exit_code(tmp_path, monkeypatch, argv) -> int:
+        """Run `status --wait` through `main` and report only its exit code.
+
+        The sibling of :meth:`_resolved`, for the rows where no timeout is ever
+        resolved because the resolution *refuses*. Deliberately does not spy
+        `_wait_for_terminal` out: a row that expects a refusal has to prove the
+        wait was never entered, and a spy would hide a wait that was.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+        })
+        return run_status.main(
+            ["--plan-file", str(plan), "--view", "run", "--wait", *argv]
+        )
+
+    @pytest.mark.parametrize("value", ["0", "3"])
+    def test_a_rejected_poll_s_surfaces_rather_than_degrading(
+        self, tmp_path, monkeypatch, capsys, value
+    ):
+        """The floor is `provider_registry`'s, and this asserts it *reaches* the
+        poll. A `poll_s` silently dropped back to 90 s would be
+        indistinguishable from the user's setting having worked, which is the
+        failure the closed-key validation exists for — and `0` means a poll
+        that returns instantly, not one that is switched off.
+
+        F4, 2026-09-20: it reaches the poll as an `ERROR:` line and **exit 3**,
+        not as the raw `ConfigError` it used to be. The exception propagated to
+        the dispatcher, which printed a traceback and returned exit **1** — and
+        rule 2 reads a `1` as "the run state is unreadable, stop and report",
+        which is a statement about the run rather than about the config key the
+        user has to fix. Exit 3 is this codebase's "needs a human"; the rejection
+        still surfaces, named, which was the point of validating at load.
+        """
+        self._config(tmp_path, monkeypatch, f"  poll_s: {value}\n")
+        assert self._exit_code(tmp_path, monkeypatch, ["--host", "opencode"]) == 3
+        captured = capsys.readouterr()
+        assert captured.err.startswith("ERROR: ")
+        assert "poll_s" in captured.err
+        assert value in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_an_unrelated_config_error_does_not_end_the_poll_loop_on_a_lie(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F4, 2026-09-20: `--wait` died on *any* ConfigError, not only `poll_s`'s.
+
+        `_resolve_wait_timeout` → `get_progress_poll` → `load_config` validates
+        **every** override block, so a bogus key under `driver:` — nothing to do
+        with polling — took the whole poll down. Measured: with
+        `MULTI_LLM_PROVIDERS_CONFIG` pointing at a config carrying `driver:
+        {not_a_key: 1}`, plain `status` exited 2 normally while `status --wait
+        --json` exited **1** with a stack trace on stderr and no JSON view on
+        stdout at all. A config edit made *during* a run therefore ended the poll
+        loop with the agent reporting the run as unreadable.
+        """
+        import utils.provider_registry as registry
+
+        override = tmp_path / "providers-override.yaml"
+        override.write_text(
+            "driver:\n  not_a_driver_key: 1\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
+        registry._config = None
+        registry._config_key = None
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+        })
+        argv = ["--plan-file", str(plan), "--view", "run"]
+
+        # The control: the same config, the same phase dir, no `--wait`.
+        assert run_status.main(argv) == 2
+        capsys.readouterr()
+
+        assert run_status.main(argv + ["--wait", "--json"]) == 3
+        captured = capsys.readouterr()
+        assert captured.out == "", (
+            "a refused `--wait` prints no view, so `--json`'s stdout stays empty "
+            "rather than half a document"
+        )
+        assert captured.err.startswith("ERROR: ")
+        assert "not_a_driver_key" in captured.err
+        assert "Traceback" not in captured.err
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1", "0"])
+    def test_a_timeout_that_is_not_a_positive_finite_number_is_refused(
+        self, tmp_path, monkeypatch, capsys, value
+    ):
+        """F7, 2026-09-20: the CLI undid the validator one layer up.
+
+        `validate_progress_block` rejects `.nan`/`.inf` for `poll_s` *precisely*
+        to prevent "a `--wait` that never returns", but `--timeout` is a plain
+        `type=float` and both parse. With `--host codex` — `timeout_ceiling_s:
+        0`, the documented "no cap", so nothing clamps — the value reached
+        `_wait_for_terminal` intact, where `time.time() >= nan` is `False`
+        forever over a non-terminal view. `0` and a negative are the mirror
+        image: they return before the first re-read, which is the instant-return
+        failure `poll_s: 0`'s own rejection exists for.
+
+        No `_wait_for_terminal` spy here on purpose: a spy is exactly what would
+        hide a wait that was entered.
+        """
+        # `--timeout=<v>`, not `--timeout <v>`: argparse reads a leading `-` as
+        # the start of the next option, and a negative value is half the subject.
+        assert self._exit_code(
+            tmp_path, monkeypatch, ["--host", "codex", f"--timeout={value}"]
+        ) == 3
+        captured = capsys.readouterr()
+        assert captured.err.startswith("ERROR: --timeout ")
+        assert "Traceback" not in captured.err
+
+    def test_a_configured_poll_s_is_really_waited_not_only_computed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The one row in this class that does **not** spy the sleeper out.
+
+        Every other row replaces `_wait_for_terminal`, which is right for
+        asserting the number that reaches it and wrong as the only coverage:
+        with the sleeper spied out on every row and the one end-to-end wait test
+        passing `--timeout 1` explicitly, nothing in the suite drove the
+        config-resolved value through the real loop. A `poll_s` that resolved
+        correctly and was then ignored — or obeyed for the wrong duration —
+        would have gone green everywhere (2026-09-20).
+
+        5 s is `provider_registry`'s own floor, so it is the shortest honest
+        configuration; the real loop re-checks on a 5 s grid, so it comes back at
+        one grid step.
+        """
+        self._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 2, "models_done": 0},
+        })
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        assert code == 2
+        assert 4.0 <= elapsed < 20.0, (
+            f"`--wait` with no `--timeout` and `poll_s: 5` took {elapsed:.2f}s; "
+            "it should wait the configured cadence and then hand back the "
+            "non-terminal view"
+        )
+
+
 class TestPollLoopContract:
     def test_banner_text_forbids_collapsing_the_wait_into_one_shell_call(self):
         text = detach.POLL_LOOP_TEXT
@@ -2901,3 +3983,2118 @@ class TestReaggregateCrossesTheDetachBoundary:
         assert Path(launched["phase_dir"]).name == phase
         # Nothing re-aggregated in the invoker: the worker owns that.
         assert "Reaggregation complete" not in out.out
+
+
+# ===========================================================================
+# 2026-09-20 — what a re-used phase dir does to the poll loop
+# ===========================================================================
+
+class TestAReusedPhaseDirDoesNotFakeATerminalRun:
+    """One phase dir, two runs' state: the `run` half and the checkpoint half.
+
+    A phase dir is stable per plan and per phase (`{plan}/review-plan/` every
+    time), and nothing drops a predecessor's `run` record on the foreground
+    path — only a detached worker's `claim_run` ever writes one. So a
+    host-background re-run over a dir an earlier `--detach` run used inherits
+    that earlier run's terminal record while writing its own live `progress`.
+    Every test here is that pair.
+    """
+
+    @staticmethod
+    def _inherited_run_over_a_live_checkpoint(plan: Path) -> Path:
+        phase = _phase_dir(plan)
+        # The predecessor: a `--detach`ed run that finished cleanly.
+        status_file.claim_run(str(phase), {
+            "run_id": "run-predecess1", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "review-plan", "host": "claude-code",
+            "heartbeat_at": status_file.now_iso(),
+        })
+        # The successor, in this host's own background job: no `run` write of
+        # any kind, only the phase machine and the per-model map.
+        beat = status_file.now_iso()
+        status_file.update_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout", "models_total": 2, "models_done": 0,
+                "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "running", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                    },
+                    "opencode:auto": {
+                        "state": "running", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                    },
+                },
+            },
+        })
+        return phase
+
+    def test_the_inherited_record_really_does_read_terminal(self, tmp_path):
+        """The premise, asserted rather than assumed.
+
+        Without this the test below could pass for the wrong reason — a view
+        that was never terminal has nothing to be kept waiting past.
+        """
+        phase = self._inherited_run_over_a_live_checkpoint(_plan(tmp_path))
+        view = detach.classify_run(str(phase), close_out=False)
+        assert view["verdict"] in detach.TERMINAL_VERDICTS
+        assert view["state"] == "models_running"
+        assert (view["progress"] or {}).get("step") == "fanout"
+
+    def test_wait_keeps_waiting_while_the_checkpoint_is_still_going(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F1, 2026-09-20: the loop became a zero-interval spin.
+
+        Measured on exactly this pair: `status … --view run --wait --timeout
+        300` returned in **0.11 s** with exit 0, printing `done` directly above a
+        table saying `running`. The instruction then relays nothing (rule 2: a
+        `0` on a host recording no run is an earlier run's record) and polls
+        again — so a 120-300 s loop becomes a tight sequence of instant tool
+        calls for the whole 10-30 minute run, and re-running a phase is the
+        common path rather than an edge case.
+
+        The fix is the *checkpoint* half of the file getting a vote:
+        `_wait_for_terminal` keeps waiting while the phase machine says the
+        phase is working, whatever the inherited `run` record says.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        self._inherited_run_over_a_live_checkpoint(plan)
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+
+        assert elapsed >= 4.0, (
+            f"`--wait` came back in {elapsed:.2f}s over a live fan-out because "
+            "the phase dir still held a *predecessor's* terminal `run` record. "
+            "An instant return is what turns the poll loop into a spin."
+        )
+        assert elapsed < 30.0, f"--wait did not come back ({elapsed:.1f}s)"
+        # The exit code is still the inherited record's; dropping that record is
+        # the seed-time half of the fix and lives elsewhere. What this owns is
+        # that the poll spent its interval instead of returning instantly.
+        assert code in (0, 2)
+
+    def test_a_terminal_checkpoint_under_a_terminal_run_still_returns_at_once(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The other side of the same guard, and the reason it is evidence-based.
+
+        A finished `--detach`ed run is the overwhelmingly common terminal case
+        and its whole point is that `--wait` hands back immediately. A guard that
+        read *any* checkpoint as "still going" would make every completed
+        detached run cost a full poll interval before saying so.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-finished-01", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "review-plan", "heartbeat_at": status_file.now_iso(),
+        })
+        status_file.update_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "progress": {"step": "complete", "models_total": 2,
+                         "models_done": 2, "models_succeeded": 2},
+        })
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        assert code == 0
+        assert elapsed < 2.0, (
+            f"a finished run took {elapsed:.2f}s to report itself finished; the "
+            "checkpoint guard must key on evidence the phase is *working*, not "
+            "on the checkpoint existing"
+        )
+
+
+class TestTheAskLanesTerminalWordsAreTerminal:
+    """`ask` ends on `completed` / `partial` / `failed`, never on `complete`.
+
+    Every other lane's phase machine stops on `complete`, and
+    `CHECKPOINT_TERMINAL_STATES` was written from that ladder — so two of the
+    three words the ask lane really writes were absent, `failed` was in the set
+    only by coincidence, and `_checkpoint_in_flight` answered `True` for every
+    ask that ever *succeeded*. Two consequences off that one gap: a finished
+    foreground ask rendered `running in foreground (5/5 models, no detached run
+    record)` for the rest of the phase dir's life — the head line rule 1 tells a
+    host agent to relay verbatim — and `--wait --question …` over a detached ask
+    whose `run.state` was already `done` spent its whole resolved `poll_s` on
+    every poll before exiting 0.
+    """
+
+    @staticmethod
+    def _terminal_words():
+        """The words the ask lane really assigns, read out of its own source.
+
+        Derived, never typed: a hand-copied list is exactly what drifted here in
+        the first place, and a test that invented a word would go green over a
+        lane that had stopped writing it.
+        """
+        import ast
+
+        tree = ast.parse(
+            (SKILL_ROOT / "ask_orchestrator.py").read_text(encoding="utf-8")
+        )
+        words = {
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "state"
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        assert words, (
+            "ask_orchestrator.py no longer assigns its final phase `state` as "
+            "string literals, so this test can no longer read the real words"
+        )
+        return words
+
+    @staticmethod
+    def _ask_dir(plan: Path, question: str) -> Path:
+        from utils.output_handler import slugify_question
+
+        directory = (
+            plan.parent / plan.stem.replace(" ", "_") / "ask"
+            / slugify_question(question)
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def test_every_word_it_ends_on_is_a_terminal_checkpoint_state(self):
+        words = self._terminal_words()
+        # The premise, asserted rather than assumed: this lane does not spell
+        # its ending the way the review lanes do, which is why the set had to
+        # widen instead of the lane being made to write `complete`.
+        assert "complete" not in words, (
+            "the ask lane now writes the review lanes' word, so this test is "
+            "pinning a distinction that no longer exists"
+        )
+        missing = sorted(words - run_status.CHECKPOINT_TERMINAL_STATES)
+        assert not missing, (
+            f"ask_orchestrator ends a run on {missing}, and "
+            "`CHECKPOINT_TERMINAL_STATES` has never heard of those words — so "
+            "`_checkpoint_in_flight` reads every ask that ended that way as "
+            "still working"
+        )
+
+    def test_a_finished_foreground_ask_stops_calling_itself_running(
+        self, tmp_path, capsys
+    ):
+        """One pass per real terminal word, against the head line rule 1 relays."""
+        plan = _plan(tmp_path)
+        question = "Does the rollback plan cover the schema change?"
+        directory = self._ask_dir(plan, question)
+        for word in sorted(self._terminal_words()):
+            status_file.write_status(str(directory), {
+                "phase": "ask", "state": word, "question": question,
+                "progress": {"step": "complete", "models_total": 5,
+                             "models_done": 5, "models_succeeded": 5},
+            })
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--question", question,
+            ]) == 2
+            out = capsys.readouterr().out
+            assert (
+                "finished in foreground (5/5 models, no detached run record)"
+                in out
+            ), out
+            assert "running in foreground" not in out, (
+                f"an ask that ended on `{word}` still reports itself as "
+                f"running:\n{out}"
+            )
+
+    def test_wait_over_a_finished_detached_ask_returns_at_once(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The `--wait` half: the whole poll interval, on every poll, forever.
+
+        `progress.step` is already `complete` here, so the only thing that could
+        hold this wait is the phase `state` word — which is the point.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        question = "Which models disagreed about the cache?"
+        directory = self._ask_dir(plan, question)
+        status_file.claim_run(str(directory), {
+            "run_id": "run-ask-done01", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "ask", "host": "opencode",
+            "heartbeat_at": status_file.now_iso(),
+        })
+        status_file.update_status(str(directory), {
+            "phase": "ask", "question": question, "state": "completed",
+            "progress": {"step": "complete", "models_total": 5,
+                         "models_done": 5, "models_succeeded": 5},
+        })
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--question", question, "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        assert code == 0
+        assert elapsed < 2.0, (
+            f"a finished detached ask took {elapsed:.2f}s to report itself "
+            "finished; every poll of every completed ask pays that, and the "
+            "run had been done since before the call"
+        )
+
+
+class TestTheRefusalCloseOutWordsAreTerminal:
+    """A run that refused before dispatch has ended, and the checkpoint says so.
+
+    Same defect class as the ask lane's three words directly above, one lane
+    further on. `review_orchestrator_base._print_executor_refusal` is the exit-3
+    block for a run that dispatched nothing, and its one caller `sys.exit`s on
+    the next line — so `runner_rejected` / `executor_refused` are the last thing
+    that run ever writes. Neither was in `CHECKPOINT_TERMINAL_STATES`, so
+    `_checkpoint_in_flight` read a refused phase as still working: the head line
+    called it `running in foreground (…)` for the rest of the dir's life, and
+    `--wait` burned its whole resolved deadline before exiting 2 with a `next`
+    that polls it again — a loop nothing in it can end, over a run that cannot
+    move. `run_status._resume_shape` meanwhile already reads a top-level
+    `runner_rejected` as the refusal's durable classification, so one document
+    was terminal to one reader and live to the other.
+    """
+
+    @staticmethod
+    def _close_out_words():
+        """The words the refusal close-out really writes, read out of its source.
+
+        Derived rather than typed, for the reason the ask lane's twin above
+        gives: a hand-copied list is exactly what drifted in the first place,
+        and a test that invented a word would go green over a site that had
+        stopped writing it. Scoped to `_print_executor_refusal` because *that
+        function* is the ending — its caller exits on the next line, so every
+        word it stamps on the checkpoint is terminal by construction. The
+        module at large is not: it also writes `models_running`,
+        `grouping_complete` and the rest of the live ladder.
+        """
+        import ast
+
+        tree = ast.parse(
+            (SKILL_ROOT / "utils" / "review_orchestrator_base.py")
+            .read_text(encoding="utf-8")
+        )
+        func = next(
+            (node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef)
+             and node.name == "_print_executor_refusal"),
+            None,
+        )
+        assert func is not None, (
+            "review_orchestrator_base no longer defines "
+            "`_print_executor_refusal`, so this test can no longer read the "
+            "real close-out words"
+        )
+        words = set()
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if not (isinstance(key, ast.Constant) and key.value == "state"):
+                    continue
+                # `{"state": "runner_rejected" if rejected else "executor_refused"}`
+                # — both branches are written, so both are collected.
+                branches = (
+                    [value.body, value.orelse] if isinstance(value, ast.IfExp)
+                    else [value]
+                )
+                words.update(
+                    branch.value for branch in branches
+                    if isinstance(branch, ast.Constant)
+                    and isinstance(branch.value, str)
+                )
+        assert words, (
+            "`_print_executor_refusal` no longer assigns the checkpoint's "
+            "`state` as string literals, so this test can no longer read the "
+            "real words"
+        )
+        return words
+
+    def test_the_premise_it_pins(self):
+        """The site really is an ending, and it really writes its own words."""
+        words = self._close_out_words()
+        assert "runner_rejected" in words and "executor_refused" in words, (
+            f"the refusal close-out now writes {sorted(words)}; this test's "
+            "behavioural half below names the two it was written for"
+        )
+        assert "complete" not in words, (
+            "the refusal now spells its ending the way a successful phase does, "
+            "so this test is pinning a distinction that no longer exists"
+        )
+
+    def test_every_word_the_close_out_writes_is_a_terminal_checkpoint_state(self):
+        missing = sorted(self._close_out_words() - run_status.CHECKPOINT_TERMINAL_STATES)
+        assert not missing, (
+            f"`_print_executor_refusal` ends a run on {missing}, and "
+            "`CHECKPOINT_TERMINAL_STATES` has never heard of those words — so "
+            "`_checkpoint_in_flight` reads every run refused that way as still "
+            "working"
+        )
+
+    def test_a_refused_foreground_phase_stops_calling_itself_running(
+        self, tmp_path, capsys
+    ):
+        """One pass per real close-out word, against the head line rule 1 relays."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        for word in sorted(self._close_out_words()):
+            # What the refusal leaves behind: the fan-out's own `progress` is
+            # whatever the run had got to, and `_print_executor_refusal` stamps
+            # only the top-level `state`. `step` is terminal here so the phase
+            # `state` word is the only thing that could hold the view — which
+            # is the half under test.
+            status_file.write_status(str(phase), {
+                "phase": "review-plan", "state": word,
+                "reason_code": "runner_invalid_model",
+                "progress": {"step": "complete", "models_total": 2,
+                             "models_done": 2, "models_succeeded": 2},
+            })
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--phase", "review-plan",
+            ]) == 2
+            out = capsys.readouterr().out
+            assert (
+                "finished in foreground (2/2 models, no detached run record)"
+                in out
+            ), out
+            assert "running in foreground" not in out, (
+                f"a run refused with `{word}` still reports itself as "
+                f"running:\n{out}"
+            )
+
+    def test_wait_over_a_refused_run_returns_at_once(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The `--wait` half: the whole resolved deadline, on every poll, forever.
+
+        Foreground, so there is no `run` record and the verdict is `no_run` —
+        not a vote either way (F2), which leaves the checkpoint casting the only
+        one. That is exactly the shape a Claude Code review-plan run refused by
+        its runner leaves on disk.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "runner_rejected",
+            "reason_code": "runner_invalid_model",
+            "progress": {"step": "complete", "models_total": 2,
+                         "models_done": 2, "models_succeeded": 2},
+        })
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--phase", "review-plan", "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        assert code == 2
+        assert elapsed < 2.0, (
+            f"a refused run took {elapsed:.2f}s to report itself finished; the "
+            "run had been over since before the call, and the instruction's "
+            "answer to that exit 2 is to poll again"
+        )
+
+
+class TestAPollThatNamesTheRunIsNotHeldByAStaleCheckpoint:
+    """The mirror image of F1: the terminal record IS the run being asked about.
+
+    Nothing walks the phase machine back when a run fails or is aborted, so a
+    dead run's checkpoint keeps `state: models_running` and `progress.step:
+    fanout` for good. F1 gave that checkpoint a vote because on a re-used phase
+    dir it normally describes a *successor*. Pinned with `--run-id` there is no
+    successor left for it to describe — the id the caller typed is the id on the
+    record — and holding them for the whole resolved timeout before reporting a
+    failure that was already on disk is the opposite of what `--wait` is for.
+    """
+
+    RUN_ID = "run-current0001"
+
+    @classmethod
+    def _dead_run_over_a_stale_checkpoint(cls, plan: Path, *, state: str) -> Path:
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": cls.RUN_ID, "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": state, "exit_code": 1 if state == "failed" else None,
+            "error": "the worker died mid-fan-out", "detached": True,
+            "mode": "review-plan", "host": "opencode",
+            "heartbeat_at": status_file.now_iso(),
+        })
+        # The phase half, left exactly where the failure found it.
+        status_file.update_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 2,
+                         "models_done": 0, "models_succeeded": 0},
+        })
+        return phase
+
+    @pytest.mark.parametrize("state", ["failed", "aborted"])
+    def test_the_premise_a_dead_runs_checkpoint_still_reads_in_flight(
+        self, tmp_path, state
+    ):
+        """Without this the timing test below could pass for the wrong reason."""
+        phase = self._dead_run_over_a_stale_checkpoint(_plan(tmp_path), state=state)
+        view = detach.classify_run(str(phase), close_out=False)
+        assert view["verdict"] == state
+        assert view["verdict"] in detach.TERMINAL_VERDICTS
+        assert run_status._checkpoint_in_flight(view) is True
+
+    @pytest.mark.parametrize("state", ["failed", "aborted"])
+    def test_a_terminal_run_named_by_its_id_reports_at_once(
+        self, tmp_path, monkeypatch, capsys, state
+    ):
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        self._dead_run_over_a_stale_checkpoint(plan, state=state)
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--run-id", self.RUN_ID[:8], "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        # Terminal-needs-human, which is what the caller was waiting to be told.
+        assert code == cli_common.EXIT_NEEDS_HUMAN
+        assert elapsed < 2.0, (
+            f"a poll pinned to run {self.RUN_ID[:8]} spent {elapsed:.2f}s "
+            f"before reporting that very run's `{state}` verdict, because the "
+            "phase fields it left behind still say `models_running`/`fanout`"
+        )
+
+    def test_the_same_pair_without_the_id_still_waits(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F1 is untouched: only an *identified* run skips the checkpoint.
+
+        A bare poll cannot know whether the live-looking checkpoint belongs to
+        the terminal record above it or to a successor nobody recorded, and F1's
+        whole point is that guessing "terminal" there turns the poll loop into a
+        spin. Same bytes on disk, no `--run-id`, still waits.
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        self._dead_run_over_a_stale_checkpoint(plan, state="failed")
+
+        start = time.monotonic()
+        run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+            "--wait",
+        ])
+        elapsed = time.monotonic() - start
+        capsys.readouterr()
+        assert elapsed >= 4.0, (
+            "a poll that named no run skipped the checkpoint's vote, which is "
+            f"the F1 regression (returned in {elapsed:.2f}s)"
+        )
+
+
+class TestTheForegroundHeadLineHasATense:
+    """`running in foreground (…)` is relayed verbatim by rule 1, so it must be true."""
+
+    @staticmethod
+    def _foreground(plan: Path, *, state: str, step: str, done: int) -> Path:
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": state,
+            "progress": {"step": step, "models_total": 2, "models_done": done,
+                         "models_succeeded": done},
+        })
+        assert "run" not in status_file.read_status(str(phase))
+        return phase
+
+    def test_a_finished_foreground_phase_stops_calling_itself_running(
+        self, tmp_path, capsys
+    ):
+        """F3, 2026-09-20: the head line gated on `progress` being non-empty.
+
+        A foreground checkpoint keeps its `progress` object forever — nothing
+        clears it — so `state: complete` plus `progress.step: complete` still
+        printed `running in foreground (2/2 models, no detached run record)`
+        with `phase state: complete` two lines below it. Rule 1 tells the agent
+        to relay that head line **verbatim**, so `status` on any completed Claude
+        Code phase, and on every historical ask dir a bare `status` lists,
+        reported it as running.
+
+        "finished" claims only that the phase stopped working; how it ended is
+        the `phase state:` line, which is printed on its own and never collapsed
+        into this one.
+        """
+        plan = _plan(tmp_path)
+        self._foreground(plan, state="complete", step="complete", done=2)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "finished in foreground (2/2 models, no detached run record)" in out
+        assert "running in foreground" not in out, out
+        # Still three state fields on three lines, still never collapsed.
+        assert "phase state:    complete" in out
+
+    def test_a_working_foreground_phase_still_says_running(self, tmp_path, capsys):
+        """The mirror row: the tense has to distinguish, not just soften."""
+        plan = _plan(tmp_path)
+        self._foreground(plan, state="models_running", step="fanout", done=1)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "running in foreground (1/2 models, no detached run record)" in out
+
+    def test_the_host_handoff_state_counts_as_finished(self, tmp_path, capsys):
+        """`validation_pending` is a terminal step, not a stalled one.
+
+        The process has exited and the agent's own subagents take over, so a
+        phase parked there is not working and must not be relayed as though it
+        were. `progress_tracker.PhaseProgress` names this and `complete` as the
+        two terminal steps; this is the reader agreeing with it.
+        """
+        plan = _plan(tmp_path)
+        self._foreground(
+            plan, state="validation_pending", step="validation_pending", done=2
+        )
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "finished in foreground (2/2 models" in out
+        assert "running in foreground" not in out, out
+
+
+class TestOneBadModelRowCostsItsOwnColumn:
+    """The `models` map is the least trustworthy part of the checkpoint.
+
+    It is the only part written per slot, by whichever lane won the race, and
+    `status` is the command a poll loop runs — so a malformed row costs its own
+    cell and never the command. Everything else in the map already degraded;
+    one shape did not (F5, 2026-09-20).
+    """
+
+    @staticmethod
+    def _two_rows(plan: Path, first_started_at) -> Path:
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout", "models_total": 2, "models_done": 0,
+                "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "running", "started_at": first_started_at,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                    },
+                    "opencode:auto": {
+                        "state": "running", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 1,
+                    },
+                },
+            },
+        })
+        return phase
+
+    def test_a_clock_that_raises_costs_that_row_its_clock_only(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The renderer's own guard, pinned independently of the parser's.
+
+        `detach._elapsed_since` caught `ValueError` only, and `datetime.now() -
+        <aware datetime>` raises **TypeError**, so one `started_at:
+        "2026-09-19T00:00:00Z"` in the map took the whole `status` command down
+        with a traceback and exit 1 — which rule 2 maps to "the run state is
+        unreadable, stop and report", ending a poll loop over a perfectly
+        healthy run.
+
+        The parser has its own fix and its own test; this one stands whatever
+        the parser does, by making the reader raise on demand. Two guards for
+        one incident is deliberate: the map is read by a command that must not
+        fail, and a second reader of a third stamp shape would otherwise
+        reintroduce it.
+        """
+        plan = _plan(tmp_path)
+        self._two_rows(plan, status_file.now_iso())
+
+        def _explode(entry, now=None):
+            if str(entry.get("timeout_s")) == "1800" and entry.get("attempt") == 1:
+                raise TypeError(
+                    "can't subtract offset-naive and offset-aware datetimes"
+                )
+            return None
+
+        monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out
+        # Both rows are still rendered, with their state and no clock.
+        rows = [
+            line.strip() for line in out.splitlines()
+            if line.startswith("        ")
+        ]
+        assert [row.split() for row in rows] == [
+            ["codex:gpt-5.6-sol", "running"], ["opencode:auto", "running"]
+        ], rows
+
+    def test_an_aware_started_at_does_not_take_the_command_down(
+        self, tmp_path, capsys
+    ):
+        """End to end, with the stamp shape that really appeared.
+
+        `Z` is the plan's own schema example and what the JS tests emit, so this
+        is a file a real host can write. Whether the row ends up with a clock or
+        without one is the parser's business; what this pins is that `status`
+        answers at all.
+        """
+        plan = _plan(tmp_path)
+        self._two_rows(plan, "2026-09-19T00:00:00Z")
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out
+        assert "codex:gpt-5.6-sol" in out and "opencode:auto" in out
+
+
+class TestAMalformedProgressObjectCostsItsOwnLine:
+    """`progress` is a reserved *object*, and a file on disk can disagree.
+
+    `classify_run` passed `status.get("progress") or {}` straight through, and a
+    non-empty list or string is **truthy** — so the malformed value reached the
+    view and every reader that spells the same idiom called `.get` on it:
+    `_checkpoint_in_flight`, `_verdict_text`, `_model_table_lines` and
+    `_terminal_fingerprints`. The result was an `AttributeError` traceback and
+    exit 1, which rule 2 maps to "the run state is unreadable, stop and report"
+    — a far larger claim than "one key of this checkpoint is malformed", and it
+    ends the poll loop over a run that is otherwise perfectly readable. The two
+    newest readers sit on the head line and on the `--wait` loop, so both are
+    driven here.
+
+    Same rule the per-model rows already follow: a value that is not a mapping
+    is not trusted, coerced once where the view is built rather than guarded at
+    each reader — the guard that has to be repeated is the one that gets
+    forgotten.
+    """
+
+    SHAPES = [["fanout"], "fanout", 7, True]
+
+    @staticmethod
+    def _write_raw(plan: Path, progress) -> Path:
+        """Hand-write the checkpoint: `write_status` is not the writer that did this."""
+        phase = _phase_dir(plan)
+        Path(phase, ".status.json").write_text(
+            json.dumps({
+                "phase": "review-plan", "state": "models_running",
+                "progress": progress,
+            }),
+            encoding="utf-8",
+        )
+        return phase
+
+    @pytest.mark.parametrize("progress", SHAPES)
+    def test_the_view_carries_a_mapping_whatever_the_file_says(
+        self, tmp_path, progress
+    ):
+        plan = _plan(tmp_path)
+        phase = self._write_raw(plan, progress)
+
+        view = detach.classify_run(str(phase), close_out=False)
+
+        assert view["progress"] == {}, (
+            "a non-dict `progress` reached the view; every reader below it "
+            "calls `.get` on this"
+        )
+
+    @pytest.mark.parametrize("progress", SHAPES)
+    def test_the_head_line_and_the_table_still_render(
+        self, tmp_path, capsys, progress
+    ):
+        """The head line's tense gate is `_checkpoint_in_flight`, which reads it."""
+        plan = _plan(tmp_path)
+        self._write_raw(plan, progress)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out and "AttributeError" not in out
+        # The dir is still reported and the *other* half of the checkpoint is
+        # still read: only the malformed key is dropped, along with the counts
+        # and the foreground tense it would have carried. `no_run` here is the
+        # honest fallback — with no readable `progress` there is nothing to say
+        # "2/2 models" from — and it is the same word this dir printed before a
+        # foreground run ever wrote `progress` at all.
+        assert "review-plan  no_run" in out, out
+        assert "phase state:    models_running" in out, out
+
+    @pytest.mark.parametrize("progress", SHAPES)
+    def test_the_wait_loop_still_polls_it(self, tmp_path, monkeypatch, progress):
+        """`--wait` re-reads the same file every interval — one bad key, every pass."""
+        plan = _plan(tmp_path)
+        self._write_raw(plan, progress)
+        real_sleep = run_status.time.sleep
+        monkeypatch.setattr(
+            run_status.time, "sleep", lambda s: real_sleep(min(s, 0.01))
+        )
+
+        assert run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--wait",
+            "--timeout", "0.2",
+        ]) == 2
+
+
+class TestTheAskLanesOwnSelectorCarriesProgress:
+    def test_a_question_pinned_poll_carries_progress_into_its_result(
+        self, tmp_path, capsys
+    ):
+        """F8a, 2026-09-20: the one mode that always pins one run had no `progress`.
+
+        `MULTI_LLM_RESULT.progress` was gated on `--phase or --run-id`, and
+        `ask` is the one mode whose instruction core forbids `--phase` outright
+        (`--phase ask` selects every question ever asked under the plan, so a
+        poll relays a wall of unrelated tables and holds exit 2 long after this
+        invocation finished). Its documented selector is `--question`, which
+        names exactly one run — the condition the carry-over is *for* — so an
+        ask poll was the one poll whose result line could not relay a count.
+        """
+        from utils.output_handler import slugify_question
+
+        plan = _plan(tmp_path)
+        question = "Is the rollback strategy sufficient?"
+        directory = (
+            plan.parent / plan.stem.replace(" ", "_") / "ask"
+            / slugify_question(question)
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        progress = {
+            "step": "fanout", "models_total": 3, "models_done": 1,
+            "models_succeeded": 1,
+            "models": {"codex:gpt-5.6-sol": {"state": "running"}},
+        }
+        status_file.write_status(str(directory), {
+            "phase": "ask", "state": "models_running", "question": question,
+            "progress": progress,
+        })
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--question", question,
+            ]) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        payload = context.payload(2)
+        assert payload["progress"] == progress
+        # The same selector answers the mode/phase half too: one named run is
+        # one named run, whichever of the three selectors named it.
+        assert payload["phase"] == "ask"
+
+
+class TestTheRosterRendersBeforeTheMapIsSeeded:
+    """The launch-time window, which is the one the user actually watched.
+
+    The child writes `models_requested` and reports `step=fanout,
+    models_total=N` *before* it builds the tracker that seeds `progress.models`,
+    so for the first seconds of every fan-out the checkpoint knows the whole
+    roster and the table rendered nothing:
+
+        running in foreground (1/5 models, no detached run record)
+        progress:       fanout, models 1/5 done, 1 ok, 0 failed
+
+    Which CLI is running which model was on disk the whole time. The two asks
+    this answers are "say that all five started, and say what each one is".
+    """
+
+    @staticmethod
+    def _checkpoint(plan: Path, progress: dict, *, requested=None) -> Path:
+        phase = _phase_dir(plan)
+        checkpoint = {
+            "phase": "review-plan", "state": "models_running",
+            "progress": dict(progress, step="fanout"),
+        }
+        if requested is not None:
+            checkpoint["models_requested"] = requested
+        status_file.write_status(str(phase), checkpoint)
+        return phase
+
+    ROSTER = [
+        "codex:gpt-6-astra:xhigh",
+        "pi:openrouter/deepseek/deepseek-v4-flash-0731",
+        "opencode:auto",
+    ]
+
+    # The three shapes a not-yet-seeded map arrives in: the key absent (what the
+    # child really writes), an empty dict (a tracker that seeded nothing), and a
+    # non-dict (a hand-edited or truncated checkpoint). All three mean the same
+    # thing to a reader and must render the same roster.
+    @pytest.mark.parametrize(
+        "models", [None, {}, "not-a-map"], ids=["absent", "empty", "garbage"]
+    )
+    def test_the_requested_roster_renders_before_the_map_exists(
+        self, tmp_path, capsys, models
+    ):
+        plan = _plan(tmp_path)
+        progress = {"models_total": 3, "models_done": 0, "models_succeeded": 0}
+        if models is not None:
+            progress["models"] = models
+        self._checkpoint(plan, progress, requested=self.ROSTER)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out.splitlines()
+
+        assert "      progress:       fanout, models 0/3 done, 0 ok, 0 failed" in out
+        assert "      models:" in out
+        # Pinned whole: the column padding is what makes the CLI and the model
+        # readable down a column, and every host reads this back through a file
+        # codec, so it is ASCII to begin with.
+        assert out[out.index("      models:") + 1:][:3] == [
+            "        codex:gpt-6-astra:xhigh                        queued",
+            "        pi:openrouter/deepseek/deepseek-v4-flash-0731  queued",
+            "        opencode:auto                                  queued",
+        ], out
+
+    def test_a_dispatch_only_phase_still_grows_no_models_header(
+        self, tmp_path, capsys
+    ):
+        """The guard the roster change had to leave standing.
+
+        `generate-tasks` never calls `report_progress(step=…)` before the end, so
+        its only progress is the executor's mirror and it records no
+        `models_total` at all. Reading an absent map as `{}` would have handed
+        `_model_row_specs` an empty list to answer from — and its `models_total`
+        gate is what keeps the answer empty. A bare `models:` header over no rows
+        on every dispatch-only phase is the regression this forbids.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(phase), {
+            "phase": "generate-tasks", "state": "dispatching",
+            "progress": {"subagents": {
+                "kind": "task_generation", "invoker": "executor",
+                "total": 1, "ok": 1, "counts": {"ok": 1},
+                "failed_task_ids": [],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "progress:       task_generation 1/1 ok" in out
+        assert "models:" not in out
+
+    def test_a_roster_with_no_count_beside_it_is_not_a_table(
+        self, tmp_path, capsys
+    ):
+        """The `models_total` gate itself, which the test above does not reach.
+
+        That one passes because its fixture carries no `models_requested` — cut
+        the gate out entirely and it stays green, so it pins the dispatch-only
+        phase's *shape*, not the line that protects it. This is the other half:
+        a checkpoint that DOES carry a roster and no `models_total` still grows
+        no table, because `models_total` is what says a fan-out is what this
+        phase is doing. Without it a roster is a leftover key, and a header over
+        rows nobody is running is worse than no header.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(phase), {
+            "phase": "generate-tasks", "state": "dispatching",
+            "models_requested": ["codex:gpt-6-astra:xhigh", "gemini:pro"],
+            "progress": {"subagents": {
+                "kind": "task_generation", "invoker": "executor",
+                "total": 1, "ok": 1, "counts": {"ok": 1},
+                "failed_task_ids": [],
+            }},
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "models:" not in out
+        assert "codex:gpt-6-astra:xhigh" not in out
+
+    def test_a_total_with_no_roster_anywhere_renders_no_table(
+        self, tmp_path, capsys
+    ):
+        """`models_total` alone is a count, not a roster.
+
+        A checkpoint written by an older run (or truncated mid-write) can carry
+        the count with neither a seeded map nor `models_requested`. There is
+        nothing to name, so the count keeps the line it already has and no
+        header is invented over an empty table.
+        """
+        plan = _plan(tmp_path)
+        self._checkpoint(
+            plan, {"models_total": 5, "models_done": 0, "models_succeeded": 0}
+        )
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "progress:       fanout, models 0/5 done, 0 ok, 0 failed" in out
+        assert "models:" not in out
+
+
+class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
+    """`progress:` says how many finished; this says which.
+
+    The second ask, and the one the counts structurally cannot answer: a poller
+    watching `models 2/5 done` go to `3/5` learns that something finished and
+    never what. `--wait` is the only invocation that reads the same file twice,
+    so it is the only one that can honestly say *just*.
+    """
+
+    DONE_AT = "2026-09-20T12:00:00"
+
+    @classmethod
+    def _entry(cls, state, elapsed_s, **extra):
+        beat = status_file.now_iso()
+        entry = {
+            "state": state, "started_at": beat, "updated_at": beat,
+            "timeout_s": 1800, "attempt": 1, "source": None,
+        }
+        if state in ("done", "failed"):
+            entry["ended_at"] = cls.DONE_AT
+            entry["elapsed_s"] = elapsed_s
+        entry.update(extra)
+        return entry
+
+    @staticmethod
+    def _progress(models: dict) -> dict:
+        terminal = sum(
+            1 for e in models.values()
+            if isinstance(e, dict) and e.get("state") in ("done", "failed")
+        )
+        return {
+            "step": "fanout", "models_total": len(models),
+            "models_done": terminal, "models_succeeded": terminal,
+            "models": models,
+        }
+
+    @classmethod
+    def _write(cls, phase: Path, models: dict) -> None:
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "models_requested": list(models),
+            "progress": cls._progress(models),
+        })
+
+    @staticmethod
+    def _wait_once(plan: Path, monkeypatch, mutate, *argv) -> int:
+        """One `--wait` pass with `mutate` applied inside the sleep.
+
+        `main` collects once for the baseline and `_wait_for_terminal` collects
+        again after its first sleep; mutating between the two is exactly the
+        "a model finished while the poll was waiting" event, without spawning a
+        worker to produce it. The timeout is small but not tiny: the deadline is
+        checked *before* the first sleep, so a value in the milliseconds would
+        make a loaded machine skip the only iteration this needs.
+        """
+        calls = []
+        real_collect = run_status._collect
+
+        def _collect(plan_path, args):
+            calls.append(1)
+            if len(calls) == 2:
+                mutate()
+            return real_collect(plan_path, args)
+
+        monkeypatch.setattr(run_status, "_collect", _collect)
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--wait",
+            "--timeout", "0.2", *argv,
+        ])
+        assert len(calls) == 2, (
+            f"`--wait` re-read the checkpoint {len(calls) - 1} times; the delta "
+            "this asserts needs exactly one re-read"
+        )
+        return code
+
+    def test_a_wait_with_nothing_recorded_yet_waits_instead_of_spinning(
+        self, tmp_path, monkeypatch
+    ):
+        """An empty selection is a waiting state, not a terminal one.
+
+        The first poll of every launch is issued before the run has written its
+        checkpoint, so it selects no view at all — and a loop keyed on "any view
+        is live" exits instantly over an empty list. Exit 2 already means "still
+        going, and that covers no run recorded yet", so returning in 0.13 s
+        turned the one call whose job is to hold a turn into a spin the agent
+        repeats as fast as its host allows (F4, 2026-09-20). It now costs its own
+        deadline and then still exits 2.
+        """
+        plan = _plan(tmp_path)          # a plan with no phase dir at all
+        slept = []
+        real_sleep = run_status.time.sleep
+
+        def _record(seconds):
+            slept.append(seconds)
+            real_sleep(min(seconds, 0.01))
+
+        monkeypatch.setattr(run_status.time, "sleep", _record)
+        assert run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--wait",
+            "--timeout", "0.2",
+        ]) == 2
+        assert slept, "`--wait` returned without waiting over an empty selection"
+
+    def test_a_re_run_of_the_same_models_still_names_what_finished(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The case the whole feature is for, and the one it used to lose.
+
+        A phase dir is re-used run after run, so a re-review of the same plan
+        finds the PREVIOUS run's rows on disk — the same specs, already `done`.
+        Keyed on the spec alone, the baseline said "already terminal" before
+        this run had seeded anything, so the completion that happened during the
+        wait was skipped; on the next poll the row was genuinely terminal and in
+        that baseline too, so it was skipped again, and no poll ever announced
+        it (F1, 2026-09-20). The baseline is keyed on the *ending* — state,
+        `ended_at`, `elapsed_s` — so a second, different ending is a difference.
+
+        The launch writes now drop the predecessor's `progress` outright, which
+        is where this is really fixed; this is the half that still has to hold
+        when a poll lands in the window before one of them.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        spec = "codex:gpt-6-astra:xhigh"
+        other = "gemini:gemini-3.5-pro"
+        # The predecessor: both models finished here, days ago.
+        old = self._entry("done", 300)
+        old["ended_at"] = "2026-09-19T10:05:00"
+        self._write(phase, {spec: dict(old), other: dict(old)})
+
+        def _finish():
+            # This run: same two specs, and one of them ends again — later.
+            self._write(phase, {
+                spec: self._entry("done", 252),
+                other: self._entry("running", None),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert f"      just finished: {spec} (4m12s, done)" in out
+        # ...and only that one: the other row went backwards, not forwards.
+        assert other not in out.split("just finished:")[1].split("\n")[0]
+
+    def test_an_unreadable_baseline_claims_nothing_when_it_heals(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A map that could not be read is not a map that said "nothing yet".
+
+        A torn or hand-edited checkpoint whose `models` is not a dict reads as
+        an empty baseline unless the two cases are kept apart, and then every
+        row in the healthy map that replaces it is announced as having just
+        finished — rows that may have finished an hour ago (F4, 2026-09-20).
+        `None` means "nothing was observed here", which is the same answer a
+        phase dir discovered mid-wait gets.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "models_requested": ["codex:gpt-6-astra:xhigh"],
+            "progress": {
+                "step": "fanout", "models_total": 1, "models_done": 0,
+                "models": "torn",
+            },
+        })
+
+        def _heal():
+            self._write(phase, {"codex:gpt-6-astra:xhigh": self._entry("done", 252)})
+
+        assert self._wait_once(plan, monkeypatch, _heal) == 2
+        assert "just finished:" not in capsys.readouterr().out
+
+    def test_it_names_only_what_went_terminal_during_this_wait(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The baseline is what makes the word "just" true.
+
+        `codex` was already `done` when the wait was entered — it is on the
+        table, it is in the counts, and naming it again on every poll for the
+        rest of the run would turn the line into a second, staler copy of the
+        table. Only the row that crossed the line while this command waited is
+        news.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {
+            "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+            "gemini:gemini-3.5-pro": self._entry("running", None),
+        })
+
+        def _finish():
+            self._write(phase, {
+                "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+                "gemini:gemini-3.5-pro": self._entry("done", 62),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert "      just finished: gemini:gemini-3.5-pro (1m02s, done)" in out
+        assert "codex:gpt-6-astra:xhigh (" not in out
+
+    def test_the_line_sits_between_the_counts_and_the_table(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Reading order: how many, then which, then the roster they sit in.
+
+        All three are relayed by Layer 2 rule 1 as they are printed, so the
+        order on screen is the order the agent relays them in.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {"codex:gpt-6-astra:xhigh": self._entry("running", None)})
+
+        def _finish():
+            self._write(
+                phase, {"codex:gpt-6-astra:xhigh": self._entry("done", 252)}
+            )
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out.splitlines()
+        progress_at = next(i for i, l in enumerate(out) if "progress:" in l)
+        assert out[progress_at + 1] == (
+            "      just finished: codex:gpt-6-astra:xhigh (4m12s, done)"
+        ), out
+        assert out[progress_at + 2] == "      models:", out
+
+    def test_several_join_with_semicolons_and_a_failure_names_its_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`; `, not `, ` — the clause's own interior is comma-separated.
+
+        Joined with commas, two models render as four fields no reader can
+        re-pair. The failure's reason rides in its own clause because a poller
+        told only "1 failed" has to open the log to learn anything at all, and
+        the whole point of the line is that it does not have to.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {
+            "codex:gpt-6-astra:xhigh": self._entry("running", None),
+            "gemini:gemini-3.5-pro": self._entry("running", None),
+            "opencode:auto": self._entry("running", None),
+        })
+
+        def _finish():
+            self._write(phase, {
+                "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+                "gemini:gemini-3.5-pro": self._entry(
+                    "failed", 62, error="rate limited"
+                ),
+                "opencode:auto": self._entry("running", None),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert (
+            "      just finished: codex:gpt-6-astra:xhigh (4m12s, done); "
+            "gemini:gemini-3.5-pro (1m02s, failed: rate limited)"
+        ) in out
+
+    def test_a_multi_line_error_stays_one_line_in_both_renderers(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`error` is the one field a provider writes, and it can hold a newline.
+
+        An adapter that puts a stderr excerpt in there hands both renderers a
+        string with `\n` in it. Layer 2 rule 1 has the host agent relay
+        `just finished:` **verbatim**, so a two-line value turns one rule-bound
+        line into two — the second carrying no label and reading as prose the
+        agent wrote — and the table's aligned columns come apart on the same
+        row. Both sites collapse it, through one helper, because one of them
+        collapsing is the two spellings of one field disagreeing.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {
+            "gemini:gemini-3.5-pro": self._entry("running", None),
+        })
+
+        def _finish():
+            self._write(phase, {
+                "gemini:gemini-3.5-pro": self._entry(
+                    "failed", 62,
+                    error="rate limited\n  retry-after: 60\n  upstream said no",
+                ),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert (
+            "      just finished: gemini:gemini-3.5-pro (1m02s, failed: "
+            "rate limited retry-after: 60 upstream said no)"
+        ) in out
+        # ...and the table row beneath it, which renders the same field.
+        assert (
+            "rate limited retry-after: 60 upstream said no" in out
+        )
+        assert "\n  retry-after" not in out
+        # The model still running is not on the line, whatever else is.
+        assert "opencode:auto (" not in out
+
+    def test_a_resume_landing_mid_wait_is_skipped_and_never_ok(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """One vocabulary for one row.
+
+        There is no `skipped` *state* — a model answered from disk is `done`
+        and `source` carries the distinction — so both this line and the table
+        read it through `_model_state_label`. `ok` is the counting line's word
+        for a slot that produced a usable result; borrowing it here would put
+        `ok` directly above the same row labelled `skipped`.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {"opencode:auto": self._entry("queued", None)})
+
+        def _finish():
+            self._write(phase, {
+                "opencode:auto": self._entry("done", 0, source="existing_file"),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert "      just finished: opencode:auto (0m00s, skipped)" in out
+        assert "(0m00s, ok)" not in out
+
+    def test_a_plain_status_prints_no_line_and_its_json_grows_no_key(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Without `--wait` nothing proved anything finished *during* the call.
+
+        The `--json` half is a compatibility constraint, not tidiness: the
+        payload is `{"runs": views}` serialized raw, so a key present-but-empty
+        on every view would change the bytes of every JSON poll ever made —
+        including the OpenCode package route's supervised poll, which reads the
+        payload instead of the text.
+
+        Both directions of that constraint are asserted here, because the
+        comment beside the attach site claimed only one of them and claimed it
+        backwards ("this key itself still never leaves the view", 2026-09-21).
+        It does leave: `{"runs": views}` *is* these dicts, so a `--wait` that
+        observes a completion hands the key straight back and a consumer has to
+        handle it. The key is absent below because nothing finished during a
+        wait — never because it cannot reach `--json`.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {
+            "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+            "gemini:gemini-3.5-pro": self._entry("done", 62),
+        })
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "just finished:" not in out
+        # Both rows are on the table, so nothing is *missing* — only the tense.
+        assert "codex:gpt-6-astra:xhigh  done" in out
+
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "run", "--json"]
+        ) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert "finished_during_wait" not in payload["runs"][0], payload["runs"][0]
+
+        # The other direction: a wait that really observed one.
+        self._write(phase, {
+            "codex:gpt-6-astra:xhigh": self._entry("running", None),
+        })
+
+        def _finish():
+            self._write(phase, {
+                "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _finish, "--json") == 2
+        waited = json.loads(capsys.readouterr().out)
+        assert waited["runs"][0]["finished_during_wait"] == [{
+            "spec": "codex:gpt-6-astra:xhigh", "state": "done",
+            "elapsed_s": 252.0, "error": None,
+        }], waited["runs"][0]
+
+    def test_a_wait_that_returns_at_once_attaches_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A finished detached run: `--wait` hands back without ever looping.
+
+        The baseline and the returned view are then literally the same dicts, so
+        the difference is empty and no key is attached — which is the right
+        answer rather than a missed case: nothing finished during a wait that
+        never waited. Asserted on the JSON, because the empty text proves only
+        that `_just_finished_text` returned "".
+        """
+        TestWaitTimeoutResolution._config(tmp_path, monkeypatch, "  poll_s: 5\n")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-finished-jf", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "review-plan", "heartbeat_at": status_file.now_iso(),
+        })
+        # Written *after* the claim, and with `update_status` rather than
+        # `write_status`: both halves of the file have to say "finished" or the
+        # wait keeps waiting on the one that does not, and this test's whole
+        # subject is the loop that never runs.
+        status_file.update_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "progress": dict(
+                self._progress(
+                    {"codex:gpt-6-astra:xhigh": self._entry("done", 252)}
+                ),
+                step="complete",
+            ),
+        })
+
+        start = time.monotonic()
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--wait", "--json",
+        ])
+        elapsed = time.monotonic() - start
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0
+        assert elapsed < 2.0, f"a finished run waited {elapsed:.2f}s"
+        assert "finished_during_wait" not in payload["runs"][0], payload["runs"][0]
+
+    def test_a_malformed_entry_costs_its_own_clause_never_the_command(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`status` is the command a poll loop runs, so it must answer.
+
+        Three bad shapes in one map, and the good row still gets named: a clock
+        whose reader raises (F5's `started_at: "…Z"`, which took the whole
+        command down with a TypeError and exit 1 — which rule 2 reads as "the
+        run state is unreadable, stop and report"), a stored `elapsed_s` that is
+        not a number, and an entry that is not a dict at all. A clause with no
+        clock beats a traceback; a row that cannot be read as terminal is simply
+        not claimed as finished.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self._write(phase, {
+            "codex:gpt-6-astra:xhigh": self._entry("running", None),
+            "gemini:gemini-3.5-pro": self._entry("running", None),
+            "pi:auto": self._entry("running", None),
+        })
+
+        def _finish():
+            self._write(phase, {
+                "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+                "gemini:gemini-3.5-pro": self._entry("done", "soon"),
+                "pi:auto": "truncated mid-write",
+            })
+            real = run_status.entry_elapsed_s
+
+            def _explode(entry, now=None):
+                if entry.get("elapsed_s") == 252:
+                    raise TypeError(
+                        "can't subtract offset-naive and offset-aware datetimes"
+                    )
+                return real(entry, now)
+
+            monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+
+        assert self._wait_once(plan, monkeypatch, _finish) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out
+        # The raising clock and the unreadable `elapsed_s` both degrade to a
+        # clause with no elapsed; the non-dict row is not claimed at all.
+        assert (
+            "      just finished: codex:gpt-6-astra:xhigh (done); "
+            "gemini:gemini-3.5-pro (done)"
+        ) in out
+        assert "pi:auto (" not in out
+
+    def test_a_phase_dir_that_appeared_mid_wait_is_not_claimed_as_just_finished(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """No "before" picture, no claim.
+
+        A poll with no selector lists every phase under the plan, so another
+        process opening a second phase dir mid-wait adds a view this command
+        never saw the start of. Treating its missing baseline as an *empty*
+        baseline would announce every already-terminal row in it as having just
+        finished, on no evidence at all — and a finished phase dir is exactly
+        what tends to appear that way. It gets its roster from the table, like
+        any other first sighting, and only the dir that was here all along can
+        say what moved in it.
+        """
+        plan = _plan(tmp_path)
+        watched = _phase_dir(plan)
+        self._write(watched, {"codex:gpt-6-astra:xhigh": self._entry("running", None)})
+
+        def _appear():
+            self._write(
+                watched, {"codex:gpt-6-astra:xhigh": self._entry("done", 252)}
+            )
+            self._write(
+                _phase_dir(plan, "implement"),
+                {"gemini:gemini-3.5-pro": self._entry("done", 62)},
+            )
+
+        assert self._wait_once(plan, monkeypatch, _appear) == 2
+        out = capsys.readouterr().out
+        assert "      just finished: codex:gpt-6-astra:xhigh (4m12s, done)" in out
+        # The newcomer is listed, tabled, counted — and not claimed.
+        assert "gemini:gemini-3.5-pro" in out
+        assert "gemini:gemini-3.5-pro (" not in out
+
+    def test_a_models_key_that_is_not_there_yet_is_an_empty_baseline(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """F1, 2026-09-21: absent is not unreadable, and the difference is a line.
+
+        There is a real window where the key is simply missing: the claim write
+        drops the predecessor's `progress` outright and `seed()` writes this
+        run's roster a moment later. A poll landing between them — the first
+        poll of every launch — reads a checkpoint with no map at all, which is
+        the honest "nothing has finished yet". Folded into the same `None` the
+        torn map above returns, that baseline was skipped as "nothing observed",
+        so every spec that went terminal during that whole first wait produced
+        no `just finished:` line.
+        """
+        # The two shapes, told apart at the source.
+        assert run_status._terminal_fingerprints(
+            {"progress": {"step": "fanout"}}
+        ) == {}
+        assert run_status._terminal_fingerprints({"progress": {}}) == {}
+        assert run_status._terminal_fingerprints(
+            {"progress": {"step": "fanout", "models": "torn"}}
+        ) is None
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 2, "models_done": 0,
+                         "models_succeeded": 0},
+        })
+
+        def _seed_and_finish():
+            self._write(phase, {
+                "codex:gpt-6-astra:xhigh": self._entry("done", 252),
+                "gemini:gemini-3.5-pro": self._entry("running", None),
+            })
+
+        assert self._wait_once(plan, monkeypatch, _seed_and_finish) == 2
+        out = capsys.readouterr().out
+        assert "      just finished: codex:gpt-6-astra:xhigh (4m12s, done)" in out
+        assert "gemini:gemini-3.5-pro (" not in out
+
+
+class TestTheLaunchAnnouncesTheRosterItResolved:
+    """The line-up, on the first result line a supervising host can read.
+
+    `progress_lines` is otherwise `status`'s key, rendered from
+    `progress.models` — a map that does not exist when the launcher returns,
+    because the worker seeds it on the other side of the fork. The launcher does
+    not need the map: it is the process that **resolved the selection** (it has
+    already refused this very launch if none of those specs had a CLI on PATH),
+    so the roster is knowable there, and `roster_line_for_specs` renders it
+    through the budget resolution `seed()` uses.
+
+    Why it is worth a key rather than the banner it already prints: on the
+    OpenCode package route the launch's result is the *first* thing `execute`
+    relays, the next relay is a whole `--wait` away (~83 s, the host cap less a
+    margin), and the terminal poll is deliberately never relayed — so a run that
+    went terminal inside that first wait announced its models nowhere at all,
+    and every other run announced them a poll late, against a requirement that
+    says a fan-out names its models when it starts.
+    """
+
+    @staticmethod
+    def _launch(tmp_path, monkeypatch, specs, **namespace):
+        """One `detach.launch` with the fork stubbed, returning its payload."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        monkeypatch.setenv(detach.UV_ENV, str(_fake_uv(tmp_path)))
+        # Not what this row is about, and a machine with no `codex` on PATH
+        # would otherwise refuse the launch before it ever reached the banner.
+        monkeypatch.setattr(
+            detach, "missing_provider_binaries", lambda *a, **k: {}
+        )
+
+        def fake_spawn(command, *, cwd, env, log_path):
+            run_id = command[command.index("--internal-run-id") + 1]
+            status_file.claim_run(str(phase), {
+                "run_id": run_id, "state": "running", "pid": os.getpid(),
+                "heartbeat_at": status_file.now_iso(),
+            })
+            return os.getpid()
+
+        monkeypatch.setattr(process_control, "spawn_detached", fake_spawn)
+        context = cli_common.activate_result(
+            cli_common.ResultContext(mode="review-plan")
+        )
+        try:
+            code = detach.launch(
+                mode="review-plan",
+                argv=["--plan-file", str(plan), "--detach", "--yes"],
+                phase_dir=str(phase), plan_file=str(plan), phase="review-plan",
+                args=argparse.Namespace(
+                    force=False, if_not_running=False, **namespace
+                ),
+                model_specs=specs,
+            )
+        finally:
+            cli_common.deactivate_result()
+        assert code == 0
+        return context.payload(0)
+
+    def test_the_launch_result_carries_the_roster_the_worker_will_seed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The same sentence, one fork early — not a second spelling of it.
+
+        The launcher and the worker each read config rather than each other, so
+        there is no seed to race: the string below is what
+        `FanoutProgress.seed()` emits a moment later from the same specs, the
+        same anchor and the same `--timeout` override, which is what lets the
+        package route's per-call "shown once" memory drop the duplicate the
+        first poll brings instead of saying the roster twice.
+        """
+        specs = ["codex:gpt-6-astra:xhigh", "opencode:auto"]
+        payload = self._launch(tmp_path, monkeypatch, specs, timeout=1800)
+        capsys.readouterr()
+
+        assert payload["progress_lines"] == [
+            "[PROGRESS] fan-out over 2 models: "
+            "codex:gpt-6-astra:xhigh (30m), opencode:auto (30m)"
+        ]
+        seeded = tmp_path / "seeded"
+        seeded.mkdir()
+        tracker = progress_tracker.FanoutProgress(
+            seeded, specs, interval_s=0, timeout=1800,
+        )
+        tracker.seed()
+        assert payload["progress_lines"][0] == tracker.render_roster()
+        # And nothing else on the line moved: the launch still hands back its
+        # log, its checkpoint and the poll command as `next`.
+        assert payload["next"] and "status" in payload["next"]
+        assert any(a.endswith("orchestrator-run.log") for a in payload["artifacts"])
+
+    def test_a_launch_with_no_fan_out_grows_no_key(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A `--reaggregate` branch, `generate-tasks`, a write phase.
+
+        They cross the same boundary with no specs at all. The roster renders
+        `""` and `set_progress_lines` drops an empty entry, so their result
+        lines are byte-for-byte what they were — "absent" and "nothing to
+        announce" are not two states a reader has to tell apart.
+        """
+        payload = self._launch(tmp_path, monkeypatch, None, timeout=None)
+        capsys.readouterr()
+        assert "progress_lines" not in payload
+
+    def test_an_unreadable_config_costs_the_line_and_not_the_launch(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Narration, at the one point where the worker is already running.
+
+        The banner has been printed and the daemon is alive by the time this
+        renders, so a raise here would report a launch failure for a launch that
+        succeeded. The budget resolution already degrades to `?` on its own, so
+        the wrapper covers the renderer itself.
+        """
+        monkeypatch.setattr(
+            progress_tracker, "roster_line_for_specs",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("config is gone")),
+        )
+        payload = self._launch(
+            tmp_path, monkeypatch, ["codex:gpt-6-astra:xhigh"], timeout=1800
+        )
+        capsys.readouterr()
+        assert "progress_lines" not in payload
+        assert payload["next"], "the launch still reported its poll command"
+
+
+class TestTheRenderedProgressLinesRideTheResultLine:
+    """The half of the poll a host with no agent in its loop can actually show.
+
+    `progress` rides the result line whole, which is the right shape for a
+    reader that can turn a map into a sentence. The OpenCode **package** route
+    cannot: `execute` supervises the run itself and the model makes one blocking
+    tool call, so nothing there reads `instructions/*.md`, nothing relays a
+    `[PROGRESS]` line out of a log the plugin never opens, and the plugin's own
+    rule forbids it to compose a sentence about a run. Measured 2026-09-21: a
+    5 m 40 s four-model fan-out reached the user as silence and then one
+    compressed line, with a complete `progress.models` map and twelve ticker
+    lines sitting in artifacts nothing on that route reads.
+
+    So `MULTI_LLM_RESULT` carries the *rendered* lines too — the roster and the
+    `just finished:` line, from the renderers that already write the human view
+    — and these rows pin that they are the same text, that they ride only where
+    `progress` already does, and that they are a key of their own rather than a
+    key inside `progress`.
+    """
+
+    JF = TestJustFinishedNamesWhatCrossedTheLineDuringTheWait
+
+    @staticmethod
+    def _payload(plan, *argv, exit_code=2):
+        """`status`'s own result payload, as the dispatcher would emit it."""
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run", *argv,
+            ]) == exit_code
+        finally:
+            cli_common.deactivate_result()
+        return context.payload(exit_code)
+
+    def test_a_pinned_poll_carries_the_roster_rendered(self, tmp_path, capsys):
+        """The line the fan-out printed at seed, on the surface that reader reads.
+
+        Byte-identical to `progress_tracker`'s own, because it *is* that
+        renderer run over the map the checkpoint carries — not a second spelling
+        assembled here out of the same fields.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        models = {
+            "codex:gpt-6-astra:xhigh": self.JF._entry("running", None),
+            "opencode:auto": self.JF._entry("queued", None),
+        }
+        self.JF._write(phase, models)
+
+        payload = self._payload(plan, "--phase", "review-plan")
+        capsys.readouterr()
+
+        lines = payload["progress_lines"]
+        assert lines[0] == (
+            "[PROGRESS] fan-out over 2 models: "
+            "codex:gpt-6-astra:xhigh (30m), opencode:auto (30m)"
+        )
+        assert lines[0] == progress_tracker.render_roster_line(models)
+        # The state line rides behind it on every poll; its own row is below.
+        assert lines[1].startswith("[PROGRESS] 0/2 done (0 ok, 0 failed) | ")
+        assert len(lines) == 2, lines
+
+    def test_the_progress_object_is_still_the_file_s_own(self, tmp_path, capsys):
+        """A key of its own, never one more key inside `progress`.
+
+        `progress` is what the status file wrote, carried through unreworded so
+        a reader gets the numbers where they were computed; a rendered line
+        folded into it would make that object something neither the file nor the
+        renderer owns, and would change the bytes of a payload other readers
+        already parse.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        models = {"codex:gpt-6-astra:xhigh": self.JF._entry("running", None)}
+        self.JF._write(phase, models)
+        written = status_file.read_status(str(phase))["progress"]
+
+        payload = self._payload(plan, "--phase", "review-plan")
+        capsys.readouterr()
+
+        assert payload["progress"] == written
+        assert "lines" not in payload["progress"]
+        assert payload["progress_lines"], "the lines went missing entirely"
+
+    def test_the_just_finished_line_reaches_the_result_line_too(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The one thing the counts structurally cannot say, on the same surface.
+
+        `--wait` is the only invocation that reads the same file twice, and this
+        route's every poll is a `--wait` of ~83 s — so a completion inside that
+        window is exactly what `_attach_finished_during_wait` already captures.
+        It reached the rendered view and nothing else; now it rides the result
+        line, labelled, so a host that shows the string shows what it is a list
+        of.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self.JF._write(phase, {
+            "codex:gpt-6-astra:xhigh": self.JF._entry("running", None),
+            "gemini:gemini-3.5-pro": self.JF._entry("running", None),
+        })
+
+        def _finish():
+            self.JF._write(phase, {
+                "codex:gpt-6-astra:xhigh": self.JF._entry("done", 252),
+                "gemini:gemini-3.5-pro": self.JF._entry("running", None),
+            })
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert self.JF._wait_once(
+                plan, monkeypatch, _finish, "--phase", "review-plan"
+            ) == 2
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        payload = context.payload(2)
+
+        lines = payload["progress_lines"]
+        assert len(lines) == 3, lines
+        assert lines[0].startswith("[PROGRESS] fan-out over 2 models: ")
+        # Roster, state, news — the order the human view prints the last two in.
+        assert lines[1].startswith("[PROGRESS] 1/2 done (1 ok, 0 failed) | ")
+        assert lines[2] == "just finished: codex:gpt-6-astra:xhigh (4m12s, done)"
+        # And it is the rendered view's own line, label included — one spelling
+        # for the reader who sees the table and the reader who only gets this.
+        assert f"      {lines[2]}" in out
+
+    def test_it_rides_exactly_where_the_progress_object_rides(
+        self, tmp_path, capsys
+    ):
+        """Same selector rule, same absence rule.
+
+        Only a poll pinned to one run is "the watched run's" — a plain listing
+        answers about no single run, so it carries neither key.
+
+        A phase with no per-model map is **not** the absence case, and used to
+        be treated as one: `generate-tasks`, an apply phase and every
+        dispatch-only phase record their progress as an executor mirror, and
+        those polls were exactly the ones the OpenCode route had nothing to show
+        for but a serialized object. The state line answers them from
+        `_progress_text` — the `progress:` line the human view already prints —
+        so the roster being empty no longer means the key is. What is left
+        absent is a `progress` object with nothing renderable in it at all.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self.JF._write(phase, {"codex:gpt-6-astra:xhigh": self.JF._entry("running", None)})
+
+        # No selector: `status`/`null`, and neither key.
+        payload = self._payload(plan)
+        capsys.readouterr()
+        assert "progress" not in payload and "progress_lines" not in payload
+
+        # A pinned poll of a phase whose progress is an executor mirror: there
+        # is an object, so `progress` rides; there is no roster, so nothing is
+        # rendered and the key stays away.
+        mirror = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(mirror), {
+            "phase": "generate-tasks", "state": "subagents_failed",
+            "progress": {"subagents": {
+                "kind": "task_generation", "invoker": "executor",
+                "total": 1, "ok": 1, "counts": {"ok": 1}, "failed_task_ids": [],
+            }},
+        })
+        payload = self._payload(plan, "--phase", "generate-tasks")
+        capsys.readouterr()
+        assert payload["progress"]["subagents"]["total"] == 1
+        # No roster (no map) and no news (no `--wait`), but the phase still says
+        # what it is doing — the same clause `render_run_text` prints.
+        assert payload["progress_lines"] == ["task_generation 1/1 ok"]
+        assert payload["progress_lines"] == [
+            run_status._progress_text(payload["progress"])
+        ]
+
+        # And the one shape that really has nothing to say still grows no key.
+        empty = _phase_dir(plan, "review-tasks")
+        status_file.write_status(str(empty), {
+            "phase": "review-tasks", "state": "running", "progress": {},
+        })
+        payload = self._payload(plan, "--phase", "review-tasks")
+        capsys.readouterr()
+        assert "progress_lines" not in payload
+
+    def test_the_json_view_is_byte_for_byte_what_it_was(self, tmp_path, capsys):
+        """Nothing is attached to the view, so `--json` cannot have moved.
+
+        The rendered lines are built at the result-line site out of the view,
+        never written onto it — the same compatibility constraint
+        `finished_during_wait` is held to, and for the same reason: `--json`
+        serializes these dicts raw, so a key attached here would change the
+        bytes of every JSON poll ever made.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        self.JF._write(phase, {"codex:gpt-6-astra:xhigh": self.JF._entry("running", None)})
+
+        assert run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            "--json",
+        ]) == 2
+        payload = json.loads(capsys.readouterr().out)
+        view = payload["runs"][0]
+        assert "progress_lines" not in view, view
+        assert "lines" not in view["progress"], view["progress"]
+
+    #: Everything `json.loads` can hand back as a `timeout_s`, and what each
+    #: one did before 2026-09-21. The guard's docstring said "anything that is
+    #: not a plain number is `None`" while the code passed every `int`/`float`
+    #: straight through to `int(max(0.0, float(x)))`, which is partial.
+    UNTRUSTWORTHY_BUDGETS = [
+        # The two shapes the guard already survived.
+        ("a string", "half an hour"),
+        # `Infinity` and `NaN` are bare tokens Python's `json.loads` accepts.
+        # `int(float("inf"))` is `OverflowError` — it took the whole command
+        # down, here and in the table's own denominator.
+        ("infinity", float("inf")),
+        ("negative infinity", float("-inf")),
+        # Rendered `(0s)`: a budget of nothing, claimed about a slot that has
+        # one. A lie is cheaper to miss than a crash and worse to act on.
+        ("not a number", float("nan")),
+        ("a negative duration", -5),
+        # Valid JSON; `float()` itself raises `OverflowError` on it.
+        ("an integer with no float", int("9" * 400)),
+        # A `bool` is an `int` in Python, so this rendered `(1s)` — a plausible
+        # duration invented out of a flag.
+        ("a flag", True),
+    ]
+
+    def test_a_checkpoint_the_renderer_cannot_trust_costs_no_poll(
+        self, tmp_path, capsys
+    ):
+        """`status` is the command a poll loop runs, so it has to answer.
+
+        A hand-edited or torn map reaches the renderers exactly as a healthy one
+        does. Each unreadable budget costs its own `(?)` and nothing else, and a
+        `models` value that is not a map at all renders no roster rather than an
+        exit 1 the poll loop reads as "the run state is unreadable, stop".
+
+        Every row of `UNTRUSTWORTHY_BUDGETS` is asserted, and the row is not a
+        catalogue of hypotheticals: this test used to carry the first entry and
+        a non-dict entry only — the two shapes the guard survived — and each of
+        the others either raised out of a poll or rendered a duration nobody
+        configured. The assertion runs end to end (`status` exits 2 with its
+        table printed) rather than against the renderer alone, because the
+        crash lived in `run_status`'s own denominator as much as in the
+        roster's: `_model_timing_text` wraps `entry_elapsed_s` in a `try` and
+        called `format_budget` outside it.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        models = {"opencode:auto": "not an entry at all"}
+        for label, budget in self.UNTRUSTWORTHY_BUDGETS:
+            models[f"codex:{label}"] = dict(
+                self.JF._entry("running", None), timeout_s=budget
+            )
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models": models},
+        })
+        payload = self._payload(plan, "--phase", "review-plan")
+        out = capsys.readouterr().out
+
+        rendered = ", ".join(f"{spec} (?)" for spec in models)
+        assert payload["progress_lines"][0] == (
+            f"[PROGRESS] fan-out over {len(models)} models: {rendered}"
+        )
+        # The state line reads the same rows through the same guard, so an
+        # unrenderable budget costs a denominator there too and nothing more.
+        assert payload["progress_lines"][1].startswith(
+            f"[PROGRESS] 0/{len(models)} done (0 ok, 0 failed) | running: "
+        )
+        assert "/?)" in payload["progress_lines"][1]
+        assert len(payload["progress_lines"]) == 2, payload["progress_lines"]
+        # The human view answered too, and every live row is on it — the guard
+        # costs a denominator, never a column and never the command.
+        for spec in models:
+            assert f"        {spec}" in out, out
+        assert "/?" not in out and "?s" not in out
+
+
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models": "torn"},
+        })
+        payload = self._payload(plan, "--phase", "review-plan")
+        capsys.readouterr()
+        # No roster and no state line off a map that is not one — but the
+        # checkpoint's own `step` is still a true thing to say, so the poll is
+        # not silent.
+        assert payload["progress_lines"] == ["fanout"]
+        assert payload["progress"]["models"] == "torn"
+
+    def test_neither_rendered_line_can_forge_a_second_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """One line means one line, on a surface that joins them with newlines.
+
+        The plugin's `toastMessage` shows the supplied lines joined by a
+        newline, so a newline *inside* one of them is an extra line the user
+        reads as the dispatcher's own — no `[PROGRESS]` prefix, no label, and
+        nothing downstream able to tell it from a line Python composed. Every
+        field these two renderers interpolate comes from outside them and a
+        model spec is the easiest: it is a **config key** (`providers.yaml`, a
+        project override, a typed `--models` value) reaching the roster and
+        `just finished:` by the same route.
+
+        The two scrubbed differently until 2026-09-21 — the roster ASCII-only
+        and unfolded, `just finished:` folding `error` alone and never scrubbing
+        at all, under a docstring that claimed "ASCII only". They now take one
+        pass (`progress_tracker.one_line_ascii`), which is the point of it being
+        one function.
+        """
+        # The two renderers, side by side, on the same input.
+        assert progress_tracker.render_roster_line({
+            "codex:gpt\u2013 5\nnot a line": {"timeout_s": 60},
+        }) == "[PROGRESS] fan-out over 1 model: codex:gpt? 5 not a line (1m)"
+        assert run_status._just_finished_text({"finished_during_wait": [
+            {"spec": "codex:gpt\u2013 5\nnot a line", "state": "done",
+             "elapsed_s": 1.0, "error": None},
+        ]}) == "codex:gpt? 5 not a line (0m01s, done)"
+        # `caf\u00e9` is the half no amount of newline folding would have
+        # caught: `_just_finished_text` ran no ASCII scrub whatsoever.
+        assert run_status._just_finished_text({"finished_during_wait": [
+            {"spec": "caf\u00e9", "state": "done", "elapsed_s": 1.0},
+        ]}) == "caf? (0m01s, done)"
+
+        # And end to end, where both lines ride one `progress_lines` list.
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        spec = "codex:gpt\u2013 5\nnot a line"
+        self.JF._write(phase, {
+            spec: self.JF._entry("running", None),
+            "opencode:auto": self.JF._entry("running", None),
+        })
+
+        def _finish():
+            self.JF._write(phase, {
+                spec: self.JF._entry("done", 252),
+                "opencode:auto": self.JF._entry("running", None),
+            })
+
+        context = cli_common.activate_result(cli_common.ResultContext(mode="status"))
+        try:
+            assert self.JF._wait_once(
+                plan, monkeypatch, _finish, "--phase", "review-plan"
+            ) == 2
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+        lines = context.payload(2)["progress_lines"]
+        assert len(lines) == 3, lines
+        for line in lines:
+            assert "\n" not in line, line
+            assert line.isascii(), line
+        # The roster and the news name the spec; the state line names only the
+        # rows that are still live, and this one has gone terminal.
+        assert "codex:gpt? 5 not a line" in lines[0]
+        assert "codex:gpt? 5 not a line" in lines[2]
+
+    def test_every_poll_carries_a_line_and_a_live_one_changes(
+        self, tmp_path, monkeypatch
+    ):
+        """What stops a host falling back to a serialized object mid-run.
+
+        Measured 2026-09-21 on a 363 s package-route run: five relays, and the
+        one whose 90 s window happened to contain no completion relayed a
+        multi-KB `JSON.stringify` of the whole payload. That is the **ordinary**
+        poll — a window that contains a completion is the exception — so a set
+        of lines that only says something when something *changed* leaves the
+        blob as what the user usually sees.
+
+        Two properties, and the second is the one easy to assume rather than
+        check: a line is there on every poll, and on a live fan-out it *differs*
+        between two of them. The host's shown-once memory suppresses a line it
+        has already displayed, so a state line that rendered identically twice
+        would be deduped straight back into the blob. It differs because a live
+        row's elapsed is derived at read time from `started_at` — asserted here
+        across a simulated 90 s rather than reasoned about.
+        """
+        view = {"progress": {"step": "fanout", "models": {
+            "codex:gpt-6-astra:xhigh": self.JF._entry("running", None),
+            "opencode:auto": self.JF._entry("queued", None),
+        }}}
+        base = time.time()
+        monkeypatch.setattr(progress_tracker, "_wall_time", lambda: base)
+        first = run_status._progress_lines(view)
+        monkeypatch.setattr(progress_tracker, "_wall_time", lambda: base + 90)
+        second = run_status._progress_lines(view)
+
+        assert len(first) == len(second) == 2, (first, second)
+        # The roster is the line that must NOT move — it is what a shown-once
+        # memory is for.
+        assert first[0] == second[0]
+        assert first[1] != second[1], (first[1], second[1])
+        assert "(0m00s/30m)" in first[1] and "(1m30s/30m)" in second[1]
+
+        # Once every slot is terminal the fan-out has nothing left to narrate,
+        # and the phase's own `progress:` line takes over — the same changeover
+        # the orchestrator log makes when `PhaseProgress` replaces the fan-out
+        # ticker. It moves as the validation batches land.
+        done_view = {"progress": {
+            "step": "validating", "models_total": 2, "models_done": 2,
+            "models_succeeded": 2,
+            "models": {
+                "codex:gpt-6-astra:xhigh": self.JF._entry("done", 252),
+                "opencode:auto": self.JF._entry("done", 62),
+            },
+            "subagents": {"kind": "validation", "total": 8, "ok": 3,
+                          "counts": {"ok": 3}, "failed_task_ids": []},
+        }}
+        lines = run_status._progress_lines(done_view)
+        assert len(lines) == 2, lines
+        assert lines[1] == (
+            "validating, models 2/2 done, 2 ok, 0 failed, validation 3/8 ok"
+        )
+        # Not a second spelling: it *is* the line the human view prints.
+        assert lines[1] == run_status._progress_text(done_view["progress"])
+        assert not lines[1].startswith("[PROGRESS]"), (
+            "the frozen fan-out counts would repeat themselves every poll"
+        )
+
+    def test_a_view_whose_progress_is_not_a_mapping_renders_nothing(self):
+        """The one guard this function keeps, pinned where it is reachable.
+
+        `classify_run` coerces a torn `progress` to `{}` while it builds the
+        view, so no view this module assembles can fail the check — which makes
+        it dead through the checkpoint and alive through the call. It is kept
+        because the result-line site calls this function *outside* the
+        `if view.get("progress")` guard the text renderer sits behind, and an
+        `AttributeError` here is exit 1, which rule 2 reads as "the run state is
+        unreadable, stop and report" — paid for a key that is display-only.
+        Asserted at the level it is reachable from rather than through a
+        checkpoint that can no longer produce the shape.
+        """
+        assert run_status._progress_lines({"progress": "torn"}) == []
+        assert run_status._progress_lines({"progress": None}) == []
+        assert run_status._progress_lines({}) == []
+        # Not a guard that swallowed the feature: the healthy shape still
+        # renders, through the same one statement.
+        assert run_status._progress_lines({"progress": {"models": {
+            "codex:gpt-6-astra:xhigh": {"state": "running", "timeout_s": 1800},
+        }}}) == [
+            "[PROGRESS] fan-out over 1 model: codex:gpt-6-astra:xhigh (30m)",
+            "[PROGRESS] 0/1 done (0 ok, 0 failed) | "
+            "running: codex:gpt-6-astra:xhigh (?/30m)",
+        ]
+
+    def test_an_empty_rendered_line_is_dropped_rather_than_carried(self):
+        """`set_progress_lines`' own contract, at the level it is reachable from.
+
+        The filter is load-bearing on the launch path, where
+        `detach.launch` hands over `[roster]` unconditionally and a mode with no
+        fan-out renders `""` — so a `--reaggregate`, a `generate-tasks` or a
+        write-phase launch must grow no key rather than carry a blank a reader
+        has to filter. Asserted here because `_progress_lines` builds its list
+        from two truthiness checks and would never hand one over.
+        """
+        context = cli_common.ResultContext(mode="status")
+        context.set_progress_lines(["a line", "", None, "another"])
+        assert context.payload(2)["progress_lines"] == ["a line", "another"]
+        context.set_progress_lines([""])
+        assert "progress_lines" not in context.payload(2)
+        context.set_progress_lines(None)
+        assert "progress_lines" not in context.payload(2)

@@ -30,6 +30,8 @@ from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, S
 from . import detach as _detach
 from . import status_file as _status_file
 from . import cli_common
+from . import progress_tracker as _progress
+from .progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from .cli_common import (
     dispatcher_command,
     durable_reaggregate_fields,
@@ -320,36 +322,29 @@ def merge_validation_batches(
 # duplication". They share one implementation of each fact now.
 # ---------------------------------------------------------------------------
 
-def fanout_slot_counter(phase_dir: str, total: int) -> Callable[[], None]:
-    """Return a ``slot_finished()`` that advances ``progress.models_done``.
-
-    The fan-out is the longest stretch of a detached run — 435 s of a 516 s
-    ``review-plan``, measured 2026-09-16 — and the counter was written ``0``
-    once before the first launch and recomputed only after the last model
-    returned, so every poll in between read ``models 0/4`` beside models that
-    had already finished (D4a here; F6 for review-code, which never had a
-    counter at all). Counting *slots* rather than successes is deliberate: a
-    failed or skipped model has finished its slot, and which ones failed is the
-    post-fanout recomputation's job.
-
-    No lock: every call happens on the fan-out's own event loop, and
-    ``report_progress`` writes nothing unless this process owns a detached
-    run for *phase_dir*.
-    """
-    finished = 0
-
-    def slot_finished() -> None:
-        nonlocal finished
-        finished += 1
-        _detach.report_progress(phase_dir, models_total=total, models_done=finished)
-
-    return slot_finished
+# D4a's `fanout_slot_counter` used to live here — a closure returning a
+# `slot_finished()` that bumped `progress.models_done` once per finished slot,
+# because the key was otherwise written `0` before the first launch and
+# recomputed only after the last model returned (435 s of a 516 s `review-plan`,
+# measured 2026-09-16, reading `models 0/4` beside models that had already
+# finished). It is **deleted**, not left standing beside
+# `progress_tracker.FanoutProgress`'s per-model map: a map-derived count plus a
+# counter is two writers for one key and they can only disagree — the counter
+# ticked at slot exit while the map turns terminal at the completion print, so a
+# lane running both would flicker between counter-order and map-order. The
+# tracker carries the counter's documented meaning with it: `models_done` counts
+# **finished slots, not successful ones**, because a failed or skipped model has
+# finished its slot, and which ones failed is `models_succeeded`'s job (see
+# `FanoutProgress.counts`). The mid-run *number* is unchanged; only the writer
+# is consolidated.
 
 
 def backfill_deadline_losses(
     model_specs: List[str],
     results: Dict[str, Any],
     failed_models: Dict[str, str],
+    *,
+    tracker: Optional[FanoutProgress] = None,
 ) -> None:
     """F11: name every model the fan-out lost without a result of its own.
 
@@ -357,10 +352,33 @@ def backfill_deadline_losses(
     ``asyncio.wait_for`` deadline, or dropped as an ``Exception`` item — is in
     neither *results* nor (so far) *failed_models*: without this it is counted
     completed, inflates ``models_done`` and appears in no report section.
+
+    **Only a model that produced nothing.** Until F2 (2026-09-20) the deadline
+    branch discarded ``gather``'s whole result, so a slot that had already
+    returned successfully reached here missing from *results* and was named a
+    deadline loss beside the ``{model}.json`` it had just written; that branch
+    harvests the finished tasks first now, and this walks a *results* dict that
+    really does hold every slot that finished. Called by all three fan-out
+    lanes — the review base, ``code_review_orchestrator`` and, since F4,
+    ``ask_orchestrator``, which used to spell its own third wording for this
+    cause.
+
+    *tracker* gives the **per-model map** the same backfill in the same pass, so
+    one walk writes both facts and a reader polling afterwards can never see a
+    slot the report calls failed while the table still calls it ``running``. The
+    wording is :data:`~utils.progress_tracker.DEADLINE_ERROR` on both sides
+    rather than a string spelled twice, because the table and the report's
+    failure list have to name one cause. Idempotent against the fan-out's own
+    ``finally`` sweep: both touch only non-terminal entries, so whichever
+    arrives first records the real ending — the sweep retires the common case
+    promptly, this is the belt that catches a fan-out which returned by a path
+    the sweep missed.
     """
     for model_spec in model_specs:
         if model_spec not in results and model_spec not in failed_models:
-            failed_models[model_spec] = "no result (cancelled at the fan-out deadline)"
+            failed_models[model_spec] = DEADLINE_ERROR
+            if tracker is not None:
+                tracker.failed(model_spec, error=DEADLINE_ERROR, source=None)
 
 
 def record_review_artifacts(
@@ -580,6 +598,19 @@ def dispatch_subagent_tasks(
     as before), ``True`` when every task produced a schema-valid result file and
     the caller may continue in-process. A partial batch exits **3** here — even
     under ``--yes`` — rather than letting the phase reaggregate a short set.
+
+    **Synchronous, and it blocks for the whole batch.** ``continue_past_marker``
+    ends in ``subagent_executor._run_sync``, which — inside a running loop —
+    submits ``asyncio.run`` to a worker thread and then *waits on the result*,
+    so calling this from a coroutine pins the event loop for the entire
+    validation window and starves anything living on it, the phase-scoped
+    ``[PROGRESS]`` ticker included (F6, 2026-09-20: the executor lane got
+    exactly one line for that window, the teardown one, under three comments
+    claiming the second ticker covered it). Every caller on an async lane
+    therefore reaches it through ``await asyncio.to_thread(...)``. The function
+    stays sync because the sync lanes — the apply base, the consolidation
+    handler, ``generate-tasks`` — call it directly, and ``_run_sync`` handles
+    the no-loop case itself.
 
     ``--dry-run-subagents`` is an executor request **in its own right** (D3l), the
     same way the write twin ``write_batch_scheduler.run_write_phase`` treats it:
@@ -981,8 +1012,19 @@ def record_models_present(phase_dir: str, models: List[str]) -> List[str]:
     field-not-file rule as ``build_unsanitize_map``), and only the models with
     a file are moved: a model the fan-out completed whose file has since gone
     keeps its entry, because the record of what the fan-out did is not this
-    function's to rewrite. ``progress.models_done`` follows the completed
-    count when the fan-out published a ``models_total``.
+    function's to rewrite.
+
+    **It writes ``models_succeeded``, not ``models_done``.** Its number is a
+    count of *completed results*, which is what the post-fan-out restatements
+    compute; ``models_done`` counts finished **slots** and the salvaged model's
+    slot finished long ago — as ``failed``. So flipping that entry to ``done`` /
+    ``source: existing_file`` moves the success count and not the terminal
+    count, and the map and the two derived numbers stay in agreement. This
+    writer holds no in-memory map (it is a ``--reaggregate``'s recompute, one
+    process later), so it reads the map back off the checkpoint and writes it
+    whole; a counts-only write is safe beside it because ``progress`` merges key
+    by key at its top level and **only a write carrying a ``models`` key
+    replaces the map**.
 
     Returns:
         The models moved out of ``models_failed``, so the caller can say so.
@@ -1010,8 +1052,140 @@ def record_models_present(phase_dir: str, models: List[str]) -> List[str]:
     })
     progress = status.get("progress")
     if isinstance(progress, dict) and progress.get("models_total"):
-        _status_file.update_progress(phase_dir, {"models_done": len(completed)})
+        updates: Dict[str, Any] = {"models_succeeded": len(completed)}
+        models_map = progress.get("models")
+        if isinstance(models_map, dict) and flip_map_entries_to_done(
+            models_map, models
+        ):
+            updates["models"] = models_map
+        _status_file.update_progress(phase_dir, updates)
     return recovered
+
+
+def flip_map_entries_to_done(
+    models_map: Dict[str, Any],
+    models: Sequence[str],
+    *,
+    source: str = "existing_file",
+) -> bool:
+    """Move each named ``progress.models`` entry to ``done``/*source*.
+
+    The one rule for "this slot's verdict changed after the fan-out froze it",
+    shared by the two events that can change one: a ``--reaggregate`` finding a
+    result file the fan-out never saw (:func:`record_models_present`) and an
+    in-process salvage repairing one (:func:`record_models_salvaged`). Mutates
+    *models_map* in place and reports whether anything moved, so the caller can
+    decide whether its write needs to carry a ``models`` key at all.
+
+    ``ended_at``/``elapsed_s`` are left exactly as the fan-out froze them **on
+    an entry that was already terminal**: that slot really did end when it
+    ended, and this is a later reading of the same slot's outcome, not a second
+    run of it. Only the verdict and its provenance move — and ``error`` is
+    popped, because it is terminal-and-failed-only and a ``done`` row carrying
+    one is the contradiction this whole function exists to remove.
+
+    **A non-terminal entry has no ending to preserve, so it is given one**
+    (2026-09-21). A ``--reaggregate`` can meet a map that still holds a
+    ``queued``/``staggering``/``running`` row — a run killed with no close-out
+    on the foreground lane, where neither the fan-out's sweep nor
+    ``progress_tracker.retire_live_entries`` ever ran, or a hand-written file —
+    and flipping that row to ``done`` while leaving ``ended_at`` absent leaves
+    ``entry_elapsed_s`` on its *live* branch forever: ``now - started_at``,
+    recomputed at every read, so the table renders a finished model whose clock
+    is still running and stops only when it hits the slot's own budget. So the
+    close-out here is the one :func:`progress_tracker.retire_live_entries`
+    performs for the same shape of row — ``ended_at`` now, ``elapsed_s`` frozen
+    from ``started_at`` by the read-time rule (clamped at the slot's budget),
+    on the wall clock because this process holds no monotonic origin for a slot
+    another process ran.
+
+    **The two events do not share a ``source``, and that is the caller's to
+    say.** ``run_status.SKIPPED_SOURCES`` / ``progress_tracker.RESUME_SOURCES``
+    (``existing_file``, ``resume``) mean *this slot never dispatched on this
+    run*, and ``run_status._model_state_label`` renders ``done`` + one of them
+    as **skipped**. That is true of the ``--reaggregate`` path, which is why
+    ``existing_file`` is the default. It is a lie about an in-process salvage,
+    whose slot did dispatch, did run, failed to parse and was repaired — so
+    :func:`record_models_salvaged` passes ``salvage``, which is deliberately in
+    neither set and therefore renders as plain ``done`` in the ``models:`` table
+    and on ``just finished:`` (2026-09-21).
+    """
+    stamp = _status_file.now_iso()
+    flipped = False
+    for model in models:
+        entry = models_map.get(model)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("state") == _progress.STATE_DONE:
+            continue
+        if entry.get("state") not in _progress.TERMINAL_STATES:
+            # Read before `ended_at` is stamped, because the read-time rule keys
+            # on it: absent (the live row this branch exists for) gives
+            # `now - started_at`, present (only a hand-written row can be both
+            # non-terminal and ended) gives the value already frozen there, and
+            # either way what lands is a number that never moves again.
+            # `_seconds` is progress_tracker's one definition of how a duration
+            # reaches the checkpoint — a bare int when integral, which a clamped
+            # `1800.0` otherwise would not be.
+            elapsed = _progress.entry_elapsed_s(entry)
+            if not entry.get("ended_at"):
+                entry["ended_at"] = stamp
+            entry["elapsed_s"] = (
+                _progress._seconds(round(elapsed, 1)) if elapsed is not None else 0
+            )
+        entry["state"] = _progress.STATE_DONE
+        entry["source"] = source
+        entry["updated_at"] = stamp
+        entry.pop("error", None)
+        flipped = True
+    return flipped
+
+
+def record_models_salvaged(phase_dir: str, models: Sequence[str]) -> None:
+    """F3, 2026-09-20: put the map back in step after an in-process salvage.
+
+    Both fan-out lanes repair a model's result file under ``--exec-subagents``
+    and then ``del failed_models[spec]``, so the checkpoint they write a few
+    lines later lists that model under ``models_completed`` and counts it in
+    ``models_succeeded``. Neither touched the per-model map, and neither could
+    have by the obvious route: terminal transitions are **idempotent**
+    (``FanoutProgress._freeze`` refuses a second one), so a ``tracker.done()``
+    against an entry the fan-out already froze as ``failed`` is a silent no-op.
+    The result was a checkpoint reading ``models_completed: [a, b, c]``,
+    ``models_failed: {}``, ``progress.models_succeeded: 3`` beside
+    ``progress.models.c.state: "failed"`` with the pre-salvage error still on
+    it — the exact contradiction :func:`record_models_present` was written to
+    remove, recreated one function over.
+
+    So the flip is written straight to the checkpoint through
+    ``update_progress``, the way ``record_models_present`` does it, and by the
+    same helper — but **not** with the same ``source``. ``existing_file`` is in
+    ``run_status.SKIPPED_SOURCES``, so it would have every salvaged model read
+    ``skipped`` in the ``models:`` table and on ``just finished:``: a word that
+    means "never dispatched", about a slot that dispatched, ran and was
+    repaired. ``salvage`` is in neither that set nor
+    ``progress_tracker.RESUME_SOURCES``, so the row renders ``done`` and still
+    says where the verdict came from. Counters are **not** written here: the
+    caller's own post-salvage restatement (``models_done`` /
+    ``models_succeeded``) follows immediately and carries no ``models`` key,
+    and ``progress`` merges key by key at its top level, so the two writes
+    compose rather than overwrite.
+
+    The in-memory tracker is deliberately *not* reconciled, because it is never
+    written again past this point on either lane (its last write is F11's
+    backfill, above). A lane that ever does write it again after a salvage would
+    re-assert ``failed`` from memory — that is the day ``FanoutProgress`` needs
+    a method of its own for "a frozen verdict was superseded", which is not this
+    change's to add.
+    """
+    progress = _status_file.read_status(phase_dir).get("progress")
+    if not isinstance(progress, dict):
+        return
+    models_map = progress.get("models")
+    if not isinstance(models_map, dict):
+        return
+    if flip_map_entries_to_done(models_map, models, source="salvage"):
+        _status_file.update_progress(phase_dir, {"models": models_map})
 
 
 def dispatch_salvage_tasks(
@@ -1492,16 +1666,19 @@ def collect_served_models(
 def record_sandbox_bypassed(
     phase_dir: Union[str, Path], served_models: Dict[str, Dict[str, Any]]
 ) -> List[str]:
-    """Mirror the bypassed slots into ``progress.sandbox_bypassed`` — detached
-    runs only — and return the specs recorded.
+    """Mirror the bypassed slots into ``progress.sandbox_bypassed`` — on every
+    run — and return the specs recorded.
 
     ``models_served`` (top-level, written by the phase's own ``update_status``)
     is the durable copy reaggregate reads; this is the poller's copy, under the
     reserved ``progress`` object ``status --view run`` renders, so a host that
     never reads the log still learns which slots ran without a sandbox. The
     ``run`` object is process state and is not touched (``status_file``).
-    ``report_progress`` is a no-op in the foreground, which is what keeps a
-    default run's checkpoint free of the key.
+    ``report_progress`` used to be a no-op in the foreground and this docstring
+    used to lean on that; it writes there now, so a default run's checkpoint does
+    carry the key — which is the feature working, not a leak. The fact that
+    matters to a reader of a foreground checkpoint is the narrower one: it gains
+    ``progress`` keys and still no ``run`` object.
     """
     bypassed = sorted(
         spec for spec, entry in (served_models or {}).items()
@@ -1885,6 +2062,8 @@ async def run_single_model(
     retry_count: int = 0,
     out_dir: Optional[str] = None,
     prefix: Optional[str] = None,
+    *,
+    tracker: Optional[FanoutProgress] = None,
 ) -> Dict[str, Any]:
     """Run a single model review with file-based JSON output.
 
@@ -1911,6 +2090,17 @@ async def run_single_model(
         invoke_phase: Phase name for invoke_with_file_output (e.g., 'plan_review', 'task_review')
         timeout: Optional timeout override in seconds — the slot's **whole**
             wall-clock budget, taken once as a deadline and never re-issued.
+        tracker: The fan-out's :class:`~utils.progress_tracker.FanoutProgress`,
+            when the caller built one. This coroutine supplies only what the
+            helper around it cannot see — the ``running`` transition at **both**
+            start prints (once per ladder attempt on the file-based lane, so
+            ``attempt`` tracks ``ladder.attempt_index``) and the ``retrying``
+            transition at the backoff print. Every *terminal* transition is
+            ``run_models_concurrent``'s, derived from the result dict this
+            returns, so the pre-dispatch sandbox refusal below needs none of its
+            own: it returns ``source: "not-dispatched"`` and the helper retires
+            the slot from that. ``None`` (a direct call, a test) keeps every
+            line here byte-for-byte what it was.
         retry_count: Vestigial. Retry state lives in the ladder now, which is the
             point of §7.5 rule 1; the parameter survives only because
             ``review_plan_orchestrator``'s backward-compatible wrapper forwards
@@ -2061,6 +2251,14 @@ async def run_single_model(
         )
         try:
             print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
+            if tracker is not None:
+                # This lane makes exactly one dispatch and has no ladder, so the
+                # attempt is 1 by construction. `timeout_s` is the slot's whole
+                # budget, which is also the seed's value unless a per-slot
+                # override moved it — the one thing the seed could not know.
+                tracker.running(
+                    model_spec, attempt=1, timeout_s=effective_timeout
+                )
             result = await asyncio.to_thread(
                 invoke_with_provider,
                 prompt=prompt,
@@ -2208,6 +2406,18 @@ async def run_single_model(
                 f"(attempt {ladder.attempt_index}, timeout: {attempt_timeout}s "
                 f"of a {effective_timeout}s slot)..."
             )
+            if tracker is not None:
+                # Once per ladder attempt, which is what carries a retried slot
+                # back out of `retrying` and into `running` with the new attempt
+                # number. `timeout_s` stays `effective_timeout` — the slot's
+                # whole budget — and is deliberately not `attempt_timeout`,
+                # which is what *remains* and shrinks every round: rendered as
+                # the denominator it would overstate the budget left.
+                tracker.running(
+                    model_spec,
+                    attempt=ladder.attempt_index,
+                    timeout_s=effective_timeout,
+                )
 
             result = await asyncio.to_thread(
                 invoke_with_file_output,
@@ -2288,6 +2498,17 @@ async def run_single_model(
                 # sleeps, keeps MULTI_LLM_TEST_FAST_BACKOFF=1 an exact 10 ms.
                 delay = get_backoff_delay(action.delay)
                 print(f"[{display_name}] {status}, retrying in {delay}s...")
+                if tracker is not None:
+                    # The entry stays `retrying` for the sleep and returns to
+                    # `running` at the next attempt's start print above.
+                    # `elapsed_s` is not reset by it: the backoff is charged to
+                    # the same slot deadline, so a reset would claim budget the
+                    # slot does not have.
+                    tracker.retrying(
+                        model_spec,
+                        attempt=ladder.attempt_index,
+                        retry_after_s=delay,
+                    )
                 await asyncio.sleep(delay)
 
         duration = time.time() - start_time
@@ -2473,6 +2694,8 @@ async def run_models_concurrent(
     max_parallel: int,
     skip_predicate: Optional[Callable[[str, int], Optional[Any]]] = None,
     anchor: Optional[Union[str, Path]] = None,
+    *,
+    tracker: Optional[FanoutProgress] = None,
 ) -> Dict[str, Any]:
     """Run a per-model async callback across all models with shared concurrency control.
 
@@ -2485,7 +2708,10 @@ async def run_models_concurrent(
       providers do not hog global slots while waiting for their turn)
     - staggered launches (``index * PROVIDER_STAGGER_DELAY``, honoring
       ``MULTI_LLM_TEST_FAST_BACKOFF``)
-    - an overall timeout wrapping ``asyncio.gather`` that cancels stragglers
+    - an overall timeout wrapping ``asyncio.gather`` that harvests whatever
+      finished before it fired and cancels the stragglers (F2, 2026-09-20: it
+      used to harvest nothing, so a deadline threw away the results of the
+      models that had already answered)
 
     The caller supplies ``per_model_coro_factory(model_spec, index)`` returning
     an awaitable; whatever it produces is stored in the returned dict keyed by
@@ -2511,6 +2737,22 @@ async def run_models_concurrent(
             bound and every provider resolution below falls back to CWD (§9.3.c).
             ``run_review_phase`` and ``ask_orchestrator`` both hold the plan path
             and pass it.
+        tracker: The caller's :class:`~utils.progress_tracker.FanoutProgress`.
+            Given one, this function owns the *mechanics* of the per-model map,
+            because they are the mechanics it already owns: it seeds every
+            requested spec **before** the tasks are created (so a poller sees a
+            complete map from the first read instead of one that fills in as
+            models start), transitions a slot to ``staggering`` at the stagger
+            sleep and back to ``queued`` the moment that sleep ends and the
+            semaphore wait begins, records the **terminal** transition for every
+            slot from the result dict — the skip predicate's return and the
+            factory's alike, since both are result dicts carrying
+            ``success``/``source``/``error`` — retires a slot that raised, names
+            the deadline as the sweep reason when its own ``wait_for`` fires,
+            and in its ``finally`` cancels and awaits the ticker, sweeps, and
+            only then returns. ``None`` keeps every line here byte-for-byte
+            what it was, which is what lets a direct call (a test, another
+            caller) stay untouched.
 
     Returns:
         Dict mapping model spec to whatever the callback returned for it.
@@ -2543,6 +2785,17 @@ async def run_models_concurrent(
         if skip_predicate is not None:
             skipped = skip_predicate(model_spec, index)
             if skipped is not None:
+                # A model answered from disk is terminal the moment it is
+                # seeded: it has a usable result and no attempt is ever
+                # dispatched, so it counts in `models_done` *and* in
+                # `models_succeeded` and a resumed run of four models that finds
+                # three on disk reads `3/4` at the FIRST poll rather than `0/4`
+                # (D4a on the one lane where nothing dispatches at all). The
+                # `source` the predicate put on the result — `existing_file`
+                # here, `resume` on the ask lane — is what a renderer reads to
+                # label the row "skipped"; there is no `skipped` state.
+                if tracker is not None:
+                    tracker.record_result(model_spec, skipped)
                 return (model_spec, skipped)
 
         # Stagger launches
@@ -2550,17 +2803,65 @@ async def run_models_concurrent(
             base_stagger = index * PROVIDER_STAGGER_DELAY
             stagger_delay = get_backoff_delay(base_stagger)
             print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
+            if tracker is not None:
+                tracker.staggering(model_spec, delay_s=stagger_delay)
             await asyncio.sleep(stagger_delay)
+            # The stagger is spent, but this slot is not dispatched: the two
+            # semaphores below can park it for minutes (five models at
+            # `max_parallel: 2` park three of them), and `running` is only
+            # reached inside the factory's coroutine. Without this the whole
+            # wait rendered `staggering` — a state the slot left at the line
+            # above — while index 0, which never staggers, rendered the same
+            # wait as `queued`. One word for one wait.
+            if tracker is not None:
+                tracker.queued(model_spec)
 
         # Acquire provider semaphore first (if any), then global semaphore.
         prov_sem = provider_semaphores.get(provider_name)
-        if prov_sem:
-            async with prov_sem:
+        try:
+            if prov_sem:
+                async with prov_sem:
+                    async with semaphore:
+                        result = await per_model_coro_factory(model_spec, index)
+            else:
                 async with semaphore:
-                    return (model_spec, await per_model_coro_factory(model_spec, index))
-        else:
-            async with semaphore:
-                return (model_spec, await per_model_coro_factory(model_spec, index))
+                    result = await per_model_coro_factory(model_spec, index)
+        except Exception as exc:
+            # A task that raised is printed as `Task exception:` and dropped from
+            # `completed` below without ever being keyed into `results`, so this
+            # is the only place the *spec* behind that exception is still known.
+            # `Exception`, deliberately **not** `BaseException`: a
+            # `CancelledError` arriving here is the overall deadline's own
+            # `task.cancel()`, and retiring it as an exception would stamp the
+            # empty `str(CancelledError())` over the wording the sweep is about
+            # to write. Cancellation is the sweep's to name, in one of exactly
+            # two phrasings; an exception is this slot's own ending and is
+            # re-raised unchanged, because `return_exceptions=True` is what the
+            # caller's contract is written against.
+            if tracker is not None:
+                tracker.failed(
+                    model_spec,
+                    error=str(exc) or type(exc).__name__,
+                    source="exception",
+                )
+            raise
+        # The terminal transition for a slot that returned, derived from the
+        # result dict itself: `run_single_model` and `ask_one` both answer with
+        # `{"success", "source", "error"}`, so no call site has to re-derive
+        # which of `done`/`failed` it means or get the `source` pass-through
+        # wrong. This is `fanout_slot_counter`'s tick, with identity attached.
+        if tracker is not None:
+            tracker.record_result(model_spec, result)
+        return (model_spec, result)
+
+    # Seeded before the tasks exist, not as they start: the write that claims
+    # the phase dir drops the predecessor's `progress` wholesale, so what this
+    # run writes is all any reader ever sees and a model missing from the map is
+    # a bug rather than a model carried over. (`claim_run` does that on the
+    # detached lane; on the foreground one the launch write does — nothing did
+    # until F1, 2026-09-20.)
+    if tracker is not None:
+        tracker.seed()
 
     tasks = [asyncio.create_task(run_with_semaphore(spec, idx)) for idx, spec in enumerate(model_specs)]
 
@@ -2575,6 +2876,12 @@ async def run_models_concurrent(
 
     stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
+
+    # Created alongside the `gather`, cancelled-and-awaited in the `finally`.
+    # At `progress.interval_s: 0` this is a no-op returning `None`: the lines
+    # stop, every event-driven transition is still written.
+    if tracker is not None:
+        tracker.start_ticker()
 
     try:
         completed = await asyncio.wait_for(
@@ -2591,9 +2898,70 @@ async def run_models_concurrent(
 
     except asyncio.TimeoutError:
         print(f"Total timeout ({total_timeout}s) exceeded for all models")
+        # F2, 2026-09-20: **harvest before cancelling.** `asyncio.wait_for`
+        # raises instead of assigning `completed`, so this branch used to leave
+        # `results` exactly `{}` — including for the slots that had already
+        # RETURNED A RESULT before the deadline fired. The tracker, which
+        # records each slot's terminal transition inside the wrapper above, then
+        # disagreed with the report about the same run: measured on a 2-model
+        # fan-out where one slot returned in 10 ms and one straggled, the map
+        # read `{fast: done/file, slow: failed/DEADLINE}` and `counts()` `(2, 1,
+        # 2)`, while `backfill_deadline_losses` named *both* models in
+        # `failed_models` and the restatement wrote `models_succeeded = 0`. So
+        # the checkpoint contradicted its own map, and `models_failed` named a
+        # model whose `{model}.json` was already on disk for the next
+        # `--reaggregate` to pick up. It is also the F11 over-reporting at its
+        # source: a finished model is no longer reported failed, because it did
+        # not fail.
+        #
+        # On 3.11 every task is `done()` by the time this runs — `wait_for`
+        # awaits `_cancel_and_wait(gather)` before it raises — so the loop below
+        # sees each slot's real ending: a result, a cancellation, or its own
+        # exception (already retired by the wrapper's `except`, and deliberately
+        # not re-keyed into `results`, which is the `return_exceptions=True`
+        # contract the caller is written against). `cancelled()` is asked before
+        # `exception()`, which raises on a cancelled task.
+        for task in tasks:
+            if not task.done() or task.cancelled() or task.exception() is not None:
+                continue
+            model_spec, result = task.result()
+            results[model_spec] = result
+        # Named before the ticker is torn down, because there are two sweepers —
+        # this function's `finally` and the ticker's own — and a reason passed at
+        # one call site would let them disagree about the wording for one run.
+        # It is `backfill_deadline_losses`' string, so the per-model table and
+        # the report's failure list name one cause rather than two.
+        if tracker is not None:
+            tracker.set_sweep_reason(DEADLINE_ERROR)
+        # A no-op on this interpreter (see above: `wait_for` already awaited the
+        # gather's own cancellation, so nothing here is still pending). Kept
+        # because it is cheap and because the guarantee it encodes — no slot
+        # outlives this function — is the sweep's premise, not `wait_for`'s.
         for task in tasks:
             if not task.done():
                 task.cancel()
+    finally:
+        if tracker is not None:
+            # Order is fixed and is the whole of lifetime rule 2: cancel AND
+            # await the ticker, then sweep, then return. Awaiting is the point,
+            # not politeness — the caller's per-model summary follows
+            # immediately, and a ticker merely cancelled could emit one more
+            # `[PROGRESS]` line into the middle of it; and because the map is
+            # written whole on every transition, any write landing after the
+            # sweep would resurrect the `queued`/`running` entries the sweep had
+            # just retired. After the sweep no entry reads `queued`,
+            # `staggering`, `running` or `retrying`, and the map is not left to
+            # the slots to close out: a cancelled slot's `finally` runs, but it
+            # is the slot's own coroutine and records nothing about the map
+            # (F7, 2026-09-20 — the wording here used to say the deadline branch
+            # "cancels without awaiting", which has not been true since 3.8:
+            # `wait_for` awaits the gather's cancellation before it raises).
+            # What is genuinely unreachable from a slot is an ending the slot
+            # never sees at all — a `KeyboardInterrupt` unwinding this coroutine
+            # between slots, a task the gather drops — so the sweep walks the
+            # map rather than the tasks.
+            await tracker.stop_ticker()
+            tracker.sweep()
 
     return results
 
@@ -2742,6 +3110,8 @@ async def run_all_models(
     prefix: Optional[str] = None,
     skip_existing: bool = True,
     prior_usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    tracker: Optional[FanoutProgress] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run all models with concurrency limit and staggered starts.
 
@@ -2770,17 +3140,18 @@ async def run_all_models(
             usage of its own, so its entry is put back on the skip result here
             — the one place that knows a result was reused.  A model that
             really re-runs is never seeded from it.
+        tracker: The caller's :class:`~utils.progress_tracker.FanoutProgress`,
+            threaded into both halves of the fan-out —
+            :func:`run_models_concurrent` for the seed, the stagger, every
+            terminal transition and the teardown sweep, and
+            :func:`run_single_model` for the start/retry transitions only it can
+            see. It replaces D4a's `fanout_slot_counter` outright rather than
+            running beside it: a map-derived `models_done` and a counter are two
+            writers for one key, and the two would tick at different moments.
 
     Returns:
         Dict mapping model spec to result dict
     """
-    # D4a: one `models_done` tick per finished slot (the skip predicate is
-    # synchronous, `per_model`'s `finally` runs after its await resumes, so
-    # every call is on this event loop). Shared with review-code's fan-out.
-    slot_finished = fanout_slot_counter(
-        str(get_phase_dir(Path(plan_path), phase_name)), len(model_specs)
-    )
-
     def skip_existing_result(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
         # skip models that already have valid results (resume after partial
@@ -2801,8 +3172,10 @@ async def run_all_models(
                 if isinstance(existing_data, list):
                     print(f"[SKIP] {display_name} - already has results ({len(existing_data)} items)")
                     # A slot answered from disk is a slot finished; a resumed
-                    # run must not read `models 0/4` while it skips four.
-                    slot_finished()
+                    # run must not read `models 0/4` while it skips four. The
+                    # transition itself is `run_models_concurrent`'s, taken from
+                    # the `source: existing_file` result below — one writer for
+                    # the key, at one moment.
                     return {
                         "success": True,
                         "output": json.dumps(existing_data),
@@ -2845,22 +3218,26 @@ async def run_all_models(
             quiet=True,
         )
         prompt_context = prompt_context_factory(model_spec)
-        try:
-            return await run_single_model(
-                model_spec, plan_path, prompt_template, prompt_context,
-                phase_name, invoke_phase, timeout,
-                out_dir=out_dir, prefix=prefix,
-            )
-        finally:
-            # In a `finally` because a slot that raised (or was cancelled by the
-            # overall timeout) has stopped occupying the fan-out just as surely
-            # as one that returned a result.
-            slot_finished()
+        # No `finally` tick here any more: the slot's terminal transition is
+        # taken by `run_models_concurrent` from what this returns, and a slot
+        # that raised or was cancelled is retired by the sweep in that
+        # function's own `finally`, which runs whichever way the fan-out ends —
+        # including the endings this coroutine never sees, such as a
+        # `KeyboardInterrupt` between slots. (It used to say the deadline
+        # branch "cancels its stragglers without awaiting them"; `wait_for`
+        # awaits the gather's cancellation before it raises, so a cancelled slot
+        # does reach its own `finally` — F7, 2026-09-20.)
+        return await run_single_model(
+            model_spec, plan_path, prompt_template, prompt_context,
+            phase_name, invoke_phase, timeout,
+            out_dir=out_dir, prefix=prefix, tracker=tracker,
+        )
 
     return await run_models_concurrent(
         model_specs, per_model, timeout, max_parallel,
         skip_predicate=skip_existing_result,
         anchor=plan_path,
+        tracker=tracker,
     )
 
 
@@ -3346,8 +3723,10 @@ def aggregate_results(
 
     # A detached run's caller never saw this stdout, so success has to hand back
     # paths rather than a search: `status` on a `done` run prints these and
-    # repeats them in MULTI_LLM_RESULT.artifacts. A no-op in the foreground, which
-    # is what keeps a non-detached .status.json byte-for-byte what it was.
+    # repeats them in MULTI_LLM_RESULT.artifacts. A no-op in the foreground —
+    # `record_output_files` kept the handle guard `report_progress` gave up, so a
+    # non-detached `.status.json` still gains no `output_files` (it gains
+    # `progress`, and nothing else).
     report_html_path = os.path.join(phase_dir, "report.html")
     grouped_path_out = os.path.join(phase_dir, "grouped.json")
     validation_path_out = os.path.join(phase_dir, "validation.json")
@@ -3760,346 +4139,376 @@ async def reaggregate_from_existing_files(
         print(f"No model result files found in: {phase_dir}")
         return
 
-    # Collect all suggestions
-    all_suggestions = []
-    models_found = set()
-    results_by_model: Dict[str, List[Dict[str, Any]]] = {}
+    # T5, the lane with no fan-out at all: a `--reaggregate` invocation's whole
+    # work — regrouping, and on a phase that needs it a full revalidation pass —
+    # is the silent window, with no per-model ticker ahead of it to have covered
+    # any of it. Same object, same cadence, same `progress.subagents` read; it
+    # prints and writes nothing, so the map the original run's sweep froze is
+    # untouched.
+    phase_ticker = PhaseProgress(str(phase_dir), anchor=plan_path)
+    phase_ticker.start_ticker()
+    # One yield, so the ticker task is really *entered* before the phase's
+    # synchronous stretch begins. `ensure_future` only schedules it, and a
+    # task cancelled before its first step never runs its body at all — so
+    # without this a tail that happens to contain no `await` (the
+    # host-driven `validation_pending` return is one) would emit no
+    # `[PROGRESS]` line even at teardown, and the log's last such line would
+    # be the fan-out's rather than the phase's terminal step.
+    await asyncio.sleep(0)
+    try:
+        # Collect all suggestions
+        all_suggestions = []
+        models_found = set()
+        results_by_model: Dict[str, List[Dict[str, Any]]] = {}
 
-    # Restore original model specs (with colons) from .status.json
-    unsanitize = build_unsanitize_map(phase_dir)
+        # Restore original model specs (with colons) from .status.json
+        unsanitize = build_unsanitize_map(phase_dir)
 
-    for model, _chosen_path, suggestions in resolve_result_files_by_model(
-        phase_dir, result_files, unsanitize
-    ):
-        models_found.add(model)
-        # `s["source_model"] = model` is an item assignment, so one non-dict
-        # element in one file used to raise TypeError and lose every model's
-        # suggestions — the same defect code-review's reaggregate carried.
-        suggestions = drop_non_record_entries(
-            suggestions, model, noun="suggestions"
+        for model, _chosen_path, suggestions in resolve_result_files_by_model(
+            phase_dir, result_files, unsanitize
+        ):
+            models_found.add(model)
+            # `s["source_model"] = model` is an item assignment, so one non-dict
+            # element in one file used to raise TypeError and lose every model's
+            # suggestions — the same defect code-review's reaggregate carried.
+            suggestions = drop_non_record_entries(
+                suggestions, model, noun="suggestions"
+            )
+            for s in suggestions:
+                s["source_model"] = model
+            all_suggestions.extend(suggestions)
+            results_by_model[model] = suggestions
+            print(f"  Loaded {len(suggestions)} suggestions from {model}")
+
+        print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
+
+        # Same reconciliation as code-review's reaggregate: a result file on disk
+        # is a completed model, whatever the fan-out recorded before the salvage
+        # (or the out-of-band result) that produced it.
+        for model in record_models_present(phase_dir, sorted(models_found)):
+            print(f"[{model}] result file present; recorded as completed (was failed)")
+
+        if not all_suggestions:
+            print("No suggestions to aggregate.")
+            return
+
+        # Group similar suggestions - preserve existing groups if validation exists
+        grouped_path = os.path.join(phase_dir, "grouped.json")
+        validation_path_check = os.path.join(phase_dir, "validation.json")
+        validation_tasks_path_check = os.path.join(phase_dir, "validation_tasks.json")
+
+        has_existing_validation = (
+            (os.path.exists(validation_path_check) and not args.skip_validation) or
+            os.path.exists(validation_tasks_path_check)
         )
-        for s in suggestions:
-            s["source_model"] = model
-        all_suggestions.extend(suggestions)
-        results_by_model[model] = suggestions
-        print(f"  Loaded {len(suggestions)} suggestions from {model}")
 
-    print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
-
-    # Same reconciliation as code-review's reaggregate: a result file on disk
-    # is a completed model, whatever the fan-out recorded before the salvage
-    # (or the out-of-band result) that produced it.
-    for model in record_models_present(phase_dir, sorted(models_found)):
-        print(f"[{model}] result file present; recorded as completed (was failed)")
-
-    if not all_suggestions:
-        print("No suggestions to aggregate.")
-        return
-
-    # Group similar suggestions - preserve existing groups if validation exists
-    grouped_path = os.path.join(phase_dir, "grouped.json")
-    validation_path_check = os.path.join(phase_dir, "validation.json")
-    validation_tasks_path_check = os.path.join(phase_dir, "validation_tasks.json")
-
-    has_existing_validation = (
-        (os.path.exists(validation_path_check) and not args.skip_validation) or
-        os.path.exists(validation_tasks_path_check)
-    )
-
-    reuse_bound_grouping = has_existing_validation and os.path.exists(grouped_path)
-    if reuse_bound_grouping:
-        with open(grouped_path, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-        grouped = load_groups_payload(raw_data)
-        # Reuse presumes the bound file still describes the results on disk.
-        # The documented salvage flow breaks that presumption by design: the
-        # fan-out groups without the failed model, materializes validation and
-        # returns at the marker; the salvage lands afterwards; `--reaggregate`
-        # then found a bound grouping and reused it, so the salvaged model's
-        # findings never reached a group (see `grouped_coverage_gap` for the
-        # measured review-code instance, 2026-09-17). Retire the round and
-        # regroup below.
-        gap = grouped_coverage_gap(grouped, results_by_model)
-        if gap:
-            print(
-                "grouped.json does not cover the model results on disk; "
-                "regrouping and retiring the validation round bound to it:"
-            )
-            for line in gap:
-                print(f"  {line}")
-            retire_stale_validation_round(
-                phase_dir, reason="grouped.json did not cover the results on disk"
-            )
-            reuse_bound_grouping = False
-
-    if reuse_bound_grouping:
-        print(f"Using existing grouped.json (preserves validation alignment)")
-    else:
-        raw_grouped = group_similar_suggestions(all_suggestions)
-        grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
-        stamp_stable_ids(grouped)
-        # D7: a re-group orphans any verdicts on disk, so they leave with it.
-        retire_stale_validation(phase_dir, reason="grouped.json rewritten by reaggregate")
-        with open(grouped_path, 'w', encoding='utf-8') as f:
-            json.dump(save_groups_payload(grouped), f, indent=2)
-        print(f"Grouped suggestions saved to: {grouped_path}")
-
-    plan_content = read_plan(plan_path)
-
-    validated_groups_for_report: Optional[List[Dict]] = None
-    validation_path = os.path.join(phase_dir, "validation.json")
-    validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
-
-    # Check if validation already completed. D7: a validation.json is honoured
-    # only when it binds to the grouped.json beside it (or, for a legacy file
-    # without the binding, when no batch file postdates it); otherwise it is
-    # retired — renamed, not deleted — and the batch files decide.
-    honour_validation_file = os.path.exists(validation_path) and not args.skip_validation
-    if honour_validation_file:
-        stale_reason = stale_validation_reason(Path(validation_path), Path(grouped_path))
-        if stale_reason:
-            print(f"\nNot using validation.json: {stale_reason}")
-            retire_stale_validation(phase_dir, reason=stale_reason)
-            honour_validation_file = False
-
-    if honour_validation_file:
-        print(f"\nFound existing validation.json, using it for report generation...")
-        try:
-            from .validation import load_validation_results as load_validation_v2
-            validation_results = load_validation_v2(Path(validation_path))
-            validated_groups = apply_validation_to_groups(
-                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                validation_results
-            )
-            validated_groups_for_report = validated_groups
-            print(f"Loaded {len(validation_results)} validation results")
-        except Exception as e:
-            print(f"Warning: Could not load validation.json: {e}")
-            validated_groups_for_report = None
-
-    # Check if batched validation completed
-    elif os.path.exists(validation_tasks_path) and not args.skip_validation:
-        print("\nFound validation_tasks.json, checking for completed batches...")
-        # A phase dir outlives the run that wrote it, and with prompts embedded a
-        # task file is a snapshot: a run started under one skill version and
-        # resumed under the other would silently mis-spawn, and a plan edited
-        # between materialization and resume leaves prompts that still validate
-        # cleanly while reviewing text nobody is looking at any more. Both fail
-        # loudly here (exit 3) rather than dispatching anything. Read outside the
-        # try below, whose broad handler would otherwise downgrade the refusal to
-        # a warning.
-        try:
-            batch_metadata = read_task_file(
-                validation_tasks_path,
-                phase_dir=phase_dir,
-                current_inputs=build_inputs(
-                    plan_file=str(plan_path),
-                    grouped_file=grouped_path,
-                    # review-tasks embeds the task list in every prompt, so an
-                    # edit to it between materialization and resume is as stale
-                    # as an edited plan. Absent for every other phase, and
-                    # unrecorded hashes are simply not compared.
-                    tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
-                ),
-            )
-        except TaskFileError as task_file_error:
-            print(f"ERROR: {task_file_error}", file=sys.stderr)
-            sys.exit(task_file_error.exit_code)
-        # The recorded `prompt_path` is a derived convenience field like
-        # `output_path`, so it goes stale the moment a phase dir is moved or
-        # copied — and a host following it would then hand a subagent a file
-        # that is missing, or one somebody edited. Re-derive from the
-        # loaded-from dir and rewrite anything that is not `prompt` byte for
-        # byte, before a single batch is dispatched.
-        if ensure_prompt_sidecars(batch_metadata, phase_dir):
-            # Native hosts reread the JSON, not this in-memory document. Publish
-            # rebound pointers and removed fallback fields before handing off.
-            from .subagent_executor import _atomic_write_json
-
-            try:
-                _atomic_write_json(validation_tasks_path, batch_metadata)
-            except OSError as exc:
+        reuse_bound_grouping = has_existing_validation and os.path.exists(grouped_path)
+        if reuse_bound_grouping:
+            with open(grouped_path, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+            grouped = load_groups_payload(raw_data)
+            # Reuse presumes the bound file still describes the results on disk.
+            # The documented salvage flow breaks that presumption by design: the
+            # fan-out groups without the failed model, materializes validation and
+            # returns at the marker; the salvage lands afterwards; `--reaggregate`
+            # then found a bound grouping and reused it, so the salvaged model's
+            # findings never reached a group (see `grouped_coverage_gap` for the
+            # measured review-code instance, 2026-09-17). Retire the round and
+            # regroup below.
+            gap = grouped_coverage_gap(grouped, results_by_model)
+            if gap:
                 print(
-                    f"ERROR: Could not persist repaired prompt metadata to "
-                    f"{validation_tasks_path}: {exc}. Fix task-file write access "
-                    "and retry reaggregation before dispatching native subagents.",
-                    file=sys.stderr,
+                    "grouped.json does not cover the model results on disk; "
+                    "regrouping and retiring the validation round bound to it:"
                 )
-                sys.exit(3)
-        try:
-            total_batches = batch_metadata.get("total_batches", 0)
-            batches_found = 0
-            for batch in batch_metadata.get("batches", []):
-                batch_file = os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json")
-                if os.path.exists(batch_file):
-                    batches_found += 1
-
-            if batches_found == total_batches and total_batches > 0:
-                print(f"All {total_batches} batch files found, merging...")
-                validated_groups_for_report = merge_validation_batches(
-                    phase_dir, batch_metadata, grouped, validation_path
+                for line in gap:
+                    print(f"  {line}")
+                retire_stale_validation_round(
+                    phase_dir, reason="grouped.json did not cover the results on disk"
                 )
-            elif dispatch_subagent_tasks(
-                args,
-                task_file=validation_tasks_path,
-                phase_dir=phase_dir,
-                phase=phase_name,
-                document=batch_metadata,
-                plan_path=str(plan_path),
-                label="validation",
-                # D2 row 10: this path used to pass none, so its own failure
-                # printed the "re-run the same command" fallback — a flag-less
-                # hint by omission. The document's triple, live flags winning.
-                retry_command=resolved_reaggregate_command(batch_metadata),
-            ):
-                # D3b on the reaggregate path: a run resumed with
-                # --exec-subagents dispatches the still-incomplete batches itself
-                # (completed ones are skipped by their result files, D3i) rather
-                # than telling a host to go run subagents it may not have.
-                validated_groups_for_report = merge_validation_batches(
-                    phase_dir, batch_metadata, grouped, validation_path
-                )
-            else:
-                print(f"Only {batches_found}/{total_batches} batch files found.")
-                print("Wait for all validation subagents to complete before reaggregating.")
-                return
-        except Exception as e:
-            print(f"Warning: Could not process batch metadata: {e}")
-            validated_groups_for_report = None
+                reuse_bound_grouping = False
 
-    # Run internal validation if requested
-    elif not args.skip_validation:
-        internal_validation = getattr(args, 'internal_validation', False)
-        if internal_validation:
-            print("\nRunning internal validation...")
-            validation_timeout = args.timeout if args.timeout else 600
-            validation_results = await validate_groups(
-                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                context=plan_content,
-                model=args.validation_model,
-                timeout=validation_timeout
-            )
-
-            validated_groups = apply_validation_to_groups(
-                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                validation_results
-            )
-            validated_groups_for_report = validated_groups
-
-            save_validation_results(validation_results, Path(validation_path))
-            print(f"Validation results saved to: {validation_path}")
+        if reuse_bound_grouping:
+            print(f"Using existing grouped.json (preserves validation alignment)")
         else:
-            # Host-neutral: this print runs on every host that dispatches
-            # subagent validation (opencode, codex, claude-code, ...), and
-            # naming Claude Code here contradicted the runner the log names a
-            # few lines later (measured 2026-09-16: an opencode-driven run
-            # printed this beside 11 lines correctly naming opencode).
-            print("\nPreparing batched validation for subagent execution...")
-            extra_kwargs = {}
-            if extra_validation_metadata:
-                extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                if k in ("tasks_file",)}
-            batched_tasks = prepare_batched_validation_tasks(
-                groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                output_dir=phase_dir,
-                plan_file=str(plan_path),
-                model=args.validation_model,
-                orchestrator=orchestrator_script,
-                **validation_context_kwargs(
-                    phase_name, plan_content, extra_validation_metadata
-                ),
-                **extra_kwargs,
-            )
-            batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+            raw_grouped = group_similar_suggestions(all_suggestions)
+            grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
+            stamp_stable_ids(grouped)
+            # D7: a re-group orphans any verdicts on disk, so they leave with it.
+            retire_stale_validation(phase_dir, reason="grouped.json rewritten by reaggregate")
+            with open(grouped_path, 'w', encoding='utf-8') as f:
+                json.dump(save_groups_payload(grouped), f, indent=2)
+            print(f"Grouped suggestions saved to: {grouped_path}")
 
-            with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                json.dump(batched_tasks, f, indent=2)
+        plan_content = read_plan(plan_path)
 
-            # The phase machine's own word for this stretch. `status` printed
-            # `phase state: grouping_complete` beside `progress: validating` for
-            # the whole validation run (measured 2026-09-16) because
-            # `validation_pending` — documented in utils/status_file.py since D4
-            # — was never written by anything.
-            update_status(phase_dir, {"state": "validation_pending"})
+        validated_groups_for_report: Optional[List[Dict]] = None
+        validation_path = os.path.join(phase_dir, "validation.json")
+        validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
 
-            total_batches = batched_tasks["total_batches"]
-            stats = batched_tasks.get("batching_stats", {})
+        # Check if validation already completed. D7: a validation.json is honoured
+        # only when it binds to the grouped.json beside it (or, for a legacy file
+        # without the binding, when no batch file postdates it); otherwise it is
+        # retired — renamed, not deleted — and the batch files decide.
+        honour_validation_file = os.path.exists(validation_path) and not args.skip_validation
+        if honour_validation_file:
+            stale_reason = stale_validation_reason(Path(validation_path), Path(grouped_path))
+            if stale_reason:
+                print(f"\nNot using validation.json: {stale_reason}")
+                retire_stale_validation(phase_dir, reason=stale_reason)
+                honour_validation_file = False
 
-            if total_batches == 1:
-                print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-            else:
-                print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                print(f"Batches: {total_batches}")
-
-            print(f"\nValidation prepared for subagent execution.")
-            print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-
-            # Resolved here, from the running skill dir, because the task file
-            # stores only the durable mode + plan pair (D1c).
-            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-            # D3b: with --exec-subagents this process continues past the marker
-            # instead of exiting — dispatch the batch, then fall through to the
-            # merge below and finish the phase in one invocation. The marker is
-            # still printed above (logs and .status.json), but it is
-            # informational on this path.
-            if dispatch_subagent_tasks(
-                args,
-                task_file=validation_tasks_path,
-                phase_dir=phase_dir,
-                phase=phase_name,
-                document=batched_tasks,
-                plan_path=str(plan_path),
-                label="validation",
-                retry_command=reaggregate_cmd,
-            ):
-                validated_groups_for_report = merge_validation_batches(
-                    phase_dir, batched_tasks, grouped, validation_path
+        if honour_validation_file:
+            print(f"\nFound existing validation.json, using it for report generation...")
+            try:
+                from .validation import load_validation_results as load_validation_v2
+                validation_results = load_validation_v2(Path(validation_path))
+                validated_groups = apply_validation_to_groups(
+                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    validation_results
                 )
+                validated_groups_for_report = validated_groups
+                print(f"Loaded {len(validation_results)} validation results")
+            except Exception as e:
+                print(f"Warning: Could not load validation.json: {e}")
+                validated_groups_for_report = None
+
+        # Check if batched validation completed
+        elif os.path.exists(validation_tasks_path) and not args.skip_validation:
+            print("\nFound validation_tasks.json, checking for completed batches...")
+            # A phase dir outlives the run that wrote it, and with prompts embedded a
+            # task file is a snapshot: a run started under one skill version and
+            # resumed under the other would silently mis-spawn, and a plan edited
+            # between materialization and resume leaves prompts that still validate
+            # cleanly while reviewing text nobody is looking at any more. Both fail
+            # loudly here (exit 3) rather than dispatching anything. Read outside the
+            # try below, whose broad handler would otherwise downgrade the refusal to
+            # a warning.
+            try:
+                batch_metadata = read_task_file(
+                    validation_tasks_path,
+                    phase_dir=phase_dir,
+                    current_inputs=build_inputs(
+                        plan_file=str(plan_path),
+                        grouped_file=grouped_path,
+                        # review-tasks embeds the task list in every prompt, so an
+                        # edit to it between materialization and resume is as stale
+                        # as an edited plan. Absent for every other phase, and
+                        # unrecorded hashes are simply not compared.
+                        tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
+                    ),
+                )
+            except TaskFileError as task_file_error:
+                print(f"ERROR: {task_file_error}", file=sys.stderr)
+                sys.exit(task_file_error.exit_code)
+            # The recorded `prompt_path` is a derived convenience field like
+            # `output_path`, so it goes stale the moment a phase dir is moved or
+            # copied — and a host following it would then hand a subagent a file
+            # that is missing, or one somebody edited. Re-derive from the
+            # loaded-from dir and rewrite anything that is not `prompt` byte for
+            # byte, before a single batch is dispatched.
+            if ensure_prompt_sidecars(batch_metadata, phase_dir):
+                # Native hosts reread the JSON, not this in-memory document. Publish
+                # rebound pointers and removed fallback fields before handing off.
+                from .subagent_executor import _atomic_write_json
+
+                try:
+                    _atomic_write_json(validation_tasks_path, batch_metadata)
+                except OSError as exc:
+                    print(
+                        f"ERROR: Could not persist repaired prompt metadata to "
+                        f"{validation_tasks_path}: {exc}. Fix task-file write access "
+                        "and retry reaggregation before dispatching native subagents.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(3)
+            try:
+                total_batches = batch_metadata.get("total_batches", 0)
+                batches_found = 0
+                for batch in batch_metadata.get("batches", []):
+                    batch_file = os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json")
+                    if os.path.exists(batch_file):
+                        batches_found += 1
+
+                if batches_found == total_batches and total_batches > 0:
+                    print(f"All {total_batches} batch files found, merging...")
+                    validated_groups_for_report = merge_validation_batches(
+                        phase_dir, batch_metadata, grouped, validation_path
+                    )
+                elif await asyncio.to_thread(
+                    dispatch_subagent_tasks,
+                    args,
+                    task_file=validation_tasks_path,
+                    phase_dir=phase_dir,
+                    phase=phase_name,
+                    document=batch_metadata,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    # D2 row 10: this path used to pass none, so its own failure
+                    # printed the "re-run the same command" fallback — a flag-less
+                    # hint by omission. The document's triple, live flags winning.
+                    retry_command=resolved_reaggregate_command(batch_metadata),
+                ):
+                    # D3b on the reaggregate path: a run resumed with
+                    # --exec-subagents dispatches the still-incomplete batches itself
+                    # (completed ones are skipped by their result files, D3i) rather
+                    # than telling a host to go run subagents it may not have.
+                    validated_groups_for_report = merge_validation_batches(
+                        phase_dir, batch_metadata, grouped, validation_path
+                    )
+                else:
+                    print(f"Only {batches_found}/{total_batches} batch files found.")
+                    print("Wait for all validation subagents to complete before reaggregating.")
+                    return
+            except Exception as e:
+                print(f"Warning: Could not process batch metadata: {e}")
+                validated_groups_for_report = None
+
+        # Run internal validation if requested
+        elif not args.skip_validation:
+            internal_validation = getattr(args, 'internal_validation', False)
+            if internal_validation:
+                print("\nRunning internal validation...")
+                validation_timeout = args.timeout if args.timeout else 600
+                validation_results = await validate_groups(
+                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    context=plan_content,
+                    model=args.validation_model,
+                    timeout=validation_timeout
+                )
+
+                validated_groups = apply_validation_to_groups(
+                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    validation_results
+                )
+                validated_groups_for_report = validated_groups
+
+                save_validation_results(validation_results, Path(validation_path))
+                print(f"Validation results saved to: {validation_path}")
             else:
-                print("\nAfter validation completes, run:")
-                print(f"  {reaggregate_cmd or ''}")
-                # The single follow-up a native-subagent host is owed, also
-                # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
-                # that cannot parse prose does not have to regex-mine stdout.
-                record_next(reaggregate_cmd or None)
-                return
-    else:
-        print("\nSkipping validation (--skip-validation flag set)")
+                # Host-neutral: this print runs on every host that dispatches
+                # subagent validation (opencode, codex, claude-code, ...), and
+                # naming Claude Code here contradicted the runner the log names a
+                # few lines later (measured 2026-09-16: an opencode-driven run
+                # printed this beside 11 lines correctly naming opencode).
+                print("\nPreparing batched validation for subagent execution...")
+                extra_kwargs = {}
+                if extra_validation_metadata:
+                    extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
+                                    if k in ("tasks_file",)}
+                batched_tasks = prepare_batched_validation_tasks(
+                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    output_dir=phase_dir,
+                    plan_file=str(plan_path),
+                    model=args.validation_model,
+                    orchestrator=orchestrator_script,
+                    **validation_context_kwargs(
+                        phase_name, plan_content, extra_validation_metadata
+                    ),
+                    **extra_kwargs,
+                )
+                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
-    # Build list of successful models
-    successful_models = list(models_found)
-    failed_models_map: Dict[str, str] = {}
+                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                    json.dump(batched_tasks, f, indent=2)
 
-    # Generate report. `served_models` is what the fan-out recorded in the
-    # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
-    # 2026-09-17): the per-model files carry neither, so without this read a
-    # reaggregated report named a bypassed slot as if it had run sandboxed.
-    report_path = aggregate_results(
-        prefix, out_dir, phase_dir, phase_name,
-        successful_models, failed_models_map, validated_groups_for_report,
-        plan_path=plan_path,
-        base_ref=base_ref,
-        tasks_path=tasks_path,
-        template_style=template_style,
-        diff_data=diff_data,
-        served_models=recorded_served_models(phase_dir),
-        # …and what it spent, read back off the same checkpoint for the same
-        # reason: the per-model files never held it.
-        usage=recorded_usage(phase_dir),
-    )
+                # The phase machine's own word for this stretch. `status` printed
+                # `phase state: grouping_complete` beside `progress: validating` for
+                # the whole validation run (measured 2026-09-16) because
+                # `validation_pending` — documented in utils/status_file.py since D4
+                # — was never written by anything.
+                update_status(phase_dir, {"state": "validation_pending"})
 
-    print("\nReaggregation complete!")
-    print(f"Report: {report_path}")
+                total_batches = batched_tasks["total_batches"]
+                stats = batched_tasks.get("batching_stats", {})
 
-    # Mark phase complete
-    state = get_or_create_state(Path(plan_path))
-    state.mark_phase_completed(phase_name)
-    state.save()
-    # The in-phase machine reaches its terminal word here too: a re-aggregated
-    # phase is as finished as a freshly run one, and `status` reads this field.
-    update_status(str(phase_dir), {"state": "complete"})
-    _detach.report_progress(str(phase_dir), step="complete")
+                if total_batches == 1:
+                    print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
+                else:
+                    print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
+                    print(f"Batches: {total_batches}")
+
+                print(f"\nValidation prepared for subagent execution.")
+                print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
+
+                # Resolved here, from the running skill dir, because the task file
+                # stores only the durable mode + plan pair (D1c).
+                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
+                # D3b: with --exec-subagents this process continues past the marker
+                # instead of exiting — dispatch the batch, then fall through to the
+                # merge below and finish the phase in one invocation. The marker is
+                # still printed above (logs and .status.json), but it is
+                # informational on this path.
+                if await asyncio.to_thread(
+                    dispatch_subagent_tasks,
+                    args,
+                    task_file=validation_tasks_path,
+                    phase_dir=phase_dir,
+                    phase=phase_name,
+                    document=batched_tasks,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    retry_command=reaggregate_cmd,
+                ):
+                    validated_groups_for_report = merge_validation_batches(
+                        phase_dir, batched_tasks, grouped, validation_path
+                    )
+                else:
+                    print("\nAfter validation completes, run:")
+                    print(f"  {reaggregate_cmd or ''}")
+                    # The single follow-up a native-subagent host is owed, also
+                    # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
+                    # that cannot parse prose does not have to regex-mine stdout.
+                    record_next(reaggregate_cmd or None)
+                    return
+        else:
+            print("\nSkipping validation (--skip-validation flag set)")
+
+        # Build list of successful models
+        successful_models = list(models_found)
+        failed_models_map: Dict[str, str] = {}
+
+        # Generate report. `served_models` is what the fan-out recorded in the
+        # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
+        # 2026-09-17): the per-model files carry neither, so without this read a
+        # reaggregated report named a bypassed slot as if it had run sandboxed.
+        report_path = aggregate_results(
+            prefix, out_dir, phase_dir, phase_name,
+            successful_models, failed_models_map, validated_groups_for_report,
+            plan_path=plan_path,
+            base_ref=base_ref,
+            tasks_path=tasks_path,
+            template_style=template_style,
+            diff_data=diff_data,
+            served_models=recorded_served_models(phase_dir),
+            # …and what it spent, read back off the same checkpoint for the same
+            # reason: the per-model files never held it.
+            usage=recorded_usage(phase_dir),
+        )
+
+        print("\nReaggregation complete!")
+        print(f"Report: {report_path}")
+
+        # Mark phase complete
+        state = get_or_create_state(Path(plan_path))
+        state.mark_phase_completed(phase_name)
+        state.save()
+        # The in-phase machine reaches its terminal word here too: a re-aggregated
+        # phase is as finished as a freshly run one, and `status` reads this field.
+        update_status(str(phase_dir), {"state": "complete"})
+        _detach.report_progress(str(phase_dir), step="complete")
+    finally:
+        # Cancelled and awaited past the terminal `progress.step`, exactly as on
+        # the fan-out lane, so the log's last `[PROGRESS]` states `step:
+        # complete` rather than whatever the last interval caught. The
+        # `nothing to aggregate` early return comes out through here too. The
+        # *other* early return — no result files at all — does not, and cannot:
+        # it is taken before `PhaseProgress` is even constructed, which is the
+        # right place for it (there is no phase window to narrate when the dir
+        # holds nothing to read). F7, 2026-09-20: this comment used to claim
+        # both of them passed through.
+        await phase_ticker.stop_ticker()
 
 
 # ---------------------------------------------------------------------------
@@ -4399,6 +4808,20 @@ async def run_review_orchestration(
         "started_at": datetime.now().isoformat(),
         "models_requested": list(model_specs),
         "error": None,
+        # A re-used phase dir keeps its predecessor's `progress` unless someone
+        # drops it, and on the FOREGROUND lane nobody did: `claim_run` is the
+        # only writer of `progress: None` and only the detached worker calls it,
+        # while `write_status` carries the reserved objects over from disk by
+        # design. So a re-review of the same plan opened with the last run's
+        # per-model map on screen — every slot `done`, `2 ok` — and the
+        # `just finished:` line, whose baseline is "what this map already calls
+        # terminal", could never announce a model whose predecessor row was
+        # already terminal: it was in the baseline before this run seeded it
+        # queued, and in every later poll's baseline after it really finished
+        # (F1, 2026-09-20). Dropping it here is the same move `claim_run` makes,
+        # at the same moment — the write that claims the dir for this fan-out.
+        # `report_progress` below rebuilds it two statements later.
+        "progress": None,
     })
     # D6 row 2, recorded rather than merely applied: an auto-selection nobody can
     # see afterwards is indistinguishable from a silent degradation. Only under
@@ -4411,7 +4834,18 @@ async def run_review_orchestration(
             "defaults.models: " + ", ".join(model_specs),
         )
     _detach.report_progress(
-        phase_dir, step="fanout", models_total=len(model_specs), models_done=0
+        phase_dir, step="fanout", models_total=len(model_specs),
+        models_done=0, models_succeeded=0,
+    )
+
+    # The caller constructs the tracker because the caller is the one that
+    # already knows all three of its inputs — the phase dir, the requested
+    # specs, and the plan anchor every config read is resolved against (§9.3.c)
+    # — and because it owns the map afterwards: the deadline backfill, the
+    # both-counters restatement and the phase-scoped ticker all happen out here,
+    # past the fan-out's return. The fan-out below owns only the mechanics.
+    tracker = FanoutProgress(
+        phase_dir, model_specs, anchor=plan_path, timeout=args.timeout
     )
 
     # Run all models
@@ -4428,6 +4862,7 @@ async def run_review_orchestration(
         prefix=prefix,
         skip_existing=not getattr(args, "rerun_all", False),
         prior_usage=prior_usage,
+        tracker=tracker,
     )
 
     # Save per-model results
@@ -4454,8 +4889,10 @@ async def run_review_orchestration(
             failed_models[model_spec] = error or "Unknown error"
 
     # F11: a model `run_models_concurrent`'s deadline cancelled has no result
-    # file and, so far, no failure entry either. Same helper review-code uses.
-    backfill_deadline_losses(model_specs, results, failed_models)
+    # file and, so far, no failure entry either. Same helper review-code uses,
+    # and one pass writes both facts now — `failed_models[spec]` and the map's
+    # own entry, under the one `DEADLINE_ERROR` wording.
+    backfill_deadline_losses(model_specs, results, failed_models, tracker=tracker)
 
     # §3.6: which model actually served each slot. The per-model `{model}.json`
     # is a bare suggestion list reaggregation re-reads, so the attribution is
@@ -4476,9 +4913,34 @@ async def run_review_orchestration(
     # file now exists is no longer failed, so the partial-results accounting
     # below sees the post-salvage truth rather than the pre-salvage one.
     if failed_models and exec_subagents_requested(args):
-        dispatch_salvage_tasks(
-            args, phase_dir=phase_dir, phase=phase_name, plan_path=plan_path
-        )
+        # T5: salvage is the first stretch of the post-fan-out window and was
+        # the one stretch nothing narrated. The fan-out's ticker is cancelled
+        # and awaited by the time `run_all_models` returns (lifetime rule 1),
+        # and the phase-scoped ticker below does not start until grouping — so
+        # a salvage dispatch, which is a real subagent run and can last
+        # minutes, sat between them emitting no `[PROGRESS]` line at all while
+        # `progress.step` still read `fanout`. Both halves of the cure are the
+        # ones the validation window already uses: publish the step *before*
+        # the dispatch (so the ticker's lines and a `--poll` both name the
+        # work, the way `dispatch_subagent_tasks` does it for `validating`),
+        # and reach the dispatch through `asyncio.to_thread` — it ends in
+        # `subagent_executor._run_sync`'s `pool.submit(asyncio.run, …).result()`
+        # and would otherwise pin this loop and starve the ticker for the whole
+        # window, which is exactly the F6 failure one stretch over.
+        _detach.report_progress(phase_dir, step="salvage")
+        salvage_ticker = PhaseProgress(phase_dir, anchor=plan_path)
+        salvage_ticker.start_ticker()
+        try:
+            await asyncio.to_thread(
+                dispatch_salvage_tasks,
+                args,
+                phase_dir=phase_dir,
+                phase=phase_name,
+                plan_path=plan_path,
+            )
+        finally:
+            await salvage_ticker.stop_ticker()
+        salvaged: List[str] = []
         for model_spec in list(failed_models):
             recovered = os.path.join(
                 phase_dir, f"{sanitize_model_name(model_spec)}.json"
@@ -4486,6 +4948,14 @@ async def run_review_orchestration(
             if os.path.exists(recovered) and os.path.getsize(recovered) > 0:
                 print(f"[{model_spec}] recovered by salvage: {recovered}")
                 del failed_models[model_spec]
+                salvaged.append(model_spec)
+        # F3, 2026-09-20: the map has to move with `failed_models`. Deleting the
+        # entry above is what makes the write below count this model as
+        # completed and succeeded, and the per-model map — frozen `failed` by
+        # the fan-out, and immune to a second `tracker.done()` because terminal
+        # transitions are idempotent — said the opposite in the same file.
+        if salvaged:
+            record_models_salvaged(phase_dir, salvaged)
 
     # D6 row 3: partial results are usable output, so a run that lost *some*
     # models resumes-then-reaggregates (never a question, never `--rerun-all`)
@@ -4528,239 +4998,298 @@ async def run_review_orchestration(
         # than "this run was free".
         **({"usage": usage} if usage else {}),
     })
-    # Restates the count rather than adding to it: `run_all_models` advanced it
-    # per finished *slot*, and this is the same number re-derived from the
-    # models that actually produced a result — so a run that lost a model ends
-    # on `models 3/4` instead of the `4/4` the slot counter last wrote.
+    # The restatement, and it writes **both** counters now. `models_done` keeps
+    # the fan-out's meaning — finished slots, which after the sweep and the
+    # backfill is every requested spec — while `models_succeeded` carries what
+    # this site used to put under `models_done`: the models that actually
+    # produced a result. A lossy run therefore ends on `8/8 done, 7 ok, 1
+    # failed` rather than on the shrinking numerator `models 3/4`, which a live
+    # progress line cannot use at all: under that meaning the counter walks
+    # backwards at the end of a lossy run and can never reach `8/8`.
+    succeeded = len(model_specs) - len(failed_models)
     _detach.report_progress(
         phase_dir,
         step="grouping",
         models_total=len(model_specs),
-        models_done=len(model_specs) - len(failed_models),
+        models_done=len(model_specs),
+        models_succeeded=succeeded,
     )
 
-    # Group similar suggestions
-    all_suggestions = []
-    for model_spec in model_specs:
-        if model_spec in failed_models:
-            continue
-        sanitized_model = sanitize_model_name(model_spec)
-        result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
-        if os.path.exists(result_path):
-            try:
-                with open(result_path, 'r', encoding='utf-8') as f:
-                    suggestions = drop_non_record_entries(
-                        json.load(f), model_spec, noun="suggestions"
+    # T5: the fan-out is not the phase. `run_models_concurrent` returned the
+    # moment the last slot did — its ticker cancelled and awaited, its per-model
+    # summary printed by the save loop above — and the phase now keeps working
+    # for minutes: grouping, validation-batch preparation, and under
+    # `--exec-subagents` the validation dispatch and merge in-process. That
+    # window is where Claude Code goes silent again, at the END of the run
+    # instead of throughout it. This second ticker covers it; lifetime rule 1
+    # does not bend for it, which is why it starts here and not one line
+    # earlier. The one stretch it does NOT cover is the in-process salvage
+    # above, which runs before this point and carries its own instance of this
+    # same ticker under `step: salvage`; the fan-out's ticker is already dead
+    # by then, so rule 1 holds there too, and the two windows together leave
+    # no unnarrated gap between the last model and the report.
+    # It reads `progress.subagents` (the executor's own mirror) rather
+    # than recomputing a second key, and it never touches `models`, so the
+    # fan-out's terminal map stays frozen exactly as the sweep left it.
+    #
+    # **What it covers, exactly** (F6, 2026-09-20 — this comment used to claim
+    # the whole dispatch and merge without qualification, and on the executor
+    # lane it was covering neither): a ticker is a task on this loop, so it gets
+    # a turn only where this stretch awaits. The long one, the batch dispatch,
+    # does now — `dispatch_subagent_tasks` is blocking (it ends in
+    # `_run_sync`'s `pool.submit(asyncio.run, …).result()`) and is therefore
+    # awaited through `asyncio.to_thread` below, which is what lets the ticker
+    # breathe for the minutes it runs. The synchronous stretches around it —
+    # grouping, the excerpts, the merge — still pass unnarrated, and the
+    # teardown line lands after them; that is a real limit, not something the
+    # start-up `sleep(0)` below papers over.
+    phase_ticker = PhaseProgress(phase_dir, anchor=plan_path)
+    phase_ticker.start_ticker()
+    # One yield, so the ticker task is really *entered* before the phase's
+    # synchronous stretch begins. `ensure_future` only schedules it, and a
+    # task cancelled before its first step never runs its body at all — so
+    # without this a tail that happens to contain no `await` (the
+    # host-driven `validation_pending` return is one) would emit no
+    # `[PROGRESS]` line even at teardown, and the log's last such line would
+    # be the fan-out's rather than the phase's terminal step.
+    await asyncio.sleep(0)
+    try:
+        # Group similar suggestions
+        all_suggestions = []
+        for model_spec in model_specs:
+            if model_spec in failed_models:
+                continue
+            sanitized_model = sanitize_model_name(model_spec)
+            result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
+            if os.path.exists(result_path):
+                try:
+                    with open(result_path, 'r', encoding='utf-8') as f:
+                        suggestions = drop_non_record_entries(
+                            json.load(f), model_spec, noun="suggestions"
+                        )
+                        for s in suggestions:
+                            s["source_model"] = model_spec
+                        all_suggestions.extend(suggestions)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+        validated_groups_for_report: Optional[List[Dict]] = None
+
+        if all_suggestions:
+            raw_grouped = group_similar_suggestions(all_suggestions)
+            grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
+            stamp_stable_ids(grouped)
+            grouped_path = os.path.join(phase_dir, "grouped.json")
+            # D7: the previous run's verdicts belong to the grouping this write
+            # replaces; retired in the same step so no later reaggregate finds them.
+            retire_stale_validation(phase_dir, reason="grouped.json rewritten by a re-run")
+            with open(grouped_path, 'w', encoding='utf-8') as f:
+                json.dump(save_groups_payload(grouped), f, indent=2)
+            print(f"Grouped suggestions saved to: {grouped_path}")
+
+            update_status(phase_dir, {
+                "state": "grouping_complete",
+                "total_groups": len(grouped),
+                "total_suggestions": len(all_suggestions),
+            })
+
+            # Validate grouped suggestions
+            if not args.skip_validation:
+                internal_validation = getattr(args, 'internal_validation', False)
+                if internal_validation:
+                    print("\nRunning internal validation...")
+                    validation_timeout = args.timeout if args.timeout else 600
+                    validation_results = await validate_groups(
+                        [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                        context=plan_content,
+                        model=args.validation_model,
+                        timeout=validation_timeout
                     )
-                    for s in suggestions:
-                        s["source_model"] = model_spec
-                    all_suggestions.extend(suggestions)
-            except (json.JSONDecodeError, IOError):
-                pass
 
-    validated_groups_for_report: Optional[List[Dict]] = None
+                    validated_groups = apply_validation_to_groups(
+                        [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                        validation_results
+                    )
+                    validated_groups_for_report = validated_groups
 
-    if all_suggestions:
-        raw_grouped = group_similar_suggestions(all_suggestions)
-        grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
-        stamp_stable_ids(grouped)
-        grouped_path = os.path.join(phase_dir, "grouped.json")
-        # D7: the previous run's verdicts belong to the grouping this write
-        # replaces; retired in the same step so no later reaggregate finds them.
-        retire_stale_validation(phase_dir, reason="grouped.json rewritten by a re-run")
-        with open(grouped_path, 'w', encoding='utf-8') as f:
-            json.dump(save_groups_payload(grouped), f, indent=2)
-        print(f"Grouped suggestions saved to: {grouped_path}")
-
-        update_status(phase_dir, {
-            "state": "grouping_complete",
-            "total_groups": len(grouped),
-            "total_suggestions": len(all_suggestions),
-        })
-
-        # Validate grouped suggestions
-        if not args.skip_validation:
-            internal_validation = getattr(args, 'internal_validation', False)
-            if internal_validation:
-                print("\nRunning internal validation...")
-                validation_timeout = args.timeout if args.timeout else 600
-                validation_results = await validate_groups(
-                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    context=plan_content,
-                    model=args.validation_model,
-                    timeout=validation_timeout
-                )
-
-                validated_groups = apply_validation_to_groups(
-                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    validation_results
-                )
-                validated_groups_for_report = validated_groups
-
-                validation_path = os.path.join(phase_dir, "validation.json")
-                save_validation_results(validation_results, Path(validation_path))
-            else:
-                # Host-neutral: this print runs on every host that dispatches
-                # subagent validation (opencode, codex, claude-code, ...), and
-                # naming Claude Code here contradicted the runner the log
-                # names a few lines later (measured 2026-09-16: an
-                # opencode-driven run printed this beside 11 lines correctly
-                # naming opencode).
-                print("\nPreparing batched validation for subagent execution...")
-                extra_kwargs = {}
-                if extra_validation_metadata:
-                    extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                    if k in ("tasks_file",)}
-                batched_tasks = prepare_batched_validation_tasks(
-                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    output_dir=phase_dir,
-                    plan_file=str(plan_path),
-                    model=args.validation_model,
-                    # The document's `reaggregate_mode` is what every later
-                    # retry hint is rebuilt from (`resolved_reaggregate_command`),
-                    # so it has to be THIS phase's script. Measured 2026-09-14
-                    # on a `review-tasks` fan-out: the kwarg was missing, the
-                    # helper defaulted to review-plan's script, and the exit-3
-                    # block told the session model to re-invoke `review-plan
-                    # --reaggregate` for a review-tasks run.
-                    orchestrator=orchestrator_script,
-                    **validation_context_kwargs(
-                        phase_name, plan_content, extra_validation_metadata
-                    ),
-                    **extra_kwargs,
-                )
-                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
-
-                validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
-                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                    json.dump(batched_tasks, f, indent=2)
-
-                # The phase machine's own word for this stretch — see the
-                # matching write on the reaggregate path.
-                update_status(phase_dir, {"state": "validation_pending"})
-
-                total_batches = batched_tasks["total_batches"]
-                stats = batched_tasks.get("batching_stats", {})
-
-                if total_batches == 1:
-                    print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-                else:
-                    print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                    print(f"Batches: {total_batches}")
-                    if stats.get("efficiency_gain_percent", 0) > 0:
-                        print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
-
-                print(f"\nValidation prepared for subagent execution.")
-                print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-                print(f"HIGH priority: {stats.get('high_count', 0)}")
-                print(f"Normal priority: {stats.get('normal_count', 0)}")
-
-                # Resolved here, from the running skill dir, because the task
-                # file stores only the durable mode + plan pair (D1c).
-                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-                # D3b: self-contained mode continues past the marker in this same
-                # process — dispatch, merge, and finish the phase in one
-                # invocation. Host-driven mode (the default) is unchanged below.
-                if dispatch_subagent_tasks(
-                    args,
-                    task_file=validation_tasks_path,
-                    phase_dir=phase_dir,
-                    phase=phase_name,
-                    document=batched_tasks,
-                    plan_path=str(plan_path),
-                    label="validation",
-                    retry_command=reaggregate_cmd,
-                ):
                     validation_path = os.path.join(phase_dir, "validation.json")
-                    validated_groups_for_report = merge_validation_batches(
-                        phase_dir, batched_tasks, grouped, validation_path
-                    )
+                    save_validation_results(validation_results, Path(validation_path))
                 else:
-                    print("\nAfter validation completes, run:")
-                    print(f"  {reaggregate_cmd or ''}")
-                    record_next(reaggregate_cmd or None)
+                    # Host-neutral: this print runs on every host that dispatches
+                    # subagent validation (opencode, codex, claude-code, ...), and
+                    # naming Claude Code here contradicted the runner the log
+                    # names a few lines later (measured 2026-09-16: an
+                    # opencode-driven run printed this beside 11 lines correctly
+                    # naming opencode).
+                    print("\nPreparing batched validation for subagent execution...")
+                    extra_kwargs = {}
+                    if extra_validation_metadata:
+                        extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
+                                        if k in ("tasks_file",)}
+                    batched_tasks = prepare_batched_validation_tasks(
+                        groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                        output_dir=phase_dir,
+                        plan_file=str(plan_path),
+                        model=args.validation_model,
+                        # The document's `reaggregate_mode` is what every later
+                        # retry hint is rebuilt from (`resolved_reaggregate_command`),
+                        # so it has to be THIS phase's script. Measured 2026-09-14
+                        # on a `review-tasks` fan-out: the kwarg was missing, the
+                        # helper defaulted to review-plan's script, and the exit-3
+                        # block told the session model to re-invoke `review-plan
+                        # --reaggregate` for a review-tasks run.
+                        orchestrator=orchestrator_script,
+                        **validation_context_kwargs(
+                            phase_name, plan_content, extra_validation_metadata
+                        ),
+                        **extra_kwargs,
+                    )
+                    batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
-                    # The follow-up command is persisted in its **durable,
-                    # rebindable** form (mode word + plan path) — in the task
-                    # file above and here alike — never as the
-                    # resolved skill-dir-absolute string the same run prints: the
-                    # Claude plugin cache is keyed by commit hash, so a stored
-                    # absolute command points at a directory that no longer
-                    # exists after any plugin update. `status` (and
-                    # utils/detach.resolved_reaggregate_command) rebuild it at
-                    # read time from the *running* skill dir.
-                    update_status(phase_dir, {
-                        "state": "validation_pending",
-                        "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
-                        "validation_tasks_path": validation_tasks_path,
-                        **durable_reaggregate_fields(orchestrator_script, plan_path),
-                    })
-                    _detach.report_progress(phase_dir, step="validation_pending")
+                    validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
+                    with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                        json.dump(batched_tasks, f, indent=2)
 
-                    return  # Exit early - Claude Code handles validation
-        else:
-            print("\nSkipping validation (--skip-validation flag set)")
+                    # The phase machine's own word for this stretch — see the
+                    # matching write on the reaggregate path.
+                    update_status(phase_dir, {"state": "validation_pending"})
 
-    # Aggregate results
-    report_path = aggregate_results(
-        prefix, out_dir, phase_dir, phase_name,
-        model_specs, failed_models, validated_groups_for_report,
-        plan_path=plan_path,
-        base_ref=base_ref,
-        tasks_path=tasks_path,
-        template_style=template_style,
-        diff_data=diff_data,
-        served_models=served_models or None,
-        usage=usage or None,
-    )
+                    total_batches = batched_tasks["total_batches"]
+                    stats = batched_tasks.get("batching_stats", {})
 
-    # Handle consolidation recommendation (only for phases that support it)
-    if supports_consolidation and validated_groups_for_report:
-        from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
-        valid_group_count = sum(
-            1 for g in validated_groups_for_report
-            if g.get("validation_status") in ("valid", "needs-human-decision")
+                    if total_batches == 1:
+                        print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
+                    else:
+                        print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
+                        print(f"Batches: {total_batches}")
+                        if stats.get("efficiency_gain_percent", 0) > 0:
+                            print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
+
+                    print(f"\nValidation prepared for subagent execution.")
+                    print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
+                    print(f"HIGH priority: {stats.get('high_count', 0)}")
+                    print(f"Normal priority: {stats.get('normal_count', 0)}")
+
+                    # Resolved here, from the running skill dir, because the task
+                    # file stores only the durable mode + plan pair (D1c).
+                    reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
+                    # D3b: self-contained mode continues past the marker in this same
+                    # process — dispatch, merge, and finish the phase in one
+                    # invocation. Host-driven mode (the default) is unchanged below.
+                    if await asyncio.to_thread(
+                        dispatch_subagent_tasks,
+                        args,
+                        task_file=validation_tasks_path,
+                        phase_dir=phase_dir,
+                        phase=phase_name,
+                        document=batched_tasks,
+                        plan_path=str(plan_path),
+                        label="validation",
+                        retry_command=reaggregate_cmd,
+                    ):
+                        validation_path = os.path.join(phase_dir, "validation.json")
+                        validated_groups_for_report = merge_validation_batches(
+                            phase_dir, batched_tasks, grouped, validation_path
+                        )
+                    else:
+                        print("\nAfter validation completes, run:")
+                        print(f"  {reaggregate_cmd or ''}")
+                        record_next(reaggregate_cmd or None)
+
+                        # The follow-up command is persisted in its **durable,
+                        # rebindable** form (mode word + plan path) — in the task
+                        # file above and here alike — never as the
+                        # resolved skill-dir-absolute string the same run prints: the
+                        # Claude plugin cache is keyed by commit hash, so a stored
+                        # absolute command points at a directory that no longer
+                        # exists after any plugin update. `status` (and
+                        # utils/detach.resolved_reaggregate_command) rebuild it at
+                        # read time from the *running* skill dir.
+                        update_status(phase_dir, {
+                            "state": "validation_pending",
+                            "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
+                            "validation_tasks_path": validation_tasks_path,
+                            **durable_reaggregate_fields(orchestrator_script, plan_path),
+                        })
+                        _detach.report_progress(phase_dir, step="validation_pending")
+
+                        return  # Exit early - Claude Code handles validation
+            else:
+                print("\nSkipping validation (--skip-validation flag set)")
+
+        # Aggregate results
+        report_path = aggregate_results(
+            prefix, out_dir, phase_dir, phase_name,
+            model_specs, failed_models, validated_groups_for_report,
+            plan_path=plan_path,
+            base_ref=base_ref,
+            tasks_path=tasks_path,
+            template_style=template_style,
+            diff_data=diff_data,
+            served_models=served_models or None,
+            usage=usage or None,
         )
-        threshold = getattr(args, 'consolidation_threshold', None) or CONSOLIDATION_RECOMMENDED_THRESHOLD
-        if valid_group_count >= threshold:
-            print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
-            print(f"Run: --consolidate to cluster related suggestions")
-            # The marker is a *log* line, and a detached run's caller never sees
-            # the log — so on the route every host actually reads (the launch
-            # returns, `status --view run` renders the checkpoint) the
-            # recommendation used to vanish entirely. Measured 2026-09-16: a
-            # 29-group run printed the marker and the session model reported "no
-            # consolidation was recommended". Recorded here in the checkpoint and
-            # on the result line, and **never** as `next` — `--consolidate` is a
-            # mechanical continuation a host may auto-follow, and a
-            # recommendation is not an instruction.
-            recommendation = {
-                "valid_groups": valid_group_count,
-                "threshold": threshold,
-                "command": "--consolidate",
-            }
-            update_status(phase_dir, {"consolidation_recommended": recommendation})
-            cli_common.record_consolidation_recommended(recommendation)
 
-    # Mark phase as completed
-    state = get_or_create_state(Path(plan_path))
-    state.mark_phase_completed(phase_name)
-    state.save()
+        # Handle consolidation recommendation (only for phases that support it)
+        if supports_consolidation and validated_groups_for_report:
+            from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+            valid_group_count = sum(
+                1 for g in validated_groups_for_report
+                if g.get("validation_status") in ("valid", "needs-human-decision")
+            )
+            threshold = getattr(args, 'consolidation_threshold', None) or CONSOLIDATION_RECOMMENDED_THRESHOLD
+            if valid_group_count >= threshold:
+                print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
+                print(f"Run: --consolidate to cluster related suggestions")
+                # The marker is a *log* line, and a detached run's caller never sees
+                # the log — so on the route every host actually reads (the launch
+                # returns, `status --view run` renders the checkpoint) the
+                # recommendation used to vanish entirely. Measured 2026-09-16: a
+                # 29-group run printed the marker and the session model reported "no
+                # consolidation was recommended". Recorded here in the checkpoint and
+                # on the result line, and **never** as `next` — `--consolidate` is a
+                # mechanical continuation a host may auto-follow, and a
+                # recommendation is not an instruction.
+                recommendation = {
+                    "valid_groups": valid_group_count,
+                    "threshold": threshold,
+                    "command": "--consolidate",
+                }
+                update_status(phase_dir, {"consolidation_recommended": recommendation})
+                cli_common.record_consolidation_recommended(recommendation)
 
-    # §Fix2: the phase machine's own terminal value. status_file.py's module
-    # docstring names the sequence ``models_running`` →
-    # ``models_complete``/``grouping_complete`` → ``validation_pending`` →
-    # ``complete``, but nothing wrote the last link — the most recent `state`
-    # this run recorded was whichever intermediate step it last passed
-    # through (``grouping_complete``, or ``models_complete`` when there was
-    # nothing to group), even on a run that reaches here, past a written
-    # report and a completed phase. `run.state`/`progress.step` are the
-    # *process*/*display* views this same module docstring distinguishes from
-    # the phase machine; this is the third and last of the three. Nothing
-    # gates resume or ``--reaggregate`` on this field (both key off artifact
-    # existence and ``run.state`` — see ``reaggregate_from_existing_files`` and
-    # AGENTS.md's D7 notes), so recording it here only fixes what a reader
-    # (``status``, ``check_workflow_prerequisites``) reports for a finished run.
-    update_status(phase_dir, {"state": "complete"})
-    _detach.report_progress(phase_dir, step="complete")
+        # Mark phase as completed
+        state = get_or_create_state(Path(plan_path))
+        state.mark_phase_completed(phase_name)
+        state.save()
+
+        # §Fix2: the phase machine's own terminal value. status_file.py's module
+        # docstring names the sequence ``models_running`` →
+        # ``models_complete``/``grouping_complete`` → ``validation_pending`` →
+        # ``complete``, but nothing wrote the last link — the most recent `state`
+        # this run recorded was whichever intermediate step it last passed
+        # through (``grouping_complete``, or ``models_complete`` when there was
+        # nothing to group), even on a run that reaches here, past a written
+        # report and a completed phase. `run.state`/`progress.step` are the
+        # *process*/*display* views this same module docstring distinguishes from
+        # the phase machine; this is the third and last of the three. Nothing
+        # gates resume or ``--reaggregate`` on this field (both key off artifact
+        # existence and ``run.state`` — see ``reaggregate_from_existing_files`` and
+        # AGENTS.md's D7 notes), so recording it here only fixes what a reader
+        # (``status``, ``check_workflow_prerequisites``) reports for a finished run.
+        update_status(phase_dir, {"state": "complete"})
+        _detach.report_progress(phase_dir, step="complete")
+    finally:
+        # Cancelled AND awaited, so the last `[PROGRESS]` line lands before the
+        # phase's own report rather than into the middle of it. It is stopped
+        # *after* the terminal `progress.step` is written, which is what makes
+        # that last line read `step: complete` instead of trailing off at
+        # whatever step the last interval happened to catch. Two terminal steps
+        # reach here, not one: the `complete` just above, and the
+        # `validation_pending` early return, where the host-driven lanes hand
+        # validation back to the agent and the process exits — stopping at the
+        # second is not a gap,
+        # because on Claude Code that return IS the background job's completion
+        # signal.
+        await phase_ticker.stop_ticker()
