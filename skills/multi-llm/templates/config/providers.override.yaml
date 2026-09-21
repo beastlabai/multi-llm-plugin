@@ -197,12 +197,12 @@
 #       - openrouter/z-ai/glm-5.2:xhigh
 #       - kilo/z-ai/glm-5.2
 #       - openrouter/minimax/minimax-m2.7
-#       - openrouter/minimax/minimax-m3:thinking
+#       - openrouter/minimax/minimax-m3
 #       - openrouter/x-ai/grok-4.20-multi-agent
 #       - openrouter/arcee-ai/trinity-large-thinking
 #       - openrouter/xiaomi/mimo-v2.5-pro
-#       - openrouter/qwen/qwen3.7-max:max
-#       - openrouter/qwen/qwen3.8-max:xhigh
+#       - openrouter/qwen/qwen3.7-max
+#       - openrouter/qwen/qwen3.8-max-0902:xhigh
 #       - openrouter/tencent/hy3:high
 #       - openrouter/stepfun/step-3.7-flash:high
 #       - openrouter/openai/gpt-5.5-pro
@@ -373,24 +373,24 @@ defaults:
   models:
 #     - cursor-agent:composer-2.5
 #     - cursor-agent:gemini-3.6-flash-high
-#     - cursor-agent:cursor-grok-4.5-high
+#     - cursor-agent:grok-4.7-high
 #     - opencode:openrouter/deepseek/deepseek-v4-flash-0731
 #     - kilocode:openrouter/moonshotai/kimi-k3:max
 #     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high
-#     - kilocode:openrouter/z-ai/glm-5.2:xhigh
-#     - kilocode:openrouter/minimax/minimax-m3:thinking
+#     - kilocode:openrouter/z-ai/glm-5.3:max
+#     - kilocode:openrouter/minimax/minimax-m3
 #     - kilocode:openrouter/xiaomi/mimo-v2.5-pro:high
-#     - kilocode:openrouter/qwen/qwen3.8-max:xhigh
-#     - claude-code:fable:high
-#     - codex:gpt-5.6-sol:xhigh
+#     - kilocode:openrouter/qwen/qwen3.8-max-0902:xhigh
+#     - codex:gpt-6-astra:xhigh
+#     - claude-code:claude-fable-5-1:high
 
   ## --- defaults.quick_models ------------------------------------------------
   ## Lightweight subset used with --quick / -q. REPLACES the base list. Same
   ## uncommenting rule as defaults.models.
   quick_models:
-#     - cursor-agent:cursor-grok-4.5-high
-#     - cursor-agent:gpt-5.6-sol-xhigh
-#     - claude-code:fable:high
+#     - cursor-agent:grok-4.7-high
+#     - codex:gpt-6-astra:xhigh
+#     - claude-code:claude-fable-5-1:high
 
   ## --- defaults.modes -------------------------------------------------------
   ## Per-mode overrides (NOT written by `--init`). A mode's `models` (and optional
